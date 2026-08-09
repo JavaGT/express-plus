@@ -72,7 +72,7 @@ function throwingAccessDeclarations() {
         protectingAnnotation('confidential', {
           protects: 'sensitive',
           placeholder: '[Confidential]',
-          access: async () => { throw new Error('access exploded'); },
+          access: async () => { throw new Error('sensitive-marker'); },
         }),
       ],
     }),
@@ -82,7 +82,7 @@ function throwingAccessDeclarations() {
   return { Project, SecretDoc };
 }
 
-async function setup(make = declarations) {
+async function setup(make = declarations, appOptions = {}) {
   const db = new DatabaseSync(':memory:');
   const { Project, SecretDoc } = make();
   executeFrameworkDDL(db);
@@ -97,6 +97,7 @@ async function setup(make = declarations) {
     db,
     entities: [Project, SecretDoc],
     history: durableHistory({ authorize: () => true, actions: {} }),
+    ...appOptions,
   });
   await app.start();
   await app.ready;
@@ -153,6 +154,7 @@ test('recipient projection: project owner sees real text, editor and stranger se
   const strangerView = await recipientSnapshot(ctx, 'stranger');
   assert.equal(strangerView.kind, 'workbench.annotatedText.recipient');
   assert.equal(strangerView.text, 'open  tail');
+  assert.deepEqual(strangerView.redactions, [{ start: 5, end: 5, placeholder: '[Confidential]' }]);
   assert.equal(JSON.stringify(strangerView).includes('secret'), false);
 });
 
@@ -236,6 +238,7 @@ test('per-recipient re-evaluation: an edit inside the confidential span and its 
   assert.deepEqual(deniedAfter.redactions, [{ start: 6, end: 6, placeholder: '[Confidential]' }]);
   assert.equal(JSON.stringify(deniedAfter).includes('secret'), false);
   assert.equal(JSON.stringify(deniedAfter).includes('seXcret'), false);
+  assert.equal(JSON.stringify(deniedAfter).includes('X'), false);
 
   // Undo the insert; the unauthorized projection still never leaks.
   const undone = await undoLast(ctx, 'owner', 'tab-owner');
@@ -246,6 +249,7 @@ test('per-recipient re-evaluation: an edit inside the confidential span and its 
   assert.deepEqual(deniedAfterUndo.redactions, [{ start: 6, end: 6, placeholder: '[Confidential]' }]);
   assert.equal(JSON.stringify(deniedAfterUndo).includes('secret'), false);
   assert.equal(JSON.stringify(deniedAfterUndo).includes('seXcret'), false);
+  assert.equal(JSON.stringify(deniedAfterUndo).includes('X'), false);
 
   // The owner still sees the real continuous text.
   const ownerView = await recipientSnapshot(ctx, 'owner');
@@ -255,7 +259,10 @@ test('per-recipient re-evaluation: an edit inside the confidential span and its 
 });
 
 test('a throwing confidentiality access denies the span inline instead of aborting the snapshot', async (t) => {
-  const ctx = await setup(throwingAccessDeclarations);
+  const logEntries = [];
+  const ctx = await setup(throwingAccessDeclarations, {
+    log: { level: 'debug', output: (level, channel, msg, details) => logEntries.push({ level, channel, msg, details }) },
+  });
   t.after(async () => { await ctx.app.shutdown(); ctx.db.close(); });
   seedDocument(ctx.db, ctx.SecretDoc, 'open secret tail', [
     { id: 's1', family: 'sensitive', start: 5, end: 11 },
@@ -265,6 +272,60 @@ test('a throwing confidentiality access denies the span inline instead of aborti
   // The access body throws for EVERY principal — including the project owner.
   // The projection must not fail: the span denies inline as a placeholder and
   // the raw text never appears in any serialized recipient document.
+  for (const principalId of ['owner', 'editor', 'stranger']) {
+    const view = await recipientSnapshot(ctx, principalId);
+    assert.equal(view.kind, 'workbench.annotatedText.recipient');
+    assert.equal(view.text, 'open  tail');
+    assert.deepEqual(view.redactions, [{ start: 5, end: 5, placeholder: '[Confidential]' }]);
+    assert.equal(JSON.stringify(view).includes('secret'), false);
+  }
+
+  // The exception message is a possible sink for row or annotation data and is
+  // never logged: no captured auth entry carries the marker.
+  assert.equal(JSON.stringify(logEntries).includes('sensitive-marker'), false);
+});
+
+// A child row whose owning-project FK dangles (no parent row): the inherit-child
+// capability resolution cannot build a parent `is`, so the span denies inline.
+// The snapshot still materializes for every recipient — never a whole-document
+// failure, and never raw text on any wire.
+function seedDanglingProjectDocument(db) {
+  // Orphaned child rows are reachable (e.g. a partially applied migration), so
+  // bypass the FK gate for the seed itself; the projection under test must still
+  // fail the span closed rather than fail the whole snapshot. The gate stays OFF
+  // across the ENTIRE seed (parent row and every annotation row) because each
+  // annotation row also carries project_id='missing-project'.
+  db.exec('PRAGMA foreign_keys = OFF');
+  try {
+    db.prepare("INSERT INTO SecretDoc (id, project, owner) VALUES ('d1', 'missing-project', 'owner')").run();
+    const family = importTextToFamily('d1', ACTOR, 'open secret tail');
+    db.prepare('INSERT INTO SecretDoc_body_state (document_id, structure_version, family_checkpoint) VALUES (?, 1, ?)').run('d1', JSON.stringify(textFamilyCheckpoint(family)));
+    for (const annotation of [
+      { id: 's1', family: 'sensitive', start: 5, end: 11 },
+      { id: 'c1', family: 'confidential', start: 5, end: 11, protectedTargetIds: ['s1'] },
+    ]) {
+      db.prepare('INSERT INTO SecretDoc_body_annotation (id, document_id, project_id, owner_id, family) VALUES (?, ?, ?, ?, ?)')
+        .run(annotation.id, 'd1', 'missing-project', 'owner', annotation.family);
+      const start = JSON.stringify(resolveOffsetToEndpoint(family, annotation.start, family.checkpoint.frontier, 'right'));
+      const end = JSON.stringify(resolveOffsetToEndpoint(family, annotation.end, family.checkpoint.frontier, 'right'));
+      db.prepare('INSERT INTO SecretDoc_body_membership (annotation_id, start_point, end_point) VALUES (?, ?, ?)').run(annotation.id, start, end);
+      if (annotation.protectedTargetIds) {
+        for (const target of annotation.protectedTargetIds) {
+          db.prepare('INSERT INTO SecretDoc_body_annotation_protected_target (annotation_id, target_annotation_id) VALUES (?, ?)').run(annotation.id, target);
+        }
+      }
+    }
+    return family;
+  } finally {
+    db.exec('PRAGMA foreign_keys = ON');
+  }
+}
+
+test('a dangling owning-project FK denies the confidential span inline instead of failing the whole snapshot', async (t) => {
+  const ctx = await setup();
+  t.after(async () => { await ctx.app.shutdown(); ctx.db.close(); });
+  seedDanglingProjectDocument(ctx.db);
+
   for (const principalId of ['owner', 'editor', 'stranger']) {
     const view = await recipientSnapshot(ctx, principalId);
     assert.equal(view.kind, 'workbench.annotatedText.recipient');

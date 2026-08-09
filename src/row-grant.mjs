@@ -130,14 +130,15 @@ export async function protectingAnnotationCapabilities(
       return { granted: false, capabilities: [] };
     }
     return { granted: true, capabilities: decision.capabilities };
-  } catch (error) {
+  } catch {
     // A throwing access body (or a throwing check run-face) is a server-side
     // fault: fail THIS span closed — an inline placeholder — mirroring the
     // row-admission path's catch-all deny. It never aborts the whole document
-    // snapshot and never discloses the protected text to any recipient.
+    // snapshot and never discloses the protected text to any recipient. The
+    // exception message is intentionally NOT logged: it can embed row or
+    // annotation data that must not leave the server.
     getLog().debug('auth', 'protecting annotation access failed; denying span', {
       entity: entityRecord.name,
-      error: error instanceof Error ? error.message : String(error),
     });
     return { granted: false, capabilities: [] };
   }
