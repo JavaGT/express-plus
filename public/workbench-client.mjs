@@ -349,6 +349,9 @@ class LiveSyncSession {
   }
 
   // Send a volatile caret update. Returns false when offline (no queue/replay).
+  // The wire grammar is offset-only: the annotated-text canonical document is
+  // blockless, so the offset is document-absolute and `blockId` is validated
+  // for the caller but not transmitted.
   updateCaret({ entity, id, field, blockId, offset }) {
     if (this._closed) throw new ClientClosedError();
     const arg = arguments[0];
@@ -368,7 +371,7 @@ class LiveSyncSession {
     if (!Number.isSafeInteger(offset) || offset < 0) {
       throw new TypeError('updateCaret requires a non-negative safe integer offset');
     }
-    const msg = { type: 'caret.update', entity, id, field, blockId, offset };
+    const msg = { type: 'caret.update', entity, id, field, offset };
     return this._send(msg);
   }
 
@@ -665,13 +668,13 @@ class LiveSyncSession {
       if (!isPlainJsonObject(value)) return;
       const valueKeys = Object.keys(value).sort();
       if (value.kind === 'caret') {
-        if (valueKeys.length !== 4 || valueKeys[0] !== 'blockId' || valueKeys[1] !== 'kind' || valueKeys[2] !== 'offset' || valueKeys[3] !== 'presence') return;
-        if (typeof value.blockId !== 'string' || value.blockId.length === 0 ||
+        if (valueKeys.length !== 4 || valueKeys[0] !== 'kind' || valueKeys[1] !== 'name' || valueKeys[2] !== 'offset' || valueKeys[3] !== 'presence') return;
+        if (typeof value.name !== 'string' ||
             typeof value.presence !== 'string' || value.presence.length === 0 ||
             !Number.isSafeInteger(value.offset) || value.offset < 0) return;
       } else if (value.kind === 'edge') {
-        if (valueKeys.length !== 4 || valueKeys[0] !== 'blockId' || valueKeys[1] !== 'edge' || valueKeys[2] !== 'kind' || valueKeys[3] !== 'presence') return;
-        if (typeof value.blockId !== 'string' || value.blockId.length === 0 ||
+        if (valueKeys.length !== 4 || valueKeys[0] !== 'edge' || valueKeys[1] !== 'kind' || valueKeys[2] !== 'name' || valueKeys[3] !== 'presence') return;
+        if (typeof value.name !== 'string' ||
             typeof value.presence !== 'string' || value.presence.length === 0 ||
             (value.edge !== 'start' && value.edge !== 'end')) return;
       } else {

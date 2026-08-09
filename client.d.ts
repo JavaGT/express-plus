@@ -81,6 +81,7 @@ export interface CaretUpdate {
   entity: string;
   id: string;
   field: string;
+  /** Validated but not transmitted: the wire grammar is a document-absolute offset. */
   blockId: string;
   offset: number;
 }
@@ -114,15 +115,18 @@ export interface AnnotatedTextCaretRemove {
 export interface AnnotatedTextVisibleCaret {
   kind: 'caret';
   presence: string;
-  blockId: string;
+  /** Document-absolute UTF-16 offset into the canonical text (the wire is blockless). */
   offset: number;
+  /** The source user's public display label, or '' when the app supplies none. */
+  name: string;
 }
 
 export interface AnnotatedTextRestrictedCaret {
   kind: 'edge';
   presence: string;
-  blockId: string;
   edge: 'start' | 'end';
+  /** The source user's public display label, or '' when the app supplies none. */
+  name: string;
 }
 
 // ---------------------------------------------------------------------------
