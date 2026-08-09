@@ -92,3 +92,68 @@ export function placeholderDisplayWidth(redactions = []) {
   for (const redaction of redactions) total += redaction.placeholder.length;
   return total;
 }
+
+function scalarStart(text, offset) {
+  if (offset > 0 && offset < text.length && text.charCodeAt(offset) >= 0xdc00 && text.charCodeAt(offset) <= 0xdfff
+    && text.charCodeAt(offset - 1) >= 0xd800 && text.charCodeAt(offset - 1) <= 0xdbff) return offset - 1;
+  return offset;
+}
+
+function scalarEnd(text, offset) {
+  if (offset > 0 && offset < text.length && text.charCodeAt(offset) >= 0xdc00 && text.charCodeAt(offset) <= 0xdfff
+    && text.charCodeAt(offset - 1) >= 0xd800 && text.charCodeAt(offset - 1) <= 0xdbff) return offset + 1;
+  return offset;
+}
+
+/**
+ * Project zero-width redaction markers through one wire edit [from, to) →
+ * `text` (an insertion has from === to). Markers are absolute in the wire
+ * text. An insertion AT a marker attaches by affinity — 'left' shifts the
+ * marker right by the inserted length (the text lands before the placeholder),
+ * 'right' leaves it — matching the wire→canonical boundary rule. A delete
+ * fully before a marker shifts it left by the deleted width; a delete that
+ * would cover a marker leaves it in place (such an edit fails closed on the
+ * server). Redactions are never mutated.
+ */
+export function projectRedactionsOverEdit(redactions = [], from, to, text, affinity = 'right') {
+  if (redactions.length === 0) return redactions;
+  if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 0 || to < from) return redactions;
+  const insertion = from === to;
+  const delta = (text ?? '').length - (to - from);
+  return redactions.map((redaction) => {
+    if (!redaction || !Number.isSafeInteger(redaction.start) || !Number.isSafeInteger(redaction.end)) return redaction;
+    let start = redaction.start;
+    let end = redaction.end;
+    if (insertion) {
+      if (redaction.start > from || (redaction.start === from && affinity === 'left')) {
+        start += text.length;
+        end += text.length;
+      }
+    } else if (redaction.start >= to) {
+      start += delta;
+      end += delta;
+    }
+    return Object.freeze({ ...redaction, start, end });
+  });
+}
+
+/**
+ * Project markers through the wire text transition before → after by diffing
+ * the two texts (the editor's optimistic drafts are wire text, so the
+ * placeholder columns never participate).
+ */
+export function projectRedactionsOverText(redactions = [], beforeText, afterText, affinity = 'right') {
+  if (redactions.length === 0 || beforeText === afterText) return redactions;
+  let from = 0;
+  while (from < beforeText.length && from < afterText.length && beforeText[from] === afterText[from]) from += 1;
+  let beforeEnd = beforeText.length;
+  let afterEnd = afterText.length;
+  while (beforeEnd > from && afterEnd > from && beforeText[beforeEnd - 1] === afterText[afterEnd - 1]) {
+    beforeEnd -= 1;
+    afterEnd -= 1;
+  }
+  from = scalarStart(beforeText, scalarStart(afterText, from));
+  beforeEnd = scalarEnd(beforeText, beforeEnd);
+  const text = afterText.slice(from, scalarEnd(afterText, afterEnd));
+  return projectRedactionsOverEdit(redactions, from, beforeEnd, text, affinity);
+}

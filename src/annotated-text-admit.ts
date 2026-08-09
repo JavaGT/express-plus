@@ -16,6 +16,8 @@ import { resolveAnnotatedTextOwningScope } from './annotated-text-field.ts';
 import { resolveStream, resolveLease, resolvePosition } from './annotated-text-authoring-stream.ts';
 import { readSeq } from './committed-log.ts';
 import { planAnnotationRemove, planTextOffsetEdit, planTextRangeApply } from './annotated-text-plan.ts';
+import { mapVisibleOffsetToCanonical, authoringRedactionsForRecipient, type AuthoringRedaction } from './annotated-text-recipient-projection.ts';
+import { projectAnnotatedTextSnapshot } from './annotated-text-snapshot.ts';
 import type { StructuralEndpoint } from './annotated-text-family.ts';
 import type { Principal } from './principal.ts';
 import { rawRow } from './entity/query.ts';
@@ -81,6 +83,7 @@ interface AuthoringLease {
 interface AuthoringPosition {
   visible_at_issue: number;
   family_checkpoint: string;
+  redactions?: string | null;
 }
 
 interface V9AdmitContext {
@@ -211,6 +214,12 @@ async function assertV9AuthoringPrelude(ctx: V9AdmitContext): Promise<V9Prelude>
     if (JSON.stringify(positionFamily.checkpoint.frontier) !== JSON.stringify(family.checkpoint.frontier)) {
       throw new ValidationError(`${name}.${fieldName}.operation authoring basis is stale; re-bootstrap the snapshot`, { code: 'position-stale' });
     }
+    // A protection applied WITHOUT a text change leaves the family frontier
+    // untouched, so the family check above cannot see it. The frame's
+    // redactions column carries the principal's wire→canonical basis at issue
+    // time; recompute the CURRENT basis through the principal's own recipient
+    // view and fail closed when the deny set moved under the frame.
+    assertRedactionsBasesMatch(await currentAuthoringRedactions(ctx, row), parsedRedactions(position), 'position');
   }
   const actor = createHash('sha256').update(`${name}\u0000${fieldName}\u0000${command.id}\u0000${principal?.id ?? ''}\u0000${command.authoring.mutationId}`).digest('hex').slice(0, 32);
   const lamport = Math.max(0, ...Object.values(family.checkpoint.elements).map((element) => element.lamport)) + 1;
@@ -227,15 +236,89 @@ function assertOffsetInDocument(family: ContinuousTextFamily, offset: number, la
   }
 }
 
+// The recipient's wire→canonical offset basis, bound to its authoring
+// position frame (the frame's `redactions` column carries the exact authoring
+// entries `authoringRedactionsForRecipient` produced at issue time). An empty
+// frame (fully-visible recipient) maps as identity.
+function parsedRedactions(position: AuthoringPosition | null): AuthoringRedaction[] {
+  const raw = position?.redactions;
+  if (!raw) return [];
+  const parsed = JSON.parse(raw);
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+function assertRedactionsBasesMatch(primary: AuthoringRedaction[], other: AuthoringRedaction[], label: string): void {
+  if (JSON.stringify(primary) !== JSON.stringify(other)) {
+    throw new ValidationError(`annotated-text ${label} authoring redaction bases differ; re-bootstrap the snapshot`, { code: 'position-stale' });
+  }
+}
+
+// The acting principal's CURRENT wire→canonical basis at admit time, projected
+// through the principal's own recipient view. The position frame the client
+// edits against carries the same basis at issue time (the receipt issues the
+// frame against the post-commit projection); a protection applied without a
+// text change shifts this basis while leaving the family frontier unchanged,
+// so the prelude compares the two and fails closed on a stale frame.
+async function currentAuthoringRedactions(ctx: V9AdmitContext, row: any): Promise<AuthoringRedaction[]> {
+  const { db, record, fieldName, descriptor, principal } = ctx;
+  let current;
+  try {
+    current = await projectAnnotatedTextSnapshot({
+      db, entity: record, row, principal, fieldName, descriptor, mintBasis: false,
+    });
+  } catch {
+    throw new ValidationError(`${ctx.name}.${ctx.fieldName}.operation cannot revalidate the authoring basis; re-bootstrap the snapshot`, { code: 'position-stale' });
+  }
+  return authoringRedactionsForRecipient(current);
+}
+
+/**
+ * Map a redacted recipient's wire offsets to canonical. A redacted recipient
+ * never holds raw canonical offsets (its projection removed the denied text),
+ * so every submitted offset is a wire offset against its own frame. A range
+ * pins its endpoints to the boundaries facing the range interior; a collapsed
+ * point at a placeholder is the affinity-bound gap.
+ */
+function mapWireRangeToCanonical(fromOffset: number, fromAffinity: 'left' | 'right', toOffset: number, toAffinity: 'left' | 'right', redactions: AuthoringRedaction[], isRange: boolean): { from: number; to: number } {
+  const from = mapVisibleOffsetToCanonical(fromOffset, fromAffinity, redactions, isRange ? 'right' : null);
+  const to = isRange
+    ? mapVisibleOffsetToCanonical(toOffset, toAffinity, redactions, 'left')
+    : from;
+  return { from, to };
+}
+
+// Fail closed on any mapped edit that would reach hidden text: an endpoint
+// strictly inside a denied interval, or a range that contains one (a selection
+// spanning the placeholder). Honest wire offsets never trigger these — the
+// gate is the corruption wall against forged or future-rotten offsets. The
+// containment check is order-insensitive: a forged range whose endpoints pin
+// to reversed boundaries (an equal-offset range at a marker with left/right
+// affinities spans the hidden interval) maps backwards and is caught here too.
+function assertEditLandsInVisibleText(from: number, to: number, redactions: AuthoringRedaction[], label: string): void {
+  const strictlyInside = (value: number) => redactions.some((redaction) => redaction.start < value && value < redaction.end);
+  if (strictlyInside(from) || strictlyInside(to)) {
+    throw new ValidationError(`annotated-text ${label} position maps inside a redacted interval`, { code: 'position-redacted' });
+  }
+  const lo = Math.min(from, to);
+  const hi = Math.max(from, to);
+  if (redactions.some((redaction) => lo <= redaction.start && redaction.end <= hi)) {
+    throw new ValidationError(`annotated-text ${label} selection spans a redacted interval`, { code: 'position-redacted' });
+  }
+}
+
 /** text.insert | text.delete | text.replace */
 async function admitTextEdit(ctx: V9Prelude & { edit: V9EditLoose }): Promise<unknown[]> {
   const { name, fieldName, command, db, prefix, documentScope, lease, family, state, actor, lamport, edit } = ctx;
   // The position's family-basis equality with the current family is enforced in
-  // the prelude; the client's offset is absolute against that same basis.
+  // the prelude; the client's offset is absolute against that same basis. For a
+  // redacted recipient the offset is a WIRE offset (its frame's redactions are
+  // the wire→canonical table); it is mapped before planning so edits land in
+  // visible text only.
   const at = (edit.at ?? edit.from)!;
   const offset = at.offset;
-  assertOffsetInDocument(family, offset, 'position');
+  const redactions = parsedRedactions(ctx.position);
   let toOffset = offset;
+  let toAffinity: 'left' | 'right' = 'right';
   if (edit.kind !== 'text.insert') {
     if (!edit.to?.positionToken) throw new ValidationError(`${name}.${fieldName}.operation replacement end position token unavailable`, { code: 'position-token-unavailable' });
     const toPosition = resolvePosition({ db, prefix, positionToken: edit.to.positionToken, leaseId: lease.id }) as unknown as AuthoringPosition | null;
@@ -245,14 +328,24 @@ async function admitTextEdit(ctx: V9Prelude & { edit: V9EditLoose }): Promise<un
     if (JSON.stringify(toPositionFamily.checkpoint.frontier) !== JSON.stringify(family.checkpoint.frontier)) {
       throw new ValidationError(`${name}.${fieldName}.operation replacement end authoring basis is stale; re-bootstrap the snapshot`, { code: 'position-stale' });
     }
+    assertRedactionsBasesMatch(redactions, parsedRedactions(toPosition), 'replacement end');
     toOffset = edit.to.offset;
-    assertOffsetInDocument(family, toOffset, 'replacement end');
+    toAffinity = edit.to.affinity;
   }
+  const fromAffinity = at.affinity ?? 'right';
+  // A two-ended edit at equal wire offsets is a range only when its endpoints
+  // pin to different boundaries (left/right at a marker spans the hidden
+  // interval); an insert is always the collapsed affinity-bound gap.
+  const isRange = edit.kind !== 'text.insert' && (offset !== toOffset || fromAffinity !== toAffinity);
+  const mapped = mapWireRangeToCanonical(offset, fromAffinity, toOffset, toAffinity, redactions, isRange);
+  assertEditLandsInVisibleText(mapped.from, mapped.to, redactions, edit.kind === 'text.insert' ? 'position' : 'replacement');
+  assertOffsetInDocument(family, mapped.from, 'position');
+  if (edit.kind !== 'text.insert') assertOffsetInDocument(family, mapped.to, 'replacement end');
   const annotations = loadAnnotations({ db, prefix, compiledMeta: ctx.compiledMeta, documentId: command.id });
   const ranges = loadRanges({ db, prefix, documentId: command.id });
   const plannerEdit = edit.kind === 'text.insert'
-    ? { kind: 'text.insert', at: { offset, affinity: edit.at!.affinity }, text: edit.text }
-    : { kind: edit.kind, from: { offset, affinity: edit.from!.affinity }, to: { offset: toOffset, affinity: edit.to!.affinity }, text: edit.text };
+    ? { kind: 'text.insert', at: { offset: mapped.from, affinity: edit.at!.affinity }, text: edit.text }
+    : { kind: edit.kind, from: { offset: mapped.from, affinity: edit.from!.affinity }, to: { offset: mapped.to, affinity: edit.to!.affinity }, text: edit.text };
   let plan;
   try {
     plan = planTextOffsetEdit({
@@ -283,6 +376,11 @@ async function admitTextRangeApply(ctx: V9Prelude & { edit: V9RangeApplyEdit }):
       JSON.stringify(toPosFamily.checkpoint.frontier) !== JSON.stringify(family.checkpoint.frontier)) {
     throw new ValidationError(`${name}.${fieldName}.operation annotation selection authoring basis is stale; re-bootstrap the snapshot`, { code: 'position-stale' });
   }
+  const redactions = parsedRedactions(fromPos);
+  assertRedactionsBasesMatch(redactions, parsedRedactions(toPos), 'annotation selection');
+  const mapped = mapWireRangeToCanonical(edit.from.offset, edit.from.affinity, edit.to.offset, edit.to.affinity, redactions,
+    edit.from.offset !== edit.to.offset || edit.from.affinity !== edit.to.affinity);
+  assertEditLandsInVisibleText(mapped.from, mapped.to, redactions, 'annotation selection');
   const familyMeta = compiledMeta.annotationHandles[edit.annotation?.family];
   if (!familyMeta) throw new ValidationError(`${name}.${fieldName}.operation unknown annotation family`, { code: 'position-invalid' });
   const ranges = loadRanges({ db, prefix, documentId: command.id });
@@ -298,8 +396,8 @@ async function admitTextRangeApply(ctx: V9Prelude & { edit: V9RangeApplyEdit }):
     plan = planTextRangeApply({
       documentId: command.id, structureVersion: state.structure_version, family,
       annotation,
-      from: { offset: edit.from.offset, affinity: edit.from.affinity },
-      to: { offset: edit.to.offset, affinity: edit.to.affinity },
+      from: { offset: mapped.from, affinity: edit.from.affinity },
+      to: { offset: mapped.to, affinity: edit.to.affinity },
       ranges, actorId: ctx.principal?.id ?? '',
     });
   } catch (error) {

@@ -6,6 +6,8 @@ import {
   classifyDisplayOffset,
   displayToWirePosition,
   placeholderDisplayWidth,
+  projectRedactionsOverEdit,
+  projectRedactionsOverText,
   selectionCrossesDisplayRedaction,
   wireToDisplayPosition,
 } from './workbench-annotated-text-redaction-coords.mjs';
@@ -84,6 +86,29 @@ function rootSpan(element) {
   return [...element.children].find((child) => child.dataset.blockId === BLOCK_ID) ?? null;
 }
 
+/**
+ * Reconstruct the wire document (text + zero-width markers) from the rendered
+ * DOM. Real text nodes concatenate; `[data-restricted]` placeholder spans
+ * record a zero-width marker at their wire position. The editor's optimistic
+ * drafts are built on the wire text, so placeholder columns never enter the
+ * draft, and a placeholder shifts with adjacent typing instead of swallowing
+ * the caret. Annotation marker spans wrap real text and contribute normally.
+ */
+function wireDocumentOf(span) {
+  let wire = '';
+  const redactions = [];
+  const walker = textWalker(span);
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    if (node.parentElement?.hasAttribute('data-restricted')) {
+      redactions.push({ start: wire.length, end: wire.length, placeholder: node.data });
+      continue;
+    }
+    wire += node.data;
+  }
+  return { text: wire, redactions };
+}
+
 /** Bind a blockless plain-text contenteditable to an annotated-text session.
  * The document is ONE `text` with absolute `ranges` and document-wide
  * `redactions`; the editor renders one contentEditable root span and reads
@@ -102,6 +127,16 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
   let submitting = false;
   let blockedComposition = false;
   let historyInputHandled = false;
+
+  // The markers the editor is currently showing: an active optimistic draft
+  // carries its own (placeholder positions move with adjacent edits), otherwise
+  // the session document's. The DOM is repainted with these on every draft
+  // change, so the DOM and this helper never disagree.
+  function currentRedactions() {
+    if (queued) return queued.redactions;
+    if (submitted) return submitted.redactions;
+    return session.document?.redactions ?? [];
+  }
 
   function currentDocument() {
     return session.document ?? null;
@@ -148,7 +183,8 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     const intent = changedRange(draft.baseText, draft.text);
     if (intent.from !== intent.to || !intent.text) return null;
     const at = Math.min(intent.from, targetText.length);
-    return { ...draft, baseText: targetText, text: `${targetText.slice(0, at)}${intent.text}${targetText.slice(at)}` };
+    const collapsed = { ...draft, baseText: targetText, text: `${targetText.slice(0, at)}${intent.text}${targetText.slice(at)}` };
+    return { ...collapsed, redactions: projectRedactionsOverText(draft.redactions, draft.text, collapsed.text, draft.affinity) };
   }
 
   /**
@@ -158,38 +194,48 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
    * absolute offsets are re-derived from the intent, never guessed.
    */
   function rebaseDraft(draft, targetText) {
-    if (draft.text === draft.baseText) return { ...draft, baseText: targetText, text: targetText };
+    if (draft.text === draft.baseText) {
+      return {
+        ...draft,
+        baseText: targetText,
+        text: targetText,
+        redactions: projectRedactionsOverText(draft.redactions, draft.text, targetText, draft.affinity),
+      };
+    }
     const intent = changedRange(draft.baseText, draft.text);
     const prefix = draft.baseText.slice(0, intent.from);
     const suffix = draft.baseText.slice(intent.from);
+    let rebased;
     if (intent.from === intent.to && intent.text && targetText.startsWith(draft.baseText)) {
       const foreign = targetText.slice(draft.baseText.length);
       let overlap = 0;
       while (overlap < intent.text.length && overlap < foreign.length
         && intent.text[overlap] === foreign[overlap]) overlap += 1;
       const from = overlap ? targetText.length : intent.from;
-      return { ...draft, baseText: targetText, text: `${targetText.slice(0, from)}${intent.text.slice(overlap)}${targetText.slice(from)}` };
-    }
-    if (intent.from === intent.to && intent.text && targetText.startsWith(prefix) && targetText.endsWith(suffix)) {
+      rebased = { ...draft, baseText: targetText, text: `${targetText.slice(0, from)}${intent.text.slice(overlap)}${targetText.slice(from)}` };
+    } else if (intent.from === intent.to && intent.text && targetText.startsWith(prefix) && targetText.endsWith(suffix)) {
       const foreign = targetText.slice(prefix.length, targetText.length - suffix.length);
       let overlap = 0;
       while (overlap < intent.text.length && overlap < foreign.length
         && intent.text[overlap] === foreign[overlap]) overlap += 1;
       const from = prefix.length + foreign.length;
-      return { ...draft, baseText: targetText, text: `${targetText.slice(0, from)}${intent.text.slice(overlap)}${targetText.slice(from)}` };
+      rebased = { ...draft, baseText: targetText, text: `${targetText.slice(0, from)}${intent.text.slice(overlap)}${targetText.slice(from)}` };
+    } else {
+      return null;
     }
-    return null;
+    return { ...rebased, redactions: projectRedactionsOverText(draft.redactions, draft.text, rebased.text, draft.affinity) };
   }
 
   /** Map a DOM point onto a wire position in the one document text. */
   function endpoint(node, offset, document = session.document) {
     if (!document) return null;
+    const redactions = currentRedactions();
     if (node === element) {
       const span = rootSpan(element);
       if (!span || element.childNodes.length === 0) return null;
       if (offset === 0) return { offset: 0, affinity: 'right' };
       if (offset === element.childNodes.length) {
-        const wireLength = Math.max(0, (span.textContent ?? '').length - placeholderDisplayWidth(document.redactions ?? []));
+        const wireLength = Math.max(0, (span.textContent ?? '').length - placeholderDisplayWidth(redactions));
         return { offset: wireLength, affinity: 'right' };
       }
       return null;
@@ -199,9 +245,9 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     if (!span || span.dataset.blockId !== BLOCK_ID) return null;
     const local = pointInSpan(span, node, offset);
     if (local === null || local < 0 || local > (span.textContent ?? '').length) return null;
-    const classified = classifyDisplayOffset(local, document.redactions ?? []);
+    const classified = classifyDisplayOffset(local, redactions);
     if (classified.kind === 'interior') return null;
-    const wire = displayToWirePosition({ offset: local, affinity: classified.affinity ?? 'right' }, document.redactions ?? []);
+    const wire = displayToWirePosition({ offset: local, affinity: classified.affinity ?? 'right' }, redactions);
     return { offset: wire.offset, affinity: wire.affinity };
   }
 
@@ -214,7 +260,7 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     const from = endpoint(range.startContainer, range.startOffset, document);
     const to = endpoint(range.endContainer, range.endOffset, document);
     if (!from || !to) return null;
-    const redactions = document.redactions ?? [];
+    const redactions = currentRedactions();
     const fromDisplay = wireToDisplayPosition({ offset: from.offset, affinity: from.affinity }, redactions);
     const toDisplay = wireToDisplayPosition({ offset: to.offset, affinity: to.affinity }, redactions);
     if (selectionCrossesDisplayRedaction(fromDisplay.offset, toDisplay.offset, redactions)) return null;
@@ -343,9 +389,10 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     const ranges = draftEdit
       ? projectRangesOverEdit(document.ranges, draftEdit.from, draftEdit.to, draftEdit.text)
       : document.ranges;
-    const signature = blockPaintSignature(text, ranges, document.redactions);
+    const redactions = currentRedactions();
+    const signature = blockPaintSignature(text, ranges, redactions);
     if (painted.get(span) === signature) return false;
-    paintBlock(span, text, ranges, new Map((document.annotations ?? []).map((annotation) => [annotation.id, annotation.family])), document.redactions);
+    paintBlock(span, text, ranges, new Map((document.annotations ?? []).map((annotation) => [annotation.id, annotation.family])), redactions);
     painted.set(span, signature);
     return true;
   }
@@ -364,7 +411,6 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
       return;
     }
     const current = document ?? session.document;
-    const redactions = current.redactions ?? [];
     // A render that merely confirms the already-displayed optimistic state must
     // not move the caret. Browsers collapse a selection to the start of a
     // contentEditable node the moment its text node is replaced, so capture the
@@ -438,7 +484,7 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
 
     if (domMutated && caretBeforeRender?.from && caretBeforeRender.to
       && caretBeforeRender.from.offset === caretBeforeRender.to.offset) {
-      setCaret(caretBeforeRender.from.offset, caretBeforeRender.from.affinity, redactions);
+      setCaret(caretBeforeRender.from.offset, caretBeforeRender.from.affinity, currentRedactions());
     }
     if (queued && current.text === queued.baseText && !submitting && isLive()) flushQueued();
     if (!queued && !submitted && !submitting) {
@@ -459,12 +505,12 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     return tracked;
   }
 
-  async function replace(from, to, text) {
+  async function replace(from, to, text, affinity = 'right') {
     submitting = true;
     try {
       const result = await report(session.replace({
-        from: { offset: from, affinity: 'right' },
-        to: { offset: to, affinity: 'right' },
+        from: { offset: from, affinity },
+        to: { offset: to, affinity },
         text,
       }));
       if (!result?.ok) {
@@ -497,30 +543,34 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     const change = changedRange(pending.baseText, pending.text);
     if (change.from !== change.to || change.text) {
       submitted = { ...pending, ingested: false };
-      void replace(change.from, change.to, change.text);
+      void replace(change.from, change.to, change.text, pending.affinity);
     } else {
       element.setAttribute('aria-busy', 'false');
     }
   }
 
-  function bufferEdit(from, to, text) {
+  function bufferEdit(from, to, text, affinity = 'right') {
     if (!queued) {
       const span = rootSpan(element);
-      const displayed = span?.textContent ?? '';
       // The in-flight op's own fold echo or its transient double-application is
       // the only authoritative baseline for a successor draft; never build a
-      // queued base on the phantom doubled text the session will revert.
-      const baseline = submitting && submitted && (displayed === submitted.text || displayed === doubleApplication(submitted))
-        ? submitted.text
-        : session.document?.text ?? '';
-      queued = { baseText: baseline, text: baseline };
+      // queued base on the phantom doubled text the session will revert. The
+      // displayed DOM is DISPLAY text, so the baseline is reconstructed as wire
+      // text (placeholder columns excluded).
+      const displayedWire = span ? wireDocumentOf(span).text : '';
+      const pendingBase = submitting && submitted && (displayedWire === submitted.text || displayedWire === doubleApplication(submitted));
+      const baseline = pendingBase ? submitted.text : session.document?.text ?? '';
+      const baselineRedactions = pendingBase ? submitted.redactions : session.document?.redactions ?? [];
+      queued = { baseText: baseline, baseRedactions: baselineRedactions, text: baseline, redactions: baselineRedactions, affinity };
     }
+    queued.affinity = affinity;
     queued.text = `${queued.text.slice(0, from)}${text}${queued.text.slice(to)}`;
+    queued.redactions = projectRedactionsOverEdit(queued.redactions ?? [], from, to, text, affinity);
     element.setAttribute('aria-busy', 'true');
     rendering = true;
     const span = rootSpan(element);
     if (span) paintDisplay(span, session.document, queued.text, changedRange(queued.baseText, queued.text));
-    setCaret(from + text.length, 'right', session.document?.redactions ?? []);
+    setCaret(from + text.length, affinity, queued.redactions);
     rendering = false;
     clearTimeout(queuedTimer);
     queuedTimer = setTimeout(flushQueued, 100);
@@ -552,17 +602,16 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     }
     const selected = getSelection();
     if (!selected) return;
-    // A redacted recipient reads a display text with placeholders whose display
-    // offsets do not map onto the wire offsets the session authors. Fail closed
-    // instead of submitting mis-translated offsets (matching the redaction
-    // coords invariant and the no-fold-for-redacted-recipients stance).
-    if ((session.document?.redactions?.length ?? 0) > 0) {
-      onError(new Error('annotated text is redacted in this view and cannot be edited'));
-      return;
-    }
     if (event.inputType === 'insertText' || event.inputType === 'insertFromPaste' || event.inputType === 'insertFromDrop') {
       const text = event.dataTransfer?.getData?.('text/plain') ?? event.data ?? '';
-      if (text) bufferEdit(selected.from.offset, selected.to.offset, text);
+      if (text) {
+        // A collapsed caret at a redaction placeholder edge carries the affinity
+        // that pins it to the visible neighbor; pass it through so the typed
+        // text attaches to that neighbor instead of defaulting to the marker's
+        // 'right' edge (the placeholder must never swallow the caret).
+        const affinity = selected.from.offset === selected.to.offset ? (selected.from.affinity ?? 'right') : 'right';
+        bufferEdit(selected.from.offset, selected.to.offset, text, affinity);
+      }
       return;
     }
     const text = pendingDraftText() ?? session.document?.text ?? '';
@@ -584,27 +633,23 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
       render();
       return;
     }
-    if ((session.document?.redactions?.length ?? 0) > 0) {
-      blockedComposition = true;
-      event.preventDefault();
-      render();
-      onError(new Error('annotated text is redacted in this view and cannot be edited'));
-      return;
-    }
     if (submitted) {
       clearTimeout(queuedTimer);
       queuedTimer = null;
       queued = null;
-      composing = { text: submitted.text, afterSubmitted: true };
+      composing = { text: submitted.text, redactions: submitted.redactions, afterSubmitted: true };
       return;
     }
     // Keep buffered typing as the composition's predecessor. Composition
     // end will turn the whole visible result into one queued draft, so a
-    // foreign update is rebased by the same path as ordinary typing.
+    // foreign update is rebased by the same path as ordinary typing. The base
+    // markers are captured here (the pre-composition wire coordinates) so the
+    // end handler can carry them onto the queued draft.
     clearTimeout(queuedTimer);
     queuedTimer = null;
     composing = {
       text: queued ? queued.text : session.document?.text ?? '',
+      redactions: queued ? queued.redactions : session.document?.redactions ?? [],
       queuedBaseText: queued ? queued.baseText : session.document?.text ?? '',
     };
   }
@@ -619,22 +664,26 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     const base = composing;
     composing = null;
     const span = rootSpan(element);
-    const domText = span?.textContent ?? '';
     if (!span) {
       render();
       return;
     }
-    // Composition is blocked on redacted views, so the display text equals the
-    // wire text here and needs no coordinate translation.
+    // The DOM holds DISPLAY text (placeholder columns included). Reconstruct
+    // the wire text and the markers' shifted positions so the queued draft is
+    // built on the wire document the session authors; the placeholder columns
+    // never enter the draft and the markers move with adjacent composition.
+    const wire = wireDocumentOf(span);
     const queuedBaseText = base.queuedBaseText ?? base.text;
-    if (domText === base.text && queuedBaseText === base.text) {
+    if (wire.text === base.text && queuedBaseText === base.text) {
       queued = null;
       render();
       return;
     }
     queued = {
       baseText: queuedBaseText,
-      text: domText,
+      baseRedactions: base.redactions ?? [],
+      text: wire.text,
+      redactions: wire.redactions,
     };
     element.setAttribute('aria-busy', 'true');
     render();

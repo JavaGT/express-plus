@@ -29,6 +29,8 @@ import { clearAuthoringState, issueAuthoringSnapshot, buildAuthoringEnvelope } f
 import { admitV9AnnotatedTextEdit, assertV9AuthoringBinding as assertV9AuthoringBindingFromAdmit } from '../annotated-text-admit.mjs';
 import { packOperatedFacts } from '../annotated-text-operated-facts.mjs';
 import { applyTextOperation, restoreTextFamily, textFamilyCheckpoint as continuousTextFamilyCheckpoint } from '../annotated-text-continuous.mjs';
+import { projectAnnotatedTextSnapshot } from '../annotated-text-snapshot.mjs';
+import { authoringRedactionsForRecipient } from '../annotated-text-recipient-projection.mjs';
 import { rawRow } from './query.mjs';
 
 export const CRUD_CURSOR_POLICY = Symbol('workbench.crud-cursor-policy');
@@ -439,7 +441,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       if (Object.keys(rest).length === 0) {
         if (!history) throw new ValidationError(`${name}.update requires at least one field to change`);
       }
-      const currentStored = conditionalHistory ? rawRow(db, name, id) : null;
+      const currentStored = conditionalHistory ? rawRow(db, name, id)        : null;
       if (conditionalHistory && !currentStored) throw Object.assign(new Error(`${name} ${id} not found`), { status: 404 });
       if (history) {
         if (!conditionalHistory || !history || (history.operation !== 'undo' && history.operation !== 'redo') || !history.input || Object.keys(history.input).length !== 2) throw new ValidationError(`${name}.update history input is invalid`);
@@ -1691,15 +1693,25 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
           privateFact: command.edit.kind === 'text.insert'
             ? { version: 2, kind: 'annotated-text.contribution', documentId: command.id, contribution: { kind: 'text.insert', opId: events[0].data.operation.operation[2], anchor: events[0].data.operation.operation[5][1], text: command.edit.text, scalarCount: scalarCount(command.edit.text) } }
             : { version: 2, kind: 'annotated-text.barrier', documentId: command.id },
-          authoringReceipt: ({ db: receiptDb, confirmedThrough }     ) => {
+          authoringReceipt: async ({ db: receiptDb, confirmedThrough }     ) => {
             // Blockless (issue #33): issue ONE document-scoped position frame
             // bound to the post-commit family so the authoring client can keep
             // typing. The snapshot insert joins this origin transaction.
             const postState = receiptDb.prepare(`SELECT family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(command.id);
             const postFamily = restoreTextFamily(JSON.parse(postState.family_checkpoint));
+            // Project the post-commit state through the ACTING principal's own
+            // view (the recipient projection + its redaction WeakMap): the
+            // issued frame must carry THAT principal's CURRENT wire→canonical
+            // basis, and the canonical family checkpoint may only leave the
+            // server when the principal reads the ENTIRE document unredacted.
+            const receiptRecipient = await projectAnnotatedTextSnapshot({
+              db: receiptDb, entity: record, row: rawRow(receiptDb, name, command.id),
+              principal, fieldName, descriptor, mintBasis: false,
+            });
+            const receiptRedactions = authoringRedactionsForRecipient(receiptRecipient);
             const issued = issueAuthoringSnapshot({
               db: receiptDb, prefix, leaseId: command.authoring.lease, fence: confirmedThrough,
-              positions: [{ familyCheckpoint: continuousTextFamilyCheckpoint(postFamily), visibleAtIssue: true, redactions: [] }],
+              positions: [{ familyCheckpoint: continuousTextFamilyCheckpoint(postFamily), visibleAtIssue: true, redactions: receiptRedactions }],
             });
             const envelope = buildAuthoringEnvelope({
               streamToken: command.authoring.stream,
@@ -1708,9 +1720,10 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
               fence: confirmedThrough,
               positionFrames: issued .positionFrames,
             });
+            const fullyVisible = !receiptRecipient.restricted && !receiptRecipient.redactions?.length && receiptRedactions.length === 0;
             return Object.freeze({ version: 1, actionId, confirmedThrough, authoring: Object.freeze({
               ...envelope,
-              family: continuousTextFamilyCheckpoint(postFamily),
+              ...(fullyVisible ? { family: continuousTextFamilyCheckpoint(postFamily) } : {}),
             }) });
           },
         };

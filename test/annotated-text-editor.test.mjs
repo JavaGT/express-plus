@@ -39,7 +39,32 @@ function setup(text = 'Hello', document = visible(text)) {
     element.dispatchEvent(event);
     return event;
   }
-  return { dom, element, session, calls, errors, binding, select, beforeinput, publish(document) { session.document = document; listener?.(document); } };
+  // Select a range by DISPLAY offsets (placeholder columns included) across all
+  // text nodes inside the one root span. Used for redacted documents where the
+  // placeholder splits the DOM into several text nodes.
+  function displaySelect(from, to = from) {
+    element.focus();
+    const span = element.querySelector('[data-block-id="b"]');
+    const point = (target) => {
+      let offset = 0;
+      const walker = span.ownerDocument.createTreeWalker(span, 4);
+      let node;
+      while ((node = walker.nextNode())) {
+        const next = offset + node.data.length;
+        if (target <= next) return [node, target - offset];
+        offset = next;
+      }
+      throw new Error('display offset is outside the editor');
+    };
+    const [startNode, startOffset] = point(from);
+    const [endNode, endOffset] = point(to);
+    const range = dom.window.document.createRange();
+    range.setStart(startNode, startOffset);
+    range.setEnd(endNode, endOffset);
+    dom.window.getSelection().removeAllRanges();
+    dom.window.getSelection().addRange(range);
+  }
+  return { dom, element, session, calls, errors, binding, select, displaySelect, beforeinput, publish(document) { session.document = document; listener?.(document); } };
 }
 
 const flushInput = () => new Promise((resolve) => setTimeout(resolve, 110));
@@ -752,4 +777,127 @@ test('annotation helpers fail closed after close', () => {
   assert.equal(onlyAnn1.hasAttribute('data-active-annotation'), false);
   harness.binding.selectAnnotation('ann-1');
   assert.equal(harness.dom.window.getSelection().rangeCount, 0);
+});
+
+function redactedDocument() {
+  return {
+    version: 1, text: 'hello  world', ranges: [], annotations: [],
+    redactions: [{ start: 6, end: 6, placeholder: '[restricted]' }],
+  };
+}
+
+test('annotated editor attaches a right-edge caret to the visible right neighbor', async () => {
+  const harness = setup('', redactedDocument());
+  assert.equal(harness.element.textContent, 'hello [restricted] world');
+  // The caret at the placeholder's right display edge maps to the marker with
+  // right affinity, pinning it to the visible right neighbor.
+  harness.displaySelect(18);
+  assert.deepEqual(harness.binding.getSelection(), {
+    from: { offset: 6, affinity: 'right' },
+    to: { offset: 6, affinity: 'right' },
+  });
+
+  harness.beforeinput('insertText', 'Y');
+  // Y renders on the placeholder's right side and the caret passes it — the
+  // placeholder never swallows the caret.
+  assert.equal(harness.element.textContent, 'hello [restricted]Y world');
+  assert.deepEqual(harness.binding.getSelection(), {
+    from: { offset: 7, affinity: 'right' },
+    to: { offset: 7, affinity: 'right' },
+  });
+  await flushInput();
+  assert.deepEqual(harness.calls[0][1], {
+    from: { offset: 6, affinity: 'right' },
+    to: { offset: 6, affinity: 'right' },
+    text: 'Y',
+  });
+  assert.deepEqual(harness.errors, []);
+  harness.binding.close();
+});
+
+test('annotated editor attaches a left-edge caret to the visible left neighbor', async () => {
+  const harness = setup('', redactedDocument());
+  harness.displaySelect(6);
+  assert.deepEqual(harness.binding.getSelection(), {
+    from: { offset: 6, affinity: 'left' },
+    to: { offset: 6, affinity: 'left' },
+  });
+
+  harness.beforeinput('insertText', 'X');
+  // X renders on the placeholder's left side; the zero-width marker shifts past
+  // it (wire 7) instead of swallowing the typed text.
+  assert.equal(harness.element.textContent, 'hello X[restricted] world');
+  assert.deepEqual(harness.binding.getSelection(), {
+    from: { offset: 7, affinity: 'left' },
+    to: { offset: 7, affinity: 'left' },
+  });
+  await flushInput();
+  assert.deepEqual(harness.calls[0][1], {
+    from: { offset: 6, affinity: 'left' },
+    to: { offset: 6, affinity: 'left' },
+    text: 'X',
+  });
+  assert.deepEqual(harness.errors, []);
+  harness.binding.close();
+});
+
+test('annotated editor composes consecutive edge typing through the placeholder boundary', async () => {
+  // Left edge: two keystrokes buffer into one replacement; the marker keeps
+  // shifting ahead of the typed text and the caret stays on the visible side.
+  const left = setup('', redactedDocument());
+  left.displaySelect(6);
+  left.beforeinput('insertText', 'X');
+  assert.equal(left.element.textContent, 'hello X[restricted] world');
+  assert.deepEqual(left.binding.getSelection(), {
+    from: { offset: 7, affinity: 'left' },
+    to: { offset: 7, affinity: 'left' },
+  });
+  left.beforeinput('insertText', 'Y');
+  assert.equal(left.element.textContent, 'hello XY[restricted] world');
+  assert.deepEqual(left.binding.getSelection(), {
+    from: { offset: 8, affinity: 'left' },
+    to: { offset: 8, affinity: 'left' },
+  });
+  await flushInput();
+  assert.equal(left.calls.length, 1, 'consecutive edge typing composes into one replacement');
+  assert.deepEqual(left.calls[0][1], {
+    from: { offset: 6, affinity: 'left' },
+    to: { offset: 6, affinity: 'left' },
+    text: 'XY',
+  });
+  assert.deepEqual(left.errors, []);
+  left.binding.close();
+
+  // Right edge: the same two keystrokes compose on the visible right neighbor.
+  const right = setup('', redactedDocument());
+  right.displaySelect(18);
+  right.beforeinput('insertText', 'X');
+  right.beforeinput('insertText', 'Y');
+  assert.equal(right.element.textContent, 'hello [restricted]XY world');
+  assert.deepEqual(right.binding.getSelection(), {
+    from: { offset: 8, affinity: 'right' },
+    to: { offset: 8, affinity: 'right' },
+  });
+  await flushInput();
+  assert.equal(right.calls.length, 1, 'consecutive right-edge typing composes into one replacement');
+  assert.deepEqual(right.calls[0][1], {
+    from: { offset: 6, affinity: 'right' },
+    to: { offset: 6, affinity: 'right' },
+    text: 'XY',
+  });
+  assert.deepEqual(right.errors, []);
+  right.binding.close();
+});
+
+test('annotated editor rejects a spanning selection client-side without folding', async () => {
+  const harness = setup('', redactedDocument());
+  harness.displaySelect(2, 20);
+  assert.equal(harness.binding.getSelection(), null);
+  // A delete over the rejected selection is a no-op: the editor never submits a
+  // range the coords layer refused to map.
+  harness.beforeinput('deleteContentBackward');
+  await flushInput();
+  assert.deepEqual(harness.calls, []);
+  assert.deepEqual(harness.errors, []);
+  harness.binding.close();
 });

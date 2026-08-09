@@ -207,6 +207,14 @@ export function materializeRange(family                      , start            
  * Resolve an ABSOLUTE UTF-16 offset into the whole document to a structural
  * endpoint. The basis must equal the current frontier (offsets are always
  * resolved against the live document).
+ *
+ * At an exact character boundary the affinity chooses which side of the
+ * boundary owns it: 'left' yields the boundary BEFORE the following visible
+ * element, 'right' the boundary AFTER the preceding element's scalar (before
+ * its children). This is what lets an insertion AT the boundary land OUTSIDE a
+ * range whose start endpoint carries 'left' affinity — a redacted recipient's
+ * edge typing attaches to the visible neighbor instead of being absorbed into
+ * the hidden span.
  */
 export function resolveOffsetToEndpoint(family                      , utf16Offset        , basisFrontier          , affinity                  )                     {
   if (JSON.stringify(family.checkpoint.frontier) !== JSON.stringify(basisFrontier)) {
@@ -225,13 +233,24 @@ export function resolveOffsetToEndpoint(family                      , utf16Offse
   }
 
   let accumulated = 0;
-  for (const [, element] of order) {
+  for (let index = 0; index < order.length; index += 1) {
+    const [, element] = order[index];
     if (element.deletedBy.length) continue;
     const width = element.scalar.length;
     const postScalar = accumulated + width;
     if (accumulated < utf16Offset && utf16Offset <= postScalar) {
       const anchor = ['element', [[...element.op], element.ordinal]];
       if (utf16Offset === postScalar) {
+        if (affinity === 'left') {
+          // Boundary AFTER this element, attached to the LEFT region: the
+          // boundary is the LEFT side of the next visible element, so text
+          // later inserted at this position (a child of the preceding element)
+          // lands BEFORE the endpoint and stays outside a range starting here.
+          const nextAnchor = nextVisibleAnchorAfter(order, index);
+          if (nextAnchor) {
+            return assertStructuralEndpoint({ point: ['point', nextAnchor, 'left'], basisFrontier });
+          }
+        }
         return assertStructuralEndpoint({ point: ['point', anchor, 'right'], basisFrontier });
       }
       return assertStructuralEndpoint({ point: ['point', anchor, 'left'], basisFrontier });
@@ -239,6 +258,39 @@ export function resolveOffsetToEndpoint(family                      , utf16Offse
     accumulated = postScalar;
   }
   fail('failed to resolve offset to endpoint');
+}
+
+/** The first visible element after a traversal index, or null when none follow. */
+function nextVisibleAnchorAfter(order                              , index        )                {
+  for (let cursor = index + 1; cursor < order.length; cursor += 1) {
+    const [, element] = order[cursor];
+    if (element.deletedBy.length === 0) {
+      return ['element', [[...element.op], element.ordinal]];
+    }
+  }
+  return null;
+}
+
+/**
+ * The RGA anchor element for an insert AT an absolute offset: the last visible
+ * element whose scalar ends at or contains the offset. The anchor is a pure
+ * function of the offset — affinity does not reposition an insertion point, it
+ * only decides which side of the boundary an endpoint/range owns (see
+ * `resolveOffsetToEndpoint`). An offset at an element boundary anchors to the
+ * element BEFORE it, so the new text becomes its child and lands exactly at the
+ * requested offset.
+ */
+export function insertAnchorForOffset(family                      , utf16Offset        )         {
+  let accumulated = 0;
+  for (const [, element] of rgaTraversal(family.checkpoint)) {
+    if (element.deletedBy.length) continue;
+    const postScalar = accumulated + element.scalar.length;
+    if (accumulated < utf16Offset && utf16Offset <= postScalar) {
+      return ['element', [[...element.op], element.ordinal]];
+    }
+    accumulated = postScalar;
+  }
+  fail('failed to resolve insert anchor for offset');
 }
 
 function endpointAfterLastVisible(_family                      , order                              , basisFrontier          )                     {
@@ -276,7 +328,7 @@ export function textOperationForOffsetEdit(family                      , edit   
     assertUtf16Offset(text, edit.at.offset);
     const anchor = edit.at.offset === 0 || text.length === 0
       ? ['root']
-      : resolveOffsetToEndpoint(family, edit.at.offset, basis, edit.at.affinity).point[1];
+      : insertAnchorForOffset(family, edit.at.offset);
     return canonicalTextOp(['workbench.text', 1, [actor, 1], lamport, basis, ['insert', anchor, edit.text]]);
   }
   if (edit.kind !== 'text.delete') fail('text.replace is not supported by this builder — compose delete + insert operations; emitting a delete-only op would silently drop the replacement text');

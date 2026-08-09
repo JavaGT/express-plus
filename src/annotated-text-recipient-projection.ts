@@ -16,6 +16,41 @@ export function authoringRedactionsForRecipient(recipient: any) {
   return recipientRedactionIntervals.get(recipient) ?? [];
 }
 
+// The authoring redaction entry a recipient's position frame carries: the
+// hidden interval's CANONICAL [start, end) plus the wire (recipient-visible)
+// marker position `visibleStart` where it renders. This is the inverse
+// coordinate table of the projection: the recipient edits against wire
+// offsets, the server maps them back to canonical before planning.
+export interface AuthoringRedaction {
+  visibleStart: number;
+  start: number;
+  end: number;
+}
+
+/**
+ * Map a redacted recipient's WIRE offset (an index into the projected
+ * recipient text, where every denied interval is a zero-width marker at its
+ * `visibleStart`) to the canonical offset that offset edits. A collapsed
+ * offset AT a marker is the non-editable-gap boundary: affinity selects the
+ * visible neighbor ('left' → the interval's canonical start, 'right' → its
+ * end). A RANGE endpoint pins to the boundary facing the range's interior
+ * (`side` 'right' for a range starting at a marker, 'left' for one ending
+ * there), so a selection adjacent to a placeholder deletes visible text only.
+ */
+export function mapVisibleOffsetToCanonical(offset: number, affinity: 'left' | 'right', redactions: readonly AuthoringRedaction[], side: 'left' | 'right' | null = null): number {
+  let hidden = 0;
+  for (const redaction of redactions) {
+    if (offset < redaction.visibleStart) break;
+    if (offset === redaction.visibleStart) {
+      if (side === 'left') return redaction.start;
+      if (side === 'right') return redaction.end;
+      return affinity === 'right' ? redaction.end : redaction.start;
+    }
+    hidden += redaction.end - redaction.start;
+  }
+  return offset + hidden;
+}
+
 function fail(message: string): never { throw new Error(`annotated-text recipient projection: ${message}`); }
 
 function freeze(value: any) {

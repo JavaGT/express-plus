@@ -506,7 +506,7 @@ async function commitEvents(db: any, events: any, {
       });
       const confirmedThrough = readSeq(db, scope);
       const resultData = commit.authoringReceipt
-        ? commit.authoringReceipt({ db, actionId, scope, confirmedThrough, finalizedEvents: result })
+        ? await commit.authoringReceipt({ db, actionId, scope, confirmedThrough, finalizedEvents: result })
         : Object.freeze({ actionId, confirmedThrough });
       // The owning-stream action receipt (Wave 4.9): written atomically with
       // the events it references, so a retry's dedupe check and a crash
