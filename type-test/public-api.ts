@@ -147,6 +147,11 @@ const projectedAnnotatedText = materializeAnnotatedTextSnapshot(
 const projectedKind: 'workbench.annotatedText.recipient' = projectedAnnotatedText.kind;
 const projectedText: string = projectedAnnotatedText.text;
 const materializedRanges: readonly { readonly annotationId: string; readonly start: number; readonly end: number }[] = projectedAnnotatedText.ranges;
+// The materializer always projects the wire capabilityHints into a public
+// `capabilities` array (restricted recipients are review-only with null).
+const projectedCapabilities: readonly string[] | null = projectedAnnotatedText.capabilities;
+// @ts-expect-error restricted recipients are review-only: capabilities is nullable
+const grantedOnlyCapabilities: readonly string[] = projectedAnnotatedText.capabilities;
 // @ts-expect-error recipient snapshots never expose authoring basis state
 projectedAnnotatedText.basis;
 // @ts-expect-error the continuous document has no synthetic blocks
@@ -155,7 +160,7 @@ projectedAnnotatedText.blocks;
 projectedAnnotatedText.memberships;
 // @ts-expect-error the continuous document has no caret blockId grammar
 projectedAnnotatedText.blockId;
-void [projectedKind, projectedText, materializedRanges];
+void [projectedKind, projectedText, materializedRanges, projectedCapabilities, grantedOnlyCapabilities];
 
 type ProjectRow = { id: string; name: string; ownerId: string };
 const category: FailureCategory = FAILURE_CATEGORIES[0];

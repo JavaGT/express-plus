@@ -652,6 +652,7 @@ export interface AnnotatedTextDocument {
     readonly owner?: string;
   }[];
   readonly measurements?: readonly AnnotatedTextMeasurement[];
+  readonly capabilities: readonly string[] | null;
   readonly capabilityHints?: readonly string[];
   readonly restricted?: boolean;
   readonly redactions?: readonly { readonly start: number; readonly end: number; readonly placeholder: string }[];

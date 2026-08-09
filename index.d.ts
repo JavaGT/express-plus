@@ -478,6 +478,7 @@ export interface AnnotatedTextDocument {
     readonly owner?: string;
   }[];
   readonly measurements?: readonly AnnotatedTextMeasurement[];
+  readonly capabilities: readonly string[] | null;
   readonly capabilityHints?: readonly string[];
   readonly restricted?: boolean;
   readonly redactions?: readonly { readonly start: number; readonly end: number; readonly placeholder: string }[];
@@ -506,6 +507,7 @@ export interface AnnotatedTextRecipientDocument {
   readonly ranges: readonly { readonly annotationId: string; readonly start: number; readonly end: number }[];
   readonly annotations: readonly AnnotatedTextAnnotation[];
   readonly measurements?: readonly AnnotatedTextMeasurement[];
+  readonly capabilities: readonly string[] | null;
   readonly capabilityHints?: readonly string[];
   readonly orphans?: readonly {
     readonly id: string;
