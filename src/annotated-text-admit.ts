@@ -286,6 +286,8 @@ async function admitTextRangeApply(ctx: V9Prelude & { edit: V9RangeApplyEdit }):
   const familyMeta = compiledMeta.annotationHandles[edit.annotation?.family];
   if (!familyMeta) throw new ValidationError(`${name}.${fieldName}.operation unknown annotation family`, { code: 'position-invalid' });
   const ranges = loadRanges({ db, prefix, documentId: command.id });
+  const annotations = loadAnnotations({ db, prefix, compiledMeta, documentId: command.id });
+  const sameFamilyAnnotationIds = new Set(annotations.filter((candidate) => candidate.family === edit.annotation.family).map((candidate) => candidate.id));
   const annotation = {
     id: edit.annotation.id,
     family: edit.annotation.family,
@@ -301,6 +303,8 @@ async function admitTextRangeApply(ctx: V9Prelude & { edit: V9RangeApplyEdit }):
       from: { offset: edit.from.offset, affinity: edit.from.affinity },
       to: { offset: edit.to.offset, affinity: edit.to.affinity },
       ranges, actorId: ctx.principal?.id ?? '',
+      cardinality: familyMeta.cardinality,
+      sameFamilyAnnotationIds,
     });
   } catch (error) {
     const err = error as Error & { code?: string };

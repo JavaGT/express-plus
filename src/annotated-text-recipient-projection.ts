@@ -102,18 +102,19 @@ export function projectAnnotatedTextForRecipient(canonical: CanonicalAnnotatedTe
     annotations.set(annotation.id, annotation);
   }
 
-  // Document-scoped ranges: one contiguous range per annotation, absolute offsets.
-  const rangeByAnnotation = new Map<string, CanonicalRange>();
+  // Document-scoped ranges: absolute offsets. An annotation may own ZERO or MORE
+  // (disjoint) ranges: an exclusive 'one'-cardinality apply trims the overlapped
+  // middle of a same-family annotation into left/right remnants, so a single
+  // annotation is no longer guaranteed one contiguous range.
+  const rangeByAnnotation = new Map<string, CanonicalRange[]>();
   for (const range of canonical.ranges) {
     exact(range, ['annotationId', 'start', 'end'], 'range');
     const annotation = annotations.get(range.annotationId);
     if (!annotation || !Number.isSafeInteger(range.start) || !Number.isSafeInteger(range.end) ||
         range.start < 0 || range.end < range.start || range.end > textLength) fail('range is invalid');
-    if (rangeByAnnotation.has(range.annotationId)) fail('canonical annotation must have exactly one range');
-    rangeByAnnotation.set(range.annotationId, range);
-  }
-  for (const annotation of annotations.values()) {
-    if (!rangeByAnnotation.has(annotation.id)) fail('canonical annotation has no range');
+    const own = rangeByAnnotation.get(range.annotationId);
+    if (own) own.push(range);
+    else rangeByAnnotation.set(range.annotationId, [range]);
   }
 
   const orphanIds = new Set<string>();
@@ -138,22 +139,26 @@ export function projectAnnotatedTextForRecipient(canonical: CanonicalAnnotatedTe
 
   // Protector activation: a protector range must intersect a protected target's
   // range. Whole-document (0..textLength) protectors cover everything. A stale
-  // protectedTargetIds entry is invalid canonical state and fails closed —
-  // validate EVERY target id before any intersection break.
+  // protectedTargetIds entry (naming an annotation that does not exist) is
+  // invalid canonical state and fails closed — validate EVERY target id before
+  // any intersection break. A rangeless protector or target (its only range was
+  // displaced by an exclusive apply) is legal but can never activate.
   for (const annotation of annotations.values()) {
     if (!Object.hasOwn(meta.protectingFamilies, annotation.family) || !annotation.protectedTargetIds?.length) continue;
     for (const targetId of annotation.protectedTargetIds) {
-      if (!rangeByAnnotation.has(targetId)) fail(`protector '${annotation.id}' names an unknown protected target '${targetId}'`);
+      if (!annotations.has(targetId)) fail(`protector '${annotation.id}' names an unknown protected target '${targetId}'`);
     }
   }
   const active = new Set<string>();
   for (const annotation of annotations.values()) {
     if (!Object.hasOwn(meta.protectingFamilies, annotation.family) || !annotation.protectedTargetIds?.length) continue;
-    const own = rangeByAnnotation.get(annotation.id)!;
-    const wholeDocument = own.start === 0 && own.end === textLength;
+    const ownRanges = rangeByAnnotation.get(annotation.id) ?? [];
+    if (ownRanges.length === 0) continue;
+    const wholeDocument = ownRanges.some((own) => own.start === 0 && own.end === textLength);
     for (const targetId of annotation.protectedTargetIds) {
-      const target = rangeByAnnotation.get(targetId)!;
-      if (wholeDocument || (own.start < target.end && target.start < own.end)) {
+      const targetRanges = rangeByAnnotation.get(targetId) ?? [];
+      const intersects = ownRanges.some((own) => targetRanges.some((target) => own.start < target.end && target.start < own.end));
+      if (wholeDocument || intersects) {
         active.add(annotation.id);
         break;
       }
@@ -179,12 +184,14 @@ export function projectAnnotatedTextForRecipient(canonical: CanonicalAnnotatedTe
   let restricted = false;
   for (const id of active) {
     if (outcomes.get(id) !== 'deny') continue;
-    const range = rangeByAnnotation.get(id)!;
-    if (range.start === 0 && range.end === textLength) {
+    const ownRanges = rangeByAnnotation.get(id)!;
+    if (ownRanges.some((range) => range.start === 0 && range.end === textLength)) {
       restricted = true;
       break;
     }
-    deniedIntervals.push({ start: range.start, end: range.end, placeholder: meta.protectingFamilies[annotations.get(id)!.family].placeholder });
+    for (const range of ownRanges) {
+      deniedIntervals.push({ start: range.start, end: range.end, placeholder: meta.protectingFamilies[annotations.get(id)!.family].placeholder });
+    }
   }
   if (restricted) {
     const result = { kind: 'workbench.annotatedText.recipient', version: 1, restricted: true, text: '', ranges: [], annotations: [] };
@@ -230,16 +237,18 @@ export function projectAnnotatedTextForRecipient(canonical: CanonicalAnnotatedTe
 
   const recipientRanges: Array<{ annotationId: string; start: number; end: number }> = [];
   const retainedAnnotationIds = new Set<string>();
-  for (const [annotationId, range] of rangeByAnnotation) {
+  for (const [annotationId, ownRanges] of rangeByAnnotation) {
     const family = annotations.get(annotationId)!.family;
     if (Object.hasOwn(meta.protectingFamilies, family)) continue;
-    const start = visibleOffsetFor(range.start);
-    const end = visibleOffsetFor(range.end);
-    // Fully inside a redaction → no positive visible span; the annotation drops
-    // out of delivery (no show-through for fully-redacted ranges).
-    if (end <= start) continue;
-    retainedAnnotationIds.add(annotationId);
-    recipientRanges.push({ annotationId, start, end });
+    for (const range of ownRanges) {
+      const start = visibleOffsetFor(range.start);
+      const end = visibleOffsetFor(range.end);
+      // Fully inside a redaction → no positive visible span; the range drops out
+      // of delivery (no show-through for fully-redacted ranges).
+      if (end <= start) continue;
+      retainedAnnotationIds.add(annotationId);
+      recipientRanges.push({ annotationId, start, end });
+    }
   }
 
   const result = {

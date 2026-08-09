@@ -194,26 +194,62 @@ test('allowed outer does not reveal denied inner and authorized recipients recei
 
 test('malformed canonical ranges and measurements fail closed', () => {
   const decisions = { version: 1, protectors: [{ protectorId: 'protect', outcome: 'allow' }], capabilityHints: [] };
+  // Multiple ranges per annotation are LEGAL (an exclusive 'one'-family apply
+  // leaves a trimmed annotation's left/right remnants), so a duplicate range is
+  // accepted and delivered as-is.
   const duplicateRange = canonical();
   duplicateRange.ranges.push({ annotationId: 'code', start: 0, end: 1 });
-  assert.throws(() => projectAnnotatedTextForRecipient(duplicateRange, descriptor(), decisions), /exactly one range/);
+  const projected = projectAnnotatedTextForRecipient(duplicateRange, descriptor(), decisions);
+  assert.deepEqual(projected.ranges, [
+    { annotationId: 'code', start: 0, end: 13 },
+    { annotationId: 'code', start: 0, end: 1 },
+  ]);
+  // Genuinely malformed ranges still fail closed before any output.
+  const outOfBounds = canonical();
+  outOfBounds.ranges[0] = { annotationId: 'code', start: 0, end: 99 };
+  assert.throws(() => projectAnnotatedTextForRecipient(outOfBounds, descriptor(), decisions), /range is invalid/);
+  const inverted = canonical();
+  inverted.ranges[0] = { annotationId: 'code', start: 5, end: 2 };
+  assert.throws(() => projectAnnotatedTextForRecipient(inverted, descriptor(), decisions), /range is invalid/);
+  const unknownAnnotation = canonical();
+  unknownAnnotation.ranges.push({ annotationId: 'nope', start: 0, end: 1 });
+  assert.throws(() => projectAnnotatedTextForRecipient(unknownAnnotation, descriptor(), decisions), /range is invalid/);
   const extraMeasurement = canonical();
   extraMeasurement.measurements[0].private = 'leak';
   assert.throws(() => projectAnnotatedTextForRecipient(extraMeasurement, descriptor(), decisions), /invalid shape/);
 });
 
-test('canonical annotations without a range fail closed', () => {
+test('canonical annotations may be rangeless or own several ranges (exclusive trimming)', () => {
+  // A rangeless annotation is legal (its only range was fully displaced by an
+  // exclusive apply); it discloses no ranges and drops out of delivery rather
+  // than failing the whole document.
   const ordinary = canonical();
-  ordinary.annotations.push({ id: 'orphan', family: 'coding', fields: {} });
-  assert.throws(() => projectAnnotatedTextForRecipient(ordinary, descriptor(), {
+  ordinary.annotations.push({ id: 'rangeless', family: 'coding', fields: {} });
+  const projected = projectAnnotatedTextForRecipient(ordinary, descriptor(), {
     version: 1, protectors: [{ protectorId: 'protect', outcome: 'allow' }], capabilityHints: [],
-  }), /no range/);
+  });
+  assert.equal(projected.text, 'secretvisible');
+  assert.deepEqual(projected.annotations.map((a) => a.id).sort(), ['code']);
+  assert.deepEqual(projected.ranges, [{ annotationId: 'code', start: 0, end: 13 }]);
 
+  // A rangeless PROTECTOR is legal too: it has no range to redact, so it is
+  // never active and never disclosed.
   const protector = canonical();
-  protector.annotations.push({ id: 'orphan-protector', family: 'confidential', fields: {}, protectedTargetIds: ['code'] });
-  assert.throws(() => projectAnnotatedTextForRecipient(protector, descriptor(), {
+  protector.annotations.push({ id: 'rangeless-protector', family: 'confidential', fields: {}, protectedTargetIds: ['code'] });
+  const projectedProtector = projectAnnotatedTextForRecipient(protector, descriptor(), {
     version: 1, protectors: [{ protectorId: 'protect', outcome: 'allow' }], capabilityHints: [],
-  }), /no range/);
+  });
+  assert.equal(Object.hasOwn(projectedProtector, 'redactions'), false);
+  assert.deepEqual(projectedProtector.annotations.map((a) => a.id).sort(), ['code']);
+
+  // A protector whose TARGET became rangeless stays legal and inactive.
+  const targetless = canonical();
+  targetless.annotations.push({ id: 'targetless', family: 'coding', fields: {} });
+  targetless.annotations.push({ id: 'range-tracking', family: 'confidential', fields: {}, protectedTargetIds: ['targetless'] });
+  const projectedTargetless = projectAnnotatedTextForRecipient(targetless, descriptor(), {
+    version: 1, protectors: [{ protectorId: 'protect', outcome: 'allow' }], capabilityHints: [],
+  });
+  assert.deepEqual(projectedTargetless.annotations.map((a) => a.id).sort(), ['code']);
 });
 
 test('whole-document denied protector restricts the recipient fail-closed', () => {

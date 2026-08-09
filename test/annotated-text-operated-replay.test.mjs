@@ -15,7 +15,8 @@ import workbench, {
 } from '../src/internal.mjs';
 import { rowToEvent } from '../src/committed-log.mjs';
 import { txn } from '../src/driver.mjs';
-import { materializeText, restoreTextFamily } from '../src/annotated-text-continuous.mjs';
+import { materializeText, restoreTextFamily, projectEndpointToOffset } from '../src/annotated-text-continuous.mjs';
+import { projectAnnotatedTextSnapshot } from '../src/annotated-text-snapshot.mjs';
 import { withAuthoringBinding } from './annotated-text-authoring-fixture.mjs';
 
 function declaredEntity() {
@@ -28,6 +29,7 @@ function declaredEntity() {
       annotations: [
         annotation('note', { fields: {} }),
         annotation('theme', { fields: { color: text() } }),
+        annotation('speaker', { cardinality: 'one' }),
       ],
     }),
     grant: [scope(() => everyone()).can(() => grant(read, write))],
@@ -71,6 +73,7 @@ const PROJECTION_TABLES = [
   'ReplayDoc_body_annotation',
   'ReplayDoc_body_annotation_note',
   'ReplayDoc_body_annotation_theme',
+  'ReplayDoc_body_annotation_speaker',
   'ReplayDoc_body_membership',
   'ReplayDoc_body_annotation_orphan_state',
 ];
@@ -201,6 +204,99 @@ test('v13 operated rows replay deterministically through the real projector/rebu
   assert.equal(rebuilt.prepare("SELECT COUNT(*) AS c FROM ReplayDoc_body_annotation WHERE id = 'note-1'").get().c, 0);
   rebuilt.close();
 });
+
+// An exclusive 'one'-cardinality family: applying speaker B over a region
+// already covered by speaker A trims A into left/right remnants. The committed
+// plan carries the FULL membership postimage, so the projection reproduces the
+// trim exactly on a whole-log replay.
+test('one-cardinality exclusive trim survives replay through the real projector seam', async (t) => {
+  const live = new DatabaseSync(':memory:');
+  installSchema(live);
+  const ReplayDoc = declaredEntity();
+  const app = workbench({ db: live, entities: [ReplayDoc] });
+  app.start();
+  await app.ready;
+  t.after(async () => { await app.shutdown().catch(() => {}); live.close(); });
+  const principal = { id: 'u1' };
+
+  const created = await app.dispatch({
+    actionId: 'create', type: 'ReplayDoc.create', scope: 'Project:p1',
+    payload: { id: 'd1', project: 'p1', owner: 'u1', body: { version: 1, blocks: [{ text: 'hello world' }] } },
+    principal,
+  });
+  assert.equal(created.ok, true, created.failure?.message);
+
+  let binding = await bindingFor(live, ReplayDoc);
+  const applyA = await app.dispatch({
+    actionId: 'apply-a', type: 'ReplayDoc.body.operation', scope: 'Project:p1',
+    payload: {
+      version: 9, id: 'd1', authoring: authoringOf(binding, 'apply-a'),
+      edit: {
+        kind: 'annotation.apply', annotation: { id: 'speaker-a', family: 'speaker', fields: {} },
+        from: { positionToken: binding.documentPositionToken, offset: 0, affinity: 'left' },
+        to: { positionToken: binding.documentPositionToken, offset: 11, affinity: 'right' },
+      },
+    },
+    principal,
+  });
+  assert.equal(applyA.ok, true, applyA.failure?.message);
+
+  binding = await bindingFor(live, ReplayDoc);
+  const applyB = await app.dispatch({
+    actionId: 'apply-b', type: 'ReplayDoc.body.operation', scope: 'Project:p1',
+    payload: {
+      version: 9, id: 'd1', authoring: authoringOf(binding, 'apply-b'),
+      edit: {
+        kind: 'annotation.apply', annotation: { id: 'speaker-b', family: 'speaker', fields: {} },
+        from: { positionToken: binding.documentPositionToken, offset: 3, affinity: 'left' },
+        to: { positionToken: binding.documentPositionToken, offset: 7, affinity: 'right' },
+      },
+    },
+    principal,
+  });
+  assert.equal(applyB.ok, true, applyB.failure?.message);
+
+  // Live state: A owns two remnants [0,3] + [7,11], B owns [3,7]. The composite
+  // membership key admits both A rows.
+  const membership = (db) => db.prepare('SELECT annotation_id, start_point, end_point FROM ReplayDoc_body_membership ORDER BY annotation_id, start_point').all()
+    .map((row) => [row.annotation_id, JSON.parse(row.start_point), JSON.parse(row.end_point)]);
+  const liveMembership = membership(live);
+  assert.equal(liveMembership.length, 3, 'two A remnants plus one B range');
+  const project = (db, endpoint) => projectEndpointToOffset(liveFamily(db), endpoint);
+  const aRanges = liveMembership.filter(([id]) => id === 'speaker-a');
+  assert.deepEqual(aRanges.map(([, s]) => project(live, s)).sort((x, y) => x - y), [0, 7]);
+  assert.deepEqual(aRanges.map(([, , e]) => project(live, e)).sort((x, y) => x - y), [3, 11]);
+
+  const liveState = projectedState(live);
+
+  // Rebuild from the same committed log: the exclusive trim must be reproduced
+  // exactly (byte-identical projection state), proving the postimage is a pure
+  // function of the committed plan.
+  const rebuilt = new DatabaseSync(':memory:');
+  installSchema(rebuilt);
+  const rebuiltApp = workbench({ db: rebuilt, entities: [declaredEntity()] });
+  replayLog(live, rebuiltApp.entities.get('ReplayDoc').projection, rebuilt);
+  assert.deepEqual(projectedState(rebuilt), liveState,
+    'rebuilt projection state must byte-match the live exclusive trim');
+  assert.deepEqual(membership(rebuilt), liveMembership);
+
+  // The recipient view discloses the trimmed annotation as TWO disjoint ranges
+  // of the same annotation id.
+  const row = rebuilt.prepare("SELECT * FROM ReplayDoc WHERE id = 'd1'").get();
+  const recipient = await projectAnnotatedTextSnapshot({
+    db: rebuilt, entity: ReplayDoc, row, principal,
+    fieldName: 'body', descriptor: ReplayDoc.fields.body, mintBasis: false,
+  });
+  const speakerRanges = recipient.ranges.filter((range) => range.annotationId === 'speaker-a').sort((a, b) => a.start - b.start);
+  assert.deepEqual(speakerRanges.map(({ start, end }) => [start, end]), [[0, 3], [7, 11]]);
+  assert.deepEqual(recipient.ranges.find((range) => range.annotationId === 'speaker-b'), { annotationId: 'speaker-b', start: 3, end: 7 });
+  rebuilt.close();
+});
+
+function liveFamily(db) {
+  const state = db.prepare("SELECT family_checkpoint FROM ReplayDoc_body_state WHERE document_id = 'd1'").get();
+  return restoreTextFamily(JSON.parse(state.family_checkpoint));
+}
 
 // Stable semantic anchors for the version-guard error: the field's operated
 // event, the offending version, the one admitted version, and the retired

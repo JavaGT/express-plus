@@ -369,7 +369,7 @@ test('A8: migration — legacy schema upgrades atomically, preserves durable dat
 
   // Run the built-in Workbench migration (fresh apply).
   await runWorkbenchMigrations(db);
-  assert.equal(appliedWorkbenchVersion(db), 3);
+  assert.equal(appliedWorkbenchVersion(db), 4);
 
   // Canonical shape: position has checkpoint_id NOT NULL, no family_checkpoint.
   const positionColumns = new Set(db.prepare(`PRAGMA table_info(${prefix}_authoring_position)`).all().map((r) => r.name));
@@ -390,7 +390,7 @@ test('A8: migration — legacy schema upgrades atomically, preserves durable dat
 
   // Second startup is a no-op.
   await runWorkbenchMigrations(db);
-  assert.equal(appliedWorkbenchVersion(db), 3);
+  assert.equal(appliedWorkbenchVersion(db), 4);
 });
 
 test('A8-rollback: induced migration failure rolls back and leaves legacy schema intact', async () => {
@@ -419,7 +419,7 @@ test('A8-rollback: induced migration failure rolls back and leaves legacy schema
   // With the trigger removed, the same run succeeds (idempotent re-apply after rollback).
   db.exec(`DROP TRIGGER fail_migration`);
   await runWorkbenchMigrations(db);
-  assert.equal(appliedWorkbenchVersion(db), 3);
+  assert.equal(appliedWorkbenchVersion(db), 4);
 });
 
 test('A8-v2: migration invalidates defective ephemeral state and preserves durable state', async () => {
@@ -439,7 +439,7 @@ test('A8-v2: migration invalidates defective ephemeral state and preserves durab
   // Upgrade from the deployed v1 build invalidates every opaque authoring token.
   await runWorkbenchMigrations(db);
   await runWorkbenchMigrations(db);
-  assert.equal(appliedWorkbenchVersion(db), 3);
+  assert.equal(appliedWorkbenchVersion(db), 4);
   assert.equal(count(db, `${prefix}_authoring_stream`), 0, 'streams from the defective build are invalidated');
   assert.equal(count(db, `${prefix}_authoring_lease`), 0, 'leases from the defective build are invalidated');
   assert.equal(count(db, `${prefix}_authoring_position`), 0, 'defective position tokens are removed');
@@ -569,7 +569,71 @@ test('A10: app.prepareSchema upgrades a legacy authoring schema via the built-in
   assert.ok(positionColumns.has('checkpoint_id'), 'position has checkpoint_id after app boot');
   assert.ok(positionColumns.has('family_checkpoint') === false, 'legacy family_checkpoint column removed after app boot');
   const applied = db.prepare('SELECT MAX(version) AS v FROM _WorkbenchMigration').get();
-  assert.equal(applied.v, 3, 'Workbench migrations v1–v3 recorded');
+  assert.equal(applied.v, 4, 'Workbench migrations v1–v4 recorded');
   assert.equal(count(db, `${prefix}_authoring_position`), 0, 'pre-migration legacy positions cleared');
   app.db.close();
+});
+
+test('A11: v4 rebuilds a legacy annotated-text membership table to the composite key, preserving rows', async () => {
+  // Legacy one-row-per-annotation membership shape (annotation_id PRIMARY KEY).
+  const db = new DatabaseSync(':memory:');
+  db.exec(`CREATE TABLE Doc (id TEXT PRIMARY KEY)`);
+  db.exec(`CREATE TABLE ${prefix}_annotation (id TEXT PRIMARY KEY, document_id TEXT NOT NULL, project_id TEXT NOT NULL, owner_id TEXT NOT NULL, family TEXT NOT NULL)`);
+  db.exec(`CREATE TABLE ${prefix}_membership (
+    annotation_id TEXT PRIMARY KEY,
+    start_point TEXT NOT NULL CHECK (json_valid(start_point)),
+    end_point TEXT NOT NULL CHECK (json_valid(end_point)),
+    FOREIGN KEY (annotation_id) REFERENCES ${prefix}_annotation(id) ON DELETE CASCADE
+  )`);
+  db.prepare(`INSERT INTO ${prefix}_annotation (id, document_id, project_id, owner_id, family) VALUES ('a1', 'd1', 'p1', 'u1', 'speaker')`).run();
+  db.prepare(`INSERT INTO ${prefix}_membership (annotation_id, start_point, end_point) VALUES ('a1', '{"p":1}', '{"p":2}')`).run();
+
+  await runWorkbenchMigrations(db);
+  assert.equal(appliedWorkbenchVersion(db), 4);
+
+  // Canonical shape: composite (annotation_id, start_point) primary key.
+  const pkColumns = db.prepare(`PRAGMA table_info(${prefix}_membership)`).all()
+    .filter((column) => column.pk > 0).map((column) => column.name).sort();
+  assert.deepEqual(pkColumns, ['annotation_id', 'start_point'], 'membership has the composite primary key after migration');
+  const columns = db.prepare(`PRAGMA table_info(${prefix}_membership)`).all();
+  assert.equal(columns.find((column) => column.name === 'annotation_id').notnull, 1);
+  // Rows copied over unchanged.
+  const row = db.prepare(`SELECT start_point, end_point FROM ${prefix}_membership WHERE annotation_id = 'a1'`).get();
+  assert.deepEqual(JSON.parse(row.start_point), { p: 1 });
+  assert.deepEqual(JSON.parse(row.end_point), { p: 2 });
+  // FK preserved.
+  assert.ok(db.prepare(`PRAGMA foreign_key_list(${prefix}_membership)`).all()
+    .some((fk) => fk.table === `${prefix}_annotation` && fk.from === 'annotation_id' && fk.on_delete === 'CASCADE'));
+
+  // The migration is idempotent; a second run skips the canonical table.
+  const second = new DatabaseSync(':memory:');
+  await runWorkbenchMigrations(second);
+  assert.equal(appliedWorkbenchVersion(second), 4);
+  second.close();
+  db.close();
+});
+
+test('A11b: v4 leaves a fresh canonical-shape membership table untouched', async () => {
+  // A fresh database's DDL already emits the composite-key membership table;
+  // the migration must not rebuild it (data survives untouched).
+  const db = new DatabaseSync(':memory:');
+  db.exec(`CREATE TABLE Doc (id TEXT PRIMARY KEY)`);
+  db.exec(`CREATE TABLE ${prefix}_annotation (id TEXT PRIMARY KEY, document_id TEXT NOT NULL, project_id TEXT NOT NULL, owner_id TEXT NOT NULL, family TEXT NOT NULL)`);
+  db.exec(`CREATE TABLE ${prefix}_membership (
+    annotation_id TEXT NOT NULL,
+    start_point TEXT NOT NULL CHECK (json_valid(start_point)),
+    end_point TEXT NOT NULL CHECK (json_valid(end_point)),
+    PRIMARY KEY (annotation_id, start_point),
+    FOREIGN KEY (annotation_id) REFERENCES ${prefix}_annotation(id) ON DELETE CASCADE
+  )`);
+  db.prepare(`INSERT INTO ${prefix}_annotation (id, document_id, project_id, owner_id, family) VALUES ('a1', 'd1', 'p1', 'u1', 'speaker')`).run();
+  db.prepare(`INSERT INTO ${prefix}_membership (annotation_id, start_point, end_point) VALUES ('a1', '{"p":1}', '{"p":2}')`).run();
+
+  await runWorkbenchMigrations(db);
+  assert.equal(appliedWorkbenchVersion(db), 4);
+  const pkColumns = db.prepare(`PRAGMA table_info(${prefix}_membership)`).all()
+    .filter((column) => column.pk > 0).map((column) => column.name).sort();
+  assert.deepEqual(pkColumns, ['annotation_id', 'start_point']);
+  assert.equal(db.prepare(`SELECT COUNT(*) AS c FROM ${prefix}_membership`).get().c, 1, 'canonical membership rows survive the migration untouched');
+  db.close();
 });

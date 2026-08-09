@@ -380,9 +380,26 @@ function projectBlocklessAnnotationApplyRange({ name, handle, db, descriptor, da
       JSON.stringify(annOp.protectedTargetIds ?? []) !== JSON.stringify(annFact.protectedTargetIds ?? []) ||
       typeof annOp.id !== 'string' || typeof annOp.family !== 'string' ||
       !annOp.fields || typeof annOp.fields !== 'object' || Array.isArray(annOp.fields)) throw new Error(`${name}.${handle.field}.operated v13 annotation facts do not match the operation`);
-  const range = f.ranges.find((entry) => entry && typeof entry === 'object' && entry.annotationId === annOp.id);
-  if (!range || !range.start || !range.end) throw new Error(`${name}.${handle.field}.operated v13 annotation range is missing`);
   if (f.selectedRange.annotationId !== annOp.id) throw new Error(`${name}.${handle.field}.operated v13 selected range does not match the annotation`);
+  // The plan's `ranges` facts are the authoritative postimage of the document's
+  // membership relation: every existing range is carried forward, trimmed (an
+  // exclusive 'one'-family apply), or replaced. Validate the WHOLE postimage
+  // up front (fail closed with zero writes on a malformed event), and require
+  // the applied annotation to own exactly the one selected range.
+  for (const entry of f.ranges) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry) ||
+        typeof entry.annotationId !== 'string' || !entry.annotationId ||
+        !entry.start || typeof entry.start !== 'object' || Array.isArray(entry.start) ||
+        !entry.end || typeof entry.end !== 'object' || Array.isArray(entry.end)) {
+      throw new Error(`${name}.${handle.field}.operated v13 annotation range is invalid`);
+    }
+  }
+  const appliedRanges = f.ranges.filter((entry     ) => entry.annotationId === annOp.id);
+  if (appliedRanges.length !== 1 ||
+      JSON.stringify(appliedRanges[0].start) !== JSON.stringify(f.selectedRange.start) ||
+      JSON.stringify(appliedRanges[0].end) !== JSON.stringify(f.selectedRange.end)) {
+    throw new Error(`${name}.${handle.field}.operated v13 selected range does not match the annotation`);
+  }
   const currentRow = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(data.id);
   if (!currentRow) throw new Error(`${name}.${handle.field}.operated v13 document does not exist`);
   const current = restoreTextFamily(JSON.parse(currentRow.family_checkpoint          ));
@@ -429,8 +446,22 @@ function projectBlocklessAnnotationApplyRange({ name, handle, db, descriptor, da
   }
   db.prepare(`DELETE FROM ${prefix}_annotation_protected_target WHERE annotation_id = ? OR target_annotation_id = ?`).run(annOp.id, annOp.id);
   for (const targetId of targetIds) db.prepare(`INSERT INTO ${prefix}_annotation_protected_target (annotation_id, target_annotation_id) VALUES (?, ?)`).run(annOp.id, targetId);
-  db.prepare(`DELETE FROM ${prefix}_membership WHERE annotation_id = ?`).run(annOp.id);
-  db.prepare(`INSERT INTO ${prefix}_membership (annotation_id, start_point, end_point) VALUES (?, ?, ?)`).run(annOp.id, JSON.stringify(range.start), JSON.stringify(range.end));
+  // Sync the membership relation to the plan's postimage. The applied annotation
+  // row (and every other annotation a range names) exists before this write, and
+  // the composite (annotation_id, start_point) primary key admits the multiple
+  // rows a trimmed annotation's left+right remnants require. Writing the WHOLE
+  // postimage makes the exclusive trim of another annotation's range durable and
+  // replay deterministically from the committed event.
+  for (const entry of f.ranges) {
+    if (!db.prepare(`SELECT id FROM ${prefix}_annotation WHERE id = ? AND document_id = ?`).get(entry.annotationId, data.id)) {
+      throw new Error(`${name}.${handle.field}.operated v13 annotation range names an unknown annotation`);
+    }
+  }
+  db.prepare(`DELETE FROM ${prefix}_membership WHERE annotation_id IN (SELECT id FROM ${prefix}_annotation WHERE document_id = ?)`).run(data.id);
+  for (const entry of f.ranges) {
+    db.prepare(`INSERT INTO ${prefix}_membership (annotation_id, start_point, end_point) VALUES (?, ?, ?)`)
+      .run(entry.annotationId, JSON.stringify(entry.start), JSON.stringify(entry.end));
+  }
   db.prepare(`UPDATE ${prefix}_state SET structure_version = ? WHERE document_id = ?`).run(data.after.structuralRevision, data.id);
 }
 
