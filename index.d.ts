@@ -263,6 +263,11 @@ export interface AnnotatedTextOptions {
   measurements?: readonly AnnotatedTextMeasurementDescriptor[];
   wordEvidence?: readonly AnnotatedTextWordEvidenceFamily<string, unknown>[];
   capabilities?: Readonly<Record<string, unknown>>;
+  /**
+   * Opt-in volatile caret presence: names the entity's ephemeral field/cell
+   * that advertises the annotated-text caret interest (see `ephemeral`).
+   */
+  carets?: { readonly field: string; readonly cell: string };
 }
 
 export interface AnnotatedTextAnnotationHandle {
@@ -591,7 +596,7 @@ export function list<Value = unknown>(
 export function log<Entry extends Record<string, FieldDescriptor> = Record<string, never>>(
   entry?: Entry,
 ): FieldDescriptor<unknown[]>;
-export function ephemeral<Cells extends Record<string, FieldDescriptor> = Record<string, never>>(
+export function ephemeral<Cells extends Record<string, FieldDescriptor | boolean> = Record<string, never>>(
   cells?: Cells,
 ): FieldDescriptor<unknown>;
 export interface StateFieldFactory {
