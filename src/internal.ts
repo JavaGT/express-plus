@@ -1,6 +1,6 @@
 export { check, resolveDecision, UnawaitedCheckError } from './check.ts';
 export { assertGuarded } from './guard/static.ts';
-export { text, annotatedText, annotation, protectingAnnotation, measurement, wordEvidenceFamily, annotationAction, boolean, date, number, json, ref, hash, blob, link, map, list, log, ephemeral, state, computed, projected, raster, polyline, vector } from './field.ts';
+export { text, annotatedText, annotation, protectingAnnotation, measurement, wordEvidenceFamily, annotationAction, annotationEntityAction, boolean, date, number, json, ref, hash, blob, link, map, list, log, ephemeral, state, computed, projected, raster, polyline, vector } from './field.ts';
 export { projectAnnotatedTextForRecipient } from './annotated-text-recipient-projection.ts';
 export { protectingAnnotationCapabilities } from './row-grant.ts';
 export { projectAnnotatedTextSnapshot } from './annotated-text-snapshot.ts';

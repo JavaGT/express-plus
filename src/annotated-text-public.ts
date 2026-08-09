@@ -7,6 +7,7 @@ export {
   measurement,
   wordEvidenceFamily,
   annotationAction,
+  annotationEntityAction,
 } from './field.ts';
 export {
   registerAnnotatedTextContract,
@@ -18,6 +19,7 @@ export {
   annotatedTextRetireAction,
 } from './annotated-text-action.ts';
 export { exportAnnotatedText, readAnnotatedTextForRecipient } from './annotated-text-snapshot.ts';
+export { annotatedTextAnnotationAction } from './annotated-text-thread-action.ts';
 export {
   assertWordEvidencePayload,
   readWordEvidence,

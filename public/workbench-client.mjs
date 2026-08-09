@@ -3714,10 +3714,41 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
           };
       return queueAuthoringMutation(command, (current) => dispatchNow(current));
     },
-    applyAnnotation({ mutationId, annotation, from, to }) {
+     applyAnnotation({ mutationId, annotation, from, to }) {
       const command = { kind: 'annotation.apply', mutationId, annotation, from, to };
       return queueAuthoringMutation(command, (current) => dispatchNow(current));
-    },
+     },
+      applyAnnotationAction(actionHandle, { mutationId, from, to, values }) {
+        if (!actionHandle || actionHandle.kind !== 'annotationEntityAction' || typeof actionHandle.actionName !== 'string') {
+          throw new TypeError('annotated text action handle is invalid');
+        }
+        const annotationHandle = field.annotations?.[actionHandle.family];
+        const expectedHandle = annotationHandle?.actions?.[actionHandle.actionName];
+        if (!annotationHandle || expectedHandle !== actionHandle) throw new TypeError('annotated text action handle is not declared by this document');
+        if (typeof mutationId !== 'string' || mutationId.length === 0
+          || !from || typeof from !== 'object' || Array.isArray(from)
+          || !to || typeof to !== 'object' || Array.isArray(to)
+          || !Number.isSafeInteger(from.offset) || !Number.isSafeInteger(to.offset)
+          || (from.affinity !== 'left' && from.affinity !== 'right')
+          || (to.affinity !== 'left' && to.affinity !== 'right')
+          || !values || typeof values !== 'object' || Array.isArray(values)
+          || (Object.getPrototypeOf(values) !== Object.prototype && Object.getPrototypeOf(values) !== null)
+          || Reflect.ownKeys(values).some((key) => typeof key !== 'string')) throw new TypeError('annotated text action input is invalid');
+        const expectedNames = Object.keys(actionHandle.input ?? {});
+        const valueNames = Object.keys(values);
+        if (valueNames.length !== expectedNames.length || valueNames.some((key) => !expectedNames.includes(key))) throw new TypeError('annotated text action values contain unknown or missing fields');
+        const command = { mutationId, from, to, values };
+       return queueAuthoringMutation(command, async (current) => {
+         if (!session.snapshot || !snapshotBinding.authoring) throw new ClientClosedError('Annotated text document is unavailable');
+         const action = {
+           type: `${entity.name}.${field.fieldName}.${actionHandle.actionName}`,
+           payload: Object.freeze({ version: 1, id: documentId, basis: snapshotBinding.authoring.documentPositionToken, mutationId: current.mutationId, from: current.from?.offset, to: current.to?.offset, values: Object.freeze({ ...(current.values ?? {}) }) }),
+         };
+         translatedActions += 1;
+         try { return await session.dispatch(action.type, action.payload); }
+         finally { translatedActions -= 1; flushAuthoringAcknowledgements(); }
+       });
+     },
     removeAnnotation({ mutationId, annotationId }) {
       const command = { kind: 'annotation.remove', mutationId, annotationId };
       return queueAuthoringMutation(command, (current) => dispatchNow(current));

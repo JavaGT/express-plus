@@ -30,6 +30,7 @@ import { txn } from './driver.mjs';
 import { installRemovalCascades } from './entity/removal-cascade.mjs';
 import { rawRow } from './entity/query.mjs';
 import { readDeletedRowAnchor } from './deleted-row-anchor.mjs';
+import { validateAnnotatedTextEntityActions } from './annotated-text-field.mjs';
 
 // Framework auth entities are always-available effect targets (an app's effect
 // may target Inbox without mounting it — auth entities are never request-facing
@@ -42,6 +43,7 @@ function collectAppEntities(app     ) {
   const projections        = [];
   const cursorPolicy = new Map();
   const entities                   = new Map(app.entities ?? []);
+  validateAnnotatedTextEntityActions(entities.values());
   for (const entity of entities.values()) {
     Object.assign(handlers, entity.crudHandlers);
     projections.push(...(entity.projections ?? [entity.projection]));
@@ -512,6 +514,28 @@ export function buildKernel(app     ) {
   return createServer({
     handlers,
     authorize: async (context) => {
+      for (const entity of entities.values()) {
+        for (const [fieldName, field] of Object.entries(entity.fields)) {
+          if ((field       ).kind !== 'annotatedText') continue;
+          for (const annotation of (field       ).annotations ?? []) for (const action of annotation.actions ?? []) {
+            const actionType = `${entity.name}.${fieldName}.${action.actionName}`;
+            if (context.type !== actionType) continue;
+            const id = context.payload?.id;
+            const row = typeof id === 'string' ? rawRow(app.db, entity.name, id) : null;
+            if (!row) return false;
+            if (!(await admitRow({ kind: 'fieldOp', entity, row: entity.deserializeRow({ ...row }), fieldName, capability: write, principal: context.principal }))) return false;
+            const targetName = typeof (field       ).annotations?.find((candidate     ) => candidate.annotationName === annotation.annotationName)?.fields?.[action.relation]?.target === 'string'
+              ? (field       ).annotations.find((candidate     ) => candidate.annotationName === annotation.annotationName).fields[action.relation].target
+              : (field       ).annotations.find((candidate     ) => candidate.annotationName === annotation.annotationName).fields[action.relation].target?.name;
+            const target = targetName ? app.entities?.get(targetName) : null;
+            if (!target || !target.grant) return false;
+            const candidate                      = { id: 'authorization-probe', [action.project]: row[(field       ).project], [action.author]: context.principal?.id };
+            for (const [publicName, entityField] of Object.entries(action.input ?? {})) candidate[entityField          ] = context.payload?.values?.[publicName];
+            if (!(await admitRow({ kind: 'verb', entity: target, row: candidate, verb: 'create', principal: context.principal }))) return false;
+            return true;
+          }
+        }
+      }
       const annotated = annotatedActionDetails.get(context.type);
       if (annotated) {
         const id = context.payload?.id;

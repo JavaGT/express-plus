@@ -61,9 +61,10 @@ export function createCommentPanel({
     }
   }
 
-  function renderAnnotations(snapshot, { onRemove } = {}) {
+  function renderAnnotations(snapshot, { onRemove, threads = [] } = {}) {
     const annotations = (snapshot?.annotations ?? [])
       .filter((annotation) => annotation.family === 'comment');
+    const threadByAnnotation = new Map(threads.map((thread) => [thread.annotationId, thread]));
     annotationsEl.replaceChildren();
     emptyEl.classList.toggle('hidden', annotations.length > 0);
     for (const [index, annotation] of annotations.entries()) {
@@ -80,6 +81,15 @@ export function createCommentPanel({
       title.append(color, `Comment ${index + 1}`);
       const quote = document.createElement('p');
       quote.textContent = annotationQuote(snapshot, annotation.id) || 'Attached text is not visible.';
+      const thread = threadByAnnotation.get(annotation.id);
+      if (thread) {
+        const body = document.createElement('p');
+        body.className = 'annotation-body';
+        body.textContent = thread.body;
+        const author = document.createElement('small');
+        author.textContent = `by ${thread.author}`;
+        card.append(body, author);
+      }
       const remove = document.createElement('button');
       remove.type = 'button';
       remove.textContent = 'Delete';
@@ -98,7 +108,8 @@ export function createCommentPanel({
         selectAnnotation(annotation.id);
       });
       remove.onclick = () => onRemove?.(annotation.id, remove);
-      card.append(title, quote, remove);
+      card.append(title, quote);
+      if (onRemove) card.append(remove);
       annotationsEl.append(card);
     }
   }

@@ -93,7 +93,7 @@ export function annotatedText(options               = {})                  {
 // Declarative annotation/measurement constructors — re-exported from
 // annotated-text-field.mjs for the public surface. Named here so the
 // import-surface contract (index.mjs, internal.mjs) stays in field.mjs.
-export { annotation, protectingAnnotation, measurement, annotationAction, wordEvidenceFamily } from './annotated-text-field.mjs';
+export { annotation, protectingAnnotation, measurement, annotationAction, annotationEntityAction, wordEvidenceFamily } from './annotated-text-field.mjs';
 // `text.crdt()` — the `crdt` kind instance for collaborative text. One instance
 // of the crdt contract, not a privileged special case (ADR #9).
                                   

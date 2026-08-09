@@ -22,6 +22,7 @@ import { BodyError, readRawBody, readRequestBody } from './http-body.mjs';
 import { scopeOf, tryParseScopeKey } from './scope-handle.mjs';
 import { createdTextReducerSeeds, textReducerCheckpoints } from './text-reducer-transport.mjs';
 import { publicEvent } from './event-delivery.mjs';
+import { createLiveEnvelopeBuilder } from './live-delivery-envelope.mjs';
 import { hasAnnotatedTextFields, projectEntitySnapshot } from './entity-snapshot-projection.mjs';
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
                                                 
@@ -269,12 +270,30 @@ async function eventsSinceScopeRoute(
       return true;
     }
   }
-  const events = rows.map((r         ) => {
-    const record = r                                                                                                                         ;
-    const data = JSON.parse(record.eventData);
-    const reducers = createdTextReducerSeeds(app.entities .get(tryParseScopeKey(record.scope          )?.entity ?? ''), { type: record.eventType          , data });
-    return publicEvent({ scope: record.scope, seq: record.seq, type: record.eventType, data, actionId: record.actionId, committedAt: record.committedAt, ...(reducers ? { reducers } : {}) });
-  });
+  const envelopes = createLiveEnvelopeBuilder({ stateful: false });
+  const events = []             ;
+  for (const r of rows) {
+    const record = r                                                                                                                      ;
+    const built = envelopes.buildEnvelope({
+      entity: entity         ,
+      event: {
+        scope: record.scope          ,
+        seq: record.seq          ,
+        eventType: record.eventType          ,
+        actionId: record.actionId          ,
+        committedAt: record.committedAt          ,
+      },
+      principal,
+      row: anchor.row,
+      scope,
+    });
+    const recovery = built.find((envelope) => envelope.type === 'resync');
+    if (recovery) {
+      sendJson(res, 200, { resync: 'stale', reason: recovery.reason });
+      return true;
+    }
+    for (const envelope of built) if (envelope.event) events.push(envelope.event);
+  }
   sendJson(res, 200, { scope, cursor, events });
   return true;
 }

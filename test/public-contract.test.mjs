@@ -23,6 +23,7 @@ export const PUBLIC_API = Object.freeze({
       'inc', 'dec', 'self', 'many', 'effect', 'schedule', 'tick',
       'simulate', 'now',
       'annotatedTextClientHandle',
+       'annotationEntityAction', 'annotatedTextAnnotationAction',
       'User', 'Session', 'Inbox', 'Credential', 'Invitation', 'ApiKey',
       'TwoFactor',
     ]),
@@ -52,8 +53,8 @@ export const PUBLIC_API = Object.freeze({
     exact: true,
     named: Object.freeze([
        'annotatedText', 'annotation', 'protectingAnnotation', 'measurement',
-       'wordEvidenceFamily', 'annotationAction', 'registerAnnotatedTextContract',
-        'registerAnnotatedTextStructuralExtension', 'annotatedTextAction', 'annotatedTextCreateAction', 'annotatedTextRetireAction', 'exportAnnotatedText', 'readAnnotatedTextForRecipient',
+       'wordEvidenceFamily', 'annotationAction', 'annotationEntityAction', 'registerAnnotatedTextContract',
+        'registerAnnotatedTextStructuralExtension', 'annotatedTextAction', 'annotatedTextAnnotationAction', 'annotatedTextCreateAction', 'annotatedTextRetireAction', 'exportAnnotatedText', 'readAnnotatedTextForRecipient',
         'assertWordEvidencePayload', 'readWordEvidence', 'wordEvidenceFieldHandle', 'wordEvidenceTableName',
     ]),
   }),

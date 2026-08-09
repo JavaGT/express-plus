@@ -156,6 +156,42 @@ test('scope-level events-since: empty when cursor is at tip', async () => {
   db.close();
 });
 
+test('scope-level events-since never exposes a foreign entity payload', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const Project = entity('Project', {
+    name: text(),
+    grant: () => [scope().can(() => grant(read, write, subVerb))],
+  });
+  const Comment = entity('Comment', {
+    projectId: text(),
+    body: text(),
+    grant: () => [scope().can(() => grant(read, write, subVerb))],
+  });
+  for (const sql of [...generateDDL(Project), ...generateDDL(Comment)]) db.exec(sql);
+  db.prepare("INSERT INTO Project (id, name) VALUES ('p1', 'one')").run();
+  const app = workbench({ db }).mount('/projects', Project).mount('/comments', Comment);
+  app.listen(0, { principalOf: () => ({ type: 'user', id: '1' }) });
+  await app.ready;
+  t.after(() => { app.httpServer.close(); db.close(); });
+
+  const result = await app.batch([
+    { type: 'Comment.create', payload: { id: 'c1', projectId: 'p1', body: 'private comment body' } },
+  ], { principal: { type: 'user', id: '1' }, scope: 'Project:p1' });
+  assert.equal(result.ok, true);
+  // Model the composed child emission on its authorized parent scope.
+  db.prepare('UPDATE _Log SET scope = ? WHERE scope = ?').run('Project:p1', 'Comment:c1');
+  db.prepare('INSERT INTO _Cursor (scope, lastSeq) VALUES (?, ?)').run('Project:p1', 1);
+
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+  const response = await fetch(`${origin}/events-since?scope=Project:p1&cursor=0`);
+  const body = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(body.resync, 'stale');
+  assert.equal(body.reason, 'recipient-snapshot-required');
+  assert.equal(JSON.stringify(body).includes('private comment body'), false);
+  assert.equal(JSON.stringify(body).includes('c1'), false);
+});
+
 test('scope-level snapshot: returns row + cursor for entity-shaped scope', async () => {
   const { app, db } = bootApp();
   const { port } = app.httpServer.address();

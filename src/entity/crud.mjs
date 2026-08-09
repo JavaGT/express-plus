@@ -28,9 +28,12 @@ import { admitsInvitationRemoval } from '../auth/invitation-acceptance-authority
 import { clearAuthoringState, issueAuthoringSnapshot, buildAuthoringEnvelope } from '../annotated-text-authoring-stream.mjs';
 import { admitV9AnnotatedTextEdit, assertV9AuthoringBinding as assertV9AuthoringBindingFromAdmit } from '../annotated-text-admit.mjs';
 import { packOperatedFacts } from '../annotated-text-operated-facts.mjs';
-import { applyTextOperation, restoreTextFamily, textFamilyCheckpoint as continuousTextFamilyCheckpoint } from '../annotated-text-continuous.mjs';
+import { applyTextOperation, restoreTextFamily, materializeText, textFamilyCheckpoint as continuousTextFamilyCheckpoint } from '../annotated-text-continuous.mjs';
 import { projectAnnotatedTextSnapshot } from '../annotated-text-snapshot.mjs';
 import { authoringRedactionsForRecipient } from '../annotated-text-recipient-projection.mjs';
+import { mapVisibleOffsetToCanonical } from '../annotated-text-recipient-projection.mjs';
+import { planTextRangeApply } from '../annotated-text-plan.mjs';
+import { assertUtf16Range } from '../annotated-text.mjs';
 import { rawRow } from './query.mjs';
 
 export const CRUD_CURSOR_POLICY = Symbol('workbench.crud-cursor-policy');
@@ -1758,6 +1761,94 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
     });
     handlers[`${name}.${fieldName}.compensate`] = compensationHandler;
     cursorPolicy[operationType] = 'excluded';
+
+    // Declaration-derived related-entity annotation actions are committed by
+    // the same durable handler as ordinary annotated-text operations.  The
+    // handler returns both lifecycle events; pipeline.applyInTxn projects them
+    // under one receipt/transaction, so a projection or FK failure rolls back
+    // both rows.
+    const annotationDeclarations = descriptor.annotations ?? [];
+    for (const annotationDeclaration of annotationDeclarations) {
+      for (const action of annotationDeclaration.actions ?? []) {
+        if (action.kind !== 'annotationEntityAction') continue;
+        const actionType = `${name}.${fieldName}.${action.actionName}`;
+        const relation = annotationDeclaration.fields?.[action.relation];
+        const targetName = typeof relation?.target === 'string' ? relation.target : relation?.target?.name;
+        const target = targetName ? record.runtime?.entityOf(targetName) : null;
+        const threadHandler = async ({ payload, db, scope, principal, actionId }     ) => {
+           if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+             || (Object.getPrototypeOf(payload) !== Object.prototype && Object.getPrototypeOf(payload) !== null)
+             || Reflect.ownKeys(payload).some((key) => typeof key !== 'string')
+             || Object.keys(payload).sort().join() !== 'basis,from,id,mutationId,to,values,version'
+            || payload.version !== 1 || typeof payload.id !== 'string' || payload.id !== payload.id
+            || typeof payload.basis !== 'string' || !payload.basis
+            || typeof payload.mutationId !== 'string' || !payload.mutationId
+            || !Number.isSafeInteger(payload.from) || !Number.isSafeInteger(payload.to)
+             || !payload.values || typeof payload.values !== 'object' || Array.isArray(payload.values)
+             || (Object.getPrototypeOf(payload.values) !== Object.prototype && Object.getPrototypeOf(payload.values) !== null)
+             || Reflect.ownKeys(payload.values).some((key) => typeof key !== 'string')) {
+             throw new ValidationError(`${actionType} requires a closed selection payload`);
+           }
+           const valueNames = Object.keys(payload.values);
+           const expectedValueNames = Object.keys(action.input ?? {});
+           if (valueNames.length !== expectedValueNames.length || valueNames.some((key) => !expectedValueNames.includes(key))) {
+             throw new ValidationError(`${actionType} values contain unknown or missing fields`);
+           }
+          const documentRow = rawRow(db, name, payload.id);
+          if (!documentRow) throw new ValidationError(`${actionType} document does not exist`);
+          const documentScope = resolveAnnotatedTextOwningScope(descriptor, fields, documentRow).key;
+          if (scope !== documentScope) throw new ValidationError(`${actionType} requires its declared document scope`);
+          if (!target || !target.crudHandlers) throw new ValidationError(`${actionType} related entity is unavailable`);
+
+          const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(payload.id);
+          if (!state) throw new ValidationError(`${actionType} document state is unavailable`);
+          const family = restoreTextFamily(JSON.parse(state.family_checkpoint));
+           const principalType = principal?.type ?? 'principal';
+           const principalId = principal?.id ?? '';
+           const position = db.prepare(`SELECT position.*, checkpoint.family_checkpoint AS basis_checkpoint FROM ${prefix}_authoring_position AS position JOIN ${prefix}_authoring_checkpoint AS checkpoint ON checkpoint.id = position.checkpoint_id JOIN ${prefix}_authoring_lease AS lease ON lease.id = position.lease_id JOIN ${prefix}_authoring_stream AS stream ON stream.id = lease.stream_id WHERE position.token = ? AND stream.document_id = ? AND stream.principal_type = ? AND stream.principal_id = ?`).get(payload.basis, payload.id, principalType, principalId);
+          if (!position || !position.visible_at_issue) throw new ValidationError(`${actionType} basis is unavailable`);
+          const basis = restoreTextFamily(JSON.parse(position.basis_checkpoint));
+          if (JSON.stringify(basis.checkpoint.frontier) !== JSON.stringify(family.checkpoint.frontier)) throw new ValidationError(`${actionType} basis is stale`);
+          const recipient = await projectAnnotatedTextSnapshot({ db, entity: record, row: documentRow, principal, fieldName, descriptor, mintBasis: false });
+          if (JSON.stringify(JSON.parse(position.redactions ?? '[]')) !== JSON.stringify(authoringRedactionsForRecipient(recipient))) throw new ValidationError(`${actionType} basis is stale`);
+          const redactions = JSON.parse(position.redactions ?? '[]');
+          const from = mapVisibleOffsetToCanonical(payload.from, 'right', redactions, 'right');
+          const to = mapVisibleOffsetToCanonical(payload.to, 'left', redactions, 'left');
+          if (redactions.some((entry     ) => entry.start < from && from < entry.end || entry.start < to && to < entry.end)
+            || redactions.some((entry     ) => Math.min(from, to) <= entry.start && entry.end <= Math.max(from, to))) throw new ValidationError(`${actionType} selection is hidden`);
+          const text = materializeText(family);
+          try { assertUtf16Range(text, from, to); } catch { throw new ValidationError(`${actionType} selection splits a UTF-16 surrogate pair`); }
+          if (from < 0 || to > text.length || from >= to) throw new ValidationError(`${actionType} selection is invalid`);
+          const relatedId = createHash('sha256').update(`${scope}\0${actionId}\0${actionType}\0related`).digest('hex').slice(0, 32);
+          const annotationId = createHash('sha256').update(`${scope}\0${actionId}\0${actionType}\0annotation`).digest('hex').slice(0, 32);
+           const relatedPayload                      = { id: relatedId };
+           for (const [publicName, entityField] of Object.entries(action.input ?? {})) {
+             if (!Object.hasOwn(payload.values, publicName)) throw new ValidationError(`${actionType} missing value '${publicName}'`);
+             relatedPayload[entityField          ] = payload.values[publicName];
+           }
+           relatedPayload[action.project] = documentRow[descriptor.project];
+           relatedPayload[action.author] = principal?.id;
+           const relatedResult = await target.crudHandlers[`${target.name}.create`]({ payload: relatedPayload, principal, db, scope, actionId });
+           const relatedEvents = (Array.isArray(relatedResult) ? relatedResult : relatedResult.events)
+             .map((event     ) => ({ ...event, scope: documentScope }));
+          const annotationFields                      = {};
+          for (const [fieldKey, fieldDescriptor] of Object.entries(annotationDeclaration.fields ?? {})) {
+            if (fieldKey === action.relation) annotationFields[fieldKey] = relatedId;
+            else if ((fieldDescriptor       ).default !== undefined) annotationFields[fieldKey] = materializeDefault((fieldDescriptor       ).default);
+            else if ((fieldDescriptor       ).optional || (fieldDescriptor       ).nullable) annotationFields[fieldKey] = null;
+            else throw new ValidationError(`${actionType} annotation field '${fieldKey}' has no derived value`);
+          }
+           const rangeRows = db.prepare(`SELECT annotation_id, start_point, end_point FROM ${prefix}_membership WHERE annotation_id IN (SELECT id FROM ${prefix}_annotation WHERE document_id = ?)`).all(payload.id);
+           const ranges = rangeRows.map((range     ) => ({ annotationId: range.annotation_id, start: JSON.parse(range.start_point), end: JSON.parse(range.end_point) }));
+           const plan = planTextRangeApply({ documentId: payload.id, structureVersion: state.structure_version, family, annotation: { id: annotationId, family: annotationDeclaration.annotationName, fields: annotationFields }       , from: { offset: from, affinity: 'right' }, to: { offset: to, affinity: 'left' }, ranges, actorId: principal?.id ?? '' });
+          const handle = eventHandles.native(name, fieldName, 'operated');
+           const annotationEvent = { handle, type: handle.type, scope: documentScope, data: plan };
+           return { events: [...relatedEvents, annotationEvent], canonicalPayload: payload, authoringReceipt: async ({ confirmedThrough }     ) => Object.freeze({ actionId, confirmedThrough, relatedId, annotationId }) };
+        };
+        Object.defineProperties(threadHandler, { inTransaction: { value: true }, batchForbidden: { value: true }, dedupeReceiptMatches: { value: (receipt     , request     ) => receipt.actionType === actionType && receipt.actionData === JSON.stringify(request.payload) } });
+        handlers[actionType] = threadHandler;
+      }
+    }
   }
 
   // Side-table mutation handlers (map.add/setRole/remove, ordered.insert/move/

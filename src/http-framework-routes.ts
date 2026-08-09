@@ -22,6 +22,7 @@ import { BodyError, readRawBody, readRequestBody } from './http-body.ts';
 import { scopeOf, tryParseScopeKey } from './scope-handle.ts';
 import { createdTextReducerSeeds, textReducerCheckpoints } from './text-reducer-transport.ts';
 import { publicEvent } from './event-delivery.ts';
+import { createLiveEnvelopeBuilder } from './live-delivery-envelope.ts';
 import { hasAnnotatedTextFields, projectEntitySnapshot } from './entity-snapshot-projection.ts';
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.ts';
 import type { Principal } from './principal.ts';
@@ -269,12 +270,30 @@ async function eventsSinceScopeRoute(
       return true;
     }
   }
-  const events = rows.map((r: unknown) => {
-    const record = r as { eventData: string; scope?: unknown; seq?: unknown; eventType?: unknown; actionId?: unknown; committedAt?: unknown };
-    const data = JSON.parse(record.eventData);
-    const reducers = createdTextReducerSeeds(app.entities!.get(tryParseScopeKey(record.scope as string)?.entity ?? ''), { type: record.eventType as string, data });
-    return publicEvent({ scope: record.scope, seq: record.seq, type: record.eventType, data, actionId: record.actionId, committedAt: record.committedAt, ...(reducers ? { reducers } : {}) });
-  });
+  const envelopes = createLiveEnvelopeBuilder({ stateful: false });
+  const events = [] as unknown[];
+  for (const r of rows) {
+    const record = r as { scope?: unknown; seq?: unknown; eventType?: unknown; actionId?: unknown; committedAt?: unknown; data?: unknown };
+    const built = envelopes.buildEnvelope({
+      entity: entity as never,
+      event: {
+        scope: record.scope as string,
+        seq: record.seq as number,
+        eventType: record.eventType as string,
+        actionId: record.actionId as string,
+        committedAt: record.committedAt as string,
+      },
+      principal,
+      row: anchor.row,
+      scope,
+    });
+    const recovery = built.find((envelope) => envelope.type === 'resync');
+    if (recovery) {
+      sendJson(res, 200, { resync: 'stale', reason: recovery.reason });
+      return true;
+    }
+    for (const envelope of built) if (envelope.event) events.push(envelope.event);
+  }
   sendJson(res, 200, { scope, cursor, events });
   return true;
 }

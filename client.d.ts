@@ -3,7 +3,12 @@
 // Source of truth: public/workbench-client.mjs
 // Projection for TypeScript app authors. JS users see no change.
 
-import type { AnnotatedTextFieldHandle, WorkbenchEntity } from './index.js';
+import type {
+  AnnotatedTextAnnotationActionValues,
+  AnnotatedTextAnnotationEntityActionHandle,
+  AnnotatedTextFieldHandle,
+  WorkbenchEntity,
+} from './index.js';
 
 // ---------------------------------------------------------------------------
 // LiveChannel — WebSocket transport layer
@@ -701,6 +706,7 @@ export interface AnnotatedTextHttpSession {
   delete(input: { readonly mutationId?: string; readonly from: AnnotatedTextEditPosition; readonly to: AnnotatedTextEditPosition }): Promise<LiveDeliveryDispatchResult>;
   replace(input: { readonly mutationId?: string; readonly from: AnnotatedTextEditPosition; readonly to: AnnotatedTextEditPosition; readonly text: string }): Promise<LiveDeliveryDispatchResult | null>;
   applyAnnotation(input: { readonly mutationId: string; readonly annotation: { readonly id: string; readonly family: string; readonly fields: Readonly<Record<string, unknown>>; readonly protectedTargetIds?: readonly string[] }; readonly from: AnnotatedTextEditPosition; readonly to: AnnotatedTextEditPosition }): Promise<ScopeDispatchResult>;
+  applyAnnotationAction<Action extends AnnotatedTextAnnotationEntityActionHandle>(actionHandle: Action, input: { readonly mutationId: string; readonly from: AnnotatedTextEditPosition; readonly to: AnnotatedTextEditPosition; readonly values: AnnotatedTextAnnotationActionValues<Action> }): Promise<ScopeDispatchResult>;
   removeAnnotation(input: { readonly mutationId: string; readonly annotationId: string }): Promise<ScopeDispatchResult>;
   reconnect(): Promise<void>;
   subscribe(listener: (document: AnnotatedTextDocument | null) => void): () => void;

@@ -51,6 +51,8 @@
     .annotation-card strong { display:block; margin-bottom:3px; }
     .annotation-color { display:inline-block; width:10px; height:10px; margin-right:6px; border:1px solid color-mix(in srgb, #000 20%, transparent); border-radius:999px; vertical-align:-1px; }
     .annotation-card p { overflow:hidden; margin:0 0 8px; color:var(--muted); font-size:12px; text-overflow:ellipsis; white-space:nowrap; }
+    .annotation-card .annotation-body { color:inherit; white-space:pre-wrap; }
+    .annotation-card small { display:block; margin-bottom:8px; color:var(--muted); }
     .annotation-card button { padding:4px 7px; color:var(--danger); font-size:12px; }
     #live-state { margin:0 16px 16px; border:1px solid var(--line); border-radius:9px; background:var(--panel); }
     #live-state summary { padding:8px 10px; cursor:pointer; color:var(--muted); font-size:12px; }
@@ -130,6 +132,7 @@
     let session = null;
     let editorBinding = null;
     let unsubscribe = null;
+    let commentThreads = [];
     let openChain = Promise.resolve();
     // Per-tab view: stored in sessionStorage (per-tab, not shared across tabs),
     // and carried in every session request's identity. Two tabs in one browser
@@ -253,6 +256,7 @@
       unsubscribe = null;
       editorBinding = null;
       session = null;
+      commentThreads = [];
       panel.renderAnnotations(null);
       $('live-state').querySelector('pre').textContent = 'null';
     }
@@ -266,7 +270,7 @@
 
     function renderSession(document = session?.document) {
       renderSessionStatus(document);
-      panel.renderAnnotations(document, { onRemove: removeAnnotation });
+      panel.renderAnnotations(document, { threads: commentThreads, onRemove: viewAs === 'demo' ? removeAnnotation : undefined });
       panel.renderAnnotationColors(document);
       $('live-state').querySelector('pre').textContent = JSON.stringify(document ?? null, null, 2);
     }
@@ -307,6 +311,9 @@
         });
         unsubscribe = session.subscribe(renderSession);
         await withTimeout(session.ready, 10000, 'document is taking too long to open — try again');
+        const commentsResponse = await fetch(`/docs/${encodeURIComponent(id)}${viewAs === 'reader' ? '?viewAs=reader' : ''}`);
+        if (!commentsResponse.ok) throw new Error(`comments failed (${commentsResponse.status})`);
+        commentThreads = (await commentsResponse.json()).threads ?? [];
         renderSession();
         updateCommentButton();
         editorBinding.focus();
@@ -350,23 +357,20 @@
         setStatus('select a range of text to comment on', 'error');
         return;
       }
-      const annotation = {
-        id: crypto.randomUUID(),
-        family: 'comment',
-        fields: { color: $('comment-color').value },
-      };
-      Promise.resolve().then(() => session.applyAnnotation({
-        mutationId: crypto.randomUUID(),
-        annotation,
-        from: selection.from,
-        to: selection.to,
-      })).then(async (result) => {
-        await awaitSettlement(result, {
-          failMessage: 'comment marker was not applied',
-          unreconciledMessage: 'comment marker was not reconciled',
-        });
-        panel.selectAnnotation(annotation.id);
-        setStatus('comment marker added', 'ok');
+       const actionHandle = DocClient.body.annotations.comment.actions.compose;
+       const body = window.prompt('Comment');
+       if (body == null || body.trim() === '') return;
+       Promise.resolve().then(async () => {
+         const result = await session.applyAnnotationAction(actionHandle, {
+           mutationId: crypto.randomUUID(), from: selection.from, to: selection.to,
+           values: { body },
+         });
+         await awaitSettlement(result, {
+           failMessage: 'comment thread was not applied',
+           unreconciledMessage: 'comment thread was not reconciled',
+         });
+         await refreshCommentThreads();
+         setStatus('comment thread added', 'ok');
       }).catch((error) => {
         reportError(error);
       });
@@ -477,6 +481,14 @@
       sessionStorage.setItem('annotated-doc-view-as', next);
       location.reload();
     });
+
+    async function refreshCommentThreads() {
+      if (!currentId) return;
+      const response = await fetch(`/docs/${encodeURIComponent(currentId)}${viewAs === 'reader' ? '?viewAs=reader' : ''}`);
+      if (!response.ok) throw new Error(`comments failed (${response.status})`);
+      commentThreads = (await response.json()).threads ?? [];
+      renderSession();
+    }
     try {
       await loadDocs();
       if (docs[0]) await openDoc(docs[0].id);

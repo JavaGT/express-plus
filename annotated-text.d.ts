@@ -5,9 +5,11 @@ export {
   measurement,
   wordEvidenceFamily,
   annotationAction,
+  annotationEntityAction,
   registerAnnotatedTextContract,
   registerAnnotatedTextStructuralExtension,
   annotatedTextAction,
+  annotatedTextAnnotationAction,
   annotatedTextCreateAction,
   annotatedTextRetireAction,
   exportAnnotatedText,
@@ -30,6 +32,11 @@ export type {
   AnnotatedTextWordEvidenceInput,
   AnnotatedTextWordEvidenceReadResult,
   AnnotatedTextActionDescriptor,
+  AnnotatedTextAnnotationEntityActionDescriptor,
+  AnnotatedTextAnnotationEntityActionHandle,
+  AnnotatedTextCompiledActionHandle,
+  AnnotatedTextActionHandles,
+  AnnotatedTextAnnotationActionValues,
   AnnotatedTextAnnotationHandle,
   AnnotatedTextMeasurementHandle,
   AnnotatedTextCapabilityHandle,
@@ -88,4 +95,3 @@ export declare function wordEvidenceFieldHandle(
 };
 
 export declare function wordEvidenceTableName(entityName: string, fieldName: string): string;
-

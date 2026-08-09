@@ -4,8 +4,8 @@ import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  annotatedText, annotation, boolean, entity, executeDDL, executeFrameworkDDL, grant, measurement, ref, read, scope, write, everyone,
-  registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension, protectingAnnotation, admin, deny,
+  annotatedText, annotation, boolean, entity, executeDDL, executeFrameworkDDL, grant, measurement, ref, read, scope, text, write, everyone,
+  registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension, protectingAnnotation, annotationEntityAction, admin, deny,
 } from '../src/internal.mjs';
 import { exportAnnotatedText } from '../src/index.mjs';
 import { materializeText, restoreTextFamily } from '../src/annotated-text-continuous.mjs';
@@ -28,6 +28,11 @@ registerAnnotatedTextStructuralExtension('r8IntegrationSource', Object.freeze(ex
 function r8Doc({
   protectingAccess = async ({ is }) => (await is.owner()) ? grant(read) : grant(),
   access = () => grant(read, write),
+  thread = false,
+  threadAction = annotationEntityAction('compose', {
+    relation: 'comment', project: 'project', author: 'author', capability: write,
+    input: { body: 'body' },
+  }),
 } = {}) {
   return entity('R8IntegrationDocument', {
     project: ref('Project'),
@@ -39,7 +44,13 @@ function r8Doc({
         annotation('coding'),
         annotation('tag', { fields: { value: boolean({ default: false }) } }),
         annotation('other', { fields: { value: boolean({ default: false }) } }),
-        annotation('comment', { empty: 'orphan' }),
+         annotation('comment', {
+           empty: 'orphan',
+           ...(thread ? {
+             fields: { comment: ref('R8Comment') },
+             actions: [threadAction],
+           } : {}),
+         }),
         protectingAnnotation('confidential', { protects: 'coding', access: protectingAccess }),
       ],
       measurements: [measurement('source', { extension: 'r8IntegrationSource' })],
@@ -54,17 +65,26 @@ async function appFor(db = new DatabaseSync(':memory:'), principalId = null, opt
     owner: ref('User', { role: 'owner' }),
     grant: [scope(() => everyone()).can(async ({ is }) => (await is.owner()) ? grant(read, write, admin) : deny('not project owner'))],
   });
+  const Comment = options?.thread ? entity('R8Comment', {
+    project: ref('Project', { immutable: true }),
+    author: ref('User'),
+    body: text(),
+    resolved: boolean({ default: false }),
+    grant: [scope(() => everyone()).can(() => grant(read, write))],
+  }) : null;
   executeFrameworkDDL(db);
   db.exec('CREATE TABLE User (id TEXT PRIMARY KEY)');
   db.exec("INSERT INTO User (id) VALUES ('u1')");
   executeDDL(Project, db);
   db.exec("INSERT INTO Project (id, owner) VALUES ('p1', 'u1')");
   executeDDL(Document, db);
-  const app = workbench({ db, entities: [Project, Document] });
+  if (Comment) executeDDL(Comment, db);
+  const app = workbench({ db, entities: [Project, ...(Comment ? [Comment] : []), Document] });
+  if (options?.deferStart) return { app, db, Document, Project, Comment };
   if (principalId !== null) app.listen(0, { principalOf: () => typeof principalId === 'function' ? principalId() : ({ id: principalId }) });
   else app.start();
   await app.ready;
-  return { app, db, Document, Project };
+  return { app, db, Document, Project, Comment };
 }
 
 async function setupDoc(docText, principalId = null, options) {
@@ -122,6 +142,32 @@ function durableAnnotatedTextState(db) {
   });
 }
 
+async function setupThreadDoc(docText = 'hello world', principalId = 'u1') {
+  return setupDoc(docText, principalId, { thread: true });
+}
+
+function threadPayload(binding, { basis = binding.documentPositionToken, from = 0, to = 5, body = 'a comment', mutationId = `m-${randomUUID()}` } = {}) {
+  return { version: 1, id: 'd1', basis, mutationId, from, to, values: { body } };
+}
+
+function dispatchThread(ctx, actionId, options = {}, principal = { id: 'u1' }) {
+  return ctx.app.dispatch({
+    actionId, type: 'R8IntegrationDocument.body.compose', scope: 'Project:p1', principal,
+    payload: threadPayload(ctx.binding, options),
+  });
+}
+
+function threadCounts(db) {
+  return {
+    comments: db.prepare('SELECT COUNT(*) AS count FROM R8Comment').get().count,
+    annotations: db.prepare('SELECT COUNT(*) AS count FROM R8IntegrationDocument_body_annotation').get().count,
+  };
+}
+
+function assertNoThreadRows(db, message) {
+  assert.deepEqual(threadCounts(db), { comments: 0, annotations: 0 }, message);
+}
+
 test('create imports continuous family text without block tables', async () => {
   const { app, db } = await setupDoc('hello world');
   assert.equal(familyText(db), 'hello world');
@@ -129,6 +175,123 @@ test('create imports continuous family text without block tables', async () => {
   const blockTables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB 'R8IntegrationDocument_body_block*'").all();
   assert.equal(blockTables.length, 0);
   await app.close?.();
+});
+
+test('annotation entity action atomically creates the related row and range', async () => {
+  const ctx = await setupThreadDoc();
+  const result = await dispatchThread(ctx, 'compose-1');
+  assert.equal(result.ok, true, result.failure?.message);
+  const comment = ctx.db.prepare('SELECT id, project, author, body, resolved FROM R8Comment').get();
+  assert.equal(comment.project, 'p1');
+  assert.equal(comment.author, 'u1');
+  assert.equal(comment.body, 'a comment');
+  assert.equal(comment.resolved, 0);
+  const annotation = ctx.db.prepare('SELECT id FROM R8IntegrationDocument_body_annotation').get();
+  assert.equal(ctx.db.prepare('SELECT COUNT(*) AS count FROM R8IntegrationDocument_body_membership WHERE annotation_id = ?').get(annotation.id).count, 1);
+  await ctx.app.close?.();
+});
+
+test('annotation entity actions reject hostile envelopes without partial related or annotation rows', async () => {
+  const cases = [
+    ['malformed and unknown values', async (ctx) => ({
+      ...threadPayload(ctx.binding), values: { body: 'ok', unknown: true },
+    })],
+    ['malformed envelope', async (ctx) => ({
+      ...threadPayload(ctx.binding), values: null,
+    })],
+    ['foreign basis', async (ctx) => threadPayload(ctx.binding, { basis: 'not-a-position-token' })],
+    ['surrogate-splitting range', async (ctx) => threadPayload(ctx.binding, { from: 1, to: 2 })],
+    ['cross-project scope and FK mismatch', async (ctx) => threadPayload(ctx.binding)],
+    ['unauthorised writer', async (ctx) => threadPayload(ctx.binding)],
+  ];
+
+  for (const [label, payloadOf] of cases) {
+    const ctx = await setupThreadDoc(label === 'surrogate-splitting range' ? '😀abc' : 'hello world');
+    if (label === 'cross-project scope and FK mismatch') {
+      ctx.db.exec("INSERT INTO Project (id, owner) VALUES ('p2', 'u1')");
+    }
+    if (label === 'unauthorised writer') ctx.db.exec("INSERT INTO User (id) VALUES ('u2')");
+    const payload = await payloadOf(ctx);
+    const result = await ctx.app.dispatch({
+      actionId: `hostile-${label}`, type: 'R8IntegrationDocument.body.compose',
+      scope: label === 'cross-project scope and FK mismatch' ? 'Project:p2' : 'Project:p1',
+      principal: label === 'unauthorised writer' ? { id: 'u2' } : { id: 'u1' }, payload,
+    });
+    assert.equal(result.ok, false, label);
+    assertNoThreadRows(ctx.db, label);
+    await ctx.app.close?.();
+  }
+});
+
+test('stale basis and failed requests leave both durable projections empty', async () => {
+  const ctx = await setupThreadDoc();
+  const before = threadCounts(ctx.db);
+  const inserted = await ctx.app.dispatch({
+    actionId: 'make-stale', type: 'R8IntegrationDocument.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: { version: 9, id: 'd1', authoring: ctx.authoringOf(ctx.binding, 'stale-edit'), edit: {
+      kind: 'text.insert', at: { positionToken: ctx.documentPositionToken, offset: 5, affinity: 'right' }, text: '!',
+    } },
+  });
+  assert.equal(inserted.ok, true, inserted.failure?.message);
+  const result = await dispatchThread(ctx, 'stale-compose', { basis: ctx.documentPositionToken });
+  assert.equal(result.ok, false);
+  assert.deepEqual(threadCounts(ctx.db), before);
+  await ctx.app.close?.();
+});
+
+test('durable replay is idempotent, while changed payload conflicts', async () => {
+  const ctx = await setupThreadDoc();
+  const replayPayload = { body: 'same', mutationId: 'replay-mutation' };
+  const first = await dispatchThread(ctx, 'replay-compose', replayPayload);
+  assert.equal(first.ok, true, first.failure?.message);
+  const identities = ctx.db.prepare('SELECT id FROM R8Comment').get().id;
+  const annotationIdentity = ctx.db.prepare('SELECT id FROM R8IntegrationDocument_body_annotation').get().id;
+  const second = await dispatchThread(ctx, 'replay-compose', replayPayload);
+  assert.equal(second.ok, true, second.failure?.message);
+  assert.deepEqual(threadCounts(ctx.db), { comments: 1, annotations: 1 });
+  assert.equal(ctx.db.prepare('SELECT id FROM R8Comment').get().id, identities);
+  assert.equal(ctx.db.prepare('SELECT id FROM R8IntegrationDocument_body_annotation').get().id, annotationIdentity);
+  const conflict = await dispatchThread(ctx, 'replay-compose', { body: 'changed', mutationId: 'replay-mutation' });
+  assert.equal(conflict.ok, false, 'same actionId with changed payload must conflict');
+  assert.deepEqual(threadCounts(ctx.db), { comments: 1, annotations: 1 });
+  await ctx.app.close?.();
+});
+
+test('annotation entity declaration validation rejects malformed relation, project, author, capability, and input mappings', async () => {
+  for (const [label, action] of [
+    ['relation', annotationEntityAction('compose', { relation: 'missing', project: 'project', author: 'author', capability: write, input: { body: 'body' } })],
+    ['project', annotationEntityAction('compose', { relation: 'comment', project: 'missing', author: 'author', capability: write, input: { body: 'body' } })],
+    ['author', annotationEntityAction('compose', { relation: 'comment', project: 'project', author: 'missing', capability: write, input: { body: 'body' } })],
+  ]) {
+    await assert.rejects(() => appFor(new DatabaseSync(':memory:'), null, { thread: true, threadAction: action }), new RegExp(label));
+  }
+  assert.throws(() => annotationEntityAction('compose', { relation: 'comment', project: 'project', author: 'author', capability: {}, input: { body: 'body' } }), /capability/);
+  assert.throws(() => annotationEntityAction('compose', { relation: 'comment', project: 'project', author: 'author', capability: write, input: { 'bad-name': 'body' } }), /input/);
+  const invalidMapping = await appFor(new DatabaseSync(':memory:'), null, {
+      thread: true,
+      threadAction: annotationEntityAction('compose', {
+        relation: 'comment', project: 'project', author: 'author', capability: write,
+        input: { body: 'id' },
+      }),
+      deferStart: true,
+    });
+  await assert.rejects(() => invalidMapping.app.start(), /framework-owned/);
+});
+
+test('annotation entity action rejects a basis issued to another principal without writes', async () => {
+  const ctx = await setupThreadDoc();
+  ctx.db.exec("INSERT INTO User (id) VALUES ('u2')");
+  const foreign = await ctx.refreshBinding({ id: 'u2' });
+  const result = await dispatchThread(
+    ctx,
+    'foreign-principal-basis',
+    { basis: foreign.documentPositionToken },
+    { id: 'u1' },
+  );
+  assert.equal(result.ok, false);
+  assertNoThreadRows(ctx.db);
+  await ctx.app.shutdown?.();
+  ctx.db.close();
 });
 
 test('text.insert mutates the continuous family at an absolute offset', async () => {

@@ -17,13 +17,16 @@ import workbench, {
   annotatedTextClientHandle,
   annotatedTextCreateAction,
   annotatedTextRetireAction,
+  annotationEntityAction,
   annotation,
+  boolean,
   entity,
   ephemeral,
   everyone,
   grant,
   protectingAnnotation,
   read,
+  readAnnotatedTextForRecipient,
   ref,
   scope,
   subscribe,
@@ -44,6 +47,16 @@ export const Project = entity('Project', {
   grant: [scope(() => everyone()).can(() => grant(read, write, subscribe, admin))],
 });
 
+// Comment is deliberately only reachable through the document's declared
+// annotation projection. It is not a Project collection/list.
+export const Comment = entity('Comment', {
+  project: ref('Project', { immutable: true }),
+  author: ref('User'),
+  body: text(),
+  resolved: boolean({ default: false }),
+  grant: [scope(() => everyone()).can(() => grant(write))],
+});
+
 export const Doc = entity('Doc', {
   project: ref('Project'),
   owner: ref('User', { role: 'owner' }),
@@ -57,7 +70,20 @@ export const Doc = entity('Doc', {
     owner: 'owner',
     carets: { field: 'presence', cell: 'caret' },
     annotations: [
-      annotation('comment', { empty: 'orphan', fields: { color: text({ oneOf: COMMENT_COLORS }) } }),
+       annotation('comment', {
+         empty: 'orphan',
+         fields: {
+           color: text({ oneOf: COMMENT_COLORS, default: COMMENT_COLORS[0] }),
+           comment: ref('Comment'),
+         },
+         actions: [annotationEntityAction('compose', {
+           relation: 'comment',
+           project: 'project',
+           author: 'author',
+           capability: write,
+           input: { body: 'body' },
+         })],
+       }),
       // `sensitive` is the protected target that a confidential span covers. It
       // is projection-internal: it never renders as a comment card, so marking
       // confidential does not surface a user-visible comment.
@@ -73,8 +99,8 @@ export const Doc = entity('Doc', {
 });
 const DocClient = annotatedTextClientHandle(Doc, Doc.body);
 
-const demoPrincipal = Object.freeze({ type: 'user', id: DEMO_USER });
-const readerPrincipal = Object.freeze({ type: 'user', id: 'reader' });
+const demoPrincipal = Object.freeze({ type: 'user', id: DEMO_USER, attributes: {} });
+const readerPrincipal = Object.freeze({ type: 'user', id: 'reader', attributes: {} });
 
 /** The demo has a fixed owner (demo) and a fixed reader (reader). The reader is
  * denied the `confidential` protecting annotation, so the same document shows
@@ -199,7 +225,7 @@ function useTail(req) {
 export function createAnnotatedDocApp({ db = DB_PATH } = {}) {
   const app = workbench({
     db,
-    entities: [Project, Doc],
+     entities: [Project, Comment, Doc],
     migrations: [
       { version: 1, up: migrateCommentColors },
       { version: 2, up: migrateAnnotationFamilies },
@@ -213,7 +239,25 @@ export function createAnnotatedDocApp({ db = DB_PATH } = {}) {
 
   app.use('/client-handle.mjs', (req, res, next) => {
     if (req.method !== 'GET') return next();
-    const handle = `export const DocClient = Object.freeze(${JSON.stringify(DocClient)});\n`;
+    // Keyed action handles are non-enumerable on the server's compatibility
+    // action array. Preserve the typed compose handle across this zero-import
+    // browser boundary rather than exposing a raw action name or payload path.
+    const clientHandle = {
+      ...DocClient,
+      body: {
+        ...DocClient.body,
+        annotations: {
+          ...DocClient.body.annotations,
+          comment: {
+            ...DocClient.body.annotations.comment,
+            actions: {
+              compose: DocClient.body.annotations.comment.actions.compose,
+            },
+          },
+        },
+      },
+    };
+    const handle = `export const DocClient = Object.freeze(${JSON.stringify(clientHandle)});\n`;
     res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'content-length': Buffer.byteLength(handle) });
     res.end(handle);
   });
@@ -224,6 +268,56 @@ export function createAnnotatedDocApp({ db = DB_PATH } = {}) {
   // are ignored — ending the response marks the intercept handled.
   app.use('/docs', async (req, res) => {
     const tail = useTail(req);
+    if (tail !== '' && req.method === 'GET') {
+      const id = decodeURIComponent(tail);
+      const principal = principalOf(req);
+      const document = app.db.prepare('SELECT id, project FROM Doc WHERE id = ?').get(id);
+      if (!document || !principal?.id) {
+        res.status(404).json({ error: 'document not found' });
+        return;
+      }
+      // Comment bodies are a related projection of the recipient-authorized
+      // document, never a raw document-id join. Unavailable/retry is opaque.
+      let recipient;
+      try {
+        recipient = await readAnnotatedTextForRecipient({
+          app,
+          entity: Doc,
+          field: Doc.body,
+          documentId: id,
+          expectedOwningScope: { entity: Project, id: document.project },
+          principal,
+        });
+      } catch {
+        res.status(404).json({ error: 'document not found' });
+        return;
+      }
+      if (recipient.kind !== 'snapshot') {
+        res.status(404).json({ error: 'document not found' });
+        return;
+      }
+      const threads = [];
+      const seenPairs = new Set();
+      for (const annotation of recipient.document.annotations) {
+        if (annotation.family !== 'comment') continue;
+        const commentId = annotation.fields?.comment;
+        if (typeof commentId !== 'string') continue;
+        const pair = `${annotation.id}\u0000${commentId}`;
+        if (seenPairs.has(pair)) continue;
+        seenPairs.add(pair);
+        const thread = app.db.prepare(
+          `SELECT annotation.id AS annotationId, comment.id, comment.author, comment.body, comment.resolved
+           FROM Doc_body_annotation AS annotation
+           JOIN Doc_body_annotation_comment AS annotationComment ON annotationComment.annotation_id = annotation.id
+           JOIN Comment AS comment ON comment.id = annotationComment.comment
+           WHERE annotation.id = ? AND annotation.document_id = ? AND annotation.family = 'comment'
+             AND annotationComment.comment = ?`,
+        ).get(annotation.id, id, commentId);
+        if (thread) threads.push(thread);
+      }
+      res.status(200).json({ threads });
+      return;
+    }
     if (tail !== '' && req.method !== 'DELETE') return;
     if (req.method === 'GET') {
       res.status(200).json({ docs: listDocs(app) });
@@ -295,7 +389,7 @@ export function createAnnotatedDocApp({ db = DB_PATH } = {}) {
 
   app.static('/', publicDir);
 
-  return { app, principalOf, Doc, Project };
+  return { app, principalOf, Doc, Project, Comment };
 }
 
 // Only auto-start when run directly (projects-smoke + demos).

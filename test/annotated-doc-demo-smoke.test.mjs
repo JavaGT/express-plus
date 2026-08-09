@@ -115,16 +115,29 @@ test('annotated-doc demo creates a document and inserts via the document session
   }
   assert.equal(session.document.text, 'hello');
 
-  const marked = await session.applyAnnotation({
+  const marked = await session.applyAnnotationAction(DocClient.body.annotations.comment.actions.compose, {
     mutationId: 'smoke-comment',
-    annotation: { id: 'smoke-comment', family: 'comment', fields: { color: '#fef08a' } },
     from: { offset: 1, affinity: 'right' },
     to: { offset: 4, affinity: 'right' },
+    values: { body: 'A smoke thread' },
   });
   assert.equal(marked.ok, true, marked.failure?.message);
   assert.equal((await marked.settlement.wait()).status, 'reconciled');
   assert.equal(session.document.annotations.length, 1);
-  assert.equal(session.document.annotations[0].id, 'smoke-comment');
+  const annotationId = session.document.annotations[0].id;
+  const threads = await (await fetch(`${origin}/docs/${encodeURIComponent(id)}`)).json();
+  assert.deepEqual(threads.threads, [{
+    annotationId,
+    id: app.db.prepare('SELECT id FROM Comment').get().id,
+    author: 'demo',
+    body: 'A smoke thread',
+    resolved: 0,
+  }]);
+  const commentId = threads.threads[0].id;
+  const directComment = await fetch(`${origin}/snapshot/Comment/${encodeURIComponent(commentId)}`);
+  assert.equal(directComment.status, 403);
+  const unauthorizedComment = await fetch(`${origin}/snapshot/Comment/${encodeURIComponent(commentId)}?viewAs=reader`);
+  assert.equal(unauthorizedComment.status, 403);
 
   // Select-all delete: clear the whole continuous document in one delete.
   const deleted = await session.delete({
