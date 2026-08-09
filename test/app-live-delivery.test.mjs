@@ -434,8 +434,6 @@ test('declared annotated text owns generated HTTP admission and package delivery
   const spoofedProject = annotatedTextCreateAction(Document, Document.body, { id: 'forbidden-project', projectId: 'p2', ownerId: 'u1' });
   assert.equal((await post(spoofedProject)).status, 403, 'declared project ownership, not caller-supplied document ownership, authorizes create');
   assert.equal(db.prepare('SELECT 1 FROM HttpAnnotatedDocument WHERE id = ?').get('forbidden-project'), undefined);
-  const initialBlockId = 'b';
-
   const sources = [];
   let actionNumber = 0;
   const session = createAnnotatedTextHttpSession({
@@ -444,24 +442,20 @@ test('declared annotated text owns generated HTTP admission and package delivery
     eventSourceFactory: () => { const source = { close() {}, onmessage: null, onerror: null }; sources.push(source); return source; },
   });
   await session.ready.catch((error) => { error.message = `first document ready: ${error.message}`; throw error; });
-  assert.equal(session.document.blocks[0].id, initialBlockId);
-  const inserted = await session.insert({ mutationId: 'insert-1', at: { blockId: initialBlockId, offset: 0, affinity: 'right' }, text: 'hello' });
+  assert.equal(session.document.text, '');
+  const inserted = await session.insert({ mutationId: 'insert-1', at: { offset: 0, affinity: 'right' }, text: 'hello' });
   assert.equal(inserted.ok, true);
   assert.equal((await inserted.settlement.wait()).status, 'reconciled');
-  assert.equal(session.document.blocks[0].text, 'hello', 'committed receipt recovers through recipient snapshot ingest');
-  assert.throws(
-    () => session.split({ mutationId: 'split-1', at: { blockId: initialBlockId, offset: 2, affinity: 'right' } }),
-    /block-era command is not supported/,
-  );
-  const splitInsert = await session.insert({ mutationId: 'split-insert', at: { blockId: initialBlockId, offset: 2, affinity: 'right' }, text: ' there' });
+  assert.equal(session.document.text, 'hello', 'committed receipt recovers through recipient snapshot ingest');
+  assert.equal(typeof session.split, 'undefined', 'block-era split must not exist on the session');
+  const splitInsert = await session.insert({ mutationId: 'split-insert', at: { offset: 2, affinity: 'right' }, text: ' there' });
   assert.equal(splitInsert.ok, true);
   assert.equal((await splitInsert.settlement.wait()).status, 'reconciled');
   // The fake SSE source delivers NO fold envelope, so the settlement can only
   // converge by fetching a recipient snapshot: the EXACT canonical text proves
   // the committed edit recovered through snapshot ingest — not merely the
   // optimistic splice being retained.
-  assert.equal(session.document.blocks.length, 1);
-  assert.equal(session.document.blocks[0].text, 'he therello');
+  assert.equal(session.document.text, 'he therello');
   assert.equal('dispatch' in session, false);
 
   assert.equal((await post(annotatedTextCreateAction(Document, Document.body, {
@@ -473,16 +467,15 @@ test('declared annotated text owns generated HTTP admission and package delivery
     eventSourceFactory: () => ({ close() {}, onmessage: null, onerror: null }),
   });
   await second.ready.catch((error) => { error.message = `second document ready: ${error.message}`; throw error; });
-  const secondBlockId = second.document.blocks[0].id;
   const secondInsert = await second.insert({
-    mutationId: 'second-insert', at: { blockId: secondBlockId, offset: 0, affinity: 'right' }, text: 'second',
+    mutationId: 'second-insert', at: { offset: 0, affinity: 'right' }, text: 'second',
   });
   assert.equal((await secondInsert.settlement.wait()).status, 'reconciled');
   const undoneSecond = await second.history.undo();
   assert.equal(undoneSecond.ok, true);
   assert.equal((await undoneSecond.settlement.wait()).status, 'reconciled');
-  assert.equal(second.document.blocks[0].text, '');
-  assert.equal(session.document.blocks.map((block) => block.text).join(''), 'he therello', 'same-project document history is isolated');
+  assert.equal(second.document.text, '');
+  assert.equal(session.document.text, 'he therello', 'same-project document history is isolated');
   second.close();
 
   const exportRequest = { app, entity: Document, field: Document.body, documentId: 'd1', expectedOwningScope: { entity: Project, id: 'p1' } };
@@ -500,7 +493,7 @@ test('declared annotated text owns generated HTTP admission and package delivery
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log WHERE scope = ?').get('Project:p1').count, committedBeforeForbidden);
 
   principal = { ...user, id: 'u2' };
-  const revokedEdit = await session.insert({ mutationId: 'revoked', at: { blockId: initialBlockId, offset: 0, affinity: 'right' }, text: 'x' });
+  const revokedEdit = await session.insert({ mutationId: 'revoked', at: { offset: 0, affinity: 'right' }, text: 'x' });
   assert.equal(revokedEdit.ok, false);
   principal = user;
   const retire = annotatedTextRetireAction(Document, 'd1');
@@ -537,7 +530,6 @@ test('annotated text text-insert is delivered as a fold envelope over the live S
     body: JSON.stringify({ actionId: 'create-fold', type: create.type, payload: create.payload, scope: 'Project:p1', clientId: 'tab-a' }),
   });
   assert.equal(createRes.status, 200);
-  const initialBlockId = 'b';
 
   // Open a real SSE events stream as the owner, with document identity so the
   // delivery can resolve the annotated-text document and emit a fold envelope.
@@ -556,7 +548,7 @@ test('annotated text text-insert is delivered as a fold envelope over the live S
     eventSourceFactory: () => ({ close() {}, onmessage: null, onerror: null }),
   });
   await session.ready.catch((error) => { error.message = `fold-ready: ${error.message}`; throw error; });
-  const inserted = await session.insert({ mutationId: 'fold-insert', at: { blockId: initialBlockId, offset: 0, affinity: 'right' }, text: 'hello' });
+  const inserted = await session.insert({ mutationId: 'fold-insert', at: { offset: 0, affinity: 'right' }, text: 'hello' });
   assert.equal(inserted.ok, true);
   await inserted.settlement.wait();
 
@@ -820,7 +812,6 @@ test('composite shell subscriber does not resync for annotated-text body edits o
     body: JSON.stringify({ actionId: 'create-shell', type: create.type, payload: create.payload, scope: 'Project:p1', clientId: 'tab-a' }),
   });
   assert.equal(createRes.status, 200);
-  const initialBlockId = 'b';
 
   const anchor = Number(db.prepare("SELECT MAX(seq) AS s FROM _Log WHERE scope = 'Project:p1'").get().s ?? 0);
   const aggregate = Number(db.prepare("SELECT revision FROM _CommittedRevision WHERE name = 'actions'").get().revision);
@@ -841,7 +832,7 @@ test('composite shell subscriber does not resync for annotated-text body edits o
     eventSourceFactory: () => ({ close() {}, onmessage: null, onerror: null }),
   });
   await session.ready.catch((error) => { error.message = `shell-ready: ${error.message}`; throw error; });
-  const inserted = await session.insert({ mutationId: 'shell-insert', at: { blockId: initialBlockId, offset: 0, affinity: 'right' }, text: 'hi' });
+  const inserted = await session.insert({ mutationId: 'shell-insert', at: { offset: 0, affinity: 'right' }, text: 'hi' });
   assert.equal(inserted.ok, true);
   await inserted.settlement.wait();
   const insertSeq = Number(db.prepare("SELECT MAX(seq) AS s FROM _Log WHERE scope = 'Project:p1'").get().s ?? 0);

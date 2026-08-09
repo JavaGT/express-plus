@@ -39,7 +39,7 @@ async function setup({ scopeAccess = async () => true, documentAccess = async ()
   db.exec("INSERT INTO RecipientReadProject (id, owner) VALUES ('p1', 'owner'), ('p2', 'owner')");
   const app = workbench({ db, entities: [Project, Transcript] });
   await app.start();
-  const created = await app.dispatch({ actionId: 'recipient-read-create', principal: { ...principal, id: 'owner' }, scope: 'RecipientReadProject:p1', ...annotatedTextCreateAction(Transcript, Transcript.body, { id: 'd1', projectId: 'p1', ownerId: 'owner', source: { blocks: [{ text: 'visible' }] } }) });
+  const created = await app.dispatch({ actionId: 'recipient-read-create', principal: { ...principal, id: 'owner' }, scope: 'RecipientReadProject:p1', ...annotatedTextCreateAction(Transcript, Transcript.body, { id: 'd1', projectId: 'p1', ownerId: 'owner', source: { text: 'visible' } }) });
   assert.equal(created.ok, true, created.failure?.message);
   const request = { app, entity: Transcript, field: Transcript.body, documentId: 'd1', expectedOwningScope: { entity: Project, id: 'p1' }, principal };
   return { app, db, Project, Transcript, request, close: async () => { await app.shutdown(); db.close(); } };

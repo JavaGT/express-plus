@@ -128,7 +128,7 @@ test('scope carets interest and callback are retained and resent on reconnect', 
   assert.deepEqual(second.interest.carets, ['body']);
   sockets[1].emit('message', {
     type: 'annotated-text-caret', version: 1, entity: 'Doc', id: 'd1', field: 'body',
-    change: { op: 'upsert', value: { kind: 'caret', presence: 'p1', blockId: 'b1', offset: 0 } },
+    change: { op: 'upsert', value: { kind: 'caret', presence: 'p1', offset: 0 } },
   });
   assert.equal(seen.length, 1);
   channel.close();
@@ -138,14 +138,14 @@ test('scope carets interest and callback are retained and resent on reconnect', 
 
 test('updateCaret sends exact caret.update message', () => {
   const { channel, sockets } = harness();
-  const result = channel.updateCaret({ entity: 'Doc', id: 'a', field: 'body', blockId: 'b1', offset: 5 });
+  const result = channel.updateCaret({ entity: 'Doc', id: 'a', field: 'body', offset: 5 });
   assert.equal(result, false); // offline
 });
 
 test('updateCaret rejects unknown keys', () => {
   const { channel } = harness();
   assert.throws(
-    () => channel.updateCaret({ entity: 'Doc', id: 'a', field: 'body', blockId: 'b1', offset: 5, extra: 'x' }),
+    () => channel.updateCaret({ entity: 'Doc', id: 'a', field: 'body', offset: 5, extra: 'x' }),
     /updateCaret requires exactly/,
   );
 });
@@ -153,19 +153,15 @@ test('updateCaret rejects unknown keys', () => {
 test('updateCaret rejects empty strings', () => {
   const { channel } = harness();
   assert.throws(
-    () => channel.updateCaret({ entity: '', id: 'a', field: 'body', blockId: 'b1', offset: 0 }),
+    () => channel.updateCaret({ entity: '', id: 'a', field: 'body', offset: 0 }),
     /updateCaret requires non-empty strings/,
   );
   assert.throws(
-    () => channel.updateCaret({ entity: 'Doc', id: '', field: 'body', blockId: 'b1', offset: 0 }),
+    () => channel.updateCaret({ entity: 'Doc', id: '', field: 'body', offset: 0 }),
     /updateCaret requires non-empty strings/,
   );
   assert.throws(
-    () => channel.updateCaret({ entity: 'Doc', id: 'a', field: '', blockId: 'b1', offset: 0 }),
-    /updateCaret requires non-empty strings/,
-  );
-  assert.throws(
-    () => channel.updateCaret({ entity: 'Doc', id: 'a', field: 'body', blockId: '', offset: 0 }),
+    () => channel.updateCaret({ entity: 'Doc', id: 'a', field: '', offset: 0 }),
     /updateCaret requires non-empty strings/,
   );
 });
@@ -173,15 +169,15 @@ test('updateCaret rejects empty strings', () => {
 test('updateCaret rejects non-safe-negative offset', () => {
   const { channel } = harness();
   assert.throws(
-    () => channel.updateCaret({ entity: 'Doc', id: 'a', field: 'body', blockId: 'b1', offset: -1 }),
+    () => channel.updateCaret({ entity: 'Doc', id: 'a', field: 'body', offset: -1 }),
     /updateCaret requires a non-negative safe integer/,
   );
   assert.throws(
-    () => channel.updateCaret({ entity: 'Doc', id: 'a', field: 'body', blockId: 'b1', offset: 1.5 }),
+    () => channel.updateCaret({ entity: 'Doc', id: 'a', field: 'body', offset: 1.5 }),
     /updateCaret requires a non-negative safe integer/,
   );
   assert.throws(
-    () => channel.updateCaret({ entity: 'Doc', id: 'a', field: 'body', blockId: 'b1', offset: Infinity }),
+    () => channel.updateCaret({ entity: 'Doc', id: 'a', field: 'body', offset: Infinity }),
     /updateCaret requires a non-negative safe integer/,
   );
 });
@@ -218,7 +214,7 @@ test('clearCaret rejects empty strings', () => {
 
 test('updateCaret offline returns false, does not queue', async () => {
   const { channel, sockets } = harness();
-  const result = channel.updateCaret({ entity: 'Doc', id: 'a', field: 'body', blockId: 'b1', offset: 0 });
+  const result = channel.updateCaret({ entity: 'Doc', id: 'a', field: 'body', offset: 0 });
   assert.equal(result, false);
   // No socket was created because no subscription triggered _openSocket
   assert.equal(sockets.length, 0);
@@ -234,10 +230,10 @@ test('updateCaret online sends raw message', async () => {
   sockets[0].emit('message', { type: 'subscribed', entity: 'Doc', id: 'a', currentSeq: 1 });
   await pending;
 
-  const result = channel.updateCaret({ entity: 'Doc', id: 'a', field: 'body', blockId: 'b1', offset: 5 });
+  const result = channel.updateCaret({ entity: 'Doc', id: 'a', field: 'body', offset: 5 });
   assert.equal(result, true);
   const sent = sockets[0].sent.find((m) => m.type === 'caret.update');
-  assert.deepEqual(sent, { type: 'caret.update', entity: 'Doc', id: 'a', field: 'body', blockId: 'b1', offset: 5 });
+  assert.deepEqual(sent, { type: 'caret.update', entity: 'Doc', id: 'a', field: 'body', offset: 5 });
   channel.close();
 });
 
@@ -273,7 +269,7 @@ test('inbound annotated-text-caret upsert caret routes to matching onCaret', asy
   const frame = {
     type: 'annotated-text-caret', version: 1,
     entity: 'Doc', id: 'a', field: 'body',
-    change: { op: 'upsert', value: { kind: 'caret', presence: 'p1', blockId: 'b1', offset: 3 } },
+    change: { op: 'upsert', value: { kind: 'caret', presence: 'p1', offset: 3 } },
   };
   sockets[0].emit('message', frame);
   await tick();
@@ -296,7 +292,7 @@ test('inbound annotated-text-caret upsert edge routes to matching onCaret', asyn
   const frame = {
     type: 'annotated-text-caret', version: 1,
     entity: 'Doc', id: 'a', field: 'body',
-    change: { op: 'upsert', value: { kind: 'edge', presence: 'p1', blockId: 'b1', edge: 'start' } },
+    change: { op: 'upsert', value: { kind: 'edge', presence: 'p1', edge: 'start' } },
   };
   sockets[0].emit('message', frame);
   await tick();
@@ -345,7 +341,7 @@ test('malformed annotated-text-caret frames are dropped', async () => {
   sockets[0].emit('message', { type: 'annotated-text-caret', version: 1 });
   sockets[0].emit('message', { type: 'annotated-text-caret', version: 1, entity: 'Doc', id: 'a', field: 'body', change: null });
   sockets[0].emit('message', { type: 'annotated-text-caret', version: 1, entity: 'Doc', id: 'a', field: 'body', change: { op: 'unknown' } });
-  sockets[0].emit('message', { type: 'annotated-text-caret', version: 1, entity: 'Doc', id: 'a', field: 'body', change: { op: 'upsert', value: { kind: 'caret', presence: 'p1', blockId: 'b1', offset: 3, extra: 'x' } } });
+  sockets[0].emit('message', { type: 'annotated-text-caret', version: 1, entity: 'Doc', id: 'a', field: 'body', change: { op: 'upsert', value: { kind: 'caret', presence: 'p1', offset: 3, extra: 'x' } } });
   sockets[0].emit('message', { type: 'annotated-text-caret', version: 1, entity: 'Doc', id: 'a', field: 'body', extra: 'x', change: { op: 'remove', presence: 'p1' } });
   await tick();
   assert.equal(onCaretCalls.length, 0);
@@ -530,7 +526,7 @@ test('updateCaret after close throws ClientClosedError', async () => {
   const { channel } = harness();
   channel.close();
   assert.throws(
-    () => channel.updateCaret({ entity: 'Doc', id: 'a', field: 'body', blockId: 'b1', offset: 0 }),
+    () => channel.updateCaret({ entity: 'Doc', id: 'a', field: 'body', offset: 0 }),
     /Live channel is closed/,
   );
 });

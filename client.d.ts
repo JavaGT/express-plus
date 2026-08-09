@@ -3,7 +3,7 @@
 // Source of truth: public/workbench-client.mjs
 // Projection for TypeScript app authors. JS users see no change.
 
-import type { AnnotatedTextFieldHandle, AnnotatedTextPosition, WorkbenchEntity } from './index.js';
+import type { AnnotatedTextFieldHandle, WorkbenchEntity } from './index.js';
 
 // ---------------------------------------------------------------------------
 // LiveChannel — WebSocket transport layer
@@ -81,7 +81,6 @@ export interface CaretUpdate {
   entity: string;
   id: string;
   field: string;
-  blockId: string;
   offset: number;
 }
 
@@ -114,15 +113,13 @@ export interface AnnotatedTextCaretRemove {
 export interface AnnotatedTextVisibleCaret {
   kind: 'caret';
   presence: string;
-  blockId: string;
   offset: number;
 }
 
 export interface AnnotatedTextRestrictedCaret {
   kind: 'edge';
   presence: string;
-  blockId: string;
-  edge: 'start' | 'end';
+  edge: 'start';
 }
 
 // ---------------------------------------------------------------------------
@@ -627,31 +624,6 @@ export function createAuthClient(config?: AuthClientConfig): AuthClient;
 // materializeAnnotatedTextSnapshot — browser snapshot materialization
 // ---------------------------------------------------------------------------
 
-export interface AnnotatedTextVisibleBlock {
-  readonly kind: 'visible';
-  readonly id: string;
-  readonly text: string;
-  readonly fields: Readonly<Record<string, unknown>>;
-  readonly annotationIds: readonly string[];
-}
-
-export interface AnnotatedTextRestrictedBlock {
-  readonly kind: 'restricted';
-  readonly id: string;
-  readonly placeholder: string;
-}
-
-export type AnnotatedTextBlock = AnnotatedTextVisibleBlock | AnnotatedTextRestrictedBlock;
-
-declare const annotatedTextBlockGroupHandleBrand: unique symbol;
-
-export interface AnnotatedTextBlockGroupHandle {
-  readonly kind: 'workbench.annotatedText.block-group';
-  readonly blockIds: readonly string[];
-  readonly annotationIds: readonly string[];
-  readonly [annotatedTextBlockGroupHandleBrand]: never;
-}
-
 export interface AnnotatedTextAnnotation {
   readonly id: string;
   readonly family: string;
@@ -659,17 +631,8 @@ export interface AnnotatedTextAnnotation {
   readonly owner?: string;
 }
 
-export interface AnnotatedTextMembership {
-  readonly annotationId: string;
-  readonly blockId: string;
-  readonly ordinal: number;
-  readonly start?: number;
-  readonly end?: number;
-}
-
 export interface AnnotatedTextMeasurement {
   readonly id: string;
-  readonly blockId: string;
   readonly family: string;
   readonly formatVersion: number;
   readonly payload: unknown;
@@ -678,12 +641,20 @@ export interface AnnotatedTextMeasurement {
 export interface AnnotatedTextDocument {
   readonly kind: 'workbench.annotatedText.recipient';
   readonly version: 1;
-  readonly blocks: readonly AnnotatedTextBlock[];
-  readonly blockGroups: readonly AnnotatedTextBlockGroupHandle[];
+  readonly text: string;
+  readonly ranges: readonly { readonly annotationId: string; readonly start: number; readonly end: number }[];
   readonly annotations: readonly AnnotatedTextAnnotation[];
-  readonly memberships: readonly AnnotatedTextMembership[];
-  readonly measurements: readonly AnnotatedTextMeasurement[];
-  readonly capabilities: readonly string[] | null;
+  readonly orphans?: readonly {
+    readonly id: string;
+    readonly family: string;
+    readonly fields: Readonly<Record<string, unknown>>;
+    readonly savedQuote: string;
+    readonly owner?: string;
+  }[];
+  readonly measurements?: readonly AnnotatedTextMeasurement[];
+  readonly capabilityHints?: readonly string[];
+  readonly restricted?: boolean;
+  readonly redactions?: readonly { readonly start: number; readonly end: number; readonly placeholder: string }[];
 }
 
 export function materializeAnnotatedTextSnapshot(
@@ -701,10 +672,6 @@ export interface AnnotatedTextAuthoringContext {
   readonly documentId: string;
 }
 
-export type AnnotatedTextBlockGroupSelection =
-  | { readonly kind: 'one'; readonly blockGroup: AnnotatedTextBlockGroupHandle }
-  | { readonly kind: 'consecutive' | 'listed'; readonly blockGroups: readonly AnnotatedTextBlockGroupHandle[] };
-
 export interface AnnotatedTextHttpSessionConfig {
   readonly baseUrl: string;
   readonly context: AnnotatedTextAuthoringContext;
@@ -716,23 +683,24 @@ export interface AnnotatedTextHttpSessionConfig {
   readonly onFoldApplied?: (fold: unknown, elapsedMs: number) => void;
 }
 
+/** A client-side position into the document's single continuous text frame:
+ * absolute UTF-16 offset plus placeholder-edge affinity. The session stamps
+ * its own position token server-side. */
+export interface AnnotatedTextEditPosition {
+  readonly offset: number;
+  readonly affinity: 'left' | 'right';
+}
+
 export interface AnnotatedTextHttpSession {
   readonly document: AnnotatedTextDocument | null;
   readonly history: LiveDeliveryHistorySession;
   readonly status: LiveDeliverySession<AnnotatedTextDocument>['status'];
   readonly ready: Promise<void>;
-  insert(input: { readonly mutationId?: string; readonly at: AnnotatedTextPosition; readonly text: string }): Promise<LiveDeliveryDispatchResult>;
-  delete(input: { readonly mutationId?: string; readonly from: AnnotatedTextPosition; readonly to: AnnotatedTextPosition }): Promise<LiveDeliveryDispatchResult>;
-  replace(input: { readonly mutationId?: string; readonly from: AnnotatedTextPosition; readonly to: AnnotatedTextPosition; readonly text: string }): Promise<LiveDeliveryDispatchResult | null>;
-  split(input: { readonly mutationId: string; readonly at: AnnotatedTextPosition }): Promise<ScopeDispatchResult>;
-  merge(input: { readonly mutationId: string; readonly leftBlockId: string; readonly rightBlockId: string }): Promise<ScopeDispatchResult>;
-  applyAnnotation(input: { readonly mutationId: string; readonly annotation: { readonly id: string; readonly family: string; readonly fields: Readonly<Record<string, unknown>>; readonly protectedTargetIds?: readonly string[] }; readonly from: AnnotatedTextPosition; readonly to: AnnotatedTextPosition }): Promise<ScopeDispatchResult>;
-  detachAnnotation(input: { readonly mutationId: string; readonly annotationId: string; readonly blockId: string }): Promise<ScopeDispatchResult>;
+  insert(input: { readonly mutationId?: string; readonly at: AnnotatedTextEditPosition; readonly text: string }): Promise<LiveDeliveryDispatchResult>;
+  delete(input: { readonly mutationId?: string; readonly from: AnnotatedTextEditPosition; readonly to: AnnotatedTextEditPosition }): Promise<LiveDeliveryDispatchResult>;
+  replace(input: { readonly mutationId?: string; readonly from: AnnotatedTextEditPosition; readonly to: AnnotatedTextEditPosition; readonly text: string }): Promise<LiveDeliveryDispatchResult | null>;
+  applyAnnotation(input: { readonly mutationId: string; readonly annotation: { readonly id: string; readonly family: string; readonly fields: Readonly<Record<string, unknown>>; readonly protectedTargetIds?: readonly string[] }; readonly from: AnnotatedTextEditPosition; readonly to: AnnotatedTextEditPosition }): Promise<ScopeDispatchResult>;
   removeAnnotation(input: { readonly mutationId: string; readonly annotationId: string }): Promise<ScopeDispatchResult>;
-  continueBlock(input: { readonly mutationId: string; readonly at: AnnotatedTextPosition }): Promise<ScopeDispatchResult>;
-  setBlockGroupAssignment(input: { readonly mutationId: string; readonly selection: AnnotatedTextBlockGroupSelection; readonly annotation: { readonly id: string; readonly family: string; readonly fields: Readonly<Record<string, unknown>> } }): Promise<ScopeDispatchResult>;
-  clearBlockGroupAssignment(input: { readonly mutationId: string; readonly selection: AnnotatedTextBlockGroupSelection; readonly family: string }): Promise<ScopeDispatchResult>;
-  splitAndAssign(input: { readonly mutationId: string; readonly at: AnnotatedTextPosition; readonly annotation: { readonly id: string; readonly family: string; readonly fields: Readonly<Record<string, unknown>> } }): Promise<ScopeDispatchResult>;
   reconnect(): Promise<void>;
   subscribe(listener: (document: AnnotatedTextDocument | null) => void): () => void;
   close(): void;
@@ -747,7 +715,6 @@ export interface AnnotatedTextEditorBinding {
 }
 
 export interface AnnotatedTextEditorPosition {
-  readonly blockId: string;
   readonly offset: number;
   readonly affinity: 'right';
 }

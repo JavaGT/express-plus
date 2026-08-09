@@ -53,8 +53,8 @@ test('annotated editor replaces a selection within the document', async () => {
   assert.equal(harness.element.textContent, 'Hio');
   await flushInput();
   assert.deepEqual(harness.calls[0][1], {
-    from: { blockId: 'b', offset: 1, affinity: 'right' },
-    to: { blockId: 'b', offset: 4, affinity: 'right' },
+    from: { offset: 1, affinity: 'right' },
+    to: { offset: 4, affinity: 'right' },
     text: 'i',
   });
   assert.deepEqual(harness.errors, []);
@@ -67,8 +67,8 @@ test('annotated editor backspace and forward delete preserve surrogate pairs', a
   backward.beforeinput('deleteContentBackward');
   await flushInput();
   assert.deepEqual(backward.calls[0][1], {
-    from: { blockId: 'b', offset: 1, affinity: 'right' },
-    to: { blockId: 'b', offset: 3, affinity: 'right' },
+    from: { offset: 1, affinity: 'right' },
+    to: { offset: 3, affinity: 'right' },
     text: '',
   });
   backward.binding.close();
@@ -78,8 +78,8 @@ test('annotated editor backspace and forward delete preserve surrogate pairs', a
   forward.beforeinput('deleteContentForward');
   await flushInput();
   assert.deepEqual(forward.calls[0][1], {
-    from: { blockId: 'b', offset: 1, affinity: 'right' },
-    to: { blockId: 'b', offset: 3, affinity: 'right' },
+    from: { offset: 1, affinity: 'right' },
+    to: { offset: 3, affinity: 'right' },
     text: '',
   });
   forward.binding.close();
@@ -110,8 +110,8 @@ test('annotated editor deletes to the start of the line for soft and hard line b
     harness.beforeinput(inputType);
     await flushInput();
     assert.deepEqual(harness.calls[0][1], {
-      from: { blockId: 'b', offset: 2, affinity: 'right' },
-      to: { blockId: 'b', offset: 3, affinity: 'right' },
+      from: { offset: 2, affinity: 'right' },
+      to: { offset: 3, affinity: 'right' },
       text: '',
     });
     harness.binding.close();
@@ -121,8 +121,8 @@ test('annotated editor deletes to the start of the line for soft and hard line b
     emoji.beforeinput(inputType);
     await flushInput();
     assert.deepEqual(emoji.calls[0][1], {
-      from: { blockId: 'b', offset: 2, affinity: 'right' },
-      to: { blockId: 'b', offset: 5, affinity: 'right' },
+      from: { offset: 2, affinity: 'right' },
+      to: { offset: 5, affinity: 'right' },
       text: '',
     });
     emoji.binding.close();
@@ -146,8 +146,8 @@ test('annotated editor commits composition once and delegates history', async ()
   assert.equal(harness.calls.length, 1);
   assert.equal(harness.calls[0][0], 'replace');
   assert.deepEqual(harness.calls[0][1], {
-    from: { blockId: 'b', offset: 1, affinity: 'right' },
-    to: { blockId: 'b', offset: 1, affinity: 'right' },
+    from: { offset: 1, affinity: 'right' },
+    to: { offset: 1, affinity: 'right' },
     text: '語',
   });
   harness.beforeinput('historyUndo');
@@ -190,8 +190,8 @@ test('annotated editor rebases compatible buffered insertion over a foreign appe
   assert.equal(harness.element.textContent, 'aXb!');
   await flushInput();
   assert.deepEqual(harness.calls[0][1], {
-    from: { blockId: 'b', offset: 1, affinity: 'right' },
-    to: { blockId: 'b', offset: 1, affinity: 'right' },
+    from: { offset: 1, affinity: 'right' },
+    to: { offset: 1, affinity: 'right' },
     text: 'X',
   });
   harness.binding.close();
@@ -203,16 +203,16 @@ test('annotated editor preserves the caret across a compatible foreign fold whil
   harness.beforeinput('insertText', 'X');
   assert.equal(harness.element.textContent, 'aXb');
   assert.deepEqual(harness.binding.getSelection(), {
-    from: { blockId: 'b', offset: 2, affinity: 'right' },
-    to: { blockId: 'b', offset: 2, affinity: 'right' },
+    from: { offset: 2, affinity: 'right' },
+    to: { offset: 2, affinity: 'right' },
   });
   // A foreign fold appends text; the draft rebases onto the foreign text and
   // the caret stays after the locally-typed character (not at the buffer start).
   harness.publish(visible('ab!'));
   assert.equal(harness.element.textContent, 'aXb!');
   assert.deepEqual(harness.binding.getSelection(), {
-    from: { blockId: 'b', offset: 2, affinity: 'right' },
-    to: { blockId: 'b', offset: 2, affinity: 'right' },
+    from: { offset: 2, affinity: 'right' },
+    to: { offset: 2, affinity: 'right' },
   });
   harness.binding.close();
 });
@@ -240,8 +240,8 @@ test('annotated editor preserves later typing while the preceding replacement se
   settlements.shift()();
   await flushInput();
   assert.deepEqual(harness.calls[1][1], {
-    from: { blockId: 'b', offset: 2, affinity: 'right' },
-    to: { blockId: 'b', offset: 2, affinity: 'right' },
+    from: { offset: 2, affinity: 'right' },
+    to: { offset: 2, affinity: 'right' },
     text: 'c',
   });
   harness.element.focus();
@@ -254,8 +254,8 @@ test('annotated editor preserves later typing while the preceding replacement se
   settlements.shift()();
   await flushInput();
   assert.deepEqual(harness.calls[2][1], {
-    from: { blockId: 'b', offset: 3, affinity: 'right' },
-    to: { blockId: 'b', offset: 3, affinity: 'right' },
+    from: { offset: 3, affinity: 'right' },
+    to: { offset: 3, affinity: 'right' },
     text: 'd',
   });
   assert.deepEqual(harness.errors, []);
@@ -286,8 +286,8 @@ test('annotated editor waits for receipt ingest before flushing a queued success
   harness.publish(visible('ab'));
   await flushInput();
   assert.deepEqual(harness.calls[1][1], {
-    from: { blockId: 'b', offset: 2, affinity: 'right' },
-    to: { blockId: 'b', offset: 2, affinity: 'right' },
+    from: { offset: 2, affinity: 'right' },
+    to: { offset: 2, affinity: 'right' },
     text: 'c',
   });
   harness.publish(visible('abc'));
@@ -308,8 +308,8 @@ test('annotated editor folds queued typing into one composition replacement', as
 
   assert.equal(harness.calls.length, 1);
   assert.deepEqual(harness.calls[0][1], {
-    from: { blockId: 'b', offset: 1, affinity: 'right' },
-    to: { blockId: 'b', offset: 1, affinity: 'right' },
+    from: { offset: 1, affinity: 'right' },
+    to: { offset: 1, affinity: 'right' },
     text: 'b語',
   });
   harness.binding.close();
@@ -326,8 +326,8 @@ test('annotated editor rebases queued typing and composition over a compatible f
 
   assert.equal(harness.element.textContent, 'ab語c');
   assert.deepEqual(harness.calls[0][1], {
-    from: { blockId: 'b', offset: 1, affinity: 'right' },
-    to: { blockId: 'b', offset: 1, affinity: 'right' },
+    from: { offset: 1, affinity: 'right' },
+    to: { offset: 1, affinity: 'right' },
     text: 'b語',
   });
   assert.deepEqual(harness.errors, []);
@@ -402,8 +402,8 @@ test('annotated editor queues composition behind a submitted replacement', async
   settlements.shift()();
   await flushInput();
   assert.deepEqual(harness.calls[1][1], {
-    from: { blockId: 'b', offset: 2, affinity: 'right' },
-    to: { blockId: 'b', offset: 2, affinity: 'right' },
+    from: { offset: 2, affinity: 'right' },
+    to: { offset: 2, affinity: 'right' },
     text: '語',
   });
   assert.deepEqual(harness.errors, []);
@@ -476,8 +476,8 @@ test('annotated editor submits new input from a foreign snapshot after its prede
   await flushInput();
 
   assert.deepEqual(harness.calls[1][1], {
-    from: { blockId: 'b', offset: 7, affinity: 'right' },
-    to: { blockId: 'b', offset: 7, affinity: 'right' },
+    from: { offset: 7, affinity: 'right' },
+    to: { offset: 7, affinity: 'right' },
     text: '!',
   });
   harness.binding.close();
@@ -519,8 +519,8 @@ test('annotated editor collapses a buffered insertion whose base reverts to a sh
   return flushInput().then(() => {
     assert.equal(harness.calls.length, 1);
     assert.deepEqual(harness.calls[0][1], {
-      from: { blockId: 'b', offset: 3, affinity: 'right' },
-      to: { blockId: 'b', offset: 3, affinity: 'right' },
+      from: { offset: 3, affinity: 'right' },
+      to: { offset: 3, affinity: 'right' },
       text: 'X',
     });
     assert.deepEqual(harness.errors, []);
@@ -590,8 +590,8 @@ test('annotated editor maps a span boundary to the end of the document', () => {
   selection.addRange(range);
 
   assert.deepEqual(harness.binding.getSelection(), {
-    from: { blockId: 'b', offset: 5, affinity: 'right' },
-    to: { blockId: 'b', offset: 5, affinity: 'right' },
+    from: { offset: 5, affinity: 'right' },
+    to: { offset: 5, affinity: 'right' },
   });
   harness.binding.close();
 });
@@ -610,8 +610,8 @@ test('annotated editor rejects selections crossing a redaction placeholder', () 
   before.collapse(true);
   selection.removeAllRanges(); selection.addRange(before);
   assert.deepEqual(harness.binding.getSelection(), {
-    from: { blockId: 'b', offset: 6, affinity: 'left' },
-    to: { blockId: 'b', offset: 6, affinity: 'left' },
+    from: { offset: 6, affinity: 'left' },
+    to: { offset: 6, affinity: 'left' },
   });
   // A selection spanning the placeholder maps to no valid range.
   const crossing = harness.dom.window.document.createRange();

@@ -95,6 +95,10 @@ test('projects capabilityHints into the public capabilities array (restricted re
   }));
   assert.equal(restricted.restricted, true);
   assert.equal(restricted.capabilities, null);
+  // Restricted documents retain the full recipient shape with empty sensitive
+  // collections (issue #33 contract).
+  assert.deepEqual(restricted.orphans, []);
+  assert.deepEqual(restricted.measurements, []);
 });
 
 test('materializes document-level redactions without expanding text', () => {

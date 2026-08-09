@@ -187,10 +187,10 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     if (node === element) {
       const span = rootSpan(element);
       if (!span || element.childNodes.length === 0) return null;
-      if (offset === 0) return { blockId: BLOCK_ID, offset: 0, affinity: 'right' };
+      if (offset === 0) return { offset: 0, affinity: 'right' };
       if (offset === element.childNodes.length) {
         const wireLength = Math.max(0, (span.textContent ?? '').length - placeholderDisplayWidth(document.redactions ?? []));
-        return { blockId: BLOCK_ID, offset: wireLength, affinity: 'right' };
+        return { offset: wireLength, affinity: 'right' };
       }
       return null;
     }
@@ -202,7 +202,7 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     const classified = classifyDisplayOffset(local, document.redactions ?? []);
     if (classified.kind === 'interior') return null;
     const wire = displayToWirePosition({ offset: local, affinity: classified.affinity ?? 'right' }, document.redactions ?? []);
-    return { blockId: BLOCK_ID, offset: wire.offset, affinity: wire.affinity };
+    return { offset: wire.offset, affinity: wire.affinity };
   }
 
   function getSelection() {
@@ -463,8 +463,8 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     submitting = true;
     try {
       const result = await report(session.replace({
-        from: { blockId: BLOCK_ID, offset: from, affinity: 'right' },
-        to: { blockId: BLOCK_ID, offset: to, affinity: 'right' },
+        from: { offset: from, affinity: 'right' },
+        to: { offset: to, affinity: 'right' },
         text,
       }));
       if (!result?.ok) {

@@ -101,50 +101,40 @@ test('annotated-doc demo creates a document and inserts via the document session
   t.after(() => session.close());
 
   await session.ready;
-  assert.equal(session.document.blocks.length, 1);
-  assert.equal(session.document.blocks[0].text, '');
-  const blockId = session.document.blocks[0].id;
+  assert.equal(session.document.text, '');
 
   // Per-keystroke inserts (distinct actors) — select-all delete must sort spans by op id.
   for (const ch of 'hello') {
-    const block = session.document.blocks[0];
     const inserted = await session.insert({
       mutationId: `smoke-ins-${ch}-${++actionNumber}`,
-      at: { blockId: block.id, offset: block.text.length, affinity: 'right' },
+      at: { offset: session.document.text.length, affinity: 'right' },
       text: ch,
     });
     assert.equal(inserted.ok, true, inserted.failure?.message);
     assert.equal((await inserted.settlement.wait()).status, 'reconciled');
   }
-  assert.equal(session.document.blocks[0].text, 'hello');
+  assert.equal(session.document.text, 'hello');
 
   const marked = await session.applyAnnotation({
     mutationId: 'smoke-comment',
     annotation: { id: 'smoke-comment', family: 'comment', fields: { color: '#fef08a' } },
-    from: { blockId, offset: 1, affinity: 'right' },
-    to: { blockId, offset: 4, affinity: 'right' },
+    from: { offset: 1, affinity: 'right' },
+    to: { offset: 4, affinity: 'right' },
   });
   assert.equal(marked.ok, true, marked.failure?.message);
   assert.equal((await marked.settlement.wait()).status, 'reconciled');
   assert.equal(session.document.annotations.length, 1);
   assert.equal(session.document.annotations[0].id, 'smoke-comment');
 
-  // Select-all delete: clear every block (the comment splits the doc into
-  // multiple blocks). Deleting each block's full range from last to first
-  // empties the document and collapses back to one empty editable block.
-  const originalBlocks = [...session.document.blocks];
-  for (let index = originalBlocks.length - 1; index >= 0; index -= 1) {
-    const target = originalBlocks[index];
-    const deleted = await session.delete({
-      mutationId: `smoke-del-${index}`,
-      from: { blockId: target.id, offset: 0, affinity: 'right' },
-      to: { blockId: target.id, offset: target.text.length, affinity: 'right' },
-    });
-    assert.equal(deleted.ok, true, deleted.failure?.message);
-    assert.equal((await deleted.settlement.wait()).status, 'reconciled');
-  }
-  assert.equal(session.document.blocks.length, 1);
-  assert.equal(session.document.blocks[0].text, '');
+  // Select-all delete: clear the whole continuous document in one delete.
+  const deleted = await session.delete({
+    mutationId: 'smoke-del',
+    from: { offset: 0, affinity: 'right' },
+    to: { offset: session.document.text.length, affinity: 'right' },
+  });
+  assert.equal(deleted.ok, true, deleted.failure?.message);
+  assert.equal((await deleted.settlement.wait()).status, 'reconciled');
+  assert.equal(session.document.text, '');
 
   const listed = await (await fetch(`${origin}/docs`)).json();
   assert.equal(listed.docs.length, 1);
@@ -233,32 +223,27 @@ test('annotated-doc demo deletes a document that carries a confidential span', a
   await session.ready;
 
   const text = 'classified secret';
-  const block = session.document.blocks[0];
   const inserted = await session.insert({
     mutationId: 'conf-insert',
-    at: { blockId: block.id, offset: 0, affinity: 'right' },
+    at: { offset: 0, affinity: 'right' },
     text,
   });
   assert.equal(inserted.ok, true, inserted.failure?.message);
   assert.equal((await inserted.settlement.wait()).status, 'reconciled');
 
-  const range = { blockId: block.id, offset: 0, affinity: 'right' };
   const sensitive = await session.applyAnnotation({
     mutationId: 'conf-sensitive',
     annotation: { id: 'conf-sensitive', family: 'sensitive', fields: {} },
-    from: range,
-    to: { blockId: block.id, offset: text.length, affinity: 'right' },
+    from: { offset: 0, affinity: 'right' },
+    to: { offset: text.length, affinity: 'right' },
   });
   assert.equal(sensitive.ok, true, sensitive.failure?.message);
   assert.equal((await sensitive.settlement.wait()).status, 'reconciled');
-  const sensitiveMembership = session.document.memberships.find((membership) => membership.annotationId === 'conf-sensitive');
-  const memberBlock = session.document.blocks.find((candidate) => candidate.kind === 'visible' && candidate.id === sensitiveMembership?.blockId);
-  assert.ok(memberBlock);
   const confidential = await session.applyAnnotation({
     mutationId: 'conf-confidential',
     annotation: { id: 'conf-confidential', family: 'confidential', fields: {}, protectedTargetIds: ['conf-sensitive'] },
-    from: { blockId: memberBlock.id, offset: 0, affinity: 'right' },
-    to: { blockId: memberBlock.id, offset: memberBlock.text.length, affinity: 'right' },
+    from: { offset: 0, affinity: 'right' },
+    to: { offset: text.length, affinity: 'right' },
   });
   assert.equal(confidential.ok, true, confidential.failure?.message);
   assert.equal((await confidential.settlement.wait()).status, 'reconciled');

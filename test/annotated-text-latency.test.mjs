@@ -78,7 +78,7 @@ async function setupLargeDocument(t) {
   const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
 
   const create = annotatedTextCreateAction(Document, Document.body, {
-    id: 'd1', projectId: 'p1', ownerId: 'u1', source: { blocks: [{ text: largeText() }] },
+    id: 'd1', projectId: 'p1', ownerId: 'u1', source: { text: largeText() },
   });
   const createRes = await fetch(`${origin}/workbench/actions`, {
     method: 'POST', headers: { 'content-type': 'application/json' },

@@ -18,7 +18,6 @@ export {
   annotatedTextRetireAction,
 } from './annotated-text-action.mjs';
 export { exportAnnotatedText, readAnnotatedTextForRecipient } from './annotated-text-snapshot.mjs';
-export { importTextFamilyFromBlocks, resolvePositionToEndpoint, projectEndpointToBlockOffset, materializeBlock, textFamilyCheckpoint, restoreTextFamilyCheckpoint } from './annotated-text-family.mjs';
 export {
   assertWordEvidencePayload,
   readWordEvidence,

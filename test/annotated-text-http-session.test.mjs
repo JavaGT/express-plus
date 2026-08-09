@@ -16,7 +16,10 @@ const Document = entity('LiveDocument', {
   }),
 });
 
-const BLOCK_ERA_ERROR = /annotated-text: block-era command is not supported \(issue #33\)/;
+const BLOCK_ERA_METHODS = [
+  'split', 'merge', 'detachAnnotation', 'continueBlock',
+  'setBlockGroupAssignment', 'clearBlockGroupAssignment', 'splitAndAssign',
+];
 
 function snapshot(text = 'Hello') {
   return {
@@ -238,10 +241,12 @@ test('document session fails closed on revoked bootstrap and exposes no raw disp
   session.close();
 });
 
-test('document session rejects block-era commands and still sends v9 annotation without basis or frontier', async () => {
+test('document session fails closed on block-era commands and still sends v9 annotation without basis or frontier', async () => {
   const { session, requests } = setup();
   await session.ready;
-  assert.throws(() => session.split({ mutationId: 'split-1', at: { offset: 2, affinity: 'right' } }), BLOCK_ERA_ERROR);
+  for (const name of BLOCK_ERA_METHODS) {
+    assert.equal(typeof session[name], 'undefined', `block-era ${name} must not exist on the session`);
+  }
   await session.applyAnnotation({
     mutationId: 'ann-1',
     annotation: { id: 'a1', family: 'note', fields: {} },
@@ -259,16 +264,12 @@ test('document session rejects block-era commands and still sends v9 annotation 
   session.close();
 });
 
-test('document session rejects block-group and structural block-era methods', async () => {
+test('document session exposes no block-group or structural block-era methods', async () => {
   const { session } = setup();
   await session.ready;
-  assert.throws(() => session.continueBlock({ mutationId: 'continue-1', at: { offset: 2, affinity: 'right' } }), BLOCK_ERA_ERROR);
-  assert.throws(() => session.setBlockGroupAssignment({ mutationId: 'assign-1', annotation: { id: 'g1', family: 'grouping', fields: {} } }), BLOCK_ERA_ERROR);
-  assert.throws(() => session.clearBlockGroupAssignment({ mutationId: 'clear-1', family: 'grouping' }), BLOCK_ERA_ERROR);
-  assert.throws(() => session.splitAndAssign({
-    mutationId: 'split-assign-1', at: { offset: 3, affinity: 'right' },
-    annotation: { id: 'g2', family: 'grouping', fields: {} },
-  }), BLOCK_ERA_ERROR);
+  for (const name of ['continueBlock', 'setBlockGroupAssignment', 'clearBlockGroupAssignment', 'splitAndAssign']) {
+    assert.equal(typeof session[name], 'undefined', `block-era ${name} must not exist on the session`);
+  }
   session.close();
 });
 
@@ -321,16 +322,16 @@ test('session sends token-only v9 actions without basis or block identifiers', a
   session.close();
 });
 
-test('session rejects public merge and detach block-era methods', async () => {
+test('session exposes no public merge or detach block-era methods', async () => {
   const merge = v9Setup();
   await merge.session.ready;
-  assert.throws(() => merge.session.merge({ mutationId: 'merge-1', leftBlockId: 'block-1', rightBlockId: 'block-1' }), BLOCK_ERA_ERROR);
+  assert.equal(typeof merge.session.merge, 'undefined', 'block-era merge must not exist on the session');
   assert.equal(merge.actionRequests.length, 0);
   merge.session.close();
 
   const detach = v9Setup();
   await detach.session.ready;
-  assert.throws(() => detach.session.detachAnnotation({ mutationId: 'detach-1', annotationId: 'annotation-1', blockId: 'block-1' }), BLOCK_ERA_ERROR);
+  assert.equal(typeof detach.session.detachAnnotation, 'undefined', 'block-era detachAnnotation must not exist on the session');
   assert.equal(detach.actionRequests.length, 0);
   detach.session.close();
 });

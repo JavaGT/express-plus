@@ -112,7 +112,8 @@ test('public action grammar validates field handles and emits closed v9 authorin
     type: 'PackageActionDocument.annotatedText.retire', payload: { id: 'doc-1' },
   });
   assert.throws(() => annotatedTextCreateAction(Document, Document.body, { projectId: 'p1', ownerId: 'u1' }), /non-empty id/);
-  assert.throws(() => annotatedTextCreateAction(Document, Document.body, { id: 'blank-source', projectId: 'p1', ownerId: 'u1', source: { blocks: [{ text: '' }] } }), /empty block/);
+  assert.throws(() => annotatedTextCreateAction(Document, Document.body, { id: 'blank-source', projectId: 'p1', ownerId: 'u1', source: { text: '' } }), /source requires non-empty text/);
+  assert.throws(() => annotatedTextCreateAction(Document, Document.body, { id: 'block-source', projectId: 'p1', ownerId: 'u1', source: { blocks: [{ text: 'fail-closed' }] } }), /source requires non-empty text/);
   assert.throws(() => annotatedTextCreateAction(Document, Document.body, { id: 'second-field', projectId: 'p1', ownerId: 'u1', fields: { summary: { version: 1, blocks: [{ text: 'bypass' }] } } }), /cannot include 'summary'/);
 });
 

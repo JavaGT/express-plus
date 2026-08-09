@@ -25,14 +25,13 @@ export function mixedAnnotationColor(colors) {
 }
 
 export function annotationQuote(document, annotationId) {
-  // The demo's blockless session document carries one membership per
-  // annotation as an absolute range over the single visible block.
-  const block = (document.blocks ?? []).find((candidate) => candidate.kind === 'visible');
-  const memberships = (document.memberships ?? [])
-    .filter((membership) => membership.annotationId === annotationId)
+  // The demo's blockless session document carries one absolute range per
+  // annotation over the continuous document text.
+  const ranges = (document.ranges ?? [])
+    .filter((range) => range.annotationId === annotationId)
     .sort((left, right) => (left.start ?? 0) - (right.start ?? 0));
-  const quote = memberships
-    .map((membership) => (block?.text ?? '').slice(membership.start ?? 0, membership.end ?? 0))
+  const quote = ranges
+    .map((range) => (document.text ?? '').slice(range.start ?? 0, range.end ?? 0))
     .join('');
   return quote.length > 72 ? `${quote.slice(0, 69)}...` : quote;
 }

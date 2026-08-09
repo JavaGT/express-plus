@@ -26,7 +26,6 @@ import {
 import {
   LiveChannel, LiveList, WorkbenchFailureError, createAuthClient, createLiveStore,
   createLiveDeliverySession, createScopeLiveStore, decodeResult, materializeAnnotatedTextSnapshot,
-  type AnnotatedTextBlock,
   type EventsSinceResponse, type LiveDeliveryCursor as ClientLiveDeliveryCursor, type LiveDeliverySession, type LiveStore, type ScopeLiveStore, type SnapshotResponse,
   type StaleResponse, type WsEnvelope,
 } from 'workbench/client';
@@ -52,7 +51,7 @@ const claimedBlobState: ClaimedBlobLifecycleState = claimedBlobApi.inspect('blob
 if (claimedBlobState.kind === 'available') claimedBlobState.readRange([0, 1]);
 
 const annotatedTextOptions: AnnotatedTextOptions = {
-  project: 'project', owner: 'owner', block: {},
+  project: 'project', owner: 'owner',
   annotations: [annotation('note', { actions: [annotationAction('pin')] })],
   measurements: [measurement('wordCount', { extension: 'wordMeasurement' })],
 };
@@ -114,16 +113,30 @@ void [displayPosition, displayOffset, crosses, placeholderWidth, scalarStartOffs
 declare const annotatedTextEntity: WorkbenchEntity;
 declare const requiredAnnotatedTextHandle: AnnotatedTextFieldHandle;
 annotatedTextCreateAction(annotatedTextEntity, requiredAnnotatedTextHandle, { id: 'document-1', projectId: 'project-1', ownerId: 'owner-1' });
-// @ts-expect-error source import does not admit annotation geometry in R9
+annotatedTextCreateAction(annotatedTextEntity, requiredAnnotatedTextHandle, {
+  id: 'document-1', projectId: 'project-1', ownerId: 'owner-1',
+  source: {
+    text: 'hello',
+    ranges: [{ annotationId: 'a1', family: 'note', start: 0, end: 5 }],
+  },
+});
+// @ts-expect-error block-shaped create input does not exist; source is continuous text
 annotatedTextCreateAction(annotatedTextEntity, requiredAnnotatedTextHandle, { id: 'document-1', projectId: 'project-1', ownerId: 'owner-1', source: { blocks: [{ text: 'hello', annotations: [] }] } });
-// @ts-expect-error package generates measurement identities and format versions
+// @ts-expect-error block-shaped create input does not exist; measurements come whole-document
 annotatedTextCreateAction(annotatedTextEntity, requiredAnnotatedTextHandle, { id: 'document-1', projectId: 'project-1', ownerId: 'owner-1', source: { blocks: [{ text: 'hello', measurements: [{ id: 'raw-id', family: 'wordCount', formatVersion: 1, payload: {} }] }] } });
 annotatedTextAction(annotatedTextEntity, requiredAnnotatedTextHandle, {
-  kind: 'text.insert', id: 'document-1', mutationId: 'insert-1',
-  at: { blockId: 'block-1', offset: 1, affinity: 'right' }, text: 'x',
+  kind: 'text.insert', id: 'document-1',
+  authoring: { version: 1, stream: 'stream', lease: 'lease', mutationId: 'insert-1' },
+  at: { positionToken: 'token', offset: 1, affinity: 'right' }, text: 'x',
 });
-// @ts-expect-error public positions require a recipient-visible block id
-annotatedTextAction(annotatedTextEntity, requiredAnnotatedTextHandle, { kind: 'text.insert', id: 'document-1', mutationId: 'insert-1', at: { offset: 1 }, text: 'x' });
+// @ts-expect-error public positions carry an opaque position token, never blockId
+annotatedTextAction(annotatedTextEntity, requiredAnnotatedTextHandle, { kind: 'text.insert', id: 'document-1', authoring: { version: 1, stream: 'stream', lease: 'lease', mutationId: 'insert-1' }, at: { blockId: 'block-1', offset: 1, affinity: 'right' }, text: 'x' });
+// @ts-expect-error public positions require an authoring position token
+annotatedTextAction(annotatedTextEntity, requiredAnnotatedTextHandle, { kind: 'text.insert', id: 'document-1', authoring: { version: 1, stream: 'stream', lease: 'lease', mutationId: 'insert-1' }, at: { offset: 1, affinity: 'right' }, text: 'x' });
+// @ts-expect-error block commands are not part of the public command kinds
+annotatedTextAction(annotatedTextEntity, requiredAnnotatedTextHandle, { kind: 'block.split', id: 'document-1', authoring: { version: 1, stream: 'stream', lease: 'lease', mutationId: 'split-1' }, at: { positionToken: 'token', offset: 1, affinity: 'right' } });
+// @ts-expect-error public commands carry an authoring binding, not a bare mutationId
+annotatedTextAction(annotatedTextEntity, requiredAnnotatedTextHandle, { kind: 'text.insert', id: 'document-1', mutationId: 'insert-1', at: { positionToken: 'token', offset: 1, affinity: 'right' }, text: 'x' });
 
 declare const projectedAnnotatedTextSnapshot: Record<string, unknown>;
 declare const compiledAnnotatedTextHandle: AnnotatedTextFieldHandle;
@@ -132,37 +145,17 @@ const projectedAnnotatedText = materializeAnnotatedTextSnapshot(
   compiledAnnotatedTextHandle,
 );
 const projectedKind: 'workbench.annotatedText.recipient' = projectedAnnotatedText.kind;
+const projectedText: string = projectedAnnotatedText.text;
+const materializedRanges: readonly { readonly annotationId: string; readonly start: number; readonly end: number }[] = projectedAnnotatedText.ranges;
 // @ts-expect-error recipient snapshots never expose authoring basis state
 projectedAnnotatedText.basis;
-for (const block of projectedAnnotatedText.blocks) {
-  const blockId: string = block.id;
-  if (block.kind === 'restricted') {
-    const placeholder: string = block.placeholder;
-    // @ts-expect-error restricted blocks never expose transcript text
-    block.text;
-    // @ts-expect-error restricted blocks never expose semantic fields
-    block.fields;
-    // @ts-expect-error restricted blocks never expose annotation identities
-    block.annotationIds;
-    // @ts-expect-error restricted blocks never expose measurements
-    block.measurements;
-    // @ts-expect-error restricted blocks never expose body length or offsets
-    block.length;
-    // @ts-expect-error restricted blocks never expose body length or offsets
-    block.offsets;
-    // @ts-expect-error restricted blocks never expose capability hints
-    block.capabilityHints;
-    void placeholder;
-  } else {
-    const text: string = block.text;
-    // @ts-expect-error visible blocks do not carry a restriction placeholder
-    block.placeholder;
-    void text;
-  }
-  void blockId;
-}
-declare const publicBlock: AnnotatedTextBlock;
-void [projectedKind, publicBlock];
+// @ts-expect-error the continuous document has no synthetic blocks
+projectedAnnotatedText.blocks;
+// @ts-expect-error the continuous document has no memberships
+projectedAnnotatedText.memberships;
+// @ts-expect-error the continuous document has no caret blockId grammar
+projectedAnnotatedText.blockId;
+void [projectedKind, projectedText, materializedRanges];
 
 type ProjectRow = { id: string; name: string; ownerId: string };
 const category: FailureCategory = FAILURE_CATEGORIES[0];

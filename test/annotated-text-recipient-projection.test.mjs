@@ -237,7 +237,7 @@ test('whole-document denied protector restricts the recipient fail-closed', () =
     version: 1, protectors: [{ protectorId: 'protect', outcome: 'deny' }], capabilityHints: ['body.read'],
   });
   assert.deepEqual(projected, {
-    kind: 'workbench.annotatedText.recipient', version: 1, restricted: true, text: '', ranges: [], annotations: [],
+    kind: 'workbench.annotatedText.recipient', version: 1, restricted: true, text: '', ranges: [], annotations: [], measurements: [], capabilityHints: [], orphans: [],
   });
   const serialized = JSON.stringify(projected);
   assert.equal(serialized.includes('entirely'), false);

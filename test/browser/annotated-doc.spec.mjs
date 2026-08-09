@@ -139,7 +139,7 @@ test('the live JSON state mirrors the rendered document', async ({ page }) => {
   await expect(editor).toHaveAttribute('aria-busy', 'false');
   const state = page.getByLabel('Live JSON state');
   await expect(state).toContainText('"text": "state"');
-  await expect(state).toContainText('"blocks"');
+  await expect(state).toContainText('"ranges"');
 });
 
 test('rapid sequential input persists every character', async ({ page }) => {
@@ -530,7 +530,8 @@ test('repeated backspace crosses comment edges without losing the editor selecti
   await expect(page.locator('.annotation-card')).toHaveCount(0);
   await expect(editor.locator('[data-block-id]')).toHaveCount(1);
   const state = await page.evaluate(() => JSON.parse(document.querySelector('#live-state pre')?.textContent ?? 'null'));
-  expect(state.blocks).toEqual([expect.objectContaining({ kind: 'visible', text: '', annotationIds: [] })]);
+  expect(state.text).toEqual('');
+  expect(state.ranges ?? []).toEqual([]);
   expect(state.annotations ?? []).toEqual([]);
 });
 

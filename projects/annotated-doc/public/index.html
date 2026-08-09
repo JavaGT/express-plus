@@ -248,9 +248,8 @@
     }
 
     function renderSessionStatus(document = session?.document) {
-      const block = document?.blocks?.find((candidate) => candidate.kind === 'visible');
       setStatus(
-        document ? `${session.status} - ${block ? `${block.id.slice(0, 8)}...` : 'no visible block'}` : 'document unavailable',
+        document ? `${session.status} - ${document.text.length > 0 ? `${document.text.length} chars` : 'empty'}` : 'document unavailable',
         document && session.status === 'live' ? 'ok' : document ? '' : 'error',
       );
     }
@@ -332,7 +331,7 @@
         setStatus('select text in the document first', 'error');
         return;
       }
-      if (selection.from.blockId === selection.to.blockId && selection.from.offset === selection.to.offset) {
+      if (selection.from.offset === selection.to.offset) {
         setStatus('select a range of text to comment on', 'error');
         return;
       }
@@ -386,7 +385,7 @@
       // only a well-formed range enables the marker buttons.
       const enabled = selection != null
         && selection.from != null && selection.to != null
-        && (selection.from.blockId !== selection.to.blockId || selection.from.offset !== selection.to.offset);
+        && selection.from.offset !== selection.to.offset;
       $('add-comment').disabled = session?.status !== 'live' || !enabled;
       $('mark-confidential').disabled = session?.status !== 'live' || !enabled;
     }
@@ -405,7 +404,7 @@
         setStatus('select text in the document first', 'error');
         return;
       }
-      if (selection.from.blockId === selection.to.blockId && selection.from.offset === selection.to.offset) {
+      if (selection.from.offset === selection.to.offset) {
         setStatus('select a range of text to mark confidential', 'error');
         return;
       }
@@ -436,19 +435,17 @@
           to: selection.to,
         });
         await awaitSettlement(applied, { failMessage: 'sensitive span was not applied' });
-        const sensitiveMembership = (session.document?.memberships ?? [])
-          .find((membership) => membership.annotationId === sensitiveId);
-        const memberBlock = (session.document?.blocks ?? [])
-          .find((block) => block.kind === 'visible' && block.id === sensitiveMembership?.blockId);
-        if (!sensitiveMembership || !memberBlock
-          || !Number.isSafeInteger(sensitiveMembership.start) || !Number.isSafeInteger(sensitiveMembership.end)) {
+        const sensitiveRange = (session.document?.ranges ?? [])
+          .find((range) => range.annotationId === sensitiveId);
+        if (!sensitiveRange
+          || !Number.isSafeInteger(sensitiveRange.start) || !Number.isSafeInteger(sensitiveRange.end)) {
           throw new Error('sensitive span did not settle into a visible range');
         }
         const protectedApplied = await session.applyAnnotation({
           mutationId: crypto.randomUUID(),
           annotation: confidential,
-          from: { blockId: memberBlock.id, offset: sensitiveMembership.start, affinity: 'right' },
-          to: { blockId: memberBlock.id, offset: sensitiveMembership.end, affinity: 'right' },
+          from: { offset: sensitiveRange.start, affinity: 'right' },
+          to: { offset: sensitiveRange.end, affinity: 'right' },
         });
         await awaitSettlement(protectedApplied, { failMessage: 'confidential span was not applied' });
         setStatus('confidential span marked', 'ok');

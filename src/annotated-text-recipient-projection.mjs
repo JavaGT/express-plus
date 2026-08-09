@@ -187,7 +187,9 @@ export function projectAnnotatedTextForRecipient(canonical                      
     deniedIntervals.push({ start: range.start, end: range.end, placeholder: meta.protectingFamilies[annotations.get(id) .family].placeholder });
   }
   if (restricted) {
-    const result = { kind: 'workbench.annotatedText.recipient', version: 1, restricted: true, text: '', ranges: [], annotations: [] };
+    // Fail closed but retain the full recipient shape: restricted documents
+    // keep the same collections, with sensitive values emptied (issue #33).
+    const result = { kind: 'workbench.annotatedText.recipient', version: 1, restricted: true, text: '', ranges: [], annotations: [], measurements: [], capabilityHints: [], orphans: [] };
     recipientRedactionIntervals.set(result, []);
     return freeze(result);
   }

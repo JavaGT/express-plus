@@ -91,21 +91,21 @@ test('create action validates the word-evidence envelope against declared famili
   const ctx = await appFor(t);
   const good = annotatedTextCreateAction(ctx.Document, ctx.Document.body, {
     id: 'd1', projectId: 'p1', ownerId: 'u1',
-    source: { blocks: [{ text: 'hello world', wordEvidence: wordEvidence() }] },
+    source: { text: 'hello world', wordEvidence: wordEvidence() },
   });
   assert.equal(good.payload.body.blocks[0].wordEvidence.version, 1);
   assert.deepEqual(good.payload.body.blocks[0].wordEvidence.originalTokens, ['hello', 'world']);
   assert.throws(
     () => annotatedTextCreateAction(ctx.Document, ctx.Document.body, {
       id: 'd2', projectId: 'p1', ownerId: 'u1',
-      source: { blocks: [{ text: 'hello world', wordEvidence: wordEvidence({ families: { timing: { formatVersion: 1, values: [{ mediaStartMs: 0, mediaEndMs: 420 }] } } }) }] },
+      source: { text: 'hello world', wordEvidence: wordEvidence({ families: { timing: { formatVersion: 1, values: [{ mediaStartMs: 0, mediaEndMs: 420 }] } } }) },
     }),
     /aligned/,
   );
   assert.throws(
     () => annotatedTextCreateAction(ctx.Document, ctx.Document.body, {
       id: 'd3', projectId: 'p1', ownerId: 'u1',
-      source: { blocks: [{ text: 'hello world', wordEvidence: wordEvidence({ families: { mystery: { formatVersion: 1, values: [{ mediaStartMs: 0, mediaEndMs: 420 }] } } }) }] },
+      source: { text: 'hello world', wordEvidence: wordEvidence({ families: { mystery: { formatVersion: 1, values: [{ mediaStartMs: 0, mediaEndMs: 420 }] } } }) },
     }),
     /not declared/,
   );

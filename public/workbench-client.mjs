@@ -349,26 +349,25 @@ class LiveSyncSession {
   }
 
   // Send a volatile caret update. Returns false when offline (no queue/replay).
-  updateCaret({ entity, id, field, blockId, offset }) {
+  updateCaret({ entity, id, field, offset }) {
     if (this._closed) throw new ClientClosedError();
     const arg = arguments[0];
     if (!arg || typeof arg !== 'object' || Array.isArray(arg)) {
-      throw new TypeError('updateCaret requires exactly type/entity/id/field/blockId/offset');
+      throw new TypeError('updateCaret requires exactly type/entity/id/field/offset');
     }
     const argKeys = Object.keys(arg);
-    if (argKeys.length !== 5 || argKeys.some((k) => !['entity','id','field','blockId','offset'].includes(k))) {
-      throw new TypeError('updateCaret requires exactly type/entity/id/field/blockId/offset');
+    if (argKeys.length !== 4 || argKeys.some((k) => !['entity','id','field','offset'].includes(k))) {
+      throw new TypeError('updateCaret requires exactly type/entity/id/field/offset');
     }
     if (typeof entity !== 'string' || entity.length === 0 ||
         typeof id !== 'string' || id.length === 0 ||
-        typeof field !== 'string' || field.length === 0 ||
-        typeof blockId !== 'string' || blockId.length === 0) {
-      throw new TypeError('updateCaret requires non-empty strings for entity, id, field, blockId');
+        typeof field !== 'string' || field.length === 0) {
+      throw new TypeError('updateCaret requires non-empty strings for entity, id, field');
     }
     if (!Number.isSafeInteger(offset) || offset < 0) {
       throw new TypeError('updateCaret requires a non-negative safe integer offset');
     }
-    const msg = { type: 'caret.update', entity, id, field, blockId, offset };
+    const msg = { type: 'caret.update', entity, id, field, offset };
     return this._send(msg);
   }
 
@@ -665,15 +664,13 @@ class LiveSyncSession {
       if (!isPlainJsonObject(value)) return;
       const valueKeys = Object.keys(value).sort();
       if (value.kind === 'caret') {
-        if (valueKeys.length !== 4 || valueKeys[0] !== 'blockId' || valueKeys[1] !== 'kind' || valueKeys[2] !== 'offset' || valueKeys[3] !== 'presence') return;
-        if (typeof value.blockId !== 'string' || value.blockId.length === 0 ||
-            typeof value.presence !== 'string' || value.presence.length === 0 ||
+        if (valueKeys.length !== 3 || valueKeys[0] !== 'kind' || valueKeys[1] !== 'offset' || valueKeys[2] !== 'presence') return;
+        if (typeof value.presence !== 'string' || value.presence.length === 0 ||
             !Number.isSafeInteger(value.offset) || value.offset < 0) return;
       } else if (value.kind === 'edge') {
-        if (valueKeys.length !== 4 || valueKeys[0] !== 'blockId' || valueKeys[1] !== 'edge' || valueKeys[2] !== 'kind' || valueKeys[3] !== 'presence') return;
-        if (typeof value.blockId !== 'string' || value.blockId.length === 0 ||
-            typeof value.presence !== 'string' || value.presence.length === 0 ||
-            (value.edge !== 'start' && value.edge !== 'end')) return;
+        if (valueKeys.length !== 3 || valueKeys[0] !== 'edge' || valueKeys[1] !== 'kind' || valueKeys[2] !== 'presence') return;
+        if (typeof value.presence !== 'string' || value.presence.length === 0 ||
+            value.edge !== 'start') return;
       } else {
         return;
       }
@@ -3637,11 +3634,6 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       if (value.affinity !== 'left' && value.affinity !== 'right') throw new TypeError('annotated text position requires an affinity');
       return { positionToken: snapshotBinding.authoring.documentPositionToken, offset: value.offset, affinity: value.affinity };
     };
-    if (command.kind === 'block.split' || command.kind === 'block.merge' || command.kind === 'block.continue'
-      || command.kind === 'block.split-and-assign' || command.kind === 'annotation.detach'
-      || command.kind === 'block-group.assignment.set' || command.kind === 'block-group.assignment.clear') {
-      throw new Error('annotated-text: block-era command is not supported (issue #33)');
-    }
     const translated = { ...command, id: documentId, authoring: { version: 1, stream: snapshotBinding.authoring.stream, lease: snapshotBinding.authoring.lease, mutationId: command.mutationId ?? randomToken() } };
     if (command.at) translated.at = tokenAt(command.at);
     if (command.from) translated.from = tokenAt(command.from);
@@ -3693,18 +3685,10 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       const command = { kind: 'annotation.remove', mutationId, annotationId };
       return queueAuthoringMutation(command, (current) => dispatchNow(current));
     },
-    split() { throw new Error('annotated-text: block-era command is not supported (issue #33)'); },
-    merge() { throw new Error('annotated-text: block-era command is not supported (issue #33)'); },
-    detachAnnotation() { throw new Error('annotated-text: block-era command is not supported (issue #33)'); },
-    continueBlock() { throw new Error('annotated-text: block-era command is not supported (issue #33)'); },
-    setBlockGroupAssignment() { throw new Error('annotated-text: block-era command is not supported (issue #33)'); },
-    clearBlockGroupAssignment() { throw new Error('annotated-text: block-era command is not supported (issue #33)'); },
-    splitAndAssign() { throw new Error('annotated-text: block-era command is not supported (issue #33)'); },
     reconnect: () => session.reconnect(),
     // Subscribe delivers the same document view the session.document getter
     // exposes. The underlying delivery publishes the raw blockless recipient
-    // snapshot; block-era callers (the editor binding) render `blocks` and must
-    // see the single-block view, never the raw envelope.
+    // snapshot; the view passes it through as-is.
     subscribe: (listener) => session.subscribe((snapshot) => listener(snapshot === null ? null : annotatedDocumentView(snapshot))),
     close: () => {
       sessionClosed = true;
@@ -3718,36 +3702,24 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
 
 function annotatedDocumentView(snapshot) {
   if (!snapshot || typeof snapshot !== 'object') return snapshot;
-  return {
+  return Object.freeze({
     kind: snapshot.kind,
     version: snapshot.version,
-    get text() { return snapshot.text; },
+    text: snapshot.text,
     ranges: snapshot.ranges,
     annotations: snapshot.annotations,
-    orphans: snapshot.orphans,
-    measurements: snapshot.measurements,
+    ...(snapshot.orphans !== undefined ? { orphans: snapshot.orphans } : {}),
+    ...(snapshot.measurements !== undefined ? { measurements: snapshot.measurements } : {}),
+    // The materializer projects the wire envelope's capabilityHints into its
+    // public `capabilities` array; the approved session contract exposes them
+    // as `capabilityHints` and never leaks the materialized key. Restricted
+    // documents keep the full shape with an empty hint collection.
+    ...(snapshot.restricted
+      ? { capabilityHints: [] }
+      : { capabilityHints: Array.isArray(snapshot.capabilities) ? snapshot.capabilities : (Array.isArray(snapshot.capabilityHints) ? snapshot.capabilityHints : []) }),
     ...(snapshot.restricted ? { restricted: true } : {}),
     ...(snapshot.redactions?.length ? { redactions: snapshot.redactions } : {}),
-    // Legacy single-block view so block-era callers and the editor keep working.
-    get blocks() {
-      return [Object.freeze({
-        id: 'b',
-        kind: 'visible',
-        text: snapshot.text,
-        redactions: snapshot.redactions ?? [],
-        annotationIds: snapshot.ranges.map((range) => range.annotationId),
-      })];
-    },
-    get memberships() {
-      return snapshot.ranges.map((range, index) => ({
-        annotationId: range.annotationId,
-        blockId: 'b',
-        ordinal: index,
-        start: range.start,
-        end: range.end,
-      }));
-    },
-  };
+  });
 }
 
 // ---------------------------------------------------------------------------

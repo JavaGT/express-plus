@@ -114,10 +114,12 @@ test('annotated text create atomically initializes continuous family state and i
   assert.equal(ctx.db.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name GLOB 'InitDoc_body_block*'").get().count, 0);
   assert.equal(ctx.db.prepare('SELECT COUNT(*) AS count FROM InitDoc_body_state WHERE document_id = ?').get('d1').count, 1);
 
-  // Create via annotatedTextCreateAction concatenates source block texts into one family.
-  // Measurements are merged DOCUMENT-SCOPED across source blocks (one per family;
-  // a family may be carried by any block, not just the first).
-  const imported = await ctx.app.dispatch({
+  // Create via annotatedTextCreateAction imports the continuous source text
+  // into one family. Measurements are DOCUMENT-SCOPED (one per family); a
+  // duplicate family must be rejected by the create validation.
+  // A duplicate family in the source is rejected (one measurement per
+  // (document, family)); the create must fail closed rather than pick one.
+  assert.throws(() => ctx.app.dispatch({
     actionId: 'import',
     principal: { id: 'u1' },
     ...annotatedTextCreateAction(ctx.Document, ctx.Document.body, {
@@ -125,17 +127,14 @@ test('annotated text create atomically initializes continuous family state and i
       projectId: 'p1',
       ownerId: 'u1',
       source: {
-        blocks: [
-          { text: 'first', measurements: [{ family: 'source', payload: { text: 'firstsecond' } }] },
-          { text: 'second', measurements: [{ family: 'source', payload: { text: 'firstsecond' } }] },
+        text: 'firstsecond',
+        measurements: [
+          { family: 'source', payload: { text: 'firstsecond' } },
+          { family: 'source', payload: { text: 'firstsecond' } },
         ],
       },
     }),
-  });
-  // A duplicate family across blocks is rejected (one measurement per
-  // (document, family)); the create must fail closed rather than pick one.
-  assert.equal(imported.ok, false);
-  assert.match(imported.failure?.message ?? '', /duplicate measurement family/);
+  }), /duplicate measurement family/);
 
   const importedTwo = await ctx.app.dispatch({
     actionId: 'import-two',
@@ -145,10 +144,8 @@ test('annotated text create atomically initializes continuous family state and i
       projectId: 'p1',
       ownerId: 'u1',
       source: {
-        blocks: [
-          { text: 'first', measurements: [{ family: 'source', payload: { text: 'firstsecond' } }] },
-          { text: 'second' },
-        ],
+        text: 'firstsecond',
+        measurements: [{ family: 'source', payload: { text: 'firstsecond' } }],
       },
     }),
   });

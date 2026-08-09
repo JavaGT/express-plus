@@ -1,4 +1,3 @@
-import { randomBytes } from 'node:crypto';
 import { assertUtf16Offset, assertWellFormedText } from './annotated-text.mjs';
 import { resolveDeclarationMeasurementExtension } from './annotated-text-field.mjs';
 import { frozenJsonSnapshot } from './annotated-text-r2.mjs';
@@ -91,9 +90,7 @@ function deepFreeze   (value   )    {
 }
 
 export function annotatedTextAction(entity                     , field                          , command                     )                                     {
-  return buildAnnotatedTextAction(entity, field, command, {
-    mintTemporaryBlock: () => randomBytes(32).toString('base64url'),
-  });
+  return buildAnnotatedTextAction(entity, field, command);
 }
 
 export function annotatedTextRetireAction(entity                     , documentId        )                                            {
@@ -136,41 +133,33 @@ export function annotatedTextCreateAction(entity                     , field    
   if (input.source !== undefined) {
     const source = input.source;
     if (!source || typeof source !== 'object' || Array.isArray(source) ||
-        Object.keys(source).some((key) => !['blocks', 'ranges'].includes(key)) ||
-        !Array.isArray(source.blocks) || source.blocks.length === 0) {
-      throw new Error('annotatedTextCreateAction: source requires exactly non-empty blocks');
+        Object.keys(source).some((key) => !['text', 'ranges', 'measurements', 'wordEvidence'].includes(key)) ||
+        typeof source.text !== 'string' || source.text.length === 0) {
+      throw new Error('annotatedTextCreateAction: source requires non-empty text');
     }
-    const blocks = source.blocks.map((block                     , index        )                           => {
-      if (!block || typeof block !== 'object' || Array.isArray(block) ||
-          Object.keys(block).some((key) => !['text', 'fields', 'measurements', 'wordEvidence'].includes(key)) || typeof block.text !== 'string') {
-        throw new Error(`annotatedTextCreateAction: source block ${index} is invalid`);
+    const text = source.text;
+    try { assertWellFormedText(text); } catch (error) { throw new Error(`annotatedTextCreateAction: source text ${(error         ).message}`); }
+    let wordEvidence;
+    if (source.wordEvidence !== undefined) {
+      try {
+        wordEvidence = assertWordEvidencePayload(source.wordEvidence, {
+          families: descriptor.wordEvidence,
+          blockText: text,
+        }       );
+      } catch (error) {
+        throw new Error(`annotatedTextCreateAction: source wordEvidence ${(error         ).message}`);
       }
-      try { assertWellFormedText(block.text); } catch (error) { throw new Error(`annotatedTextCreateAction: source block ${index} text ${(error         ).message}`); }
-      if (block.text.length === 0) throw new Error('annotatedTextCreateAction: source has an empty block');
-      if (block.fields !== undefined && (!block.fields || typeof block.fields !== 'object' || Array.isArray(block.fields))) {
-        throw new Error(`annotatedTextCreateAction: source block ${index} fields must be a non-array object`);
-      }
-      if (block.measurements !== undefined && !Array.isArray(block.measurements)) {
-        throw new Error(`annotatedTextCreateAction: source block ${index} measurements must be an array`);
-      }
-      let wordEvidence;
-      if (block.wordEvidence !== undefined) {
-        try {
-          wordEvidence = assertWordEvidencePayload(block.wordEvidence, {
-            families: descriptor.wordEvidence,
-            blockText: block.text,
-          }       );
-        } catch (error) {
-          throw new Error(`annotatedTextCreateAction: source block ${index} wordEvidence ${(error         ).message}`);
-        }
-      }
-      const families = new Set        ();
-      const measurements = (block.measurements ?? []).map((measurement                     , measurementIndex        )                                       => {
+    }
+    const families = new Set        ();
+    let measurements;
+    if (source.measurements !== undefined) {
+      if (!Array.isArray(source.measurements)) throw new Error('annotatedTextCreateAction: source measurements must be an array');
+      measurements = source.measurements.map((measurement                     , measurementIndex        )                                       => {
         if (!measurement || typeof measurement !== 'object' || Array.isArray(measurement) ||
             Object.keys(measurement).length !== 2 || typeof measurement.family !== 'string' || !Object.hasOwn(measurement, 'payload')) {
-          throw new Error(`annotatedTextCreateAction: source block ${index} measurement ${measurementIndex} is invalid`);
+          throw new Error(`annotatedTextCreateAction: source measurement ${measurementIndex} is invalid`);
         }
-        if (families.has(measurement.family)) throw new Error(`annotatedTextCreateAction: source block ${index} has duplicate measurement family '${measurement.family}'`);
+        if (families.has(measurement.family)) throw new Error(`annotatedTextCreateAction: source has duplicate measurement family '${measurement.family}'`);
         families.add(measurement.family);
         const config = descriptor.measurements.find((entry) => entry.measurementName === measurement.family);
         const extension = config && resolveDeclarationMeasurementExtension(config)                                                       ;
@@ -178,22 +167,16 @@ export function annotatedTextCreateAction(entity                     , field    
         let measurementPayload;
         try {
           measurementPayload = frozenJsonSnapshot(measurement.payload);
-          if (extension.validate(Object.freeze({ version: 1, formatVersion: config.formatVersion, blockText: block.text, payload: measurementPayload })) !== undefined) throw new Error('validator returned a value');
+          if (extension.validate(Object.freeze({ version: 1, formatVersion: config.formatVersion, blockText: text, payload: measurementPayload })) !== undefined) throw new Error('validator returned a value');
         } catch {
           throw new Error(`annotatedTextCreateAction: source measurement '${measurement.family}' failed validation`);
         }
         return { family: measurement.family, payload: measurementPayload };
       });
-      return {
-        text: block.text,
-        ...(block.fields === undefined ? {} : { fields: structuredClone(block.fields) }),
-        ...(block.measurements === undefined ? {} : { measurements }),
-        ...(wordEvidence === undefined ? {} : { wordEvidence }),
-      };
-    });
+    }
     const ranges = source.ranges === undefined ? undefined : (() => {
       if (!Array.isArray(source.ranges)) throw new Error('annotatedTextCreateAction: source ranges must be an array');
-      const fullText = blocks.map((block                          ) => block.text).join('');
+      const fullText = text;
       const annotationIds = new Set        ();
       return source.ranges.map((range                     , rangeIndex        )                           => {
         if (!range || typeof range !== 'object' || Array.isArray(range) ||
@@ -227,7 +210,12 @@ export function annotatedTextCreateAction(entity                     , field    
         };
       });
     })();
-    payload[fieldName] = { version: 1, blocks, ...(ranges === undefined ? {} : { ranges }) };
+    const block                           = {
+      text,
+      ...(measurements === undefined ? {} : { measurements }),
+      ...(wordEvidence === undefined ? {} : { wordEvidence }),
+    };
+    payload[fieldName] = { version: 1, blocks: [block], ...(ranges === undefined ? {} : { ranges }) };
   }
   const type = `${entity.name}.create`;
 

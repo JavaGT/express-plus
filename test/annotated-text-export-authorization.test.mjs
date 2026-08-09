@@ -56,10 +56,10 @@ test('canonical export is bound to the declared owning Project and its current a
     scope: 'ExportProject:p1',
     ...annotatedTextCreateAction(Transcript, Transcript.body, {
       id: 'd1', projectId: 'p1', ownerId: 'editor',
-      source: { blocks: [
-        { text: 'canonical ', measurements: [{ family: 'words', payload: { provider: 'local', originalToken: 'canonical', start: 0, end: 9 } }] },
-        { text: 'text' },
-      ] },
+      source: {
+        text: 'canonical text',
+        measurements: [{ family: 'words', payload: { provider: 'local', originalToken: 'canonical', start: 0, end: 9 } }],
+      },
     }),
   });
   assert.equal(created.ok, true, created.failure?.message);
