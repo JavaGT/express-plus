@@ -65,7 +65,7 @@ async function createCommentedDocument(page, { text = '1234567890', from = 2, to
   await expect(editor).toHaveAttribute('aria-busy', 'false');
   await editor.evaluate((element, rangeOffsets) => {
     const block = element.querySelector('[data-block-id]');
-    const node = block.firstChild;
+    const node = element.ownerDocument.createTreeWalker(block, NodeFilter.SHOW_TEXT).nextNode();
     const range = document.createRange();
     range.setStart(node, rangeOffsets.from);
     range.setEnd(node, rangeOffsets.to);
@@ -207,7 +207,7 @@ test('adding a comment marker preserves the selected and following text', async 
   await expect(editor).toHaveText(text);
   await expect(editor).toHaveAttribute('aria-busy', 'false');
   await editor.evaluate((element) => {
-    const node = element.firstElementChild.firstChild;
+    const node = element.ownerDocument.createTreeWalker(element.firstElementChild, NodeFilter.SHOW_TEXT).nextNode();
     const range = document.createRange();
     range.setStart(node, 7);
     range.setEnd(node, 15);
@@ -296,7 +296,7 @@ test('a comment can be deleted from the annotation list and stays deleted after 
   await expect(editor).toHaveText('before selected after');
   await expect(editor).toHaveAttribute('aria-busy', 'false');
   await editor.evaluate((element) => {
-    const node = element.firstElementChild.firstChild;
+    const node = element.ownerDocument.createTreeWalker(element.firstElementChild, NodeFilter.SHOW_TEXT).nextNode();
     const range = document.createRange();
     range.setStart(node, 7);
     range.setEnd(node, 15);
@@ -327,7 +327,7 @@ test('typing after an end comment keeps the caret outside the comment', async ({
   await expect(editor).toHaveText('1234567890');
   await expect(editor).toHaveAttribute('aria-busy', 'false');
   await editor.evaluate((element) => {
-    const node = element.firstElementChild.firstChild;
+    const node = element.ownerDocument.createTreeWalker(element.firstElementChild, NodeFilter.SHOW_TEXT).nextNode();
     const range = document.createRange();
     range.setStart(node, 8);
     range.setEnd(node, 10);
@@ -375,7 +375,7 @@ test('boundary typing follows the blockless range affinity', async ({ page }) =>
   await expect(editor).toHaveText('1234567890');
   await expect(editor).toHaveAttribute('aria-busy', 'false');
   await editor.evaluate((element) => {
-    const node = element.firstElementChild.firstChild;
+    const node = element.ownerDocument.createTreeWalker(element.firstElementChild, NodeFilter.SHOW_TEXT).nextNode();
     const range = document.createRange();
     range.setStart(node, 2);
     range.setEnd(node, 4);
@@ -441,7 +441,7 @@ test('typing at the edges of a whole-document comment follows boundary affinity'
   await expect(editor).toHaveText('34');
   await expect(editor).toHaveAttribute('aria-busy', 'false');
   await editor.evaluate((element) => {
-    const node = element.firstElementChild.firstChild;
+    const node = element.ownerDocument.createTreeWalker(element.firstElementChild, NodeFilter.SHOW_TEXT).nextNode();
     const range = document.createRange();
     range.selectNodeContents(node);
     const selection = window.getSelection();
@@ -638,7 +638,7 @@ test('replacing selected text is atomic and survives reload', async ({ page }) =
   await editor.pressSequentially('Hello', { delay: 0 });
   await expect(editor).toHaveAttribute('aria-busy', 'false');
   await editor.evaluate((element) => {
-    const node = element.firstElementChild.firstChild;
+    const node = element.ownerDocument.createTreeWalker(element.firstElementChild, NodeFilter.SHOW_TEXT).nextNode();
     const range = document.createRange();
     range.setStart(node, 1);
     range.setEnd(node, 4);
@@ -662,7 +662,7 @@ test('adding a marker while text is buffered fails closed without a page error',
   await editor.pressSequentially('buffered text', { delay: 0 });
   await expect(editor.locator('[data-block-id]')).toHaveCount(1);
   await editor.evaluate((element) => {
-    const node = element.firstElementChild.firstChild;
+    const node = element.ownerDocument.createTreeWalker(element.firstElementChild, NodeFilter.SHOW_TEXT).nextNode();
     const range = document.createRange();
     range.setStart(node, 0);
     range.setEnd(node, node.data.length);
@@ -812,7 +812,7 @@ test('a confidential span shows the real text to the owner and a redacted placeh
   await expect(editor).toHaveText('hello secret world');
   await expect(editor).toHaveAttribute('aria-busy', 'false');
   await editor.evaluate((element) => {
-    const node = element.firstElementChild.firstChild;
+    const node = element.ownerDocument.createTreeWalker(element.firstElementChild, NodeFilter.SHOW_TEXT).nextNode();
     const range = document.createRange();
     range.setStart(node, 6);
     range.setEnd(node, 12);
@@ -935,7 +935,7 @@ test('a reader selection that crosses a placeholder is rejected and never edits'
   await editor.pressSequentially('hello secret world', { delay: 0 });
   await expect(editor).toHaveAttribute('aria-busy', 'false');
   await editor.evaluate((element) => {
-    const node = element.firstElementChild.firstChild;
+    const node = element.ownerDocument.createTreeWalker(element.firstElementChild, NodeFilter.SHOW_TEXT).nextNode();
     const range = document.createRange();
     range.setStart(node, 6);
     range.setEnd(node, 12);
@@ -985,4 +985,102 @@ test('a reader selection that crosses a placeholder is rejected and never edits'
   // The owner's document is untouched.
   await expect(editor).toHaveText('hello secret world');
   await context.close();
+});
+
+// Build a three-run document by dispatching the paragraph-break beforeinput
+// the browser sends for Enter (the demo is plaintext-only, so the input is
+// driven through the same insertParagraph seam the editor listens for).
+async function buildThreeRunDocument(page, editor) {
+  const split = () => editor.evaluate((element) => {
+    element.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertParagraph' }));
+  });
+  await editor.pressSequentially('aaa', { delay: 0 });
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await placeCaretAtDisplay(editor, 3);
+  await split();
+  await expect(editor).toHaveText('aaa\n');
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await placeCaretAtDisplay(editor, 4);
+  await editor.pressSequentially('bbb', { delay: 0 });
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await placeCaretAtDisplay(editor, 8);
+  await split();
+  await expect(editor).toHaveText('aaa\nbbb\n');
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await placeCaretAtDisplay(editor, 9);
+  await editor.pressSequentially('ccc', { delay: 0 });
+  await expect(editor).toHaveText('aaa\nbbb\nccc');
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+}
+
+test('Enter creates a paragraph boundary that persists through reload', async ({ page }) => {
+  const id = await createDocument(page);
+  const editor = page.locator('#editor');
+  await editor.pressSequentially('hello', { delay: 0 });
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await placeCaretAtDisplay(editor, 2);
+  await editor.evaluate((element) => {
+    element.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertParagraph' }));
+  });
+  await expect(editor).toHaveText('he\nllo');
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await expect(editor.locator('[data-run-index]')).toHaveCount(2);
+  await page.reload();
+  await openDocument(page, id);
+  await expect(editor).toHaveText('he\nllo');
+  await expect(editor.locator('[data-run-index]')).toHaveCount(2);
+});
+
+test('cut removes the selected text and the deletion persists through reload', async ({ page }) => {
+  const id = await createDocument(page);
+  const editor = page.locator('#editor');
+  await editor.pressSequentially('abcd', { delay: 0 });
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await editor.evaluate((element) => {
+    const block = element.querySelector('[data-block-id]');
+    const node = element.ownerDocument.createTreeWalker(block, NodeFilter.SHOW_TEXT).nextNode();
+    const range = document.createRange();
+    range.setStart(node, 1);
+    range.setEnd(node, 3);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    element.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'deleteByCut' }));
+  });
+  await expect(editor).toHaveText('ad');
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await page.reload();
+  await openDocument(page, id);
+  await expect(editor).toHaveText('ad');
+});
+
+test('ordinary typing repaints only the touched run and preserves the other run nodes', async ({ page }) => {
+  const id = await createDocument(page);
+  const editor = page.locator('#editor');
+  await buildThreeRunDocument(page, editor);
+  await expect(editor.locator('[data-run-index]')).toHaveCount(3);
+  await editor.evaluate(() => {
+    window.__runs = [...document.querySelectorAll('[data-run-index]')];
+  });
+  await placeCaretAtDisplay(editor, 1);
+  await editor.pressSequentially('X', { delay: 0 });
+  await expect(editor).toHaveText('aXaa\nbbb\nccc');
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  const identity = await editor.evaluate(() => {
+    const current = [...document.querySelectorAll('[data-run-index]')];
+    return {
+      count: current.length,
+      sameNodes: current.length === window.__runs.length
+        && current.every((element, index) => element === window.__runs[index]),
+      firstRunReused: current[0] === window.__runs[0],
+      firstRunText: current[0]?.textContent,
+    };
+  });
+  expect(identity.count).toBe(3);
+  expect(identity.sameNodes).toBe(true);
+  expect(identity.firstRunReused).toBe(true);
+  expect(identity.firstRunText).toBe('aXaa\n');
+  await page.reload();
+  await openDocument(page, id);
+  await expect(editor).toHaveText('aXaa\nbbb\nccc');
 });

@@ -24,25 +24,12 @@ function setup(text = 'Hello', document = visible(text)) {
     subscribe(next) { listener = next; return () => { listener = null; }; },
   };
   const binding = bindAnnotatedTextEditor({ element, session, onError: (error) => errors.push(error) });
-  function select(from, to = from) {
-    element.focus();
-    const span = element.querySelector('[data-block-id="b"]');
-    const node = span?.firstChild?.nodeType === 3 ? span.firstChild : span;
-    const range = dom.window.document.createRange();
-    range.setStart(node, from);
-    range.setEnd(node, to);
-    dom.window.getSelection().removeAllRanges();
-    dom.window.getSelection().addRange(range);
-  }
-  function beforeinput(inputType, data = null, extras = {}) {
-    const event = new dom.window.InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType, data, ...extras });
-    element.dispatchEvent(event);
-    return event;
-  }
   // Select a range by DISPLAY offsets (placeholder columns included) across all
-  // text nodes inside the one root span. Used for redacted documents where the
-  // placeholder splits the DOM into several text nodes.
-  function displaySelect(from, to = from) {
+  // text nodes inside the one root span. The keyed-run DOM splits the text into
+  // per-run text nodes, so offsets are resolved by walking the span's text in
+  // document order (semantically identical to the old single-flat-text-node
+  // selection for any document that rendered as one text node before).
+  function select(from, to = from) {
     element.focus();
     const span = element.querySelector('[data-block-id="b"]');
     const point = (target) => {
@@ -54,6 +41,7 @@ function setup(text = 'Hello', document = visible(text)) {
         if (target <= next) return [node, target - offset];
         offset = next;
       }
+      if (target === offset) return [span, 0];
       throw new Error('display offset is outside the editor');
     };
     const [startNode, startOffset] = point(from);
@@ -64,7 +52,28 @@ function setup(text = 'Hello', document = visible(text)) {
     dom.window.getSelection().removeAllRanges();
     dom.window.getSelection().addRange(range);
   }
-  return { dom, element, session, calls, errors, binding, select, displaySelect, beforeinput, publish(document) { session.document = document; listener?.(document); } };
+  function beforeinput(inputType, data = null, extras = {}) {
+    const event = new dom.window.InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType, data, ...extras });
+    element.dispatchEvent(event);
+    return event;
+  }
+  // Replace the whole document's rendered text (used by the composition tests,
+  // which mutate the DOM between compositionstart and compositionend the way a
+  // real IME does). The first text node holds the whole single-run text; set
+  // its data so the keyed-run structure survives until the repaint.
+  function setDocumentText(text) {
+    const span = element.querySelector('[data-block-id="b"]');
+    const node = span?.ownerDocument.createTreeWalker(span, 4).nextNode();
+    if (node) node.data = text;
+    else if (span) span.textContent = text;
+  }
+  // Select a range by DISPLAY offsets (placeholder columns included) across all
+  // text nodes inside the one root span. Used for redacted documents where the
+  // placeholder splits the DOM into several text nodes.
+  function displaySelect(from, to = from) {
+    select(from, to);
+  }
+  return { dom, element, session, calls, errors, binding, select, displaySelect, beforeinput, setDocumentText, publish(document) { session.document = document; listener?.(document); } };
 }
 
 const flushInput = () => new Promise((resolve) => setTimeout(resolve, 110));
@@ -165,7 +174,7 @@ test('annotated editor commits composition once and delegates history', async ()
   const harness = setup('ab');
   harness.select(1);
   harness.element.dispatchEvent(new harness.dom.window.CompositionEvent('compositionstart', { bubbles: true }));
-  harness.element.firstChild.textContent = 'a語b';
+  harness.setDocumentText('a語b');
   harness.element.dispatchEvent(new harness.dom.window.CompositionEvent('compositionend', { bubbles: true, data: '語' }));
   await Promise.resolve();
   assert.equal(harness.calls.length, 1);
@@ -327,7 +336,7 @@ test('annotated editor folds queued typing into one composition replacement', as
   harness.select(1);
   harness.beforeinput('insertText', 'b');
   harness.element.dispatchEvent(new harness.dom.window.CompositionEvent('compositionstart', { bubbles: true }));
-  harness.element.firstChild.textContent = 'ab語';
+  harness.setDocumentText('ab語');
   harness.element.dispatchEvent(new harness.dom.window.CompositionEvent('compositionend', { bubbles: true, data: '語' }));
   await Promise.resolve();
 
@@ -346,7 +355,7 @@ test('annotated editor rebases queued typing and composition over a compatible f
   harness.beforeinput('insertText', 'b');
   harness.element.dispatchEvent(new harness.dom.window.CompositionEvent('compositionstart', { bubbles: true }));
   harness.publish(visible('ac'));
-  harness.element.firstChild.textContent = 'ab語';
+  harness.setDocumentText('ab語');
   harness.element.dispatchEvent(new harness.dom.window.CompositionEvent('compositionend', { bubbles: true, data: '語' }));
 
   assert.equal(harness.element.textContent, 'ab語c');
@@ -365,7 +374,7 @@ test('annotated editor reports an incompatible update after queued composition i
   harness.beforeinput('insertText', 'b');
   harness.element.dispatchEvent(new harness.dom.window.CompositionEvent('compositionstart', { bubbles: true }));
   harness.publish(visible('foreign replacement'));
-  harness.element.firstChild.textContent = 'ab語';
+  harness.setDocumentText('ab語');
   harness.element.dispatchEvent(new harness.dom.window.CompositionEvent('compositionend', { bubbles: true, data: '語' }));
 
   assert.equal(harness.element.textContent, 'foreign replacement');
@@ -417,7 +426,7 @@ test('annotated editor queues composition behind a submitted replacement', async
   await flushInput();
   harness.select(2);
   harness.element.dispatchEvent(new harness.dom.window.CompositionEvent('compositionstart', { bubbles: true }));
-  harness.element.firstChild.textContent = 'ab語';
+  harness.setDocumentText('ab語');
   harness.element.dispatchEvent(new harness.dom.window.CompositionEvent('compositionend', { bubbles: true, data: '語' }));
   await flushInput();
 
@@ -629,11 +638,10 @@ test('annotated editor rejects selections crossing a redaction placeholder', () 
   const harness = setup('', document);
   const selection = harness.dom.window.getSelection();
   const span = harness.element.querySelector('[data-block-id="b"]');
-  // A caret at the placeholder's left display edge maps to its wire start.
-  const before = harness.dom.window.document.createRange();
-  before.setStart(span.firstChild, 6);
-  before.collapse(true);
-  selection.removeAllRanges(); selection.addRange(before);
+  // A caret at the placeholder's left display edge maps to its wire start
+  // (the keyed-run DOM splits the text into fragments, so place it by display
+  // offset across the run's text nodes).
+  harness.displaySelect(6);
   assert.deepEqual(harness.binding.getSelection(), {
     from: { offset: 6, affinity: 'left' },
     to: { offset: 6, affinity: 'left' },
@@ -898,6 +906,299 @@ test('annotated editor rejects a spanning selection client-side without folding'
   harness.beforeinput('deleteContentBackward');
   await flushInput();
   assert.deepEqual(harness.calls, []);
+  assert.deepEqual(harness.errors, []);
+  harness.binding.close();
+});
+
+function runElements(harness) {
+  return [...harness.element.querySelector('[data-block-id="b"]').children];
+}
+
+test('annotated editor creates a paragraph boundary with insertParagraph', async () => {
+  const harness = setup('ab');
+  harness.select(1);
+  const event = harness.beforeinput('insertParagraph');
+  assert.equal(event.defaultPrevented, true);
+  assert.equal(harness.element.textContent, 'a\nb');
+  await flushInput();
+  assert.equal(harness.calls.length, 1, 'Enter is exactly one durable mutation');
+  assert.deepEqual(harness.calls[0][1], {
+    from: { offset: 1, affinity: 'right' },
+    to: { offset: 1, affinity: 'right' },
+    text: '\n',
+  });
+  assert.deepEqual(harness.errors, []);
+  harness.binding.close();
+});
+
+test('annotated editor creates a paragraph boundary with insertLineBreak', async () => {
+  const harness = setup('ab');
+  harness.select(1);
+  const event = harness.beforeinput('insertLineBreak');
+  assert.equal(event.defaultPrevented, true);
+  await flushInput();
+  assert.equal(harness.element.textContent, 'a\nb');
+  assert.equal(harness.calls.length, 1, 'Shift+Enter is exactly one durable mutation');
+  assert.deepEqual(harness.calls[0][1], {
+    from: { offset: 1, affinity: 'right' },
+    to: { offset: 1, affinity: 'right' },
+    text: '\n',
+  });
+  assert.deepEqual(harness.errors, []);
+  harness.binding.close();
+});
+
+test('annotated editor replaces a selection with a paragraph break on Enter', async () => {
+  const harness = setup('abcd');
+  harness.select(1, 3);
+  harness.beforeinput('insertLineBreak');
+  await flushInput();
+  assert.equal(harness.element.textContent, 'a\nd');
+  assert.deepEqual(harness.calls[0][1], {
+    from: { offset: 1, affinity: 'right' },
+    to: { offset: 3, affinity: 'right' },
+    text: '\n',
+  });
+  assert.deepEqual(harness.errors, []);
+  harness.binding.close();
+});
+
+test('annotated editor removes the selection on cut and treats a collapsed cut as a no-op', async () => {
+  const cut = setup('abcd');
+  cut.select(1, 3);
+  const event = cut.beforeinput('deleteByCut');
+  assert.equal(event.defaultPrevented, true);
+  assert.equal(cut.element.textContent, 'ad');
+  await flushInput();
+  assert.equal(cut.calls.length, 1, 'cut is exactly one durable mutation');
+  assert.deepEqual(cut.calls[0][1], {
+    from: { offset: 1, affinity: 'right' },
+    to: { offset: 3, affinity: 'right' },
+    text: '',
+  });
+  assert.deepEqual(cut.errors, []);
+  cut.binding.close();
+
+  const collapsed = setup('ab');
+  collapsed.select(1);
+  collapsed.beforeinput('deleteByCut');
+  await flushInput();
+  assert.deepEqual(collapsed.calls, []);
+  assert.deepEqual(collapsed.errors, []);
+  collapsed.binding.close();
+});
+
+test('annotated editor replaces a multi-run selection as one durable mutation', async () => {
+  const harness = setup('a\nb');
+  harness.select(0, 3);
+  harness.beforeinput('insertText', 'X');
+  await flushInput();
+  assert.equal(harness.element.textContent, 'X');
+  assert.equal(harness.calls.length, 1, 'a cross-paragraph replacement is one replace, not a delete+insert pair');
+  assert.deepEqual(harness.calls[0][1], {
+    from: { offset: 0, affinity: 'right' },
+    to: { offset: 3, affinity: 'right' },
+    text: 'X',
+  });
+  assert.deepEqual(harness.errors, []);
+  harness.binding.close();
+});
+
+test('annotated editor renders empty LF-delimited runs as keyed fragments', () => {
+  const harness = setup('a\n\nb');
+  const runs = runElements(harness);
+  assert.equal(runs.length, 3);
+  assert.deepEqual(runs.map((run) => run.dataset.runIndex), ['0', '1', '2']);
+  assert.deepEqual(runs.map((run) => run.textContent), ['a\n', '\n', 'b']);
+  assert.equal(harness.element.textContent, 'a\n\nb');
+  harness.binding.close();
+});
+
+test('annotated editor splits a run into two runs with insertParagraph', async () => {
+  const harness = setup('ab');
+  harness.select(1);
+  harness.beforeinput('insertParagraph');
+  assert.equal(harness.element.textContent, 'a\nb');
+  const runs = runElements(harness);
+  assert.equal(runs.length, 2);
+  assert.deepEqual(runs.map((run) => run.dataset.runIndex), ['0', '1']);
+  assert.deepEqual(runs.map((run) => run.textContent), ['a\n', 'b']);
+  await flushInput();
+  assert.deepEqual(harness.calls[0][1], {
+    from: { offset: 1, affinity: 'right' },
+    to: { offset: 1, affinity: 'right' },
+    text: '\n',
+  });
+  harness.binding.close();
+});
+
+test('annotated editor joins runs when backspacing across a paragraph boundary', async () => {
+  const harness = setup('a\nb');
+  assert.equal(runElements(harness).length, 2);
+  harness.select(2);
+  harness.beforeinput('deleteContentBackward');
+  await flushInput();
+  assert.equal(harness.element.textContent, 'ab');
+  const runs = runElements(harness);
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0].textContent, 'ab');
+  assert.deepEqual(harness.calls[0][1], {
+    from: { offset: 1, affinity: 'right' },
+    to: { offset: 2, affinity: 'right' },
+    text: '',
+  });
+  assert.deepEqual(harness.errors, []);
+  harness.binding.close();
+});
+
+test('annotated editor repaints only the touched run and preserves unchanged run nodes', async () => {
+  const harness = setup('aaa\nbbb\nccc');
+  const before = runElements(harness);
+  assert.equal(before.length, 3);
+  assert.deepEqual(before.map((run) => run.textContent), ['aaa\n', 'bbb\n', 'ccc']);
+
+  harness.select(1);
+  harness.beforeinput('insertText', 'X');
+  await flushInput();
+  assert.equal(harness.element.textContent, 'aXaa\nbbb\nccc');
+  const after = runElements(harness);
+  assert.equal(after.length, 3);
+  assert.equal(after[0], before[0], 'the edited run element is reused, not recreated');
+  assert.equal(after[0].textContent, 'aXaa\n');
+  assert.equal(after[1], before[1], 'the untouched run keeps its node identity');
+  assert.equal(after[1].textContent, 'bbb\n');
+  assert.equal(after[2], before[2], 'the untouched run keeps its node identity');
+  assert.equal(after[2].textContent, 'ccc');
+  assert.deepEqual(harness.calls[0][1], {
+    from: { offset: 1, affinity: 'right' },
+    to: { offset: 1, affinity: 'right' },
+    text: 'X',
+  });
+  assert.deepEqual(harness.errors, []);
+  harness.binding.close();
+});
+
+test('annotated editor preserves later run nodes when insertParagraph splits an earlier run', async () => {
+  const harness = setup('aaa\nbbb\nccc');
+  const before = runElements(harness);
+  assert.equal(before.length, 3);
+  assert.deepEqual(before.map((run) => run.textContent), ['aaa\n', 'bbb\n', 'ccc']);
+
+  harness.select(1);
+  harness.beforeinput('insertParagraph');
+  // The split inserts a '\n' at offset 1: run 0 'aaa\n' becomes 'a\n' + 'aa\n'.
+  assert.equal(harness.element.textContent, 'a\naa\nbbb\nccc');
+  const after = runElements(harness);
+  assert.equal(after.length, 4);
+  assert.deepEqual(after.map((run) => run.dataset.runIndex), ['0', '1', '2', '3']);
+  assert.deepEqual(after.map((run) => run.textContent), ['a\n', 'aa\n', 'bbb\n', 'ccc']);
+  // The edited run's first fragment reuses the original run element in place;
+  // its second fragment is a fresh element.
+  assert.equal(after[0], before[0], 'the split run\'s first half reuses the edited run element');
+  assert.notEqual(after[1], before[0], 'the split run\'s second half is a fresh element');
+  assert.equal(after[1].isConnected, true);
+  // The later unchanged runs keep their exact node identity even though their
+  // index shifted by the split.
+  assert.equal(after[2], before[1], 'the unchanged run after the split keeps its node identity');
+  assert.equal(after[2].textContent, 'bbb\n');
+  assert.equal(after[3], before[2], 'the trailing unchanged run keeps its node identity');
+  assert.equal(after[3].textContent, 'ccc');
+  await flushInput();
+  assert.equal(harness.calls.length, 1, 'the split is exactly one durable mutation');
+  assert.deepEqual(harness.calls[0][1], {
+    from: { offset: 1, affinity: 'right' },
+    to: { offset: 1, affinity: 'right' },
+    text: '\n',
+  });
+  assert.deepEqual(harness.errors, []);
+  harness.binding.close();
+});
+
+test('annotated editor preserves following run nodes when backspace joins two runs', async () => {
+  const harness = setup('aaa\nbbb\nccc');
+  const before = runElements(harness);
+  assert.equal(before.length, 3);
+  assert.deepEqual(before.map((run) => run.textContent), ['aaa\n', 'bbb\n', 'ccc']);
+
+  // Caret between the first '\n' and 'bbb': backspace deletes the boundary.
+  harness.select(4);
+  harness.beforeinput('deleteContentBackward');
+  assert.equal(harness.element.textContent, 'aaabbb\nccc');
+  const after = runElements(harness);
+  assert.equal(after.length, 2);
+  assert.deepEqual(after.map((run) => run.dataset.runIndex), ['0', '1']);
+  assert.deepEqual(after.map((run) => run.textContent), ['aaabbb\n', 'ccc']);
+  // The joined run reuses the first fragment's element (repainted); the second
+  // run's node is detached, and the trailing run keeps its exact node identity
+  // across the join.
+  assert.equal(after[0], before[0], 'the joined run reuses the first run\'s element');
+  assert.equal(before[1].isConnected, false, 'the consumed run is detached');
+  assert.equal(after[1], before[2], 'the following run keeps its node identity across the join');
+  assert.equal(after[1].textContent, 'ccc');
+  await flushInput();
+  assert.equal(harness.calls.length, 1, 'the join is exactly one durable mutation');
+  assert.deepEqual(harness.calls[0][1], {
+    from: { offset: 3, affinity: 'right' },
+    to: { offset: 4, affinity: 'right' },
+    text: '',
+  });
+  assert.deepEqual(harness.errors, []);
+  harness.binding.close();
+});
+
+test('annotated editor keeps a duplicate-content following run node when insertParagraph splits an earlier run', async () => {
+  // Enter at offset 1 splits the first run and the new middle run duplicates
+  // the first run's content; content-based matching could pair the old
+  // following run with that middle run and detach the genuinely unchanged
+  // follower. Absolute-interval matching must keep the exact node on the
+  // shifted following run.
+  const harness = setup('aa\naa');
+  const before = runElements(harness);
+  assert.equal(before.length, 2);
+  assert.deepEqual(before.map((run) => run.textContent), ['aa\n', 'aa']);
+
+  harness.select(1);
+  harness.beforeinput('insertParagraph');
+  // The split inserts a '\n' at offset 1: run 0 'aa\n' becomes 'a\n' + 'a\n',
+  // and the trailing 'aa' run shifts from [3,5) to [4,6).
+  assert.equal(harness.element.textContent, 'a\na\naa');
+  const after = runElements(harness);
+  assert.equal(after.length, 3);
+  assert.deepEqual(after.map((run) => run.dataset.runIndex), ['0', '1', '2']);
+  assert.deepEqual(after.map((run) => run.textContent), ['a\n', 'a\n', 'aa']);
+  // Only the split run's fragments repaint: its first half reuses the edited
+  // run element, its second half is a fresh element, and the duplicate-content
+  // following run keeps its exact node identity.
+  assert.equal(after[0], before[0], 'the split run\'s first half reuses the edited run element');
+  assert.notEqual(after[1], before[0], 'the split run\'s second half is a fresh element');
+  assert.notEqual(after[1], before[1], 'the split run\'s second half is a fresh element');
+  assert.equal(after[1].isConnected, true);
+  assert.equal(after[2], before[1], 'the duplicate-content following run keeps its node identity');
+  assert.equal(after[2].textContent, 'aa');
+  await flushInput();
+  assert.equal(harness.calls.length, 1, 'the split is exactly one durable mutation');
+  assert.deepEqual(harness.calls[0][1], {
+    from: { offset: 1, affinity: 'right' },
+    to: { offset: 1, affinity: 'right' },
+    text: '\n',
+  });
+  assert.deepEqual(harness.errors, []);
+  harness.binding.close();
+});
+
+test('annotated editor rebuilds run nodes when the whole document is replaced', async () => {
+  const harness = setup('aaa\nbbb\nccc');
+  const before = runElements(harness);
+  harness.select(0, 11);
+  harness.beforeinput('insertText', 'z');
+  await flushInput();
+  assert.equal(harness.element.textContent, 'z');
+  const after = runElements(harness);
+  assert.equal(after.length, 1);
+  assert.equal(after[0].textContent, 'z');
+  assert.equal(after[0], before[0], 'the first run element is reused at index 0');
+  assert.equal(before[1].isConnected, false, 'the replaced runs are legitimately detached');
+  assert.equal(before[2].isConnected, false, 'the replaced runs are legitimately detached');
   assert.deepEqual(harness.errors, []);
   harness.binding.close();
 });

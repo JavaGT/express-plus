@@ -310,18 +310,59 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
    * redaction coords module; wire offsets name the text without placeholders.
    */
 
-  function blockPaintSignature(text, ranges, redactions) {
-    const rangePart = (ranges ?? []).map((range) => `${range.annotationId}:${range.start}:${range.end}`).join(',');
-    const redactionPart = (redactions ?? []).map((redaction) => `${redaction.start}:${redaction.placeholder}`).join(',');
-    return `${text}|${rangePart}|${redactionPart}`;
+  /** Split the one document text into LF-delimited runs. Every run keeps its
+   * trailing `\n` (when it has one) as its last scalar, so the container's
+   * textContent — wire text plus placeholder columns — stays byte-identical to
+   * the flat rendering and the display↔wire coordinate walks keep working
+   * unchanged. Empty text is one empty run. */
+  function splitRuns(text) {
+    const runs = [];
+    let start = 0;
+    while (true) {
+      const nl = text.indexOf('\n', start);
+      if (nl === -1) {
+        runs.push({ start, end: text.length, text: text.slice(start) });
+        return runs;
+      }
+      runs.push({ start, end: nl + 1, text: text.slice(start, nl + 1) });
+      start = nl + 1;
+    }
   }
 
-  function paintBlock(span, text, ranges, annotationsById, redactions = []) {
-    const doc = span.ownerDocument;
-    const positiveRanges = (ranges ?? []).filter((range) => range.start < range.end);
-    // Show-through: a zero-width range that coincides with a redaction marker
-    // wraps the placeholder in an annotation marker span.
-    const zeroWidthRanges = (ranges ?? []).filter((range) => range.start === range.end);
+  /** The run-local view of the document-wide ranges and redaction markers.
+   * A run covers [start, end) of the wire text; ranges and markers are clipped
+   * to that window. A zero-width marker exactly at a run boundary belongs to
+   * the following run (its placeholder renders at that run's start), except a
+   * marker at the document end, which belongs to the last run. */
+  function runLocalView(run, ranges, redactions, textLength) {
+    const isLast = run.end === textLength;
+    const positive = [];
+    const zeroWidth = [];
+    for (const range of ranges ?? []) {
+      if (range.start === range.end) {
+        if (range.start >= run.start && (range.start < run.end || (isLast && range.start === run.end))) {
+          zeroWidth.push({ annotationId: range.annotationId, start: range.start - run.start });
+        }
+        continue;
+      }
+      const local = {
+        annotationId: range.annotationId,
+        start: Math.max(range.start, run.start) - run.start,
+        end: Math.min(range.end, run.end) - run.start,
+      };
+      if (local.start < local.end) positive.push(local);
+    }
+    const runRedactions = (redactions ?? [])
+      .filter((redaction) => redaction.start >= run.start && (redaction.start < run.end || (isLast && redaction.start === run.end)))
+      .map((redaction) => ({ ...redaction, start: redaction.start - run.start, end: redaction.end - run.start }));
+    return { positive, zeroWidth, redactions: runRedactions };
+  }
+
+  /** Render a run's display children: maximal flat marker spans of constant
+   * annotation-id set, plus redaction placeholder spans, exactly as the flat
+   * renderer would for the same segment (never nested, never altering text or
+   * selection offsets). */
+  function runChildren(doc, text, positiveRanges, zeroWidthRanges, redactions, annotationsById) {
     const points = new Set();
     for (const range of positiveRanges) {
       points.add(range.start);
@@ -356,6 +397,8 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
         restricted.dataset.restricted = 'true';
         restricted.contentEditable = 'false';
         restricted.textContent = redaction.placeholder;
+        // Show-through: a zero-width range that coincides with a redaction
+        // marker wraps the placeholder in an annotation marker span.
         const showThrough = zeroWidthRanges
           .filter((range) => range.start === redaction.start)
           .map((range) => range.annotationId)
@@ -374,27 +417,131 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
       cursor = point;
     }
     if (cursor < text.length) emitRun(cursor, text.length);
-    span.textContent = '';
-    for (const child of children) span.appendChild(child);
+    return children;
   }
 
-  const painted = new WeakMap();
+  function runSignature(run, ranges, redactions, textLength) {
+    const view = runLocalView(run, ranges, redactions, textLength);
+    const positivePart = view.positive.map((range) => `${range.annotationId}:${range.start}:${range.end}`).join(',');
+    const zeroWidthPart = view.zeroWidth.map((range) => `${range.annotationId}:${range.start}`).join(',');
+    const redactionPart = view.redactions.map((redaction) => `${redaction.start}:${redaction.placeholder}`).join(',');
+    return `${run.text}|${positivePart}|${zeroWidthPart}|${redactionPart}`;
+  }
+
+  function paintRun(element, run, ranges, redactions, annotationsById, textLength) {
+    const view = runLocalView(run, ranges, redactions, textLength);
+    const doc = element.ownerDocument;
+    const children = runChildren(doc, run.text, view.positive, view.zeroWidth, view.redactions, annotationsById);
+    element.textContent = '';
+    for (const child of children) element.appendChild(child);
+  }
+
+  const runPainted = new WeakMap();
 
   /**
-   * Paint the one contentEditable root span. `draftEdit` projects the ranges
-   * through a pending local draft so optimistic text paints markers at their
-   * shifted positions. Returns true when the DOM changed.
+   * Paint the one contentEditable root span as keyed LF-delimited run
+   * fragments. `draftEdit` projects the ranges through a pending local draft
+   * so optimistic text paints markers at their shifted positions. Runs are
+   * reconciled by absolute interval: every node records the full text and the
+   * [from, to) segment it was painted with, and on paint the single edit
+   * between the stored text and the current text (a queued draft or one remote
+   * change) projects each node's interval — before the edit unchanged, after
+   * it shifted by the length delta, overlapping it touched. A node whose
+   * projected interval EXACTLY equals a target run's interval keeps that run's
+   * node, so an unchanged following run survives a split/join even when its
+   * content duplicates an earlier run (absolute intervals are unique where
+   * content signatures are not). Touched nodes go to a recycle pool that
+   * unmatched target runs claim (repainting in place) or fresh elements fill;
+   * leftover nodes are removed. Returns true when the DOM changed.
    */
   function paintDisplay(span, document, text, draftEdit) {
     const ranges = draftEdit
       ? projectRangesOverEdit(document.ranges, draftEdit.from, draftEdit.to, draftEdit.text)
       : document.ranges;
     const redactions = currentRedactions();
-    const signature = blockPaintSignature(text, ranges, redactions);
-    if (painted.get(span) === signature) return false;
-    paintBlock(span, text, ranges, new Map((document.annotations ?? []).map((annotation) => [annotation.id, annotation.family])), redactions);
-    painted.set(span, signature);
-    return true;
+    const annotationsById = new Map((document.annotations ?? []).map((annotation) => [annotation.id, annotation.family]));
+    const runs = splitRuns(text);
+    const doc = span.ownerDocument;
+    const existing = [...span.children];
+
+    // Every node shares the text the last paint was made from, and successive
+    // paints differ by exactly one edit, so changedRange names that edit and
+    // the interval projection is exact.
+    const previousText = existing.length ? (runPainted.get(existing[0])?.text ?? null) : null;
+    const edit = previousText === null ? null : changedRange(previousText, text);
+    const delta = previousText === null ? 0 : text.length - previousText.length;
+    const targetByInterval = new Map();
+    for (let index = 0; index < runs.length; index += 1) {
+      targetByInterval.set(`${runs[index].start}:${runs[index].end}`, index);
+    }
+
+    // Which existing node each target run takes (-1 means a fresh element).
+    const runNode = new Array(runs.length).fill(-1);
+    const usedExisting = new Array(existing.length).fill(false);
+
+    // First pass: exact projected-interval equality keeps the node that
+    // painted that segment before. Intervals are unique, so duplicate run
+    // content can never detach an unchanged run's node.
+    for (let index = 0; index < existing.length; index += 1) {
+      const record = runPainted.get(existing[index]);
+      if (!record || !edit) continue;
+      let projected;
+      if (record.to <= edit.from) {
+        projected = { from: record.from, to: record.to };
+      } else if (record.from >= edit.to) {
+        projected = { from: record.from + delta, to: record.to + delta };
+      } else {
+        continue;
+      }
+      const target = targetByInterval.get(`${projected.from}:${projected.to}`);
+      if (target !== undefined && runNode[target] === -1) {
+        runNode[target] = index;
+        usedExisting[index] = true;
+      }
+    }
+
+    // Second pass: unmatched target runs claim the first unmatched pooled node
+    // (repainted in place) or create a fresh element when the pool runs out.
+    let nextPool = 0;
+    for (let index = 0; index < runs.length; index += 1) {
+      if (runNode[index] !== -1) continue;
+      while (nextPool < existing.length && usedExisting[nextPool]) nextPool += 1;
+      if (nextPool < existing.length) {
+        runNode[index] = nextPool;
+        usedExisting[nextPool] = true;
+        nextPool += 1;
+      }
+    }
+
+    let domChanged = false;
+    const finalChildren = [];
+    for (let index = 0; index < runs.length; index += 1) {
+      const existingIndex = runNode[index];
+      let element;
+      if (existingIndex !== -1) {
+        element = existing[existingIndex];
+      } else {
+        element = doc.createElement('span');
+        domChanged = true;
+      }
+      element.dataset.runIndex = String(index);
+      // Repaint a node's children only when its local content — text segment,
+      // overlapping ranges, and redaction markers — differs from what it shows.
+      const signature = runSignature(runs[index], ranges, redactions, text.length);
+      if (runPainted.get(element)?.signature !== signature) {
+        paintRun(element, runs[index], ranges, redactions, annotationsById, text.length);
+        domChanged = true;
+      }
+      runPainted.set(element, { text, from: runs[index].start, to: runs[index].end, signature });
+      finalChildren.push(element);
+    }
+    if (finalChildren.length !== existing.length
+      || finalChildren.some((child, index) => child !== existing[index])) domChanged = true;
+    if (domChanged) {
+      span.textContent = '';
+      for (const child of finalChildren) span.appendChild(child);
+    }
+    return domChanged;
   }
 
   function pendingDraftText() {
@@ -602,8 +749,15 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     }
     const selected = getSelection();
     if (!selected) return;
-    if (event.inputType === 'insertText' || event.inputType === 'insertFromPaste' || event.inputType === 'insertFromDrop') {
-      const text = event.dataTransfer?.getData?.('text/plain') ?? event.data ?? '';
+    if (event.inputType === 'insertText' || event.inputType === 'insertFromPaste' || event.inputType === 'insertFromDrop'
+      || event.inputType === 'insertParagraph' || event.inputType === 'insertLineBreak') {
+      // Enter creates a paragraph boundary: the LF-delimited run model treats a
+      // paragraph break as an ordinary '\n' scalar insertion through the one
+      // replace path, so insertParagraph/insertLineBreak buffer a '\n' exactly
+      // like typing any other character.
+      const text = event.inputType === 'insertParagraph' || event.inputType === 'insertLineBreak'
+        ? '\n'
+        : (event.dataTransfer?.getData?.('text/plain') ?? event.data ?? '');
       if (text) {
         // A collapsed caret at a redaction placeholder edge carries the affinity
         // that pins it to the visible neighbor; pass it through so the typed
@@ -612,6 +766,12 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
         const affinity = selected.from.offset === selected.to.offset ? (selected.from.affinity ?? 'right') : 'right';
         bufferEdit(selected.from.offset, selected.to.offset, text, affinity);
       }
+      return;
+    }
+    if (event.inputType === 'deleteByCut') {
+      // Cut removes the selection through the same replace path; the clipboard
+      // side of cut needs no handling here.
+      if (selected.from.offset !== selected.to.offset) bufferEdit(selected.from.offset, selected.to.offset, '');
       return;
     }
     const text = pendingDraftText() ?? session.document?.text ?? '';
