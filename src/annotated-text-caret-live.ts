@@ -127,6 +127,12 @@ export function createAnnotatedTextCaretLive({ db, resolveEntity, mayVerb, fanou
     // same opaque presence until clear or disconnect. A newer update upserts
     // the same presence with a new projected location; clear retracts it.
 
+    // The source's public display label is carried on every upsert so a
+    // recipient can attribute the caret without re-resolving the opaque
+    // presence token. Empty when the app does not supply one on the principal.
+    const sourcePrincipal = conn.principal as { attributes?: Record<string, unknown> } | null | undefined;
+    const sourceName = typeof sourcePrincipal?.attributes?.displayName === 'string' ? sourcePrincipal.attributes.displayName : '';
+
     // Test-only seam: inject a delay at this point so overlapping async
     // operations can race during the projection window.
     if (delay !== null) {
@@ -146,7 +152,10 @@ export function createAnnotatedTextCaretLive({ db, resolveEntity, mayVerb, fanou
         continue;
       }
       try {
-        const value = await projectAnnotatedTextCaretSnapshot({ db, entity, row: recipientState.row, principal: recipient.principal, fieldName: input.field, descriptor, caret: { offset: input.offset }, presence: slot.presence });
+        const value = Object.freeze({
+          ...(await projectAnnotatedTextCaretSnapshot({ db, entity, row: recipientState.row, principal: recipient.principal, fieldName: input.field, descriptor, caret: { offset: input.offset }, presence: slot.presence })),
+          name: sourceName,
+        });
         if (slots.get(slotKey) !== slot || slot.generation !== generation || recipient.closed || !fanout.hasCaretInterest(recipient, scope, input.field)) continue;
         // Re-authorize immediately before delivery: a subscription/row revoke
         // that landed during the projection window must not deliver on stale

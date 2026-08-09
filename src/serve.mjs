@@ -511,9 +511,19 @@ export function listen(app     , port     , optionsOrCallback      = {}) {
 
   // Live Delivery is a durable _Log consumer, so a headless HTTP application
   // has no delivery seam to attach. DB-backed apps retain the single seam.
-  if (app.db && !app._applicationLiveDelivery) {
+  //
+  // The WebSocket delivery (volatile annotated-text carets + live subscriptions)
+  // coexists with the application-integrated SSE delivery: the upgrade handler
+  // answers <appDeliveryPath>/events while the SSE handler serves HTTP GETs on
+  // the same pathname. The kernel registers only one committed consumer
+  // (application delivery wins), so the WS core is not woken for durable events;
+  // its volatile carets need no consumer and never enter the SSE path.
+  if (app.db) {
+    const wsPath = app._applicationLiveDelivery
+      ? `${(app._applicationLiveDelivery.path ?? '/live-delivery').replace(/\/$/, '')}/events`
+      : '/events';
     app.live = createLiveDelivery(httpServer, {
-      path: '/events',
+      path: wsPath,
       mayVerb: (entity     , verb     , row     , principal     ) => mayVerb(entity, verb, row, principal),
       principalOf,
       db: app.db,

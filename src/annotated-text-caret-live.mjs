@@ -130,7 +130,8 @@ export function createAnnotatedTextCaretLive({ db, resolveEntity, mayVerb, fanou
     // The source's public display label is carried on every upsert so a
     // recipient can attribute the caret without re-resolving the opaque
     // presence token. Empty when the app does not supply one on the principal.
-    const sourceName = (typeof conn?.principal?.attributes?.displayName === 'string') ? conn.principal.attributes.displayName : '';
+    const sourcePrincipal = conn.principal                                                               ;
+    const sourceName = typeof sourcePrincipal?.attributes?.displayName === 'string' ? sourcePrincipal.attributes.displayName : '';
 
     // Test-only seam: inject a delay at this point so overlapping async
     // operations can race during the projection window.
