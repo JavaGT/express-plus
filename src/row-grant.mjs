@@ -88,6 +88,15 @@ function makeIs(entityRecord              , row         , principal         )   
 // Protecting annotations are authorization subjects of the owning entity. This
 // reuses the row grant's check registry and decision backstop; it does not add
 // a policy evaluator beside Workbench authorization.
+//
+// An inherit-child's OWN registry carries no membership checks (its grant is an
+// `inherit` directive, not a membership clause), so `makeIs` on the child would
+// leave `is.owner` undefined and an access body like `(await is.owner()) ? ...`
+// would THROW — failing the whole snapshot closed (the wrong-shaped lock). Resolve
+// the child the same way `rowCapabilities` resolves an inherit-child: load the
+// parent row via the `via` FK and build `is` against the PARENT record + PARENT
+// row, so the access body decides the parent's membership plane. A missing parent
+// row denies THIS span (inline placeholder), never the whole document.
 export async function protectingAnnotationCapabilities(
   entityRecord              ,
   row         ,
@@ -96,21 +105,42 @@ export async function protectingAnnotationCapabilities(
   principal         ,
 )                              {
   if (typeof access !== 'function') return { granted: false, capabilities: [] };
-  const accessFn = access                 ;
-  const is = makeIs(entityRecord, row, principal);
-  let decision                           ;
-  await resolveDecision(
-    async () => {
-      decision = (await accessFn({ is, entity: row, annotation }))                             ;
-      return decision?.granted === true;
-    },
-    [],
-    { where: `the protecting annotation access body on entity('${entityRecord.name}')` },
-  );
-  if (!decision || decision.granted !== true || !Array.isArray(decision.capabilities)) {
+  try {
+    const accessFn = access                 ;
+    const inherited = inheritedGrant(entityRecord);
+    let isRecord = entityRecord;
+    let isRow = row;
+    if (inherited) {
+      const parentRow = inheritedParentRow(entityRecord, row, principal);
+      if (parentRow == null) return { granted: false, capabilities: [] };
+      isRecord = resolveInheritedParent(entityRecord, inherited)                ;
+      isRow = parentRow;
+    }
+    const is = makeIs(isRecord, isRow, principal);
+    let decision                           ;
+    await resolveDecision(
+      async () => {
+        decision = (await accessFn({ is, entity: row, annotation }))                             ;
+        return decision?.granted === true;
+      },
+      [],
+      { where: `the protecting annotation access body on entity('${entityRecord.name}')` },
+    );
+    if (!decision || decision.granted !== true || !Array.isArray(decision.capabilities)) {
+      return { granted: false, capabilities: [] };
+    }
+    return { granted: true, capabilities: decision.capabilities };
+  } catch (error) {
+    // A throwing access body (or a throwing check run-face) is a server-side
+    // fault: fail THIS span closed — an inline placeholder — mirroring the
+    // row-admission path's catch-all deny. It never aborts the whole document
+    // snapshot and never discloses the protected text to any recipient.
+    getLog().debug('auth', 'protecting annotation access failed; denying span', {
+      entity: entityRecord.name,
+      error: error instanceof Error ? error.message : String(error),
+    });
     return { granted: false, capabilities: [] };
   }
-  return { granted: true, capabilities: decision.capabilities };
 }
 
 // Run the grant clause's `.can` body against a materialized row + principal and
