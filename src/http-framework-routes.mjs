@@ -22,6 +22,7 @@ import { BodyError, readRawBody, readRequestBody } from './http-body.mjs';
 import { scopeOf, tryParseScopeKey } from './scope-handle.mjs';
 import { createdTextReducerSeeds, textReducerCheckpoints } from './text-reducer-transport.mjs';
 import { publicEvent } from './event-delivery.mjs';
+import { parseEventType } from './event-handle.mjs';
 import { createLiveEnvelopeBuilder } from './live-delivery-envelope.mjs';
 import { hasAnnotatedTextFields, projectEntitySnapshot } from './entity-snapshot-projection.mjs';
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
@@ -374,10 +375,24 @@ async function eventsSinceRoute(
   }
   const events = rows.map((r         ) => {
     const record = r                                                                                                                      ;
+    let handle;
+    try {
+      handle = parseEventType(record.eventType          );
+    } catch {
+      return null;
+    }
+    // A direct entity stream may only replay events whose declared entity is
+    // the admitted entity. Never serialize a foreign event before this check:
+    // its payload may contain an inaccessible row's body or generated id.
+    if (handle.entity !== entity.name) return null;
     const data = record.data ?? null;
     const reducers = createdTextReducerSeeds(entity, { type: record.eventType          , data: data ?? undefined });
     return publicEvent({ type: record.eventType, scope: record.scope, seq: record.seq, data: data                                  , actionId: record.actionId, committedAt: record.committedAt, ...(reducers ? { reducers } : {}) });
   });
+  if (events.some((event) => event === null)) {
+    sendJson(res, 200, { resync: 'stale', reason: 'recipient-snapshot-required' });
+    return true;
+  }
   sendJson(res, 200, { events });
   return true;
 }

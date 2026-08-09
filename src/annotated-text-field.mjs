@@ -225,6 +225,9 @@ function validateEntityActionDeclaration(entity        , field        , ann     
   // the declaration already carries a compiled target handle, validate the
   // complete relation grammar here as well.
   const target = typeof relation.target === 'object' ? relation.target : (typeof relation.target === 'string' ? resolveEntity?.(relation.target) : null);
+  if (typeof relation.target === 'string' && resolveEntity && !target) {
+    fail(entity, field, `${path}.relation`, `target entity '${relation.target}' is not registered`);
+  }
   if (!target?.fields) return;
   for (const targetField of inputTargets) {
     if (targetField === 'id' || targetField === action.project || targetField === action.author) {

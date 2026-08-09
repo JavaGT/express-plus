@@ -29,6 +29,7 @@ function r8Doc({
   protectingAccess = async ({ is }) => (await is.owner()) ? grant(read) : grant(),
   access = () => grant(read, write),
   thread = false,
+  relationTarget = 'R8Comment',
   threadAction = annotationEntityAction('compose', {
     relation: 'comment', project: 'project', author: 'author', capability: write,
     input: { body: 'body' },
@@ -47,7 +48,7 @@ function r8Doc({
          annotation('comment', {
            empty: 'orphan',
            ...(thread ? {
-             fields: { comment: ref('R8Comment') },
+             fields: { comment: ref(relationTarget) },
              actions: [threadAction],
            } : {}),
          }),
@@ -56,7 +57,7 @@ function r8Doc({
       measurements: [measurement('source', { extension: 'r8IntegrationSource' })],
     }),
     grant: [scope(() => everyone()).can(access)],
-  });
+    });
 }
 
 async function appFor(db = new DatabaseSync(':memory:'), principalId = null, options) {
@@ -274,8 +275,15 @@ test('annotation entity declaration validation rejects malformed relation, proje
         input: { body: 'id' },
       }),
       deferStart: true,
-    });
+  });
   await assert.rejects(() => invalidMapping.app.start(), /framework-owned/);
+  const unregisteredDb = new DatabaseSync(':memory:');
+  await assert.rejects(() => appFor(unregisteredDb, null, {
+    thread: true,
+    relationTarget: 'MissingComment',
+    deferStart: true,
+  }), /not registered/);
+  unregisteredDb.close();
 });
 
 test('annotation entity action rejects a basis issued to another principal without writes', async () => {
@@ -528,6 +536,20 @@ test('HTTP snapshot redacts for non-owner; replay requires a fresh snapshot', as
   const replay = await fetch(`${origin}/events-since/R8IntegrationDocument/d1?cursor=0`, { signal: AbortSignal.timeout(5_000) });
   assert.equal(replay.status, 200);
   assert.deepEqual(await replay.json(), { resync: 'stale', reason: 'annotated-text-snapshot-required' });
+});
+
+test('direct events-since never exposes composed comment data or generated id', async (t) => {
+  const ctx = await setupThreadDoc();
+  t.after(async () => { await ctx.app.shutdown(); ctx.db.close(); });
+  const composed = await dispatchThread(ctx, 'direct-catchup-compose', { body: 'secret composed comment' });
+  assert.equal(composed.ok, true, composed.failure?.message);
+  const commentId = ctx.db.prepare('SELECT id FROM R8Comment').get().id;
+  const origin = `http://127.0.0.1:${ctx.app.httpServer.address().port}`;
+  const response = await fetch(`${origin}/events-since/R8IntegrationDocument/d1?cursor=0`, { signal: AbortSignal.timeout(5_000) });
+  const body = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(JSON.stringify(body).includes('secret composed comment'), false);
+  assert.equal(JSON.stringify(body).includes(commentId), false);
 });
 
 test('v9 receipt dedupe and foreign position tokens reject without mutation', async () => {
