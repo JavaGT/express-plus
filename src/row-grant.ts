@@ -87,7 +87,10 @@ function makeIs(entityRecord: EntityRecord, row: unknown, principal: unknown): R
 
 // Protecting annotations are authorization subjects of the owning entity. This
 // reuses the row grant's check registry and decision backstop; it does not add
-// a policy evaluator beside Workbench authorization.
+// a policy evaluator beside Workbench authorization. An inherit-child (e.g. a
+// Transcript owning via Project) resolves its checks against the ultimate
+// parent row the same way mayRow/rowCapabilities do — the checks live on the
+// grant-owning entity's registry.
 export async function protectingAnnotationCapabilities(
   entityRecord: EntityRecord,
   row: unknown,
@@ -97,7 +100,23 @@ export async function protectingAnnotationCapabilities(
 ): Promise<CapabilityDecision> {
   if (typeof access !== 'function') return { granted: false, capabilities: [] };
   const accessFn = access as FieldAccessFn;
-  const is = makeIs(entityRecord, row, principal);
+  // Resolve the effective checks target by walking every inherit hop to the
+  // ultimate grant owner (mirrors mayRow/rowCapabilities recursion, which
+  // decide on the parent's own `.can`). Cycle protection keeps a malformed
+  // declaration from looping forever.
+  let effectiveRecord: EntityRecord = entityRecord;
+  let effectiveRow = row;
+  const seen = new Set<EntityRecord>();
+  while (inheritedGrant(effectiveRecord)) {
+    if (seen.has(effectiveRecord)) break;
+    seen.add(effectiveRecord);
+    const parentRow = inheritedParentRow(effectiveRecord, effectiveRow, principal);
+    const parentRecord = parentRow && resolveInheritedParent(effectiveRecord, inheritedGrant(effectiveRecord)!);
+    if (!parentRow || !parentRecord) break;
+    effectiveRecord = parentRecord as EntityRecord;
+    effectiveRow = parentRow;
+  }
+  const is = makeIs(effectiveRecord, effectiveRow, principal);
   let decision: GrantDecision | undefined;
   await resolveDecision(
     async () => {

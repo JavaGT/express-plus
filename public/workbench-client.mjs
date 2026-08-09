@@ -3729,6 +3729,7 @@ function annotatedDocumentView(snapshot) {
     annotations: snapshot.annotations,
     orphans: snapshot.orphans,
     measurements: snapshot.measurements,
+    capabilities: snapshot.capabilities,
     ...(snapshot.restricted ? { restricted: true } : {}),
     ...(snapshot.redactions?.length ? { redactions: snapshot.redactions } : {}),
     // Legacy single-block view so block-era callers and the editor keep working.

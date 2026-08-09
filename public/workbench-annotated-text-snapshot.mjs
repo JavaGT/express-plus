@@ -36,6 +36,26 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options = {})
       }
     }
   }
+  // Capability hints are recipient-specific, snapshot-fenced guidance derived
+  // from current authorization. Fail closed on a missing, unknown, or duplicate
+  // hint; a handle that declares no capability vocabulary materializes null.
+  const declaredCapabilities = handle?.capabilities ? new Set(Object.keys(handle.capabilities)) : null;
+  let capabilities = null;
+  if (declaredCapabilities !== null) {
+    if (!Array.isArray(snapshot.capabilityHints)) {
+      throw new Error('annotatedText snapshot: capabilityHints must be an array when capabilities are declared');
+    }
+    const seen = new Set();
+    const names = [];
+    for (const hint of snapshot.capabilityHints) {
+      if (typeof hint !== 'string' || !declaredCapabilities.has(hint) || seen.has(hint)) {
+        throw new Error(`annotatedText snapshot: capability hint '${String(hint)}' is not a unique declared capability`);
+      }
+      seen.add(hint);
+      names.push(hint);
+    }
+    capabilities = Object.freeze(names);
+  }
   const document = deepFreeze({
     kind: 'workbench.annotatedText.recipient', version: 1,
     text: snapshot.text,
@@ -43,6 +63,7 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options = {})
     annotations: snapshot.annotations.map((a) => ({ id: a.id, family: a.family, fields: { ...a.fields }, ...(a.owner ? { owner: a.owner } : {}) })),
     orphans: (snapshot.orphans ?? []).map((o) => ({ id: o.id, family: o.family, fields: { ...o.fields }, savedQuote: o.savedQuote, ...(o.owner ? { owner: o.owner } : {}) })),
     measurements: (snapshot.measurements ?? []).map((m) => ({ ...m })),
+    capabilities,
     ...(snapshot.restricted ? { restricted: true } : {}),
     ...(snapshot.redactions?.length ? { redactions: snapshot.redactions.map((r) => ({ start: r.start, end: r.end, placeholder: r.placeholder })) } : {}),
   });

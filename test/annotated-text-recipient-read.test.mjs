@@ -137,7 +137,10 @@ test('authorization throws after owning cursor changes retry rather than sanitiz
   } }); t.after(document.close); db = document.db;
   active = true;
   assert.equal((await readAnnotatedTextForRecipient(document.request)).kind, 'snapshot');
-  assert.equal(documentCalls, 2);
+  // One extra evaluation is the projection's write-grant check (the same
+  // `authorizeFieldOp` authority the mutation admission uses) for capability
+  // hints, on top of the read-admission grant on each attempt.
+  assert.equal(documentCalls, 3);
 
   let changingCalls = 0; active = false;
   const exhausted = await setup({ scopeAccess: async () => {

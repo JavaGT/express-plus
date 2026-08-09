@@ -3,8 +3,8 @@ import { restoreTextFamily, materializeText, projectEndpointToOffset, textFamily
 import { getAnnotatedTextCompiledMetadata, resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
 import { projectAnnotatedTextForRecipient, authoringRedactionsForRecipient } from './annotated-text-recipient-projection.mjs';
 import { projectAnnotatedTextCaretForRecipient } from './annotated-text-caret-projection.mjs';
-import { mayRow, protectingAnnotationCapabilities } from './row-grant.mjs';
-import { read } from './grant.mjs';
+import { mayFieldOp, mayRow, protectingAnnotationCapabilities } from './row-grant.mjs';
+import { read, write } from './grant.mjs';
 import { resolveStream, resolveLease, issueAuthoringSnapshot, buildAuthoringEnvelope } from './annotated-text-authoring-stream.mjs';
 import { readSeq } from './cursor.mjs';
 import { rawRow } from './entity/query.mjs';
@@ -185,7 +185,17 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
     const decision = await protectingAnnotationCapabilities(entity, row, annotation, access, principal);
     protectors.push({ protectorId: annotation.id, outcome: decision.capabilities.includes(read) ? 'allow' : 'deny' });
   }
-  const decisions = { version: 1, protectors, capabilityHints: [] };
+  // Recipient-specific capability hints derive from the CURRENT field write
+  // grant — the same `authorizeFieldOp` authority the annotated-text mutation
+  // admission runs — never from snapshot readability, subscription admission,
+  // or the presence of a live authoring session. The canonical document keeps
+  // empty hints; only the recipient decisions carry the granted names.
+  const canWrite = principal == null ? false : await mayFieldOp(entity, fieldName, write, row, principal);
+  const decisions = {
+    version: 1,
+    protectors,
+    capabilityHints: canWrite ? Object.keys(meta.capabilityHandles ?? {}) : [],
+  };
   const recipient = caret === null
     ? projectAnnotatedTextForRecipient(canonical, descriptor, decisions)
     : projectAnnotatedTextCaretForRecipient(canonical, descriptor, decisions, caret, presence);

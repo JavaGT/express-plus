@@ -194,7 +194,7 @@ export function projectAnnotatedTextForRecipient(canonical: CanonicalAnnotatedTe
     }
   }
   if (restricted) {
-    const result = { kind: 'workbench.annotatedText.recipient', version: 1, restricted: true, text: '', ranges: [], annotations: [] };
+    const result = { kind: 'workbench.annotatedText.recipient', version: 1, restricted: true, text: '', ranges: [], annotations: [], measurements: [], capabilityHints: [...capabilityHints] };
     recipientRedactionIntervals.set(result, []);
     return freeze(result);
   }

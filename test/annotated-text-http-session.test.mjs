@@ -1026,3 +1026,44 @@ test('baseCursor mismatch forces snapshot recovery rather than applying fold', a
   assert.equal(session.document.text, 'Hello');
   session.close();
 });
+
+test('materializes write-granted capability hints into document capabilities and replaces them on recovery', async () => {
+  const CapaDocument = entity('CapaLiveDoc', {
+    project: ref('Project'), owner: ref('User'), body: annotatedText({
+      project: 'project', owner: 'owner', annotations: [annotation('note', { fields: {} })],
+      capabilities: { edit: Object.freeze({}) },
+    }),
+  });
+  const sources = [];
+  const hints = ['edit'];
+  let number = 0;
+  const session = createAnnotatedTextHttpSession({
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: CapaDocument, field: CapaDocument.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => 'action-1',
+    fetchImpl: async (url, options) => {
+      if (options?.method === 'POST') return { ok: true, status: 200, json: async () => ({ ok: true, actionId: 'action-1', confirmedThrough: number }) };
+      const cursor = ++number;
+      const body = {
+        kind: 'workbench.annotatedText.recipient', version: 1,
+        text: 'Hello', ranges: [], annotations: [], orphans: [], measurements: [],
+        capabilityHints: hints,
+      };
+      return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { body }, cursor, authoring: authoringEnvelope(cursor) }) };
+    },
+    eventSourceFactory: () => {
+      const source = { close() {}, onmessage: null, onerror: null };
+      sources.push(source);
+      return source;
+    },
+  });
+  await session.ready;
+  assert.deepEqual(session.document.capabilities, ['edit']);
+  // A recovery that re-authorizes without write replaces the granted array;
+  // a stale ['edit'] must never survive ingest (sol: revoked-write check).
+  hints.length = 0;
+  sources[0].onmessage({ data: JSON.stringify([{ type: 'resync', seq: 2, reason: 'recipient-snapshot-required' }]) });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(session.document.capabilities, []);
+  session.close();
+});
