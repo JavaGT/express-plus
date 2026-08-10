@@ -10,7 +10,7 @@
 
 import { readSeq as cursorReadSeq,                     } from './cursor.mjs';
                                                              
-import { txn,               } from './driver.mjs';
+import { prepareCached, txn,               } from './driver.mjs';
 
 // ---- DDL ----
 
@@ -104,7 +104,7 @@ export function readSeq(db                                   , scope        )   
 // eventsFor — read every event for an actionId (dedupe). Returns raw DB rows
 // with eventData parsed, ordered by scope + seq.
 export function eventsFor(db          , actionId        )             {
-  const rows = db.prepare(
+  const rows = prepareCached(db,
     'SELECT * FROM _Log WHERE actionId = :actionId ORDER BY scope, seq',
   ).all({ actionId });
   return rows.map((r) => ({
@@ -119,7 +119,7 @@ export function eventsFor(db          , actionId        )             {
 // this is scoped by the action's own owning scope, so the same actionId reused
 // under a different owning scope is a distinct, independent action.
 export function receiptFor(db          , scope        , actionId        )                            {
-  const row = db.prepare(
+  const row = prepareCached(db,
     'SELECT * FROM _ActionReceipt WHERE scope = :scope AND actionId = :actionId',
   ).get({ scope, actionId });
   if (!row) return undefined;
@@ -137,7 +137,7 @@ export function receiptFor(db          , scope        , actionId        )       
 // proves the action committed; a pruned event is gone from every path, not
 // just replay.
 export function eventsFromReceipt(db          , receipt               , parseEventType                 )             {
-  const stmt = db.prepare('SELECT * FROM _Log WHERE scope = :scope AND seq = :seq');
+  const stmt = prepareCached(db, 'SELECT * FROM _Log WHERE scope = :scope AND seq = :seq');
   const events             = [];
   for (const ref of receipt.eventRefs) {
     const row = stmt.get({ scope: ref.scope, seq: ref.seq });
@@ -151,10 +151,10 @@ export function eventsFromReceipt(db          , receipt               , parseEve
 // appended to _Log. Atomic with the append: both land in the same commit, or
 // neither does.
 export function insertReceipt(db          , scope        , actionId        , committedAt        , events            , metadata                  = {})         {
-  const historyOrder = db.prepare(
+  const historyOrder = prepareCached(db,
     'SELECT COALESCE(MAX(historyOrder), 0) + 1 AS next FROM _ActionReceipt WHERE scope = :scope',
   ).get({ scope }) .next          ;
-  db.prepare(
+  prepareCached(db,
     `INSERT INTO _ActionReceipt
        (scope, actionId, committedAt, eventRefs, historyOrder, actionType, actionData, principalKey, sessionId, operation, resultData, historyRootActionId, historyTargetActionId, historyOutcome)
      VALUES
@@ -177,14 +177,14 @@ export function insertReceipt(db          , scope        , actionId        , com
   });
   // This survives receipt erasure and is transactionally paired with every
   // committed action, unlike SQLite's reusable implicit rowid.
-  db.prepare("UPDATE _CommittedRevision SET revision = revision + 1 WHERE name = 'actions'").run();
+  prepareCached(db, "UPDATE _CommittedRevision SET revision = revision + 1 WHERE name = 'actions'").run();
   return historyOrder;
 }
 
 // readSince — read events for a scope with seq > cursor, ordered by seq.
 // Returns raw rows with eventData parsed. Used by the resync route.
 export function readSince(db          , scope        , cursor        )             {
-  const rows = db.prepare(
+  const rows = prepareCached(db,
     'SELECT * FROM _Log WHERE scope = :scope AND seq > :cursor ORDER BY seq',
   ).all({ scope, cursor });
   return rows.map((r) => ({
@@ -197,7 +197,7 @@ export function readSince(db          , scope        , cursor        )          
 // resync route to detect a gap that can never be filled (cursor-behind-retention).
 // Returns null when the scope has no events.
 export function minSeqForScope(db          , scope        )                {
-  const row = db.prepare(
+  const row = prepareCached(db,
     'SELECT MIN(seq) AS min FROM _Log WHERE scope = :scope',
   ).get({ scope });
   return (row?.min                 ) ?? null;
@@ -236,7 +236,7 @@ export function rowToEvent(row            , parseEventType                 )    
 // actionId, and committedAt. The caller handles NOW-token resolution and
 // per-scope sequence assignment before calling this.
 export function appendEvents(db          , events                 ) {
-  const stmt = db.prepare(
+  const stmt = prepareCached(db,
     'INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt) VALUES (:scope, :seq, :eventType, :eventData, :actionId, :committedAt)',
   );
   for (const e of events) {
