@@ -223,7 +223,7 @@ const VERB_CAPABILITY: Readonly<Record<string, Capability>> = Object.freeze({
 function grantClauses(entityRecord: EntityRecord): unknown {
   const declaration = entityRecord.grant;
   const cached = GRANT_CLAUSES_CACHE.get(entityRecord);
-  if (cached?.declaration === declaration) return cached.clauses;
+  if (cached && cached.declaration === declaration) return cached.clauses;
 
   // Preserve the existing method-call `this` value for unusual declaration
   // thunks that inspect their entity receiver.
