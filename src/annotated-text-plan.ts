@@ -205,7 +205,7 @@ export function planTextOffsetEdit({ documentId, structureVersion, family, actor
 }
 
 /** Plan a document-range annotation.apply: one contiguous range, no blocks. */
-export function planTextRangeApply({ documentId, structureVersion, family, annotation, from, to, ranges = [], actorId }: {
+export function planTextRangeApply({ documentId, structureVersion, family, annotation, from, to, ranges = [], actorId, cardinality = 'many', sameFamilyAnnotationIds = null }: {
   documentId: string;
   structureVersion: number;
   family: ContinuousTextFamily;
@@ -214,6 +214,8 @@ export function planTextRangeApply({ documentId, structureVersion, family, annot
   to: { offset: number; affinity: 'left' | 'right' };
   ranges?: AnnotationRange[];
   actorId: string;
+  cardinality?: 'many' | 'one';
+  sameFamilyAnnotationIds?: Set<string> | null;
 }): TextPlan {
   const text = materializeText(family);
   const startOffset = from.offset;
@@ -227,9 +229,38 @@ export function planTextRangeApply({ documentId, structureVersion, family, annot
   const start = resolveOffsetToEndpoint(family, startOffset, family.checkpoint.frontier, from.affinity);
   const end = resolveOffsetToEndpoint(family, endOffset, family.checkpoint.frontier, to.affinity);
   const range: AnnotationRange = { annotationId: annotation.id, start, end };
-  const existing = ranges.filter((entry) => entry.annotationId === annotation.id);
-  const nextRanges = [...ranges.filter((entry) => entry.annotationId !== annotation.id), range];
-  void existing;
+  // Same-id replace keeps the applied annotation at exactly one range. When the
+  // family is exclusive ('one' cardinality), every OTHER same-family range that
+  // overlaps the selection is trimmed in OFFSET space: its overlapped middle is
+  // dropped and its non-overlapped left/right remnants are kept, so at most one
+  // annotation covers any region. Different-family ranges pass through.
+  const nextRanges: AnnotationRange[] = [];
+  for (const entry of ranges) {
+    if (entry.annotationId === annotation.id) continue;
+    if (cardinality === 'one' && sameFamilyAnnotationIds?.has(entry.annotationId)) {
+      const existingStart = projectEndpointToOffset(family, entry.start);
+      const existingEnd = projectEndpointToOffset(family, entry.end);
+      if (existingEnd > startOffset && existingStart < endOffset) {
+        if (existingStart < startOffset) {
+          nextRanges.push({
+            annotationId: entry.annotationId,
+            start: entry.start,
+            end: resolveOffsetToEndpoint(family, startOffset, family.checkpoint.frontier, 'left'),
+          });
+        }
+        if (existingEnd > endOffset) {
+          nextRanges.push({
+            annotationId: entry.annotationId,
+            start: resolveOffsetToEndpoint(family, endOffset, family.checkpoint.frontier, 'right'),
+            end: entry.end,
+          });
+        }
+        continue;
+      }
+    }
+    nextRanges.push(entry);
+  }
+  nextRanges.push(range);
   return unifiedPlan({
     id: documentId,
     before: before(family, structureVersion),

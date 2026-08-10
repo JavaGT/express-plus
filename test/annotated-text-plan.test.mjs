@@ -4,6 +4,7 @@ import {
   importTextToFamily,
   materializeText,
   resolveOffsetToEndpoint,
+  projectEndpointToOffset,
 } from '../src/annotated-text-continuous.mjs';
 import {
   planTextOffsetEdit,
@@ -220,6 +221,161 @@ test('text-range apply replaces an existing range for the same annotation', () =
   assert.ok(byId.other);
   assert.equal(plan.operation.selection.startOffset, 6);
   assert.equal(plan.operation.selection.endOffset, 11);
+});
+
+// ---------------------------------------------------------------------------
+// Exclusive ('one'-cardinality) range-apply semantics. Applying an annotation
+// of an exclusive family over a region already covered by another SAME-FAMILY
+// annotation atomically removes the overlapped middle and keeps the other
+// annotation's non-overlapped left/right remnants, so at most one annotation
+// covers any region. Offsets are compared in ABSOLUTE offset space via
+// projectEndpointToOffset.
+// ---------------------------------------------------------------------------
+
+function offsetsOf(family, ranges) {
+  return ranges.map((range) => ({
+    annotationId: range.annotationId,
+    start: projectEndpointToOffset(family, range.start),
+    end: projectEndpointToOffset(family, range.end),
+  }));
+}
+
+function exclusiveApply(family, ranges, options) {
+  return planTextRangeApply({
+    documentId: 'doc1',
+    structureVersion: 1,
+    family,
+    ranges,
+    actorId: 'u1',
+    ...options,
+  });
+}
+
+test('one-cardinality apply trims an overlapping same-family range into left/right remnants', () => {
+  const family = familyFromText('ABCDEFGHIJ');
+  const applyB = exclusiveApply(family, [rangeFor(family, 'speaker-a', 2, 8)], {
+    annotation: { id: 'speaker-b', family: 'speaker', fields: {} },
+    from: at(4),
+    to: at(6),
+    cardinality: 'one',
+    sameFamilyAnnotationIds: new Set(['speaker-a', 'speaker-b']),
+  });
+  assert.deepEqual(offsetsOf(family, applyB.facts.ranges), [
+    { annotationId: 'speaker-a', start: 2, end: 4 },
+    { annotationId: 'speaker-a', start: 6, end: 8 },
+    { annotationId: 'speaker-b', start: 4, end: 6 },
+  ]);
+  assert.equal(applyB.facts.selectedRange.annotationId, 'speaker-b');
+  assert.equal(applyB.operation.kind, 'annotation.apply-range');
+  assert.equal(applyB.facts.actorId, 'u1');
+  assert.deepEqual(applyB.facts.measurements, []);
+});
+
+test('one-cardinality apply drops a same-family range fully inside the selection', () => {
+  const family = familyFromText('ABCDEFGHIJ');
+  const applyB = exclusiveApply(family, [rangeFor(family, 'speaker-a', 2, 4)], {
+    annotation: { id: 'speaker-b', family: 'speaker', fields: {} },
+    from: at(1),
+    to: at(9),
+    cardinality: 'one',
+    sameFamilyAnnotationIds: new Set(['speaker-a', 'speaker-b']),
+  });
+  assert.deepEqual(offsetsOf(family, applyB.facts.ranges), [
+    { annotationId: 'speaker-b', start: 1, end: 9 },
+  ]);
+});
+
+test('one-cardinality apply splits a fully-covering same-family range into two remnants', () => {
+  const family = familyFromText('ABCDEFGHIJ');
+  const applyB = exclusiveApply(family, [rangeFor(family, 'speaker-a', 0, 10)], {
+    annotation: { id: 'speaker-b', family: 'speaker', fields: {} },
+    from: at(4),
+    to: at(6),
+    cardinality: 'one',
+    sameFamilyAnnotationIds: new Set(['speaker-a', 'speaker-b']),
+  });
+  assert.deepEqual(offsetsOf(family, applyB.facts.ranges), [
+    { annotationId: 'speaker-a', start: 0, end: 4 },
+    { annotationId: 'speaker-a', start: 6, end: 10 },
+    { annotationId: 'speaker-b', start: 4, end: 6 },
+  ]);
+});
+
+test('one-cardinality apply leaves non-overlapping same-family ranges untouched', () => {
+  const family = familyFromText('ABCDEFGHIJ');
+  const applyB = exclusiveApply(family, [
+    rangeFor(family, 'speaker-a', 0, 2),
+    rangeFor(family, 'speaker-c', 7, 9),
+  ], {
+    annotation: { id: 'speaker-b', family: 'speaker', fields: {} },
+    from: at(4),
+    to: at(6),
+    cardinality: 'one',
+    sameFamilyAnnotationIds: new Set(['speaker-a', 'speaker-b', 'speaker-c']),
+  });
+  assert.deepEqual(offsetsOf(family, applyB.facts.ranges), [
+    { annotationId: 'speaker-a', start: 0, end: 2 },
+    { annotationId: 'speaker-c', start: 7, end: 9 },
+    { annotationId: 'speaker-b', start: 4, end: 6 },
+  ]);
+});
+
+test('one-cardinality apply still replaces the same annotation id', () => {
+  const family = familyFromText('ABCDEFGHIJ');
+  const applyB = exclusiveApply(family, [
+    rangeFor(family, 'speaker-b', 0, 10),
+    rangeFor(family, 'speaker-a', 4, 6),
+  ], {
+    annotation: { id: 'speaker-b', family: 'speaker', fields: {} },
+    from: at(2),
+    to: at(3),
+    cardinality: 'one',
+    sameFamilyAnnotationIds: new Set(['speaker-a', 'speaker-b']),
+  });
+  // speaker-b's own range is REPLACED by the new selection (same-id replace),
+  // while speaker-a's non-overlapping range passes through unchanged.
+  assert.deepEqual(offsetsOf(family, applyB.facts.ranges), [
+    { annotationId: 'speaker-a', start: 4, end: 6 },
+    { annotationId: 'speaker-b', start: 2, end: 3 },
+  ]);
+});
+
+test('many-cardinality apply preserves overlaps (no exclusivity)', () => {
+  const family = familyFromText('ABCDEFGHIJ');
+  const applyC = exclusiveApply(family, [
+    rangeFor(family, 'code-a', 0, 5),
+    rangeFor(family, 'code-b', 3, 8),
+  ], {
+    annotation: { id: 'code-c', family: 'code', fields: {} },
+    from: at(4),
+    to: at(6),
+  });
+  assert.deepEqual(offsetsOf(family, applyC.facts.ranges), [
+    { annotationId: 'code-a', start: 0, end: 5 },
+    { annotationId: 'code-b', start: 3, end: 8 },
+    { annotationId: 'code-c', start: 4, end: 6 },
+  ]);
+});
+
+test('one-cardinality apply leaves different-family ranges untouched', () => {
+  const family = familyFromText('ABCDEFGHIJ');
+  const applyB = exclusiveApply(family, [
+    rangeFor(family, 'speaker-a', 0, 5),
+    rangeFor(family, 'note-x', 2, 8),
+  ], {
+    annotation: { id: 'speaker-b', family: 'speaker', fields: {} },
+    from: at(3),
+    to: at(7),
+    cardinality: 'one',
+    sameFamilyAnnotationIds: new Set(['speaker-a', 'speaker-b']),
+  });
+  // speaker-a is trimmed; the different-family note-x range is untouched even
+  // though it overlaps the selection.
+  assert.deepEqual(offsetsOf(family, applyB.facts.ranges), [
+    { annotationId: 'speaker-a', start: 0, end: 3 },
+    { annotationId: 'note-x', start: 2, end: 8 },
+    { annotationId: 'speaker-b', start: 3, end: 7 },
+  ]);
 });
 
 test('rejects out-of-bounds offsets and empty delete ranges', () => {

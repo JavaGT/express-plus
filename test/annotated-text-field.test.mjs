@@ -124,7 +124,10 @@ test('membership table has correct columns, PK, and FK cascade', () => {
     null, { highlight: { col1: { kind: 'value', type: 'text' } } },
   ), makeFields());
   const mem = ddl.find(s => s.includes('Doc_body_membership'));
-  assert.ok(mem.includes('annotation_id TEXT PRIMARY KEY'));
+  // The composite PK admits the multiple membership rows an exclusive
+  // 'one'-cardinality apply needs for a trimmed annotation's remnants.
+  assert.ok(mem.includes('annotation_id TEXT NOT NULL'));
+  assert.ok(mem.includes('PRIMARY KEY (annotation_id, start_point)'));
   assert.ok(mem.includes('start_point TEXT NOT NULL CHECK (json_valid(start_point))'));
   assert.ok(mem.includes('end_point TEXT NOT NULL CHECK (json_valid(end_point))'));
   assert.ok(mem.includes('FOREIGN KEY (annotation_id) REFERENCES Doc_body_annotation(id) ON DELETE CASCADE'));

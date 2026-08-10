@@ -108,6 +108,40 @@ function rebuildAuthoringFamily(db: DbHandle, prefix: string) {
   );
 }
 
+// v4: annotated-text `_membership` tables move from annotation_id PRIMARY KEY
+// (one row per annotation) to PRIMARY KEY (annotation_id, start_point) so an
+// exclusive 'one'-cardinality apply can store a trimmed annotation's left and
+// right remnants as separate rows. A canonical family is skipped untouched;
+// a legacy shape is rebuilt and its rows copied over (each annotation has one
+// row today, so the composite key introduces no duplicate collision).
+function rebuildMembershipFamily(db: DbHandle, prefix: string) {
+  if (PREFIX_IDENTIFIER.test(prefix) === false) {
+    throw new Error(`invalid annotated-text membership table prefix: ${prefix}`);
+  }
+  if (!tableExists(db, `${prefix}_membership`) || !tableExists(db, `${prefix}_annotation`)) {
+    throw new Error(`incomplete annotated-text table family: ${prefix}`);
+  }
+  const columns = db.prepare(`PRAGMA table_info(${prefix}_membership)`).all().map((r) => ({ name: r.name as string, pk: r.pk as number }));
+  const pkColumns = columns.filter((c) => c.pk > 0).map((c) => c.name);
+  const hasCanonicalShape = pkColumns.length === 2 && pkColumns.includes('annotation_id') && pkColumns.includes('start_point');
+  if (hasCanonicalShape) return;
+  if (pkColumns.length !== 1 || pkColumns[0] !== 'annotation_id') {
+    throw new Error(`unrecognized annotated-text membership table shape: ${prefix}`);
+  }
+  const tmp = `${prefix}_membership_v4`;
+  db.exec(`DROP TABLE IF EXISTS ${tmp}`);
+  db.exec(`CREATE TABLE ${tmp} (
+    annotation_id TEXT NOT NULL,
+    start_point TEXT NOT NULL CHECK (json_valid(start_point)),
+    end_point TEXT NOT NULL CHECK (json_valid(end_point)),
+    PRIMARY KEY (annotation_id, start_point),
+    FOREIGN KEY (annotation_id) REFERENCES ${prefix}_annotation(id) ON DELETE CASCADE
+  )`);
+  db.exec(`INSERT INTO ${tmp} (annotation_id, start_point, end_point) SELECT annotation_id, start_point, end_point FROM ${prefix}_membership`);
+  db.exec(`DROP TABLE ${prefix}_membership`);
+  db.exec(`ALTER TABLE ${tmp} RENAME TO ${prefix}_membership`);
+}
+
 type WorkbenchMigration = {
   version: number;
   transaction: 'exclusive';
@@ -170,6 +204,24 @@ export const WORKBENCH_MIGRATIONS: readonly WorkbenchMigration[] = Object.freeze
         const name = row.name as string;
         const columns = new Set(db.prepare(`PRAGMA table_info(${name})`).all().map((column) => column.name as string));
         if (!columns.has('redactions')) db.exec(`ALTER TABLE ${row.name} ADD COLUMN redactions TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(redactions))`);
+      }
+    },
+  },
+  {
+    // v4: rebuild annotated-text `_membership` tables from the legacy one-row-per-
+    // annotation shape (annotation_id PRIMARY KEY) to a composite
+    // (annotation_id, start_point) primary key so an exclusive 'one'-cardinality
+    // apply can persist a trimmed annotation's left AND right remnants as
+    // multiple rows. The DDL emits the canonical shape for fresh databases; this
+    // migration only reshapes legacy tables and copies their existing rows
+    // (one per annotation today) over unchanged.
+    version: 4,
+    transaction: 'exclusive',
+    up(db) {
+      for (const row of db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB '*_membership'").all()) {
+        const name = row.name as string;
+        if (!name.endsWith('_membership')) continue;
+        rebuildMembershipFamily(db, name.slice(0, -'_membership'.length));
       }
     },
   },

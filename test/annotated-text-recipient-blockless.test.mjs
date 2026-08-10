@@ -142,13 +142,20 @@ test('orphans project with saved quote when their source range is visible', () =
   assert.equal(r.orphans[0].savedQuote, 'ello');
 });
 
-test('duplicate or out-of-bounds ranges are rejected', () => {
+test('duplicate ranges are delivered; out-of-bounds ranges are rejected', () => {
+  // Multiple ranges per annotation are LEGAL (an exclusive 'one'-family apply
+  // leaves a trimmed annotation's left/right remnants).
   const c1 = canonical({
     text: 'abc',
     annotations: [ann('a1', 'comment')],
     ranges: [{ annotationId: 'a1', start: 0, end: 3 }, { annotationId: 'a1', start: 1, end: 2 }],
   });
-  assert.throws(() => projectAnnotatedTextForRecipient(c1, Doc.fields.body, decisions([])), /exactly one range/);
+  const r1 = projectAnnotatedTextForRecipient(c1, Doc.fields.body, decisions([]));
+  assert.deepEqual(r1.ranges, [
+    { annotationId: 'a1', start: 0, end: 3 },
+    { annotationId: 'a1', start: 1, end: 2 },
+  ]);
+  assert.deepEqual(r1.annotations.map((a) => a.id), ['a1']);
   const c2 = canonical({
     text: 'abc',
     annotations: [ann('a1', 'comment')],
