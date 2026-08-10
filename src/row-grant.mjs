@@ -29,7 +29,7 @@ import { isRuntimeGrantClause } from './scope.mjs';
 // admitting one row (inheritance detection, own-can detection, and capability
 // evaluation); resolve the thunk once and reuse its clauses across those asks.
 // A WeakMap keeps this cache bounded by the entity records themselves.
-const GRANT_CLAUSES_CACHE = new WeakMap();
+const GRANT_CLAUSES_CACHE = new WeakMap                                                    ();
 
 // A check-registry entry as the runtime half sees it. `run` is the per-row
 // boolean face; `harvest` belongs to the scope compiler (not consumed here).
@@ -228,7 +228,7 @@ function grantClauses(entityRecord              )          {
   // Preserve the existing method-call `this` value for unusual declaration
   // thunks that inspect their entity receiver.
   const clauses = typeof declaration === 'function'
-    ? declaration.call(entityRecord)
+    ? (declaration                                   ).call(entityRecord)
     : declaration;
   GRANT_CLAUSES_CACHE.set(entityRecord, { declaration, clauses });
   return clauses;
