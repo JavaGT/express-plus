@@ -22,6 +22,15 @@ import { read, write, subscribe, admin } from './grant.mjs';
 import { getLog } from './log.mjs';
 import { isRuntimeGrantClause } from './scope.mjs';
 
+// Entity declarations are compiled once and their grant thunk is immutable for
+// the lifetime of that declaration. Runtime membership overlays replace the
+// entity's `grant` property, so the declaration reference is also the cache
+// invalidation key. The row-auth path asks for the grant several times while
+// admitting one row (inheritance detection, own-can detection, and capability
+// evaluation); resolve the thunk once and reuse its clauses across those asks.
+// A WeakMap keeps this cache bounded by the entity records themselves.
+const GRANT_CLAUSES_CACHE = new WeakMap();
+
 // A check-registry entry as the runtime half sees it. `run` is the per-row
 // boolean face; `harvest` belongs to the scope compiler (not consumed here).
                       
@@ -212,7 +221,17 @@ const VERB_CAPABILITY                                       = Object.freeze({
 // grants have NO own `.can`; mayRow owns those cases before falling through to
 // mayVerb for entities with an own runtime capability body.
 function grantClauses(entityRecord              )          {
-  return typeof entityRecord.grant === 'function' ? entityRecord.grant() : entityRecord.grant;
+  const declaration = entityRecord.grant;
+  const cached = GRANT_CLAUSES_CACHE.get(entityRecord);
+  if (cached?.declaration === declaration) return cached.clauses;
+
+  // Preserve the existing method-call `this` value for unusual declaration
+  // thunks that inspect their entity receiver.
+  const clauses = typeof declaration === 'function'
+    ? declaration.call(entityRecord)
+    : declaration;
+  GRANT_CLAUSES_CACHE.set(entityRecord, { declaration, clauses });
+  return clauses;
 }
 
 export function hasOwnCanGrant(entityRecord              )          {

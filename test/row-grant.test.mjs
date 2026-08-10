@@ -89,3 +89,34 @@ test('an anonymous principal owns no row → no write capability', async () => {
   const row = { id: 1, body: 'hi', owner: 'alice' };
   assert.equal(await mayVerb(Note, 'update', row, anonymous), false);
 });
+
+test('a stable grant thunk is resolved once and refreshes when its declaration changes', async () => {
+  let calls = 0;
+  const clauses = [
+    scope(() => undefined).can(async ({ is }) =>
+      (await is.owner()) ? grant(read, write) : deny('not the owner')),
+  ];
+  const grantThunk = () => {
+    calls += 1;
+    return clauses;
+  };
+  const entityRecord = {
+    name: 'CachedGrant',
+    grant: grantThunk,
+    registry: Object.freeze({
+      owner: { run: ({ entity: row, principal }) => row.owner === principal.id },
+    }),
+  };
+  const row = { id: 'd1', owner: 'alice' };
+
+  assert.equal(await mayVerb(entityRecord, 'read', row, alice), true);
+  assert.equal(await mayVerb(entityRecord, 'update', row, alice), true);
+  assert.equal(calls, 1, 'the immutable declaration is evaluated once per entity');
+
+  entityRecord.grant = () => {
+    calls += 1;
+    return clauses;
+  };
+  assert.equal(await mayVerb(entityRecord, 'read', row, alice), true);
+  assert.equal(calls, 2, 'replacing the declaration invalidates the cached clauses');
+});
