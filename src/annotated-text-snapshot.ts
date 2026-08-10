@@ -1,5 +1,5 @@
 import { deserializeField } from './field-strategy.ts';
-import { restoreTextFamily, materializeText, projectEndpointToOffset, textFamilyCheckpoint } from './annotated-text-continuous.ts';
+import { compactTextFamilyCheckpoint, restoreTextFamilySerialized, materializeText, projectEndpointToOffset, textFamilyBasis } from './annotated-text-continuous.ts';
 import { getAnnotatedTextCompiledMetadata, resolveAnnotatedTextOwningScope } from './annotated-text-field.ts';
 import { projectAnnotatedTextForRecipient, authoringRedactionsForRecipient } from './annotated-text-recipient-projection.ts';
 import { projectAnnotatedTextCaretForRecipient } from './annotated-text-caret-projection.ts';
@@ -114,7 +114,7 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
   if (db.prepare(`SELECT 1 FROM ${prefix}_retired WHERE document_id = ?`).get(row.id)) fail(`field '${fieldName}' document is retired`);
   const state = db.prepare(`SELECT family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(row.id);
   if (!state) fail(`field '${fieldName}' state is missing`);
-  const family = restoreTextFamily(JSON.parse(state.family_checkpoint));
+  const family = restoreTextFamilySerialized(state.family_checkpoint);
   const text = materializeText(family);
 
   const annotations = loadAnnotations({ db, prefix, descriptor, documentId: row.id });
@@ -214,7 +214,7 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
   const issued = issueAuthoringSnapshot({
     db, prefix, leaseId: lease.id, fence: cursor,
     positions: [{
-      familyCheckpoint: textFamilyCheckpoint(family),
+      familyCheckpoint: textFamilyBasis(family),
       visibleAtIssue: true,
       redactions: authoringRedactionsForRecipient(recipient),
     }],
@@ -232,7 +232,7 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
   // safe when the recipient sees the ENTIRE document unredacted. Restricted or
   // inline-redacted recipients get no family: they stay on snapshot recovery.
   const fullyVisible = !recipient.restricted && !recipient.redactions?.length && authoringRedactionsForRecipient(recipient).length === 0;
-  if (fullyVisible) (envelope as any).family = textFamilyCheckpoint(family);
+  if (fullyVisible) (envelope as any).family = compactTextFamilyCheckpoint(family);
   return Object.freeze({ ...recipient, authoring: Object.freeze(envelope) });
 }
 
@@ -287,7 +287,7 @@ function projectCanonicalExport({ db, entity, fieldName, descriptor, documentId 
   if (db.prepare(`SELECT 1 FROM ${prefix}_retired WHERE document_id = ?`).get(documentId)) fail('document is retired');
   const state = db.prepare(`SELECT family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(documentId);
   if (!state) fail('document state is missing');
-  const family = restoreTextFamily(JSON.parse(state.family_checkpoint));
+  const family = restoreTextFamilySerialized(state.family_checkpoint);
   const text = materializeText(family);
   const annotations = loadAnnotations({ db, prefix, descriptor, documentId });
   const rangeRows = db.prepare(`SELECT annotation_id, start_point, end_point FROM ${prefix}_membership WHERE annotation_id IN (SELECT id FROM ${prefix}_annotation WHERE document_id = ?)`).all(documentId);

@@ -716,8 +716,13 @@ export interface AnnotatedTextHttpSessionConfig {
   readonly fetchImpl?: typeof globalThis.fetch;
   readonly eventSourceFactory?: (url: string, options: EventSourceInit) => EventSource;
   readonly createActionId?: () => string;
+  readonly onRecoveryDelayed?: (delayed: boolean) => void;
   /** Opt-in fold timing hook: called after each client-side fold with its applied duration in ms. */
   readonly onFoldApplied?: (fold: unknown, elapsedMs: number) => void;
+  /** Idle window used to coalesce contiguous inserts; defaults to 75ms. Set to 0 to disable. */
+  readonly typingBurstIdleMs?: number;
+  /** Maximum age of a continuously active typing burst; defaults to 150ms. */
+  readonly typingBurstMaxMs?: number;
 }
 
 export interface AnnotatedTextHttpSession {

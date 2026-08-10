@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   importTextToFamily,
+  applyTextOperation,
   materializeText,
   resolveOffsetToEndpoint,
   projectEndpointToOffset,
@@ -36,6 +37,11 @@ function input(family, edit, extra = {}) {
   });
 }
 
+function materializePlan(family, plan) {
+  const operations = plan.operation.kind === 'text.replace' ? plan.operation.operations : [plan.operation.operation];
+  return materializeText(operations.reduce((current, operation) => applyTextOperation(current, operation), family));
+}
+
 function rangeFor(family, annotationId, startOffset, endOffset) {
   const frontier = family.checkpoint.frontier;
   return {
@@ -49,32 +55,33 @@ test('plans insert, delete, and replace as unified document-wide operations', ()
   const family = familyFromText('abc');
 
   const inserted = input(family, { kind: 'text.insert', text: 'x', at: at(1) });
-  assert.equal(inserted.version, 13);
+  assert.equal(inserted.version, 14);
   assert.equal(inserted.operation.kind, 'text.apply');
   assert.equal(inserted.id, 'doc1');
   assert.deepEqual(inserted.before, { structuralRevision: 1, frontier: family.checkpoint.frontier });
   assert.equal(inserted.after.structuralRevision, 1, 'insert does not bump structuralRevision');
-  assert.equal(materializeText(inserted.facts.family), 'axbc');
+  assert.equal(inserted.facts.family, null);
+  assert.equal(materializePlan(family, inserted), 'axbc');
   assert.equal(inserted.operation.operation[0], 'workbench.text');
   assert.equal(inserted.operation.operation[5][0], 'insert');
   assert.equal(inserted.operation.operation[5][2], 'x');
   assert.deepEqual(inserted.facts.emptiedAnnotations, []);
 
   const deleted = input(family, { kind: 'text.delete', from: at(1), to: at(2) });
-  assert.equal(deleted.version, 13);
+  assert.equal(deleted.version, 14);
   assert.equal(deleted.operation.kind, 'text.apply');
-  assert.equal(materializeText(deleted.facts.family), 'ac');
+  assert.equal(materializePlan(family, deleted), 'ac');
   assert.equal(deleted.operation.operation[5][0], 'delete');
   assert.equal(deleted.after.structuralRevision, 1, 'delete without emptied ranges keeps revision');
 
   const replaced = input(family, { kind: 'text.replace', text: 'xy', from: at(1), to: at(2) });
-  assert.equal(replaced.version, 13);
+  assert.equal(replaced.version, 14);
   assert.equal(replaced.operation.kind, 'text.replace');
   assert.equal(replaced.operation.operations.length, 2);
   assert.equal(replaced.operation.operations[0][5][0], 'delete');
   assert.equal(replaced.operation.operations[1][5][0], 'insert');
   assert.equal(replaced.operation.operations[1][5][2], 'xy');
-  assert.equal(materializeText(replaced.facts.family), 'axyc');
+  assert.equal(materializePlan(family, replaced), 'axyc');
   assert.equal(replaced.after.structuralRevision, 1);
   assert.ok(Array.isArray(replaced.after.frontier));
 });
@@ -87,8 +94,8 @@ test('delete empties an orphan-policy annotation and bumps structuralRevision', 
     annotations: [annotation],
     ranges,
   });
-  assert.equal(plan.version, 13);
-  assert.equal(materializeText(plan.facts.family), 'ab');
+  assert.equal(plan.version, 14);
+  assert.equal(materializePlan(family, plan), 'ab');
   assert.equal(plan.after.structuralRevision, 2, 'emptied range bumps structuralRevision');
   assert.equal(plan.facts.emptiedAnnotations.length, 1);
   assert.equal(plan.facts.emptiedAnnotations[0].annotationId, 'ann1');
@@ -122,7 +129,7 @@ test('replace empties a delete-policy annotation like a delete does', () => {
   });
   assert.equal(plan.operation.kind, 'text.replace');
   assert.equal(plan.operation.operations.length, 2);
-  assert.equal(materializeText(plan.facts.family), 'Zcd');
+  assert.equal(materializePlan(family, plan), 'Zcd');
   assert.equal(plan.after.structuralRevision, 2);
   assert.equal(plan.facts.emptiedAnnotations.length, 1);
   assert.equal(plan.facts.emptiedAnnotations[0].annotationId, 'ann1');
@@ -138,7 +145,7 @@ test('delete that does not empty a covering range leaves emptiedAnnotations empt
     annotations: [annotation],
     ranges,
   });
-  assert.equal(materializeText(plan.facts.family), 'acd');
+  assert.equal(materializePlan(family, plan), 'acd');
   assert.deepEqual(plan.facts.emptiedAnnotations, []);
   assert.equal(plan.after.structuralRevision, 1);
 });
@@ -150,7 +157,7 @@ test('planAnnotationApplyOffsets is rejected as block-era', () => {
   );
 });
 
-test('removes an annotation and freezes the v13 result', () => {
+test('removes an annotation and freezes the compact operated result', () => {
   const family = familyFromText('abc');
   const annotation = { id: 'ann1', family: 'comment', empty: 'delete', protectedTargetIds: [] };
   const ranges = [rangeFor(family, 'ann1', 0, 3)];
@@ -162,14 +169,14 @@ test('removes an annotation and freezes the v13 result', () => {
     annotations: [annotation],
     ranges,
   });
-  assert.equal(plan.version, 13);
+  assert.equal(plan.version, 14);
   assert.equal(plan.operation.kind, 'annotation.remove');
   assert.equal(plan.operation.annotationId, 'ann1');
   assert.equal(plan.facts.result.disposition.kind, 'deleted');
   assert.deepEqual(plan.facts.removedAnnotationIds, ['ann1']);
   assert.deepEqual(plan.facts.ranges, []);
   assert.equal(plan.after.structuralRevision, 1);
-  assert.equal(plan.facts.family.id, 'doc1');
+  assert.equal(plan.facts.family, null);
   assert.ok(Object.isFrozen(plan));
 });
 
@@ -184,14 +191,14 @@ test('plans a text-range apply as one document range with no family change', () 
     from: at(2),
     to: at(12),
   });
-  assert.equal(plan.version, 13);
+  assert.equal(plan.version, 14);
   assert.equal(plan.operation.kind, 'annotation.apply-range');
   assert.deepEqual(plan.operation.selection, { startOffset: 2, endOffset: 12 });
   assert.equal(plan.operation.annotation.id, 'code1');
   assert.equal(plan.after.structuralRevision, 1, 'revision unchanged');
   assert.deepEqual(plan.after.frontier, family.checkpoint.frontier);
-  assert.equal(plan.facts.family.id, 'doc1');
-  assert.equal(materializeText(plan.facts.family), 'A diarized transcript');
+  assert.equal(plan.facts.family, null);
+  assert.equal(materializeText(family), 'A diarized transcript');
   assert.equal(plan.facts.ranges.length, 1);
   assert.equal(plan.facts.ranges[0].annotationId, 'code1');
   assert.ok(plan.facts.ranges[0].start.point, 'carries structural start endpoint');

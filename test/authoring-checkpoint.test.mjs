@@ -13,6 +13,8 @@ import {
 } from '../src/annotated-text-authoring-stream.mjs';
 import { annotatedTextAuthoringStreamDDL } from '../src/annotated-text-field.mjs';
 import { runWorkbenchMigrations, appliedWorkbenchVersion, ensureWorkbenchMigrationTable } from '../src/workbench-migrations.mjs';
+import { applyTextOp, createTextState, textCheckpoint } from '../src/annotated-text.mjs';
+import { createTextFamily, materializeText, restoreTextFamily, textFamilyCheckpoint } from '../src/annotated-text-continuous.mjs';
 
 const prefix = 'Doc_body';
 
@@ -369,7 +371,7 @@ test('A8: migration — legacy schema upgrades atomically, preserves durable dat
 
   // Run the built-in Workbench migration (fresh apply).
   await runWorkbenchMigrations(db);
-  assert.equal(appliedWorkbenchVersion(db), 4);
+  assert.equal(appliedWorkbenchVersion(db), 5);
 
   // Canonical shape: position has checkpoint_id NOT NULL, no family_checkpoint.
   const positionColumns = new Set(db.prepare(`PRAGMA table_info(${prefix}_authoring_position)`).all().map((r) => r.name));
@@ -390,7 +392,7 @@ test('A8: migration — legacy schema upgrades atomically, preserves durable dat
 
   // Second startup is a no-op.
   await runWorkbenchMigrations(db);
-  assert.equal(appliedWorkbenchVersion(db), 4);
+  assert.equal(appliedWorkbenchVersion(db), 5);
 });
 
 test('A8-rollback: induced migration failure rolls back and leaves legacy schema intact', async () => {
@@ -419,7 +421,7 @@ test('A8-rollback: induced migration failure rolls back and leaves legacy schema
   // With the trigger removed, the same run succeeds (idempotent re-apply after rollback).
   db.exec(`DROP TRIGGER fail_migration`);
   await runWorkbenchMigrations(db);
-  assert.equal(appliedWorkbenchVersion(db), 4);
+  assert.equal(appliedWorkbenchVersion(db), 5);
 });
 
 test('A8-v2: migration invalidates defective ephemeral state and preserves durable state', async () => {
@@ -439,7 +441,7 @@ test('A8-v2: migration invalidates defective ephemeral state and preserves durab
   // Upgrade from the deployed v1 build invalidates every opaque authoring token.
   await runWorkbenchMigrations(db);
   await runWorkbenchMigrations(db);
-  assert.equal(appliedWorkbenchVersion(db), 4);
+  assert.equal(appliedWorkbenchVersion(db), 5);
   assert.equal(count(db, `${prefix}_authoring_stream`), 0, 'streams from the defective build are invalidated');
   assert.equal(count(db, `${prefix}_authoring_lease`), 0, 'leases from the defective build are invalidated');
   assert.equal(count(db, `${prefix}_authoring_position`), 0, 'defective position tokens are removed');
@@ -569,7 +571,7 @@ test('A10: app.prepareSchema upgrades a legacy authoring schema via the built-in
   assert.ok(positionColumns.has('checkpoint_id'), 'position has checkpoint_id after app boot');
   assert.ok(positionColumns.has('family_checkpoint') === false, 'legacy family_checkpoint column removed after app boot');
   const applied = db.prepare('SELECT MAX(version) AS v FROM _WorkbenchMigration').get();
-  assert.equal(applied.v, 4, 'Workbench migrations v1–v4 recorded');
+  assert.equal(applied.v, 5, 'Workbench migrations v1–v5 recorded');
   assert.equal(count(db, `${prefix}_authoring_position`), 0, 'pre-migration legacy positions cleared');
   app.db.close();
 });
@@ -589,7 +591,7 @@ test('A11: v4 rebuilds a legacy annotated-text membership table to the composite
   db.prepare(`INSERT INTO ${prefix}_membership (annotation_id, start_point, end_point) VALUES ('a1', '{"p":1}', '{"p":2}')`).run();
 
   await runWorkbenchMigrations(db);
-  assert.equal(appliedWorkbenchVersion(db), 4);
+  assert.equal(appliedWorkbenchVersion(db), 5);
 
   // Canonical shape: composite (annotation_id, start_point) primary key.
   const pkColumns = db.prepare(`PRAGMA table_info(${prefix}_membership)`).all()
@@ -608,7 +610,7 @@ test('A11: v4 rebuilds a legacy annotated-text membership table to the composite
   // The migration is idempotent; a second run skips the canonical table.
   const second = new DatabaseSync(':memory:');
   await runWorkbenchMigrations(second);
-  assert.equal(appliedWorkbenchVersion(second), 4);
+  assert.equal(appliedWorkbenchVersion(second), 5);
   second.close();
   db.close();
 });
@@ -630,10 +632,37 @@ test('A11b: v4 leaves a fresh canonical-shape membership table untouched', async
   db.prepare(`INSERT INTO ${prefix}_membership (annotation_id, start_point, end_point) VALUES ('a1', '{"p":1}', '{"p":2}')`).run();
 
   await runWorkbenchMigrations(db);
-  assert.equal(appliedWorkbenchVersion(db), 4);
+  assert.equal(appliedWorkbenchVersion(db), 5);
   const pkColumns = db.prepare(`PRAGMA table_info(${prefix}_membership)`).all()
     .filter((column) => column.pk > 0).map((column) => column.name).sort();
   assert.deepEqual(pkColumns, ['annotation_id', 'start_point']);
   assert.equal(db.prepare(`SELECT COUNT(*) AS c FROM ${prefix}_membership`).get().c, 1, 'canonical membership rows survive the migration untouched');
+  db.close();
+});
+
+test('A12: v5 compacts durable continuous checkpoints and invalidates oversized authoring frames', async () => {
+  const db = setupCanonical();
+  wireDoc(db, 'd1');
+  const actor = 'a'.repeat(32);
+  const text = 'Transcript checkpoint content. '.repeat(100);
+  const state = applyTextOp(createTextState(), ['workbench.text', 1, [actor, 1], 1, [], ['insert', ['root'], text]]);
+  const family = createTextFamily('d1', textCheckpoint(state));
+  const oldSerialized = JSON.stringify(textFamilyCheckpoint(family));
+  db.exec(`CREATE TABLE ${prefix}_state (document_id TEXT PRIMARY KEY, structure_version INTEGER NOT NULL, family_checkpoint TEXT NOT NULL CHECK (json_valid(family_checkpoint)))`);
+  db.prepare(`INSERT INTO ${prefix}_state VALUES (?, 1, ?)`).run('d1', oldSerialized);
+  const stream = ensureStream({ db, prefix, documentId: 'd1', principalType: 'user', principalId: 'u1' });
+  const lease = ensureLease({ db, prefix, streamId: stream.id, clientNonceHash: 'n'.repeat(64) });
+  issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 1, positions: [{ familyCheckpoint: textFamilyCheckpoint(family), visibleAtIssue: true }] });
+
+  await runWorkbenchMigrations(db);
+
+  const serialized = db.prepare(`SELECT family_checkpoint FROM ${prefix}_state WHERE document_id = 'd1'`).get().family_checkpoint;
+  const compact = JSON.parse(serialized);
+  assert.equal(compact.checkpoint.version, 2);
+  assert.equal(Object.hasOwn(compact.checkpoint, 'elements'), false);
+  assert.equal(materializeText(restoreTextFamily(compact)), text);
+  assert.ok(serialized.length < oldSerialized.length / 10);
+  assert.equal(db.prepare(`SELECT COUNT(*) AS c FROM ${prefix}_authoring_position`).get().c, 0);
+  assert.equal(db.prepare(`SELECT COUNT(*) AS c FROM ${prefix}_authoring_checkpoint`).get().c, 0);
   db.close();
 });

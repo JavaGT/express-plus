@@ -22,6 +22,7 @@ const LEDGER_DDL = `CREATE TABLE IF NOT EXISTS _WorkbenchMigration (
 const PREFIX_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 import { exclusiveTxn, type DbHandle } from './driver.ts';
+import { restoreTextFamily, serializeCompactTextFamilyCheckpoint } from './annotated-text-continuous.ts';
 
 function tableExists(db: DbHandle, name: string) {
   return Boolean(db.prepare('SELECT 1 FROM sqlite_master WHERE type = \'table\' AND name = ?').get(name));
@@ -222,6 +223,39 @@ export const WORKBENCH_MIGRATIONS: readonly WorkbenchMigration[] = Object.freeze
         const name = row.name as string;
         if (!name.endsWith('_membership')) continue;
         rebuildMembershipFamily(db, name.slice(0, -'_membership'.length));
+      }
+    },
+  },
+  {
+    // v5: position frames only need a compact immutable frontier basis; the
+    // previous ephemeral rows retained a complete CRDT checkpoint per edit.
+    // Purge those frames so connected clients re-bootstrap, then compact each
+    // durable continuous-text checkpoint to the operation-registry v2 form.
+    // Historical committed events are intentionally untouched.
+    version: 5,
+    transaction: 'exclusive',
+    up(db) {
+      for (const row of db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB '*_authoring_lease'").all()) {
+        const name = row.name as string;
+        const prefix = name.slice(0, -'_authoring_lease'.length);
+        if (!PREFIX_IDENTIFIER.test(prefix)) throw new Error(`invalid authoring stream table prefix: ${prefix}`);
+        for (const table of ['snapshot_position', 'snapshot', 'position', 'checkpoint']) {
+          if (tableExists(db, `${prefix}_authoring_${table}`)) db.exec(`DELETE FROM ${prefix}_authoring_${table}`);
+        }
+        if (tableExists(db, `${prefix}_authoring_stream`)) db.exec(`DELETE FROM ${prefix}_authoring_stream`);
+
+        const stateTable = `${prefix}_state`;
+        if (!tableExists(db, stateTable)) continue;
+        const select = db.prepare(`SELECT document_id, family_checkpoint FROM ${stateTable}`);
+        const update = db.prepare(`UPDATE ${stateTable} SET family_checkpoint = ? WHERE document_id = ?`);
+        for (const state of select.all()) {
+          const raw = JSON.parse(state.family_checkpoint as string);
+          // Legacy block families contain a `blocks` member and are owned by
+          // their older migration lane; only blockless continuous families are
+          // compacted here.
+          if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.hasOwn(raw, 'blocks')) continue;
+          update.run(serializeCompactTextFamilyCheckpoint(restoreTextFamily(raw)), state.document_id);
+        }
       }
     },
   },

@@ -20,8 +20,23 @@ import {
   textCheckpoint,
 } from './workbench-annotated-text.mjs';
 
+const trustedFamilies = new WeakSet();
+
 function fail(message) {
   throw new Error(`annotated-text continuous: ${message}`);
+}
+
+function trustFamily(family) {
+  const trusted = deepFreeze(family);
+  trustedFamilies.add(trusted);
+  return trusted;
+}
+
+function assertTrustedFamily(family) {
+  if (!family || typeof family !== 'object' || !trustedFamilies.has(family)) {
+    fail('family must be created or restored by this module');
+  }
+  return family;
 }
 
 /** A continuous family is the document id + the RGA checkpoint. No blocks. */
@@ -37,13 +52,13 @@ export function restoreTextFamily(familyCheckpoint) {
     fail('family checkpoint id must be a non-empty string');
   }
   const checkpoint = restoreTextCheckpoint(familyCheckpoint.checkpoint);
-  return deepFreeze({ id: familyCheckpoint.id, checkpoint });
+  return trustFamily({ id: familyCheckpoint.id, checkpoint });
 }
 
 export function createTextFamily(id, checkpoint) {
   if (typeof id !== 'string' || id.length === 0) fail('document id must be a non-empty string');
   const restored = restoreTextCheckpoint(checkpoint);
-  return deepFreeze({ id, checkpoint: restored });
+  return trustFamily({ id, checkpoint: restored });
 }
 
 /**
@@ -63,11 +78,12 @@ export function importTextToFamily(documentId, actor, text) {
 }
 
 export function textFamilyCheckpoint(family) {
-  return deepFreeze({ id: family.id, checkpoint: family.checkpoint });
+  assertTrustedFamily(family);
+  return trustFamily({ id: family.id, checkpoint: family.checkpoint });
 }
 
 export function materializeText(family) {
-  return materializeCheckpointText(restoreTextCheckpoint(family.checkpoint));
+  return materializeCheckpointText(assertTrustedFamily(family).checkpoint);
 }
 
 function deepFreeze(value) {
@@ -78,7 +94,7 @@ function deepFreeze(value) {
 
 /** Apply a whole-document text operation, returning the next family. */
 export function applyTextOperation(family, operation) {
-  const state = restoreTextCheckpoint(family.checkpoint);
-  const nextState = applyTextOp(state, operation);
-  return createTextFamily(family.id, textCheckpoint(nextState));
+  assertTrustedFamily(family);
+  const nextState = applyTextOp(family.checkpoint, operation);
+  return trustFamily({ id: family.id, checkpoint: nextState });
 }

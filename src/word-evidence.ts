@@ -5,7 +5,7 @@ import {
   materializeText,
   projectEndpointToOffset,
   resolveOffsetToEndpoint,
-  restoreTextFamily,
+  restoreTextFamilySerialized,
 } from './annotated-text-continuous.ts';
 import type { ContinuousTextFamily } from './annotated-text-continuous.ts';
 import type { StructuralEndpoint } from './annotated-text-family.ts';
@@ -345,7 +345,7 @@ export function readWordEvidence({ database, entityName, fieldName, tableName, s
 }): { structureVersion: unknown; words: readonly unknown[] } | null {
   const state = database.prepare(`SELECT structure_version, family_checkpoint FROM ${entityName}_${fieldName}_state WHERE document_id = ?`).get(documentId);
   if (!state) return null;
-  const family = restoreTextFamily(JSON.parse(state.family_checkpoint as string));
+  const family = restoreTextFamilySerialized(state.family_checkpoint as string);
   const familyFilter = families && families.length > 0 ? families : null;
   const rows = familyFilter
     ? database.prepare(`SELECT * FROM ${tableName} WHERE scope = ? AND document_id = ? AND family IN (${familyFilter.map(() => '?').join(', ')}) ORDER BY source_start_utf16`)

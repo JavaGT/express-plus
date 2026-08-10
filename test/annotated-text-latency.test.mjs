@@ -85,12 +85,18 @@ async function setupLargeDocument(t) {
     body: JSON.stringify({ actionId: 'latency-create', type: create.type, payload: create.payload, scope: 'Project:p1', clientId: 'tab-a' }),
   });
   assert.equal(createRes.status, 200, await createRes.text());
-  // The RGA import splits the source text into PER-CHARACTER elements, so the
-  // family is realistically many-element; assert the workload is not a single
-  // scalar node.
+  // The compact durable checkpoint stores the causal operation registry rather
+  // than the derived element topology. The imported document is one valid
+  // multi-scalar operation; assert the compact shape and retain the large text
+  // workload that drives materialization and fold payload sizing.
   const importedState = db.prepare('SELECT family_checkpoint FROM LatencyDoc_body_state WHERE document_id = ?').get('d1');
-  const elementCount = Object.keys(JSON.parse(importedState.family_checkpoint).checkpoint.elements).length;
-  assert.ok(elementCount >= 1000, `expected a many-element family, got ${elementCount}`);
+  assert.ok(importedState?.family_checkpoint, 'expected the created document checkpoint');
+  const checkpoint = JSON.parse(importedState.family_checkpoint).checkpoint;
+  assert.equal(checkpoint.version, 2, 'expected the compact checkpoint representation');
+  const operationCount = Object.keys(checkpoint.operations).length;
+  assert.ok(operationCount >= 1, `expected the imported operation registry, got ${operationCount} operations`);
+  const text = largeText();
+  assert.ok(text.length >= 1000, `expected a large text workload, got ${text.length} UTF-16 units`);
   return { app, db, Document, origin, segmentCount: SEGMENT_COUNT, text: largeText(), textLength: largeText().length };
 }
 

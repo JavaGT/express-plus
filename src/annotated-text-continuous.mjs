@@ -20,10 +20,10 @@ import {
   compareOpId,
   createTextState,
   frontierDominates,
-  materializeText as materializeCheckpointText,
   restoreTextCheckpoint,
   textCheckpoint,
   applyTextOp,
+  compactTextCheckpoint,
 } from './annotated-text.mjs';
              
                                                          
@@ -35,9 +35,21 @@ import {
                                                                      
 
 const ROOT_ID = 'root';
+const trustedFamilies = new WeakSet        ();
+const serializedFamilyCache = new Map                              ();
+const SERIALIZED_FAMILY_CACHE_LIMIT = 16;
+const derivedIndexCache = new WeakMap                                                  ();
 
                                        
              
+                        
+ 
+
+                                      
+                                               
+                                          
+                                                              
+                                    
                         
  
 
@@ -49,6 +61,28 @@ const ROOT_ID = 'root';
                             
                           
  
+
+function trustFamily(family                      )                       {
+  const trusted = deepFreeze(family);
+  trustedFamilies.add(trusted);
+  return trusted;
+}
+
+function assertTrustedFamily(family                      )                       {
+  if (!family || typeof family !== 'object' || !trustedFamilies.has(family)) {
+    fail('family must be created or restored by this module');
+  }
+  return family;
+}
+
+function rememberSerializedFamily(serialized        , family                      )                       {
+  serializedFamilyCache.delete(serialized);
+  serializedFamilyCache.set(serialized, family);
+  if (serializedFamilyCache.size > SERIALIZED_FAMILY_CACHE_LIMIT) {
+    serializedFamilyCache.delete(serializedFamilyCache.keys().next().value          );
+  }
+  return family;
+}
 
 function fail(message        )        {
   throw new Error(`annotated-text continuous: ${message}`);
@@ -73,13 +107,29 @@ export function restoreTextFamily(familyCheckpoint         )                    
     fail('family checkpoint id must be a non-empty string');
   }
   const checkpoint = restoreTextCheckpoint(raw.checkpoint);
-  return deepFreeze({ id: raw.id, checkpoint });
+  return trustFamily({ id: raw.id, checkpoint });
+}
+
+/**
+ * Restore an exact serialized durable family with a small process-local LRU.
+ * The serialized bytes are the cache key, so a write from this or another
+ * process necessarily misses unless it names the identical already-validated
+ * immutable checkpoint.
+ */
+export function restoreTextFamilySerialized(serialized         )                       {
+  if (typeof serialized !== 'string') fail('serialized family checkpoint must be a string');
+  const cached = serializedFamilyCache.get(serialized);
+  if (cached) {
+    return rememberSerializedFamily(serialized, cached);
+  }
+  const restored = restoreTextFamily(JSON.parse(serialized));
+  return rememberSerializedFamily(serialized, restored);
 }
 
 export function createTextFamily(id        , checkpoint         )                       {
   if (typeof id !== 'string' || id.length === 0) fail('document id must be a non-empty string');
   const restored = restoreTextCheckpoint(checkpoint);
-  return deepFreeze({ id, checkpoint: restored });
+  return trustFamily({ id, checkpoint: restored });
 }
 
 /**
@@ -99,11 +149,63 @@ export function importTextToFamily(documentId        , actor        , text      
 }
 
 export function textFamilyCheckpoint(family                      )                       {
-  return deepFreeze({ id: family.id, checkpoint: family.checkpoint });
+  assertTrustedFamily(family);
+  return trustFamily({ id: family.id, checkpoint: family.checkpoint });
+}
+
+export function compactTextFamilyCheckpoint(family                      )                                                                                         {
+  assertTrustedFamily(family);
+  return deepFreeze({ id: family.id, checkpoint: compactTextCheckpoint(family.checkpoint) });
+}
+
+export function serializeCompactTextFamilyCheckpoint(family                      )         {
+  assertTrustedFamily(family);
+  const serialized = JSON.stringify(compactTextFamilyCheckpoint(family));
+  rememberSerializedFamily(serialized, family);
+  return serialized;
+}
+
+export function textFamilyBasis(family                      )                                                                            {
+  assertTrustedFamily(family);
+  return deepFreeze({ version: 1, id: family.id, frontier: family.checkpoint.frontier });
 }
 
 export function materializeText(family                      )         {
-  return materializeCheckpointText(restoreTextCheckpoint(family.checkpoint));
+  // `restoreTextFamily` already validates and restores the checkpoint. Replaying
+  // the whole operation registry again here made every offset check and fold an
+  // accidental second O(document history) restore.
+  return derivedIndex(assertTrustedFamily(family)).text;
+}
+
+/**
+ * Build the immutable traversal data needed by endpoint projection once per
+ * checkpoint. Word-evidence reads resolve two endpoints and compare text for
+ * every word; rebuilding the RGA traversal and materializing the document in
+ * each of those calls turns a linear read into quadratic work.
+ */
+function derivedIndex(family                      )                             {
+  assertTrustedFamily(family);
+  const cached = derivedIndexCache.get(family);
+  if (cached) return cached;
+
+  const order = rgaTraversal(family.checkpoint);
+  const positions = new Map                ();
+  const visibleOffsets = [0];
+  let visibleOffset = 0;
+  let text = '';
+  for (let index = 0; index < order.length; index += 1) {
+    const [key, element] = order[index];
+    positions.set(key, index);
+    if (element.deletedBy.length === 0) {
+      text += element.scalar;
+      visibleOffset += element.scalar.length;
+    }
+    visibleOffsets.push(visibleOffset);
+  }
+
+  const derived = Object.freeze({ order, positions, visibleOffsets, text });
+  derivedIndexCache.set(family, derived);
+  return derived;
 }
 
 function deepFreeze   (value   )    {
@@ -118,8 +220,7 @@ function deepFreeze   (value   )    {
  * sits against the CURRENT checkpoint.
  */
 function endpointVirtualPosition(family                      , endpoint                    )         {
-  const checkpoint = family.checkpoint;
-  const order = rgaTraversal(checkpoint);
+  const { order, positions } = derivedIndex(family);
   const anchor = endpoint.point[1];
   const affinity = endpoint.point[2];
   const anchorKey = anchorKeyStr(anchor);
@@ -134,8 +235,8 @@ function endpointVirtualPosition(family                      , endpoint         
     return order.length;
   }
 
-  const anchorIdx = order.findIndex(([key]) => key === anchorKey);
-  if (anchorIdx === -1) fail('anchor element not found in checkpoint');
+  const anchorIdx = positions.get(anchorKey);
+  if (anchorIdx === undefined) fail('anchor element not found in checkpoint');
 
   // Clean boundary semantics for the continuous model:
   //   [element, left]  = the boundary BEFORE element K       (index of K)
@@ -164,6 +265,7 @@ function assertDominatingBasis(family                      , endpoint           
  * its historical basis; both must be dominated by the current frontier.
  */
 export function compareStructuralEndpoints(family                      , left                    , right                    )         {
+  assertTrustedFamily(family);
   assertDominatingBasis(family, left, 'compareStructuralEndpoints');
   assertDominatingBasis(family, right, 'compareStructuralEndpoints');
 
@@ -189,10 +291,11 @@ export function compareStructuralEndpoints(family                      , left   
 
 /** Materialize the visible text between two structural endpoints (zero-width allowed). */
 export function materializeRange(family                      , start                    , end                    )         {
+  assertTrustedFamily(family);
   assertDominatingBasis(family, start, 'materializeRange');
   assertDominatingBasis(family, end, 'materializeRange');
   if (compareStructuralEndpoints(family, start, end) > 0) fail('materializeRange: start must not be after end');
-  const order = rgaTraversal(family.checkpoint);
+  const { order } = derivedIndex(family);
   const startPos = endpointVirtualPosition(family, start);
   const endPos = endpointVirtualPosition(family, end);
   let text = '';
@@ -209,14 +312,14 @@ export function materializeRange(family                      , start            
  * resolved against the live document).
  */
 export function resolveOffsetToEndpoint(family                      , utf16Offset        , basisFrontier          , affinity                  )                     {
+  assertTrustedFamily(family);
   if (JSON.stringify(family.checkpoint.frontier) !== JSON.stringify(basisFrontier)) {
     fail('resolveOffsetToEndpoint requires basisFrontier equal to family checkpoint frontier');
   }
-  const text = materializeText(family);
+  const { order, text } = derivedIndex(family);
   assertUtf16Offset(text, utf16Offset);
   if (affinity !== 'left' && affinity !== 'right') fail('resolveOffsetToEndpoint requires an explicit affinity');
 
-  const order = rgaTraversal(family.checkpoint);
   if (utf16Offset === 0) {
     return assertStructuralEndpoint({ point: ['point', ['root'], 'left'], basisFrontier });
   }
@@ -257,19 +360,16 @@ function endpointAfterLastVisible(_family                      , order          
  * the anchor must still exist (including as a tombstone).
  */
 export function projectEndpointToOffset(family                      , endpoint                    )         {
+  assertTrustedFamily(family);
   assertDominatingBasis(family, endpoint, 'projectEndpointToOffset');
-  const order = rgaTraversal(family.checkpoint);
+  const { visibleOffsets } = derivedIndex(family);
   const pos = endpointVirtualPosition(family, endpoint);
-  let offset = 0;
-  for (let i = 0; i < pos; i += 1) {
-    const [, element] = order[i];
-    if (element.deletedBy.length === 0) offset += element.scalar.length;
-  }
-  return offset;
+  return visibleOffsets[pos];
 }
 
 /** An absolute-offset insert/delete against the whole document (unique actor per edit). */
 export function textOperationForOffsetEdit(family                      , edit            , actor        , lamport        )         {
+  assertTrustedFamily(family);
   const basis = family.checkpoint.frontier;
   const text = materializeText(family);
   if (edit.kind === 'text.insert') {
@@ -286,7 +386,7 @@ export function textOperationForOffsetEdit(family                      , edit   
 
   const byOp = new Map                  ();
   let offset = 0;
-  for (const [, element] of rgaTraversal(family.checkpoint)) {
+  for (const [, element] of derivedIndex(family).order) {
     if (element.deletedBy.length) continue;
     const next = offset + element.scalar.length;
     if (offset >= edit.from.offset && next <= edit.to.offset) {
@@ -326,12 +426,17 @@ export function textOperationForOffsetEdit(family                      , edit   
 
 /** Apply a whole-document text operation, returning the next family. */
 export function applyTextOperation(family                      , operation         )                       {
-  const state = restoreTextCheckpoint(family.checkpoint);
-  const nextState = applyTextOp(state, operation);
-  return createTextFamily(family.id, textCheckpoint(nextState));
+  assertTrustedFamily(family);
+  // Families produced by this module already contain validated reducer state.
+  // `applyTextOp` performs the immutable clone and operation validation; a
+  // restore before it and another restore in `createTextFamily` replayed the
+  // complete registry twice for every character.
+  const nextState = applyTextOp(family.checkpoint, operation);
+  return trustFamily({ id: family.id, checkpoint: nextState });
 }
 
 export function assertTextEndpointPair(family                      , start                    , end                    , label = 'range')                         {
+  assertTrustedFamily(family);
   assertStructuralPoint(start.point);
   assertStructuralPoint(end.point);
   assertFrontier(start.basisFrontier);

@@ -179,7 +179,8 @@ test('text.replace projects one atomic document-wide event', async () => {
   });
   assert.equal(result.ok, true, result.failure?.message);
   assert.equal(result.events.length, 1);
-  assert.equal(result.events[0].data.version, 13);
+  assert.equal(result.events[0].data.version, 14);
+  assert.equal(result.events[0].data.facts.family, null);
   assert.equal(familyText(db), 'Hio');
   await app.close?.();
 });
@@ -254,7 +255,7 @@ test('annotation.remove deletes the annotation and rejects a tampered event on r
     },
   });
   assert.equal(removed.ok, true, removed.failure?.message);
-  assert.equal(removed.events[0].data.version, 13);
+  assert.equal(removed.events[0].data.version, 14);
   assert.equal(removed.events[0].data.operation.kind, 'annotation.remove');
   // Blockless annotation.remove is an explicit delete (orphan is the emptied-by-text path).
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_annotation WHERE id = 'r5-comment'").get().count, 0);
@@ -626,7 +627,7 @@ test('protective annotation.apply on a subrange creates one document range', asy
   assert.equal(result.ok, true, result.failure?.message);
   assert.equal(result.events.length, 1);
   const event = result.events[0].data;
-  assert.equal(event.version, 13);
+  assert.equal(event.version, 14);
   assert.equal(event.operation.kind, 'annotation.apply-range');
   await app.close?.();
 });

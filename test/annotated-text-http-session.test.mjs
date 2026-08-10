@@ -357,6 +357,7 @@ test('dependent text waits for settlement and reports a local conflict when its 
   let cursor = 0;
   let actionNumber = 0;
   const session = createAnnotatedTextHttpSession({
+    typingBurstIdleMs: 0,
     baseUrl: 'https://example.test/live-delivery',
     context: { entity: Document, field: Document.body, documentId: 'd1' },
     historySession: 'tab-a', createActionId: () => `action-${++actionNumber}`,
@@ -375,7 +376,7 @@ test('dependent text waits for settlement and reports a local conflict when its 
   await session.ready;
   const a = session.insert({ mutationId: 'a', at: { offset: 5, affinity: 'right' }, text: 'A' });
   const b = session.insert({ mutationId: 'b', at: { offset: 6, affinity: 'right' }, text: 'B' });
-  assert.equal(session.document.text, 'HelloA');
+  assert.equal(session.document.text, 'HelloAB', 'all queued text is visible immediately');
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(actionRequests.length, 1, 'second text action waits for first transport');
   pendingResponses.shift()({ ok: true, status: 200, json: async () => ({ ok: true, actionId: 'action-1', confirmedThrough: 1 }) });
@@ -423,7 +424,7 @@ test('queued action waits for settlement and translates through the replacement 
   await session.ready;
   const a = session.insert({ mutationId: 'a', at: { offset: 5, affinity: 'right' }, text: 'A' });
   const b = session.insert({ mutationId: 'b', at: { offset: 6, affinity: 'right' }, text: 'B' });
-  assert.equal(session.document.text, 'HelloA');
+  assert.equal(session.document.text, 'HelloAB', 'the queued dependent edit is already projected');
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(actionRequests.length, 1, 'second text action waits for first transport');
   const aAction = actionRequests[0];
@@ -433,6 +434,8 @@ test('queued action waits for settlement and translates through the replacement 
   // A's settlement installs a replacement snapshot and re-issues its token.
   // B is translated only after that binding is live.
   assert.equal(actionRequests.length, 2, 'B dispatches after A settles');
+  assert.equal(actionRequests[0].payload.authoring.mutationId, 'a');
+  assert.equal(actionRequests[1].payload.authoring.mutationId, 'b', 'caller mutation identities are never coalesced');
   assert.equal(actionRequests[1].payload.edit.at.positionToken, token('position2'), 'B uses the replacement token');
   assert.equal(session.document.text, 'HelloAB', 'B stays projected though its position token was replaced');
   assert.equal(ackRequests.some((request) => request.snapshot === token('snapshot2')), true,
@@ -447,11 +450,65 @@ test('queued action waits for settlement and translates through the replacement 
   session.close();
 });
 
+test('rapid dependent inserts project immediately and commit as one bounded typing burst', async () => {
+  const actionRequests = [];
+  const pendingResponses = [];
+  let cursor = 0;
+  let actionNumber = 0;
+  const texts = ['Hello', 'HelloXAB'];
+  const session = createAnnotatedTextHttpSession({
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: Document, field: Document.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => `rapid-${++actionNumber}`,
+    fetchImpl: async (url, options) => {
+      if (options?.method === 'POST') {
+        if (url.includes('/authoring/ack')) return { ok: true, status: 200, json: async () => ({ ok: true, acknowledgedThrough: cursor }) };
+        const request = JSON.parse(options.body);
+        actionRequests.push(request);
+        return new Promise((resolve) => pendingResponses.push(resolve));
+      }
+      cursor += 1;
+      const body = { ...snapshot().body, text: texts[Math.min(cursor - 1, texts.length - 1)] };
+      return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { body }, cursor, authoring: authoringEnvelope(cursor) }) };
+    },
+    eventSourceFactory: () => ({ close() {}, onmessage: null, onerror: null }),
+  });
+  await session.ready;
+
+  const x = session.insert({ at: { offset: 5, affinity: 'right' }, text: 'X' });
+  const a = session.insert({ at: { offset: 6, affinity: 'right' }, text: 'A' });
+  const b = session.insert({ at: { offset: 7, affinity: 'right' }, text: 'B' });
+  assert.equal(session.document.text, 'HelloXAB', 'rapid queued input is visible before transport settlement');
+
+  await new Promise((resolve) => setTimeout(resolve, 90));
+  assert.equal(actionRequests.length, 1, 'the contiguous typing burst uses one authoring action');
+  assert.equal(actionRequests[0].payload.edit.text, 'XAB');
+  pendingResponses.shift()({ ok: true, status: 200, json: async () => ({ ok: true, actionId: actionRequests[0].actionId, confirmedThrough: cursor }) });
+  for (const result of await Promise.all([x, a, b])) assert.equal(result.ok, true, result.failure?.message);
+  assert.equal(session.document.text, 'HelloXAB');
+  session.close();
+});
+
+test('close settles and cancels an unsent typing burst', async () => {
+  const { session, requests } = setup();
+  await session.ready;
+  const pending = session.insert({ at: { offset: 5, affinity: 'right' }, text: 'X' });
+  assert.equal(session.document.text, 'HelloX');
+  session.close();
+
+  const result = await pending;
+  assert.equal(result.ok, false);
+  assert.match(result.failure.message, /unavailable/);
+  await new Promise((resolve) => setTimeout(resolve, 90));
+  assert.equal(requests.length, 0, 'closing during the idle window never dispatches the cancelled burst');
+});
+
 test('known rejection releases deferred authoring acknowledgement', async () => {
   const actionResponses = [];
   const ackRequests = [];
   let cursor = 0;
   const session = createAnnotatedTextHttpSession({
+    typingBurstIdleMs: 0,
     baseUrl: 'https://example.test/live-delivery',
     context: { entity: Document, field: Document.body, documentId: 'd1' },
     historySession: 'tab-a', createActionId: () => 'action-1',
@@ -599,6 +656,7 @@ test('own-echo fold installs text without a second bootstrap snapshot', async ()
   let releaseReceipt;
   const receiptGate = new Promise((resolve) => { releaseReceipt = resolve; });
   const session = createAnnotatedTextHttpSession({
+    typingBurstIdleMs: 0,
     baseUrl: 'https://example.test/live-delivery',
     context: { entity: Document, field: Document.body, documentId: 'd1' },
     historySession: 'tab-a', createActionId: () => `action-${++actionNumber}`,
