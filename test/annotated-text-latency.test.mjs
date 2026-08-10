@@ -154,6 +154,7 @@ test('server fold build on a large document stays inside the typing budget (warn
   }
   durations.sort((a, b) => a - b);
   const median = durations[durations.length >> 1];
+  console.error(`[latency] server fold build median ${median.toFixed(3)}ms on a ${ctx.textLength}-char doc`);
   if (median > SERVER_BUILD_FAIL_MS) {
     assert.fail(`server fold build median ${median.toFixed(1)}ms on a ${ctx.textLength}-char doc is over the ${SERVER_BUILD_FAIL_MS}ms hard budget`);
   }
@@ -250,6 +251,7 @@ test('client fold apply on a large document stays inside the typing budget (warn
   // machine speed and load; only a genuine blowup should fail.
   const sorted = [...foldTimings].sort((a, b) => a - b);
   const median = sorted[sorted.length >> 1];
+  console.error(`[latency] client fold apply median ${median.toFixed(3)}ms on a ${ctx.textLength}-char doc`);
   if (median > CLIENT_APPLY_FAIL_MS) {
     assert.fail(`client fold apply median ${median.toFixed(1)}ms on a ${ctx.textLength}-char doc is over the ${CLIENT_APPLY_FAIL_MS}ms hard budget`);
   }

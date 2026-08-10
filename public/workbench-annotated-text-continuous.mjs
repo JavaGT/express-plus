@@ -21,6 +21,7 @@ import {
 } from './workbench-annotated-text.mjs';
 
 const trustedFamilies = new WeakSet();
+const materializedTextCache = new WeakMap();
 
 function fail(message) {
   throw new Error(`annotated-text continuous: ${message}`);
@@ -83,11 +84,16 @@ export function textFamilyCheckpoint(family) {
 }
 
 export function materializeText(family) {
-  return materializeCheckpointText(assertTrustedFamily(family).checkpoint);
+  const trusted = assertTrustedFamily(family);
+  const cached = materializedTextCache.get(trusted);
+  if (cached !== undefined) return cached;
+  const text = materializeCheckpointText(trusted.checkpoint);
+  materializedTextCache.set(trusted, text);
+  return text;
 }
 
 function deepFreeze(value) {
-  if (!value || typeof value !== 'object') return value;
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
   for (const child of Object.values(value)) deepFreeze(child);
   return Object.freeze(value);
 }
