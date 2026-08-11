@@ -37,6 +37,15 @@ const LOW_SURROGATE = /^[\uDC00-\uDFFF]$/;
                                
  
 
+                                        
+             
+                     
+                                                
+                                             
+                     
+                               
+ 
+
                             
                       
  
@@ -76,7 +85,11 @@ export function scalarCount(text        )         {
 }
 
 export function assertUtf16Offset(text        , offset        )         {
-  assertWellFormedText(text);
+  // Text well-formedness is validated once at import/operation boundaries
+  // (assertWellFormedText in assertTextOp/assertCheckpoint). Re-scanning the
+  // whole text here made bulk offset resolution O(offsets × text) — the hot
+  // path for word-evidence import and source-range seeding. Only the offset
+  // itself is validated per call.
   if (!Number.isSafeInteger(offset) || offset < 0 || offset > text.length) fail('offset is outside text bounds');
   if (offset > 0 && offset < text.length && HIGH_SURROGATE.test(text[offset - 1]) && LOW_SURROGATE.test(text[offset])) {
     fail('offset splits a surrogate pair');
@@ -373,6 +386,8 @@ function assertCheckpoint(value         )            {
 }
 
 export function restoreTextCheckpoint(checkpoint         )            {
+  const compact = checkpoint                                         ;
+  if (compact?.version === 2) return restoreCompactTextCheckpoint(compact);
   const supplied = assertCheckpoint(checkpoint);
   const applied = Object.values(supplied.operations).map((entry) => entry.op);
   const pending = Object.values(supplied.pending).map((entry) => entry.op);
@@ -405,7 +420,49 @@ export function restoreTextCheckpoint(checkpoint         )            {
   if (JSON.stringify(textCheckpoint(supplied)) !== JSON.stringify(textCheckpoint(restored))) {
     throw new TypeError('annotated-text checkpoint does not match its operation registry');
   }
-  return restored;
+  return Object.freeze(restored);
+}
+
+function restoreCompactTextCheckpoint(raw                                )            {
+  const keys = Object.keys(raw).sort();
+  const expectedKeys = ['frontier', 'maxPending', 'operations', 'pending', 'rebootstrapRequired', 'version'];
+  if (JSON.stringify(keys) !== JSON.stringify(expectedKeys)
+    || !Number.isSafeInteger(raw.maxPending) || (raw.maxPending          ) < 1
+    || typeof raw.rebootstrapRequired !== 'boolean'
+    || !raw.operations || typeof raw.operations !== 'object' || Array.isArray(raw.operations)
+    || !raw.pending || typeof raw.pending !== 'object' || Array.isArray(raw.pending)) {
+    throw new TypeError('invalid compact annotated-text checkpoint');
+  }
+  const expectedFrontier = assertFrontier(raw.frontier);
+  const readRegistry = (registry                                   ) => Object.entries(registry).map(([key, entry]) => {
+    const op = canonicalTextOp(entry?.op);
+    const digest = canonicalDigest(op);
+    if (key !== opKey(op[2]) || entry?.digest !== digest) throw new TypeError('invalid compact annotated-text checkpoint operation registry');
+    return { op, digest };
+  });
+  const applied = readRegistry(raw.operations                                     );
+  const pending = readRegistry(raw.pending                                     );
+  const appliedIds = new Set(applied.map(({ op }) => opKey(op[2])));
+  if (pending.some(({ op }) => appliedIds.has(opKey(op[2])))) {
+    throw new TypeError('compact annotated-text checkpoint duplicates an operation across registries');
+  }
+  const restored = makeState({ maxPending: raw.maxPending });
+  const remaining = [...applied];
+  while (remaining.length > 0) {
+    const nextIndex = remaining.findIndex(({ op }) => operationReady(restored, op));
+    if (nextIndex === -1) throw new TypeError('compact annotated-text checkpoint operations are not causally reducible');
+    const [{ op, digest }] = remaining.splice(nextIndex, 1);
+    applyReadyOperation(restored, op, digest);
+  }
+  for (const { op, digest } of pending.sort((left, right) => compareOpId(left.op[2], right.op[2]))) {
+    if (operationReady(restored, op)) throw new TypeError('compact annotated-text checkpoint contains a ready pending operation');
+    restored.pending[opKey(op[2])] = { digest, op };
+  }
+  if (raw.rebootstrapRequired) restored.rebootstrapRequired = true;
+  if (JSON.stringify(restored.frontier) !== JSON.stringify(expectedFrontier)) {
+    throw new TypeError('compact annotated-text checkpoint frontier does not match its operation registry');
+  }
+  return Object.freeze(restored);
 }
 
 export function textCheckpoint(state           )            {
@@ -416,6 +473,28 @@ export function textCheckpoint(state           )            {
   }]));
   const registry = (entries                                   ) => Object.fromEntries(Object.entries(entries).sort(([left], [right]) => left.localeCompare(right)).map(([key, entry]) => [key, { digest: entry.digest, op: entry.op }]));
   return Object.freeze({ version: 1, frontier: canonicalFrontier(state.frontier), elements: sortedElements, operations: registry(state.operations), pending: registry(state.pending), maxPending: state.maxPending, rebootstrapRequired: state.rebootstrapRequired });
+}
+
+/**
+ * Durable checkpoint form. Element topology and tombstones are deterministic
+ * reducer output, so persisting them beside the operation registry duplicates
+ * almost the entire document on every edit. Version 2 stores only the causal
+ * operation registry plus its integrity frontier; restore derives the exact
+ * same v1 in-memory state and continues accepting historical v1 checkpoints.
+ */
+export function compactTextCheckpoint(state           )                        {
+  assertState(state);
+  const registry = (entries                                   ) => Object.fromEntries(
+    Object.entries(entries).sort(([left], [right]) => left.localeCompare(right)).map(([key, entry]) => [key, { digest: entry.digest, op: entry.op }]),
+  );
+  return Object.freeze({
+    version: 2,
+    frontier: canonicalFrontier(state.frontier),
+    operations: registry(state.operations),
+    pending: registry(state.pending),
+    maxPending: state.maxPending,
+    rebootstrapRequired: state.rebootstrapRequired,
+  });
 }
 
 export function materializeText(state           )         {

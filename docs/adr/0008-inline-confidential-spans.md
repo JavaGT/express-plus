@@ -2,6 +2,14 @@
 
 Status: accepted (implemented; tracked via issues #22–#28)
 
+> Superseded in part (issue #33): the "Block-based document / partitioned into
+> blocks" framing in the locked design below is historical. Annotated text is now
+> **blockless continuous text** — one RGA text stream per document, annotations
+> as character ranges, no blocks (see `src/annotated-text-continuous.ts` and
+> `src/annotated-text-ranges.mjs`). The span-native range model, the redaction
+> rule, show-through, nesting, and the recipient-projection-as-confidentiality-
+> boundary decisions in this ADR stand.
+
 ## Decision
 
 Annotated-text becomes a **single span-native model**: annotations are arbitrary

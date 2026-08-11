@@ -9,6 +9,7 @@ import type {
   AnnotatedTextFieldHandle,
   WorkbenchEntity,
 } from './index.js';
+import type { AnnotatedTextRange, AnnotatedTextRedactionMarker } from './annotated-text-coords.js';
 
 // ---------------------------------------------------------------------------
 // LiveChannel — WebSocket transport layer
@@ -118,13 +119,18 @@ export interface AnnotatedTextCaretRemove {
 export interface AnnotatedTextVisibleCaret {
   kind: 'caret';
   presence: string;
+  /** Document-absolute UTF-16 offset into the canonical text (the wire is blockless). */
   offset: number;
+  /** The source user's public display label, or '' when the app supplies none. */
+  name: string;
 }
 
 export interface AnnotatedTextRestrictedCaret {
   kind: 'edge';
   presence: string;
   edge: 'start';
+  /** The source user's public display label, or '' when the app supplies none. */
+  name: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -629,6 +635,9 @@ export function createAuthClient(config?: AuthClientConfig): AuthClient;
 // materializeAnnotatedTextSnapshot — browser snapshot materialization
 // ---------------------------------------------------------------------------
 
+/** An annotation on the continuous document (issue #33). Its character extent
+ * lives in `AnnotatedTextDocument.ranges`; `owner` is disclosed only to the
+ * owning recipient. */
 export interface AnnotatedTextAnnotation {
   readonly id: string;
   readonly family: string;
@@ -636,6 +645,18 @@ export interface AnnotatedTextAnnotation {
   readonly owner?: string;
 }
 
+/** An orphaned annotation: its range was emptied and the server preserved the
+ * annotation under its saved quote instead of deleting it. */
+export interface AnnotatedTextOrphan {
+  readonly id: string;
+  readonly family: string;
+  readonly fields: Readonly<Record<string, unknown>>;
+  readonly savedQuote: string;
+  readonly owner?: string;
+}
+
+/** A measurement on the continuous document. `formatVersion` and `payload`
+ * are validated by the field's declared measurement extension. */
 export interface AnnotatedTextMeasurement {
   readonly id: string;
   readonly family: string;
@@ -643,39 +664,48 @@ export interface AnnotatedTextMeasurement {
   readonly payload: unknown;
 }
 
+/**
+ * The blockless recipient document (issue #33): ONE continuous `text` with
+ * document-absolute UTF-16 annotation `ranges`. Read `text`, `ranges`,
+ * `annotations`, `measurements`, `capabilities`, `orphans`, and `redactions`
+ * directly.
+ */
 export interface AnnotatedTextDocument {
   readonly kind: 'workbench.annotatedText.recipient';
   readonly version: 1;
   readonly text: string;
-  readonly ranges: readonly { readonly annotationId: string; readonly start: number; readonly end: number }[];
+  readonly ranges: readonly AnnotatedTextRange[];
   readonly annotations: readonly AnnotatedTextAnnotation[];
-  readonly orphans?: readonly {
-    readonly id: string;
-    readonly family: string;
-    readonly fields: Readonly<Record<string, unknown>>;
-    readonly savedQuote: string;
-    readonly owner?: string;
-  }[];
+  readonly orphans?: readonly AnnotatedTextOrphan[];
   readonly measurements?: readonly AnnotatedTextMeasurement[];
   readonly capabilities: readonly string[] | null;
   readonly capabilityHints?: readonly string[];
   readonly restricted?: boolean;
-  readonly redactions?: readonly { readonly start: number; readonly end: number; readonly placeholder: string }[];
+  readonly redactions?: readonly AnnotatedTextRedactionMarker[];
 }
 
 export function materializeAnnotatedTextSnapshot(
   snapshot: Record<string, unknown>,
   declaration: AnnotatedTextFieldHandle,
+  options?: { readonly binding?: unknown },
 ): AnnotatedTextDocument;
 
 // ---------------------------------------------------------------------------
 // createAnnotatedTextHttpSession — document-bound typed authoring
 // ---------------------------------------------------------------------------
 
+/** A document-absolute UTF-16 position in the one continuous text. */
+export interface AnnotatedTextPosition {
+  readonly offset: number;
+  readonly affinity: 'left' | 'right';
+}
+
 export interface AnnotatedTextAuthoringContext {
   readonly entity: WorkbenchEntity;
   readonly field: AnnotatedTextFieldHandle;
   readonly documentId: string;
+  /** Optional recipient override included in server authoring requests. */
+  readonly viewAs?: string;
 }
 
 export interface AnnotatedTextHttpSessionConfig {
@@ -685,8 +715,18 @@ export interface AnnotatedTextHttpSessionConfig {
   readonly fetchImpl?: typeof globalThis.fetch;
   readonly eventSourceFactory?: (url: string, options: EventSourceInit) => EventSource;
   readonly createActionId?: () => string;
+  readonly onRecoveryDelayed?: (delayed: boolean) => void;
   /** Opt-in fold timing hook: called after each client-side fold with its applied duration in ms. */
   readonly onFoldApplied?: (fold: unknown, elapsedMs: number) => void;
+  /** Idle window used to coalesce contiguous inserts; defaults to 75ms. Set to 0 to disable. */
+  readonly typingBurstIdleMs?: number;
+  /** Maximum age of a continuously active typing burst; defaults to 150ms. */
+  readonly typingBurstMaxMs?: number;
+  /** Opt in to volatile collaborator carets over the document WebSocket. */
+  readonly carets?: {
+    readonly wsBaseUrl: string;
+    readonly socketFactory?: (url: string) => WebSocket;
+  };
 }
 
 /** A client-side position into the document's single continuous text frame:
@@ -708,6 +748,9 @@ export interface AnnotatedTextHttpSession {
   applyAnnotation(input: { readonly mutationId: string; readonly annotation: { readonly id: string; readonly family: string; readonly fields: Readonly<Record<string, unknown>>; readonly protectedTargetIds?: readonly string[] }; readonly from: AnnotatedTextEditPosition; readonly to: AnnotatedTextEditPosition }): Promise<ScopeDispatchResult>;
   applyAnnotationAction<Action extends AnnotatedTextAnnotationEntityActionHandle>(actionHandle: Action, input: { readonly mutationId: string; readonly from: AnnotatedTextEditPosition; readonly to: AnnotatedTextEditPosition; readonly values: AnnotatedTextAnnotationActionValues<Action> }): Promise<ScopeDispatchResult>;
   removeAnnotation(input: { readonly mutationId: string; readonly annotationId: string }): Promise<ScopeDispatchResult>;
+  publishCaret?(input: { readonly offset: number }): boolean;
+  clearCaret?(): boolean;
+  onCaret?(listener: OnCaret): () => void;
   reconnect(): Promise<void>;
   subscribe(listener: (document: AnnotatedTextDocument | null) => void): () => void;
   close(): void;
@@ -718,12 +761,14 @@ export function createAnnotatedTextHttpSession(config: AnnotatedTextHttpSessionC
 export interface AnnotatedTextEditorBinding {
   focus(): void;
   getSelection(): AnnotatedTextEditorSelection | null;
+  setAnnotationHighlight(annotationId: string, active: boolean): void;
+  selectAnnotation(annotationId: string): void;
   close(): void;
 }
 
 export interface AnnotatedTextEditorPosition {
   readonly offset: number;
-  readonly affinity: 'right';
+  readonly affinity: 'left' | 'right';
 }
 
 export interface AnnotatedTextEditorSelection {

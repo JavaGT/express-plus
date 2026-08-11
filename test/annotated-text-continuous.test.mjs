@@ -15,6 +15,10 @@ import {
   applyTextOperation,
   materializeRange,
   compareStructuralEndpoints,
+  compactTextFamilyCheckpoint,
+  restoreTextFamily,
+  restoreTextFamilySerialized,
+  serializeCompactTextFamilyCheckpoint,
   textFamilyCheckpoint,
 } from '../src/annotated-text-continuous.mjs';
 
@@ -40,6 +44,37 @@ test('blockless family materializes one continuous document text', () => {
   const family = seedViaPlanner(createTextFamily('d1', textCheckpoint(createTextState())), 'hello world');
   assert.equal(materializeText(family), 'hello world');
   assert.deepEqual(textFamilyCheckpoint(family).checkpoint.frontier, family.checkpoint.frontier);
+});
+
+test('compact durable family checkpoint derives identical state without persisting element topology', () => {
+  const text = 'A moderately sized transcript. '.repeat(100);
+  const insert = ['workbench.text', 1, [actorFor(9000), 1], 1, [], ['insert', ['root'], text]];
+  const family = createTextFamily('d1', textCheckpoint(applyTextOp(createTextState(), insert)));
+  const compact = compactTextFamilyCheckpoint(family);
+
+  assert.equal(compact.checkpoint.version, 2);
+  assert.equal(Object.hasOwn(compact.checkpoint, 'elements'), false);
+  assert.equal(materializeText(restoreTextFamily(compact)), text);
+  assert.deepEqual(restoreTextFamily(compact).checkpoint.frontier, family.checkpoint.frontier);
+  assert.ok(JSON.stringify(compact).length < JSON.stringify(textFamilyCheckpoint(family)).length / 10);
+});
+
+test('serialized restore caches only exact validated bytes and exported reducers reject untrusted lookalikes', () => {
+  const family = seedViaPlanner(createTextFamily('trusted', textCheckpoint(createTextState())), 'abc');
+  const serialized = JSON.stringify(compactTextFamilyCheckpoint(family));
+  const first = restoreTextFamilySerialized(serialized);
+  const second = restoreTextFamilySerialized(serialized);
+  assert.equal(second, first, 'identical durable bytes reuse one immutable validated family');
+  assert.notEqual(restoreTextFamilySerialized(JSON.stringify({ ...JSON.parse(serialized), id: 'other' })), first);
+  assert.equal(
+    restoreTextFamilySerialized(serializeCompactTextFamilyCheckpoint(family)),
+    family,
+    'persisting a trusted next state seeds the exact-byte cache without replay',
+  );
+
+  const lookalike = structuredClone(textFamilyCheckpoint(family));
+  assert.throws(() => materializeText(lookalike), /family must be created or restored by this module/);
+  assert.throws(() => applyTextOperation(lookalike, null), /family must be created or restored by this module/);
 });
 
 test('absolute-offset insert and delete plan + apply against the whole document', () => {

@@ -22,6 +22,15 @@ import type { Capability, GrantDecision } from './grant.ts';
 import { getLog } from './log.ts';
 import { isRuntimeGrantClause } from './scope.ts';
 
+// Entity declarations are compiled once and their grant thunk is immutable for
+// the lifetime of that declaration. Runtime membership overlays replace the
+// entity's `grant` property, so the declaration reference is also the cache
+// invalidation key. The row-auth path asks for the grant several times while
+// admitting one row (inheritance detection, own-can detection, and capability
+// evaluation); resolve the thunk once and reuse its clauses across those asks.
+// A WeakMap keeps this cache bounded by the entity records themselves.
+const GRANT_CLAUSES_CACHE = new WeakMap<object, { declaration: unknown; clauses: unknown }>();
+
 // A check-registry entry as the runtime half sees it. `run` is the per-row
 // boolean face; `harvest` belongs to the scope compiler (not consumed here).
 interface CheckEntry {
@@ -89,14 +98,10 @@ function makeIs(entityRecord: EntityRecord, row: unknown, principal: unknown): R
 // reuses the row grant's check registry and decision backstop; it does not add
 // a policy evaluator beside Workbench authorization.
 //
-// An inherit-child's OWN registry carries no membership checks (its grant is an
-// `inherit` directive, not a membership clause), so `makeIs` on the child would
-// leave `is.owner` undefined and an access body like `(await is.owner()) ? ...`
-// would THROW — failing the whole snapshot closed (the wrong-shaped lock). Resolve
-// the child the same way `rowCapabilities` resolves an inherit-child: load the
-// parent row via the `via` FK and build `is` against the PARENT record + PARENT
-// row, so the access body decides the parent's membership plane. A missing parent
-// row denies THIS span (inline placeholder), never the whole document.
+// a policy evaluator beside Workbench authorization. An inherit-child (e.g. a
+// Transcript owning via Project) resolves its checks against the ultimate
+// parent row the same way mayRow/rowCapabilities do — the checks live on the
+// grant-owning entity's registry.
 export async function protectingAnnotationCapabilities(
   entityRecord: EntityRecord,
   row: unknown,
@@ -107,16 +112,26 @@ export async function protectingAnnotationCapabilities(
   if (typeof access !== 'function') return { granted: false, capabilities: [] };
   try {
     const accessFn = access as FieldAccessFn;
-    const inherited = inheritedGrant(entityRecord);
-    let isRecord = entityRecord;
-    let isRow = row;
-    if (inherited) {
-      const parentRow = inheritedParentRow(entityRecord, row, principal);
+    let effectiveRecord = entityRecord;
+    let effectiveRow = row;
+    const seen = new Set<EntityRecord>();
+
+    while (true) {
+      const inherited = inheritedGrant(effectiveRecord);
+      if (!inherited) break;
+      if (seen.has(effectiveRecord)) return { granted: false, capabilities: [] };
+      seen.add(effectiveRecord);
+
+      const parentRow = inheritedParentRow(effectiveRecord, effectiveRow, principal);
       if (parentRow == null) return { granted: false, capabilities: [] };
-      isRecord = resolveInheritedParent(entityRecord, inherited) as EntityRecord;
-      isRow = parentRow;
+      const parentRecord = resolveInheritedParent(effectiveRecord, inherited) as EntityRecord | null;
+      if (!parentRecord) return { granted: false, capabilities: [] };
+
+      effectiveRecord = parentRecord;
+      effectiveRow = parentRow;
     }
-    const is = makeIs(isRecord, isRow, principal);
+
+    const is = makeIs(effectiveRecord, effectiveRow, principal);
     let decision: GrantDecision | undefined;
     await resolveDecision(
       async () => {
@@ -224,7 +239,17 @@ const VERB_CAPABILITY: Readonly<Record<string, Capability>> = Object.freeze({
 // grants have NO own `.can`; mayRow owns those cases before falling through to
 // mayVerb for entities with an own runtime capability body.
 function grantClauses(entityRecord: EntityRecord): unknown {
-  return typeof entityRecord.grant === 'function' ? entityRecord.grant() : entityRecord.grant;
+  const declaration = entityRecord.grant;
+  const cached = GRANT_CLAUSES_CACHE.get(entityRecord);
+  if (cached && cached.declaration === declaration) return cached.clauses;
+
+  // Preserve the existing method-call `this` value for unusual declaration
+  // thunks that inspect their entity receiver.
+  const clauses = typeof declaration === 'function'
+    ? (declaration as (this: EntityRecord) => unknown).call(entityRecord)
+    : declaration;
+  GRANT_CLAUSES_CACHE.set(entityRecord, { declaration, clauses });
+  return clauses;
 }
 
 export function hasOwnCanGrant(entityRecord: EntityRecord): boolean {

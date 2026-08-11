@@ -1,5 +1,14 @@
 # Review: Improving annotated-doc data & sync with ideas from BlockNote
 
+> Superseded (issue #33): the "Workbench annotated-text is a block-based
+> document" picture in §1.2 below is historical. Annotated text is now
+> **blockless continuous text** — one RGA text stream per document, annotations
+> as character ranges `{annotationId, start, end}`, no blocks, no split/merge.
+> See `src/annotated-text-continuous.ts` and `src/annotated-text-ranges.mjs`.
+> The BlockNote comparison below remains useful history (it is what pushed
+> span-native ranges via ADR 0008), but its whole-block membership and
+> block-split findings no longer describe the current model.
+
 Status: analysis only — no decisions made. Evidence-based; existing architecture
 rules (`AGENTS.md`, `CONTEXT.md`, ADR 0005, the v9/operated lattice doc) are
 treated as binding constraints, not as things to casually overturn.

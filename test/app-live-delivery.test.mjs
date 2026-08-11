@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import workbench, {
   annotatedText, annotatedTextCreateAction, annotatedTextRetireAction, annotation,
   deny, entity, everyone, exportAnnotatedText, inherit,
-  admin, grant, keyed, measurement, object, read, ref, registerAnnotatedTextContract, scope, select, snapshot, subscribe, text, write, principalSnapshot, projectionSource,
+  admin, grant, keyed, map, measurement, membership, object, read, ref, registerAnnotatedTextContract, scope, select, snapshot, subscribe, text, write, principalSnapshot, projectionSource,
 } from '../src/index.mjs';
 import { executeDDL, executeFrameworkDDL, registerAnnotatedTextStructuralExtension } from '../src/internal.mjs';
 import { defineSqliteSchema } from '../src/sqlite-schema.mjs';
@@ -920,3 +920,71 @@ test('shutdown completes without client abort or closeAllConnections while an SS
   assert.equal(streamEnded, true, 'the SSE stream must be closed by shutdown without client abort');
 });
 
+
+test('annotated-text capability hints distinguish live read-only from write-granted recipients', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const Project = entity('CapaAuthProject', {
+    name: text(),
+    members: map(ref('User'), { role: ['owner', 'editor', 'viewer'], default: {} }),
+  });
+  membership(Project, {
+    owner: { can: [read, write, subscribe, admin], field: { role: 'owner' } },
+    editor: { can: [read, write, subscribe], field: { role: 'editor' } },
+    viewer: { can: [read, subscribe], field: { role: 'viewer' } },
+  });
+  const Document = entity('CapaAuthDoc', {
+    projectId: ref(Project), owner: ref('User'),
+    body: annotatedText({ project: 'projectId', owner: 'owner', annotations: [annotation('note')], capabilities: { edit: Object.freeze({}) } }),
+    grant: inherit(Project, { via: 'projectId' }),
+  });
+  executeDDL(Project, db);
+  executeDDL(Document, db);
+  db.exec('CREATE TABLE User (id TEXT PRIMARY KEY)');
+  db.prepare("INSERT INTO User (id) VALUES ('u1'), ('u2'), ('u3')").run();
+  db.prepare("INSERT INTO CapaAuthProject (id, name) VALUES ('p1', 'Study')").run();
+  db.prepare('INSERT INTO CapaAuthProject_members (CapaAuthProject_id, member_id, role) VALUES (?, ?, ?)').run('p1', 'u1', 'owner');
+  db.prepare('INSERT INTO CapaAuthProject_members (CapaAuthProject_id, member_id, role) VALUES (?, ?, ?)').run('p1', 'u2', 'viewer');
+  let principal = { type: 'user', id: 'u1', attributes: {} };
+  const principalOf = (request) => request.headers['x-anonymous'] ? { type: 'anonymous', id: 'anonymous' } : principal;
+  const app = workbench({ db, entities: [Project, Document] });
+  app.attachLiveDelivery({ principalOf });
+  app.listen(0, { principalOf });
+  await app.ready;
+  t.after(async () => { app.httpServer.closeAllConnections?.(); await app.shutdown(); db.close(); });
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+  const create = annotatedTextCreateAction(Document, Document.body, { id: 'd1', projectId: 'p1', ownerId: 'u1' });
+  const created = await fetch(`${origin}/workbench/actions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ actionId: 'create-capadoc', type: create.type, payload: create.payload, scope: 'CapaAuthProject:p1', clientId: 'tab-a' }),
+  });
+  assert.equal(created.status, 200);
+
+  const boot = (as, actionId) => createAnnotatedTextHttpSession({
+    baseUrl: `${origin}/live-delivery`, context: { entity: Document, field: Document.body, documentId: 'd1' },
+    historySession: `tab-${as}`, createActionId: () => actionId,
+    eventSourceFactory: () => ({ close() {}, onmessage: null, onerror: null }),
+  });
+  const owner = boot('u1', 'owner-op');
+  await owner.ready.catch((error) => { error.message = `owner ready: ${error.message}`; throw error; });
+  assert.deepEqual(owner.document.capabilities, ['edit'], 'write-granted principal materializes its granted hint');
+
+  // A viewer is still live and subscribed (proves `live` and `write` differ),
+  // but receives an empty granted array.
+  principal = { type: 'user', id: 'u2', attributes: {} };
+  const viewer = boot('u2', 'viewer-op');
+  await viewer.ready.catch((error) => { error.message = `viewer ready: ${error.message}`; throw error; });
+  assert.equal(viewer.document.version, 1);
+  assert.notEqual(viewer.status, 'revoked');
+  assert.deepEqual(viewer.document.capabilities, []);
+
+  // A non-member is denied the document entirely (fail closed).
+  principal = { type: 'user', id: 'u3', attributes: {} };
+  const stranger = boot('u3', 'stranger-op');
+  await stranger.ready.catch(() => {});
+  assert.equal(stranger.document, null);
+  assert.equal(stranger.status, 'revoked');
+  owner.close();
+  viewer.close();
+  stranger.close();
+});

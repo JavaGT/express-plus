@@ -71,6 +71,27 @@
 
 // ---- SQLite default implementations (the fallback + the wrapped-handle body) ----
 
+// Prepared statements are immutable SQL programs tied to one database handle.
+// Keep one per handle and SQL text so the commit loop does not recompile its
+// fixed statements for every action. The WeakMap lets a closed database and its
+// statements become collectible together; custom drivers still use their own
+// prepare implementation through the same helper.
+const preparedStatements = new WeakMap                              ();
+
+export function prepareCached           (db                                     , sql        )            {
+  let statements = preparedStatements.get(db          );
+  if (!statements) {
+    statements = new Map();
+    preparedStatements.set(db          , statements);
+  }
+  let statement = statements.get(sql);
+  if (!statement) {
+    statement = db.prepare(sql);
+    statements.set(sql, statement);
+  }
+  return statement             ;
+}
+
 // COMMIT inside the try: a failing COMMIT still attempts ROLLBACK so a
 // transaction that could not be committed does not stay open with uncertain
 // state. The commit-loop writer relies on single-writer semantics — leaving an

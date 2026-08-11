@@ -14,7 +14,7 @@
 import { readSeq } from './committed-log.ts';
 import { appendEvents, receiptFor, eventsFromReceipt, insertReceipt } from './committed-log.ts';
 import { lifecycleVerb, parseEventType } from './event-handle.ts';
-import { txn, type DbHandle } from './driver.ts';
+import { prepareCached, txn, type DbHandle, type DbStatement } from './driver.ts';
 import { isPlainObject, ValidationError } from './field-strategy.ts';
 import { createRequire } from 'node:module';
 import { createDurableHistoryRuntime } from './durable-history.ts';
@@ -73,6 +73,9 @@ function eventWithParsedHandle(event: any): any {
 }
 
 export const NOW = Symbol('workbench.now');
+
+const CURSOR_UPSERT_SQL =
+  'INSERT INTO _Cursor (scope, lastSeq) VALUES (?, ?) ON CONFLICT(scope) DO UPDATE SET lastSeq = ?';
 
 // Deep-walk an event's `data`, replacing every NOW token with the commit-time
 // `now` ISO string. Returns a fresh structure (does not mutate the handler's
@@ -428,12 +431,11 @@ function checkDurableBatchDedupe(db: unknown, scope: string, actionId: string, a
 // the `payload` value stays per-caller. Throws non-403 errors after rolling back;
 // Post-commit delivery can no longer turn a committed mutation into a failure.
 async function commitEvents(db: any, events: any, {
-  now, actionId, nextSeq, principal, payload, pipeline, scope, type, authorize, historyCommit, handler,
+  now, actionId, principal, payload, pipeline, scope, type, authorize, historyCommit, handler,
   erasureActionContext,
 }: {
   now: string;
   actionId: string;
-  nextSeq: (scope: unknown) => number;
   principal: unknown;
   payload: unknown;
   pipeline: any;
@@ -444,6 +446,20 @@ async function commitEvents(db: any, events: any, {
   handler?: any;
   erasureActionContext?: unknown;
 }) {
+  // A batch and any in-transaction effects share one sequence allocator. The
+  // first event for a scope reads its committed cursor once; later events use
+  // the transaction-local value while still updating _Cursor immediately so
+  // projections and admission observe the same cursor semantics as before.
+  const sequences = new Map<any, number>();
+  const updateCursor = prepareCached<DbStatement>(db, CURSOR_UPSERT_SQL);
+  const nextSeq = (eventScope: any): number => {
+    let seq = sequences.get(eventScope);
+    if (seq === undefined) seq = readSeq(db, eventScope);
+    seq += 1;
+    sequences.set(eventScope, seq);
+    updateCursor.run(eventScope, seq, seq);
+    return seq;
+  };
   let committed: any;
   try {
     // Wave 4.4 — Authorize INSIDE the transaction, atomic with log append,
@@ -504,7 +520,7 @@ async function commitEvents(db: any, events: any, {
         now, actionId, nextSeq, principal, payload: canonicalPayload, type, scope, privateFact,
         claimedBlobs: commit.claimedBlobs,
       });
-      const confirmedThrough = readSeq(db, scope);
+      const confirmedThrough = sequences.get(scope) ?? readSeq(db, scope);
       const resultData = commit.authoringReceipt
         ? await commit.authoringReceipt({ db, actionId, scope, confirmedThrough, finalizedEvents: result })
         : Object.freeze({ actionId, confirmedThrough });
@@ -716,14 +732,6 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
 
   // ---- durable path (db engaged) — async, SQLite-backed ----
 
-  function nextSeq(scope: any) {
-    const seq = readSeq(db, scope) + 1;
-    db.prepare(
-      'INSERT INTO _Cursor (scope, lastSeq) VALUES (?, ?) ON CONFLICT(scope) DO UPDATE SET lastSeq = ?',
-    ).run(scope, seq, seq);
-    return seq;
-  }
-
   // The durable dispatch: authorize (Fork C, outside txn — revoked-principal
   // detection before dedupe) → dedupe by actionId → run handler → commit
   // events inside a write transaction. Authorize ALSO runs INSIDE the
@@ -799,7 +807,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     // single-writer; BEGIN/COMMIT serialize writes.
     const now = new Date().toISOString();
     const committed = await commitEvents(db, emitted, {
-      now, actionId, nextSeq, principal, payload, pipeline, scope, type, authorize, historyCommit,
+      now, actionId, principal, payload, pipeline, scope, type, authorize, historyCommit,
       handler: handler.inTransaction || historyCommit?.handlerInputs ? handler : null, erasureActionContext,
     });
     return committed;
@@ -934,7 +942,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     // The receipt binds the entire submitted envelope, not merely its emitted
     // events. A retry must prove it is the same batch before deduping.
     const committed = await commitEvents(db, batchCommit, {
-      now, actionId, nextSeq, principal, payload: actions, pipeline, scope, type: '$batch', authorize, historyCommit,
+      now, actionId, principal, payload: actions, pipeline, scope, type: '$batch', authorize, historyCommit,
       handler: runInTxn ? runHandlers : null,
     });
     return committed;

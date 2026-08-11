@@ -1,5 +1,13 @@
 # Annotated Text T4 Annotation Lifecycle
 
+> Superseded (issue #33): annotated text is now **blockless continuous text**.
+> The per-block membership model below (`(annotationId, blockId)` memberships,
+> `splitBlockMemberships`, `mergeBlocksMemberships`) is historical. The current
+> model is character ranges `{annotationId, start, end}` over one continuous text
+> stream, with the same closed `empty: 'delete' | 'orphan'` policy — see
+> `src/annotated-text-ranges.mjs`. The annotation data shape and protection
+> semantics (empty policy, protectedTargetIds) still hold.
+
 [IMPLEMENTED — TERRA APPROVED 2026-07-25]
 
 ## Concept

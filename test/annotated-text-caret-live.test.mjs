@@ -105,8 +105,24 @@ test('successful visible upsert projects and delivers to all recipients', async 
       assert.equal(frame.change.value.kind, 'caret');
       assert.equal(frame.change.value.offset, 0);
       assert.ok(typeof frame.change.value.presence === 'string');
+      // The writer's principal carries no display name in this fixture.
+      assert.equal(frame.change.value.name, '');
     }
     assert.equal(sent.filter((f) => f.type === 'annotated-text-caret').length, 2);
+  } finally { db.close(); }
+});
+
+test('upsert carries the writer display name to recipients', async () => {
+  const { db, live, writer, sent } = setup();
+  writer.principal = { id: 'u1', attributes: { displayName: 'Aroha' } };
+  try {
+    sent.length = 0;
+    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 });
+    const upserts = sent.filter(isCaretUpsert);
+    assert.equal(upserts.length, 2, 'both recipients should receive upsert');
+    for (const frame of upserts) {
+      assert.equal(frame.change.value.name, 'Aroha');
+    }
   } finally { db.close(); }
 });
 

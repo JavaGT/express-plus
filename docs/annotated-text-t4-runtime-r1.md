@@ -1,5 +1,11 @@
 # Annotated Text T4 Runtime R1
 
+> Superseded (issue #33): annotated text is now **blockless continuous text**.
+> The block-targeted `text.apply` command below is historical. The current
+> runtime applies whole-document offset edits (`text.insert` / `text.delete`)
+> against one continuous family — see `src/annotated-text-continuous.ts`
+> (`textOperationForOffsetEdit`, `applyTextOperation`).
+
 ## Status
 
 [APPROVED 2026-07-25]

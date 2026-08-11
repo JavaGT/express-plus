@@ -1,5 +1,14 @@
 # Annotated Text T5a Recipient Projection
 
+> Superseded (issue #33): annotated text is now **blockless continuous text**.
+> The "restricted blocks" / "metadata on restricted blocks" language below is
+> historical — restricted content is a range on the continuous document, not a
+> block. The canonical recipient projection is the span-native document in
+> `src/annotated-text-recipient-projection.ts` (`kind:
+> 'workbench.annotatedText.canonical'`: `text`, `annotations`, `ranges`,
+> `measurements`, `capabilityHints`, `orphans?`). Fail-closed redaction and the
+> placeholder rule stand.
+
 T5a establishes a fail-closed recipient projection foundation. It is not the
 complete confidentiality-delivery ticket.
 

@@ -485,6 +485,22 @@ export type AnnotatedTextOperationCommand =
   | AnnotatedTextReplaceCommand
   | AnnotatedTextApplyAnnotationCommand
   | AnnotatedTextRemoveAnnotationCommand;
+
+/** The `edit` half of a v9 operation payload (command minus id/authoring). */
+export type AnnotatedTextOperationEdit =
+  | Omit<AnnotatedTextInsertCommand, 'id' | 'authoring'>
+  | Omit<AnnotatedTextDeleteCommand, 'id' | 'authoring'>
+  | Omit<AnnotatedTextReplaceCommand, 'id' | 'authoring'>
+  | Omit<AnnotatedTextApplyAnnotationCommand, 'id' | 'authoring'>
+  | Omit<AnnotatedTextRemoveAnnotationCommand, 'id' | 'authoring'>;
+
+/** The v9 operation action payload emitted by `annotatedTextAction`. */
+export interface AnnotatedTextOperationPayload {
+  readonly version: 9;
+  readonly id: string;
+  readonly authoring: AnnotatedTextAuthoringBinding;
+  readonly edit: AnnotatedTextOperationEdit;
+}
 export interface AnnotatedTextActionRequest<Payload = unknown> {
   readonly type: string;
   readonly payload: Payload;
@@ -493,7 +509,7 @@ export function annotatedTextAction(
   entity: WorkbenchEntity,
   field: AnnotatedTextFieldHandle,
   command: AnnotatedTextOperationCommand,
-): AnnotatedTextActionRequest;
+): AnnotatedTextActionRequest<AnnotatedTextOperationPayload>;
 export type AnnotatedTextAnnotationActionValues<
   Action extends AnnotatedTextAnnotationEntityActionHandle,
 > = { readonly [Name in keyof Action['input']]: unknown };
@@ -582,6 +598,33 @@ export interface AnnotatedTextDocument {
   readonly restricted?: boolean;
   readonly redactions?: readonly { readonly start: number; readonly end: number; readonly placeholder: string }[];
 }
+
+// ── Blockless document shapes (live contract) ──────────────────────────────
+/** One character range in the document text. Half-open absolute UTF-16 offsets. */
+export interface AnnotatedTextDocumentRange {
+  readonly annotationId: string;
+  readonly start: number;
+  readonly end: number;
+}
+/** An annotation orphaned by a text edit (empty policy 'orphan'): its quote survives. */
+export interface AnnotatedTextOrphan {
+  readonly id: string;
+  readonly family: string;
+  readonly fields: Readonly<Record<string, unknown>>;
+  readonly savedQuote: string;
+  readonly savedRange: readonly [number, number];
+  readonly owner?: string;
+}
+/**
+ * Document-scoped measurement. Blockless model: measurements belong to the
+ * whole document — there is no blockId (issue #33).
+ */
+export interface AnnotatedTextMeasurement {
+  readonly id: string;
+  readonly family: string;
+  readonly formatVersion: number;
+  readonly payload: unknown;
+}
 export interface AnnotatedTextCanonicalDocument {
   readonly kind: 'workbench.annotatedText.canonical';
   readonly version: 1;
@@ -598,6 +641,12 @@ export interface AnnotatedTextCanonicalDocument {
   }[];
   readonly measurements: readonly AnnotatedTextMeasurement[];
   readonly capabilityHints: readonly string[];
+}
+/** An inline redaction inserted into a recipient projection. */
+export interface AnnotatedTextRecipientRedaction {
+  readonly start: number;
+  readonly end: number;
+  readonly placeholder: string;
 }
 export interface AnnotatedTextRecipientDocument {
   readonly kind: 'workbench.annotatedText.recipient';
@@ -704,7 +753,7 @@ export function list<Value = unknown>(
 export function log<Entry extends Record<string, FieldDescriptor> = Record<string, never>>(
   entry?: Entry,
 ): FieldDescriptor<unknown[]>;
-export function ephemeral<Cells extends Record<string, FieldDescriptor> = Record<string, never>>(
+export function ephemeral<Cells extends Record<string, FieldDescriptor | boolean> = Record<string, never>>(
   cells?: Cells,
 ): FieldDescriptor<unknown>;
 export interface StateFieldFactory {

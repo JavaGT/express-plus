@@ -16,7 +16,7 @@ import { applyTextOp, createTextState, materializeText, restoreTextCheckpoint } 
 import { deleteText, insertText } from './workbench-text-edit.mjs';
 import { createAnnotatedTextSnapshotSessionBinding, revokeAnnotatedTextSnapshotSessionBinding } from './workbench-annotated-text-snapshot-internal.mjs';
 import { materializeAnnotatedTextSnapshot, projectPendingAnnotatedTextDocument, projectRangesOverText } from './workbench-annotated-text-snapshot.mjs';
-import { applyTextOperation, materializeText as materializeFamilyText, restoreTextFamily, textFamilyCheckpoint } from './workbench-annotated-text-continuous.mjs';
+import { applyTextOperation, materializeText as materializeFamilyText, restoreTextFamily } from './workbench-annotated-text-continuous.mjs';
 import { annotatedTextAction } from './workbench-annotated-text-action.mjs';
 export { bindAnnotatedTextEditor } from './workbench-annotated-text-editor.mjs';
 export { materializeAnnotatedTextSnapshot };
@@ -664,12 +664,14 @@ class LiveSyncSession {
       if (!isPlainJsonObject(value)) return;
       const valueKeys = Object.keys(value).sort();
       if (value.kind === 'caret') {
-        if (valueKeys.length !== 3 || valueKeys[0] !== 'kind' || valueKeys[1] !== 'offset' || valueKeys[2] !== 'presence') return;
-        if (typeof value.presence !== 'string' || value.presence.length === 0 ||
+        if (valueKeys.length !== 4 || valueKeys[0] !== 'kind' || valueKeys[1] !== 'name' || valueKeys[2] !== 'offset' || valueKeys[3] !== 'presence') return;
+        if (typeof value.name !== 'string' ||
+            typeof value.presence !== 'string' || value.presence.length === 0 ||
             !Number.isSafeInteger(value.offset) || value.offset < 0) return;
       } else if (value.kind === 'edge') {
-        if (valueKeys.length !== 3 || valueKeys[0] !== 'edge' || valueKeys[1] !== 'kind' || valueKeys[2] !== 'presence') return;
-        if (typeof value.presence !== 'string' || value.presence.length === 0 ||
+        if (valueKeys.length !== 4 || valueKeys[0] !== 'edge' || valueKeys[1] !== 'kind' || valueKeys[2] !== 'name' || valueKeys[3] !== 'presence') return;
+        if (typeof value.name !== 'string' ||
+            typeof value.presence !== 'string' || value.presence.length === 0 ||
             value.edge !== 'start') return;
       } else {
         return;
@@ -3313,7 +3315,7 @@ export function createPrincipalSnapshotHttpSession({
  * A document-bound annotated-text session. The document context owns scope,
  * action grammar, and private authoring bindings; callers only name positions.
  */
-export function createAnnotatedTextHttpSession({ baseUrl, context, historySession, fetchImpl, eventSourceFactory, createActionId, onRecoveryDelayed, onFoldApplied, carets }) {
+export function createAnnotatedTextHttpSession({ baseUrl, context, historySession, fetchImpl, eventSourceFactory, createActionId, onRecoveryDelayed, onFoldApplied, carets, typingBurstIdleMs = 75, typingBurstMaxMs = 150 }) {
   if (!context || typeof context !== 'object' || typeof context.documentId !== 'string' || context.documentId.length === 0) {
     throw new TypeError('annotated text context requires a documentId');
   }
@@ -3348,7 +3350,10 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
   let translatedActions = 0;
   // Annotated-text family checkpoint is session-private. Snapshots replace it;
   // fold envelopes advance it. It is not a text.crdt reducer seed.
-  let familyCheckpoint = null;
+  // Keep the validated reducer replica live across folds. Re-restoring the
+  // complete family checkpoint for every character replayed the whole document
+  // history before applying one operation.
+  let familyReplica = null;
   const snapshotBinding = createAnnotatedTextSnapshotSessionBinding();
   const requestIdentity = { entity: entity.name, field: field.fieldName, documentId, authoringClient };
   if (typeof context.viewAs === 'string' && context.viewAs.length > 0) requestIdentity.viewAs = context.viewAs;
@@ -3503,10 +3508,10 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     // The family seed comes from the snapshot's authoring envelope (fully
     // unredacted recipients). A fold against no seeded checkpoint cannot verify
     // the transition; fail closed so the session recovers with a fresh snapshot.
-    if (!familyCheckpoint) {
+    if (!familyReplica) {
       throw new Error('annotated text fold requires a family checkpoint seeded by the snapshot');
     }
-    let family = restoreTextFamily(familyCheckpoint);
+    let family = familyReplica;
     // A fold ships text operations only; the annotation ranges must track the
     // same transition. Project the authoritative snapshot ranges through the
     // fold's COMBINED text change (a replace is one delete+insert pair whose
@@ -3535,7 +3540,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     if (Object.keys(family.checkpoint.pending).length !== 0 || family.checkpoint.rebootstrapRequired) {
       throw new Error('annotated text fold left pending operations behind; snapshot recovery required');
     }
-    familyCheckpoint = textFamilyCheckpoint(family);
+    familyReplica = family;
     installAuthoringFromFold(fold.authoring, fence);
     if (onFoldApplied) onFoldApplied(fold, performance.now() - startedAt);
     const foldedDocument = applyAnnotatedTextFoldDispositions(currentDocument, foldedRanges, fold.dispositions);
@@ -3551,7 +3556,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     createActionId,
     requestIdentity,
     onRecoveryStart: () => {
-      familyCheckpoint = null;
+      familyReplica = null;
       revokeAnnotatedTextSnapshotSessionBinding(snapshotBinding);
     },
     onRecoveryDelayed,
@@ -3585,7 +3590,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       // canonical family checkpoint; seed the fold reducer from it so
       // subsequent folds apply against the client's own copy instead of
       // re-shipping the whole family per keystroke.
-      familyCheckpoint = authoring.family ?? null;
+      familyReplica = authoring.family ? restoreTextFamily(authoring.family) : null;
       const result = materializeAnnotatedTextSnapshot({ ...snapshot[field?.fieldName], authoring }, field, snapshotBinding);
       return result;
     },
@@ -3603,6 +3608,23 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     for (const authoring of deferredAuthoringAcknowledgements.values()) acknowledgeAuthoring(authoring);
     deferredAuthoringAcknowledgements.clear();
   }
+  let queuedDocumentText = null;
+  let queuedAuthoringMutations = 0;
+  const documentListeners = new Set();
+  function currentAnnotatedDocument() {
+    const view = annotatedDocumentView(session.snapshot);
+    if (!view || queuedDocumentText === null) return view;
+    return Object.freeze({
+      ...view,
+      text: queuedDocumentText,
+    });
+  }
+  function publishAnnotatedDocument() {
+    const view = currentAnnotatedDocument();
+    for (const listener of documentListeners) {
+      try { listener(view); } catch { /* isolate consumers */ }
+    }
+  }
   session.subscribe((document) => {
     if (document === null) revokeAnnotatedTextSnapshotSessionBinding(snapshotBinding);
     if (document && snapshotBinding.authoring) {
@@ -3610,22 +3632,41 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       if (translatedActions === 0) acknowledgeAuthoring(authoring);
       else deferredAuthoringAcknowledgements.set(authoring.snapshot, authoring);
     }
+    publishAnnotatedDocument();
   });
-  function capturedBlocks(command) {
-    // Blockless: the whole document is ONE text. Capture the CURRENT
-    // (optimistic) text so the submit check can detect a foreign change that
-    // appeared after capture.
-    void command;
-    return new Map([['document', session.snapshot?.text ?? '']]);
-  }
   function sameCapturedBlocks(blocks) {
     return blocks.get('document') === session.snapshot?.text;
   }
   function localAuthoringConflict() {
     return { ok: false, failure: new Error('annotated text changed before queued operation could be submitted') };
   }
-  function queueAuthoringMutation(command, send) {
-    const blocks = capturedBlocks(command);
+  function projectQueuedDocumentText(text, command) {
+    if (command.kind === 'text.insert') {
+      const offset = command.at?.offset;
+      if (!Number.isSafeInteger(offset) || offset < 0 || offset > text.length) return text;
+      return text.slice(0, offset) + command.text + text.slice(offset);
+    }
+    if (command.kind === 'text.delete' || command.kind === 'text.replace') {
+      const from = command.from?.offset;
+      const to = command.to?.offset;
+      if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 0 || to < from || to > text.length) return text;
+      return text.slice(0, from) + (command.kind === 'text.replace' ? command.text : '') + text.slice(to);
+    }
+    return text;
+  }
+  function queueAuthoringMutation(command, send, { capturedBasis = null, alreadyProjected = false, reserved = false } = {}) {
+    // Capture dependent local edits against the projection already queued
+    // ahead of them, not against the last rendered snapshot. Rapid browser
+    // input can enqueue several semantic edits before the first optimistic
+    // placeholder is visible; treating each as a sibling of that old snapshot
+    // makes every character after the first reject itself as stale.
+    const queuedBasis = capturedBasis ?? queuedDocumentText ?? session.snapshot?.text ?? '';
+    const blocks = new Map([['document', queuedBasis]]);
+    if (!alreadyProjected) queuedDocumentText = projectQueuedDocumentText(queuedBasis, command);
+    if (!reserved) queuedAuthoringMutations += 1;
+    // Queued text is an explicit optimistic placeholder. Publish it immediately
+    // instead of waiting for the preceding snapshot-fenced operation to settle.
+    publishAnnotatedDocument();
     const predecessor = authoringMutationTail;
     let release;
     authoringMutationTail = new Promise((resolve) => { release = resolve; });
@@ -3661,8 +3702,86 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
         return result;
       } finally {
         release();
+        queuedAuthoringMutations -= 1;
+        if (queuedAuthoringMutations === 0) queuedDocumentText = null;
+        publishAnnotatedDocument();
       }
     })();
+  }
+
+  // One semantic insert represents a short contiguous typing burst. Every
+  // character is projected immediately above, while the durable commit is
+  // coalesced after a brief idle window (bounded so continuous typing cannot
+  // postpone persistence indefinitely).
+  const TEXT_BURST_IDLE_MS = Math.max(0, Number(typingBurstIdleMs) || 0);
+  const TEXT_BURST_MAX_MS = Math.max(TEXT_BURST_IDLE_MS, Number(typingBurstMaxMs) || 0);
+  let openInsertBurst = null;
+  function armInsertBurst(burst) {
+    if (burst.timer) clearTimeout(burst.timer);
+    const remaining = Math.max(0, TEXT_BURST_MAX_MS - (Date.now() - burst.startedAt));
+    burst.timer = setTimeout(flushOpenInsertBurst, Math.min(TEXT_BURST_IDLE_MS, remaining));
+  }
+  function flushOpenInsertBurst() {
+    const burst = openInsertBurst;
+    if (!burst) return;
+    openInsertBurst = null;
+    if (burst.timer) clearTimeout(burst.timer);
+    queueAuthoringMutation(burst.command, burst.send, {
+      capturedBasis: burst.capturedBasis,
+      alreadyProjected: true,
+      reserved: true,
+    }).then(
+      (result) => { for (const waiter of burst.waiters) waiter.resolve(result); },
+      (error) => { for (const waiter of burst.waiters) waiter.reject(error); },
+    );
+  }
+  function queueTextInsert(command, send) {
+    if (TEXT_BURST_IDLE_MS === 0) return queueAuthoringMutation(command, send);
+    // A caller-supplied mutation ID names exactly that command for durable
+    // idempotency. Combining it with another command would make retries either
+    // conflict with the changed payload or duplicate the later characters.
+    // Only calls whose identity will be minted internally at dispatch time may
+    // share one typing-burst command.
+    if (command.mutationId !== undefined && command.mutationId !== null) {
+      flushOpenInsertBurst();
+      return queueAuthoringMutation(command, send);
+    }
+    const burst = openInsertBurst;
+    const contiguous = burst
+      && burst.command.at?.affinity === command.at?.affinity
+      && command.at?.offset === burst.command.at?.offset + burst.command.text.length;
+    if (!contiguous) flushOpenInsertBurst();
+    const promise = new Promise((resolve, reject) => {
+      if (contiguous) {
+        burst.command = { ...burst.command, text: burst.command.text + command.text };
+        burst.waiters.push({ resolve, reject });
+        queuedDocumentText = projectQueuedDocumentText(queuedDocumentText ?? session.snapshot?.text ?? '', command);
+        publishAnnotatedDocument();
+        armInsertBurst(burst);
+        return;
+      }
+      const capturedBasis = queuedDocumentText ?? session.snapshot?.text ?? '';
+      queuedDocumentText = projectQueuedDocumentText(capturedBasis, command);
+      queuedAuthoringMutations += 1;
+      publishAnnotatedDocument();
+      openInsertBurst = {
+        command: { ...command }, send, capturedBasis, waiters: [{ resolve, reject }],
+        startedAt: Date.now(), timer: null,
+      };
+      armInsertBurst(openInsertBurst);
+    });
+    return promise;
+  }
+  function cancelOpenInsertBurst() {
+    const burst = openInsertBurst;
+    if (!burst) return;
+    openInsertBurst = null;
+    if (burst.timer) clearTimeout(burst.timer);
+    queuedAuthoringMutations -= 1;
+    if (queuedAuthoringMutations === 0) queuedDocumentText = null;
+    const result = { ok: false, failure: new ClientClosedError('Annotated text document is unavailable') };
+    for (const waiter of burst.waiters) waiter.resolve(result);
+    publishAnnotatedDocument();
   }
   async function dispatchNow(command) {
     if (!session.snapshot || !snapshotBinding.authoring) throw new ClientClosedError('Annotated text document is unavailable');
@@ -3685,19 +3804,21 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     }
   }
   const annotatedSurface = {
-    get document() { return annotatedDocumentView(session.snapshot); },
+    get document() { return currentAnnotatedDocument(); },
     get history() { return session.history; },
     get status() { return session.status; },
     get ready() { return session.ready; },
     insert({ mutationId, at, text }) {
       const command = { kind: 'text.insert', mutationId, at, text };
-      return queueAuthoringMutation(command, (current) => dispatchNow(current));
+      return queueTextInsert(command, (current) => dispatchNow(current));
     },
     delete({ mutationId, from, to }) {
+      flushOpenInsertBurst();
       const command = { kind: 'text.delete', mutationId, from, to };
       return queueAuthoringMutation(command, (current) => dispatchNow(current));
     },
     replace(input) {
+      flushOpenInsertBurst();
       if (!input || typeof input !== 'object') return { ok: false, failure: new TypeError('annotated text replace requires from, to, and text') };
       // An insert (empty selection) must NOT be sent as text.replace: the
       // server rejects a replace with an empty delete range. Route it to
@@ -3712,9 +3833,12 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
             to: input?.to,
             ...(input?.text ? { text: input.text } : {}),
           };
-      return queueAuthoringMutation(command, (current) => dispatchNow(current));
+      return command.kind === 'text.insert'
+        ? queueTextInsert(command, (current) => dispatchNow(current))
+        : queueAuthoringMutation(command, (current) => dispatchNow(current));
     },
-     applyAnnotation({ mutationId, annotation, from, to }) {
+    applyAnnotation({ mutationId, annotation, from, to }) {
+      flushOpenInsertBurst();
       const command = { kind: 'annotation.apply', mutationId, annotation, from, to };
       return queueAuthoringMutation(command, (current) => dispatchNow(current));
      },
@@ -3750,16 +3874,25 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
        });
      },
     removeAnnotation({ mutationId, annotationId }) {
+      flushOpenInsertBurst();
       const command = { kind: 'annotation.remove', mutationId, annotationId };
       return queueAuthoringMutation(command, (current) => dispatchNow(current));
     },
     reconnect: () => session.reconnect(),
     // Subscribe delivers the same document view the session.document getter
     // exposes. The underlying delivery publishes the raw blockless recipient
-    // snapshot; the view passes it through as-is.
-    subscribe: (listener) => session.subscribe((snapshot) => listener(snapshot === null ? null : annotatedDocumentView(snapshot))),
+    // snapshot; listeners also receive locally queued text projections.
+    subscribe(listener) {
+      documentListeners.add(listener);
+      listener(currentAnnotatedDocument());
+      return () => documentListeners.delete(listener);
+    },
     close: () => {
       sessionClosed = true;
+      // An unsent idle-window burst has not crossed the durable boundary. Cancel
+      // it as a settled client result instead of queuing work that immediately
+      // rejects after close (and can surface as an unhandled rejection).
+      cancelOpenInsertBurst();
       wakeAuthoringMutation?.();
       wakeAuthoringMutation = null;
       revokeAnnotatedTextSnapshotSessionBinding(snapshotBinding);
@@ -3771,6 +3904,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
         caretChannel = null;
       }
       caretListeners.clear();
+      documentListeners.clear();
       session.close();
     },
   };
@@ -3805,13 +3939,7 @@ function annotatedDocumentView(snapshot) {
     annotations: snapshot.annotations,
     ...(snapshot.orphans !== undefined ? { orphans: snapshot.orphans } : {}),
     ...(snapshot.measurements !== undefined ? { measurements: snapshot.measurements } : {}),
-    // The materializer projects the wire envelope's capabilityHints into its
-    // public `capabilities` array; the approved session contract exposes them
-    // as `capabilityHints` and never leaks the materialized key. Restricted
-    // documents keep the full shape with an empty hint collection.
-    ...(snapshot.restricted
-      ? { capabilityHints: [] }
-      : { capabilityHints: Array.isArray(snapshot.capabilities) ? snapshot.capabilities : (Array.isArray(snapshot.capabilityHints) ? snapshot.capabilityHints : []) }),
+    capabilities: snapshot.capabilities,
     ...(snapshot.restricted ? { restricted: true } : {}),
     ...(snapshot.redactions?.length ? { redactions: snapshot.redactions } : {}),
   });

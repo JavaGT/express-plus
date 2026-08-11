@@ -1,5 +1,12 @@
 # Annotated Text T8 — Measurement Structural Adapters
 
+> Superseded (issue #33): annotated text is now **blockless continuous text**.
+> The block-based adapter contract below — `validate`/`partition`/`combine`
+> over `blockText` and `utf16Offset`, built for atomic split/merge — is
+> historical: there are no blocks to split or merge. Current measurements are
+> plain opaque payloads `{id, family, formatVersion, payload}` with no blockId
+> and no offsets (see `src/annotated-text-recipient-projection.ts`).
+
 ## Status
 
 [IMPLEMENTED — TERRA APPROVED 2026-07-25] T8 establishes the structural adapter contract and declaration-time validation but does not attach runtime actions or Scope integration.

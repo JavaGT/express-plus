@@ -46,8 +46,10 @@ anchor = ["root"] | ["element", [insertOpId, scalarOrdinal]]
 - A structural point is an immutable after-anchor plus `left` or `right`
   affinity. At its known frontier both affinities resolve to the same visible
   UTF-16 boundary; later insertions at that boundary transform a left-affine
-  point before and a right-affine point after those runs. T4 will use this for
-  split/merge rather than persisting UTF-16 positions.
+  point before and a right-affine point after those runs. *(The T4 split/merge
+  plan this fed is superseded — issue #33 removed the block layer; structural
+  endpoints now project directly against the whole-document RGA, see
+  `src/annotated-text-continuous.ts`.)*
 
 ## Anchor Semantics
 

@@ -229,8 +229,7 @@ export function projectAnnotatedTextForRecipient(canonical: CanonicalAnnotatedTe
     }
   }
   if (restricted) {
-    // Fail closed but retain the full recipient shape: restricted documents
-    // keep the same collections, with sensitive values emptied (issue #33).
+    // Restricted recipients are review-only and receive no authoring hints.
     const result = { kind: 'workbench.annotatedText.recipient', version: 1, restricted: true, text: '', ranges: [], annotations: [], measurements: [], capabilityHints: [], orphans: [] };
     recipientRedactionIntervals.set(result, []);
     return freeze(result);

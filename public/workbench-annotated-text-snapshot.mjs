@@ -36,6 +36,26 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options = {})
       }
     }
   }
+  // Capability hints are recipient-specific, snapshot-fenced guidance derived
+  // from current authorization. A compiled handle validates the hint vocabulary;
+  // callers without a handle retain the plain projected names.
+  const declaredCapabilities = handle?.capabilities ? new Set(Object.keys(handle.capabilities)) : null;
+  let capabilities = snapshot.capabilityHints ? [...snapshot.capabilityHints] : [];
+  if (declaredCapabilities !== null) {
+    if (!Array.isArray(snapshot.capabilityHints)) {
+      throw new Error('annotatedText snapshot: capabilityHints must be an array when capabilities are declared');
+    }
+    const seen = new Set();
+    const names = [];
+    for (const hint of snapshot.capabilityHints) {
+      if (typeof hint !== 'string' || !declaredCapabilities.has(hint) || seen.has(hint)) {
+        throw new Error(`annotatedText snapshot: capability hint '${String(hint)}' is not a unique declared capability`);
+      }
+      seen.add(hint);
+      names.push(hint);
+    }
+    capabilities = names;
+  }
   const document = deepFreeze({
     kind: 'workbench.annotatedText.recipient', version: 1,
     text: snapshot.text,
@@ -47,7 +67,7 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options = {})
     // (granted capability names); project them into the public `capabilities`
     // array the host uses to expose authoring affordances. A restricted
     // recipient is review-only and exposes `capabilities: null`.
-    capabilities: snapshot.restricted ? null : (snapshot.capabilityHints ? [...snapshot.capabilityHints] : []),
+    capabilities: snapshot.restricted ? null : capabilities,
     ...(snapshot.restricted ? { restricted: true } : {}),
     ...(snapshot.redactions?.length ? { redactions: snapshot.redactions.map((r) => ({ start: r.start, end: r.end, placeholder: r.placeholder })) } : {}),
   });

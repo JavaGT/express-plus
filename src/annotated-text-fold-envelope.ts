@@ -21,7 +21,7 @@
 
 import { parseEventType, EventKind } from './event-handle.ts';
 import { projectAnnotatedTextSnapshot } from './annotated-text-snapshot.ts';
-import { restoreTextFamily, textFamilyCheckpoint, materializeText, type ContinuousTextFamily } from './annotated-text-continuous.ts';
+import { restoreTextFamilySerialized, textFamilyBasis, textFamilyCheckpoint, materializeText, type ContinuousTextFamily } from './annotated-text-continuous.ts';
 import { frontierDominates } from './annotated-text.ts';
 import {
   ensureStream,
@@ -57,7 +57,7 @@ interface FoldDocument {
 }
 
 interface FoldEvent {
-  data?: V13OperatedData | null;
+  data?: OperatedData | null;
   eventType?: string;
   type?: string;
   scope?: string;
@@ -77,8 +77,8 @@ interface OperatedFacts {
   [key: string]: unknown;
 }
 
-interface V13OperatedData {
-  version: 13;
+interface OperatedData {
+  version: 13 | 14;
   id: string;
   before: { structuralRevision: number; frontier: any };
   after: { structuralRevision: number; frontier: any };
@@ -193,7 +193,7 @@ export async function tryBuildAnnotatedTextFoldEnvelopes(ctx: FoldCtx, { db, doc
   if (!document || document.descriptor?.kind !== 'annotatedText') return null;
   const event = ctx.event;
   const data = event?.data;
-  if (!data || data.version !== 13 || data.id !== document.documentId) return null;
+  if (!data || (data.version !== 13 && data.version !== 14) || data.id !== document.documentId) return null;
 
   let evHandle;
   try {
@@ -208,7 +208,7 @@ export async function tryBuildAnnotatedTextFoldEnvelopes(ctx: FoldCtx, { db, doc
     return null;
   }
 
-  // The v13 envelope is one exact shape; anything else (including block-era
+  // The operated envelope is one exact shape; anything else (including block-era
   // operated envelopes) falls through to the ordinary envelope grammar.
   if (!exactKeys(data, ['after', 'before', 'facts', 'id', 'operation', 'version'])
     || !revision(data.before) || !revision(data.after)
@@ -216,7 +216,8 @@ export async function tryBuildAnnotatedTextFoldEnvelopes(ctx: FoldCtx, { db, doc
     return null;
   }
   const facts = data.facts;
-  if (!facts.family || typeof facts.family !== 'object' || Array.isArray(facts.family)) {
+  if ((data.version === 13 && (!facts.family || typeof facts.family !== 'object' || Array.isArray(facts.family)))
+    || (data.version === 14 && facts.family !== null)) {
     return null;
   }
 
@@ -316,7 +317,7 @@ export async function tryBuildAnnotatedTextFoldEnvelopes(ctx: FoldCtx, { db, doc
   try {
     const state = db.prepare(`SELECT family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(document.documentId);
     if (!state) return recovery(ctx, entityName, id, 'annotated-text-snapshot-required');
-    committed = restoreTextFamily(JSON.parse(state.family_checkpoint));
+    committed = restoreTextFamilySerialized(state.family_checkpoint);
   } catch {
     return recovery(ctx, entityName, id, 'annotated-text-snapshot-required');
   }
@@ -331,8 +332,8 @@ export async function tryBuildAnnotatedTextFoldEnvelopes(ctx: FoldCtx, { db, doc
   // equals the recipient's projection, and the after frontier equals the
   // applied (committed) family's frontier.
   try {
-    if (facts.family.id !== document.documentId
-      || JSON.stringify(textFamilyCheckpoint(committed)) !== JSON.stringify(facts.family)
+    if ((data.version === 13 && (facts.family.id !== document.documentId
+      || JSON.stringify(textFamilyCheckpoint(committed)) !== JSON.stringify(facts.family)))
       || JSON.stringify(committed.checkpoint.frontier) !== JSON.stringify(data.after.frontier)
       || JSON.stringify(committed.checkpoint.frontier) === JSON.stringify(data.before.frontier)
       || !frontierDominates(committed.checkpoint.frontier, data.before.frontier)
@@ -454,7 +455,7 @@ function mintFoldAuthoring({ db, document, principal, fence, family }: {
     leaseId: lease.id,
     fence,
     positions: [{
-      familyCheckpoint: textFamilyCheckpoint(family),
+      familyCheckpoint: textFamilyBasis(family),
       visibleAtIssue: true,
       redactions: [],
     }],

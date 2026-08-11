@@ -35,6 +35,7 @@ import {
   registerAnnotatedTextContract,
   registerAnnotatedTextStructuralExtension,
   type AnnotatedTextFieldHandle, type AnnotatedTextOptions,
+  type AnnotatedTextCanonicalDocument, type AnnotatedTextRecipientDocument,
 } from 'workbench/annotated-text';
 import {
   changedRange, classifyDisplayOffset, displayToWirePosition, placeholderDisplayWidth,
@@ -137,6 +138,23 @@ annotatedTextAction(annotatedTextEntity, requiredAnnotatedTextHandle, { kind: 't
 annotatedTextAction(annotatedTextEntity, requiredAnnotatedTextHandle, { kind: 'block.split', id: 'document-1', authoring: { version: 1, stream: 'stream', lease: 'lease', mutationId: 'split-1' }, at: { positionToken: 'token', offset: 1, affinity: 'right' } });
 // @ts-expect-error public commands carry an authoring binding, not a bare mutationId
 annotatedTextAction(annotatedTextEntity, requiredAnnotatedTextHandle, { kind: 'text.insert', id: 'document-1', mutationId: 'insert-1', at: { positionToken: 'token', offset: 1, affinity: 'right' }, text: 'x' });
+
+// Blockless document shapes (issue #33): one continuous text, document-scoped ranges.
+declare const canonicalDoc: AnnotatedTextCanonicalDocument;
+const canonicalText: string = canonicalDoc.text;
+const canonicalRanges: readonly { annotationId: string; start: number; end: number }[] = canonicalDoc.ranges;
+declare const recipientDoc: AnnotatedTextRecipientDocument;
+const recipientText: string = recipientDoc.text;
+const recipientRanges: readonly { annotationId: string; start: number; end: number }[] = recipientDoc.ranges;
+// @ts-expect-error the blockless canonical document has no blocks
+canonicalDoc.blocks;
+// @ts-expect-error the blockless canonical document has no memberships
+canonicalDoc.memberships;
+// @ts-expect-error the blockless recipient projection has no blocks
+recipientDoc.blocks;
+// @ts-expect-error the blockless recipient projection has no memberships
+recipientDoc.memberships;
+void [canonicalText, canonicalRanges, recipientText, recipientRanges];
 
 declare const projectedAnnotatedTextSnapshot: Record<string, unknown>;
 declare const compiledAnnotatedTextHandle: AnnotatedTextFieldHandle;

@@ -1,3 +1,17 @@
+// Optional annotated-text subpath entry.
+//
+// TYPE AUTHORITY: the blockless continuous annotated-text model. See
+//   src/annotated-text-continuous.ts           one RGA text stream per document,
+//                                              absolute UTF-16 offsets, annotations
+//                                              as character ranges resolved to
+//                                              structural endpoints (issue #33)
+//   src/annotated-text-recipient-projection.ts canonical -> recipient projection
+// The canonical document is {kind:'workbench.annotatedText.canonical', version:1,
+// text, annotations, ranges, measurements, capabilityHints, orphans?}; the
+// recipient projection is {kind:'workbench.annotatedText.recipient', version:1,
+// text, ranges, annotations, measurements, capabilityHints}. The block-era
+// shapes and family shims below are marked `@deprecated`.
+
 export {
   annotatedText,
   annotation,
@@ -50,15 +64,27 @@ export type {
   AnnotatedTextMeasurementCombineInput,
   AnnotatedTextMeasurementCombineResult,
   AnnotatedTextStructuralExtensionSpec,
+  AnnotatedTextAuthoringBinding,
+  AnnotatedTextAuthoringPosition,
   AnnotatedTextOperationCommand,
+  AnnotatedTextOperationEdit,
+  AnnotatedTextOperationPayload,
   AnnotatedTextActionAnnotation,
   AnnotatedTextActionRequest,
   AnnotatedTextCanonicalDocument,
+  AnnotatedTextDocumentRange,
+  AnnotatedTextOrphan,
+  AnnotatedTextMeasurement,
+  AnnotatedTextRecipientRedaction,
   AnnotatedTextRecipientDocument,
   AnnotatedTextExpectedOwningScope,
   AnnotatedTextRecipientReadResult,
   AnnotatedTextCreateInput,
   AnnotatedTextCreateSourceMeasurement,
+  AnnotatedTextCanonicalBlock,
+  AnnotatedTextGroupMembership,
+  AnnotatedTextRecipientBlock,
+  AnnotatedTextRecipientBlockGroup,
 } from './index.js';
 
 /** Validate + canonicalize a source document's event-only word-evidence envelope. */

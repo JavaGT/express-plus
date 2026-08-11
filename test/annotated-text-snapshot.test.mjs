@@ -47,6 +47,7 @@ function recipient(overrides = {}) {
     annotations: [{ id: 'a1', family: 'coding', fields: {} }],
     orphans: [],
     measurements: [{ id: 'm1', family: 'words', formatVersion: 1, payload: {} }],
+    capabilityHints: [],
     ...overrides,
   };
 }
@@ -64,13 +65,15 @@ test('materializes a blockless recipient into public immutable shapes', () => {
     capabilities: [],
   });
   assert.ok(Object.isFrozen(document));
+  assert.ok(Object.isFrozen(document.capabilities));
   assert.ok(Object.isFrozen(document.ranges[0]));
   assert.ok(Object.isFrozen(document.annotations[0]));
   assert.ok(Object.isFrozen(document.annotations[0].fields));
   assert.ok(Object.isFrozen(document.orphans));
   assert.ok(Object.isFrozen(document.measurements[0]));
-  assert.ok(Object.isFrozen(document.capabilities));
-  // No block-era or binding-era keys leak into the public document.
+  // No block-era or binding-era keys leak into the public document. The raw
+  // capabilityHints wire property stays absent; its validated names appear
+  // only under `capabilities`.
   for (const absent of ['basis', 'authoring', 'blocks', 'blockGroups', 'memberships', 'capabilityHints']) {
     assert.equal(absent in document, false, `${absent} must not leak`);
   }
@@ -99,6 +102,19 @@ test('projects capabilityHints into the public capabilities array (restricted re
   // collections (issue #33 contract).
   assert.deepEqual(restricted.orphans, []);
   assert.deepEqual(restricted.measurements, []);
+});
+
+test('materializes granted capability hints into capabilities and rejects malformed hints fail-closed', () => {
+  const handle = Doc().body;
+  assert.deepEqual(materializeAnnotatedTextSnapshot(recipient({ capabilityHints: ['read'] }), handle).capabilities, ['read']);
+  assert.throws(() => materializeAnnotatedTextSnapshot(recipient({ capabilityHints: ['read', 'read'] }), handle), /not a unique declared capability/);
+  assert.throws(() => materializeAnnotatedTextSnapshot(recipient({ capabilityHints: ['unknown'] }), handle), /not a unique declared capability/);
+  assert.throws(() => materializeAnnotatedTextSnapshot(recipient({ capabilityHints: ['read', 7] }), handle), /not a unique declared capability/);
+  assert.throws(() => materializeAnnotatedTextSnapshot(recipient({ capabilityHints: 'nope' }), handle), /capabilityHints must be an array/);
+  // A call without a compiled handle still receives the projected names.
+  const plain = materializeAnnotatedTextSnapshot(recipient());
+  assert.deepEqual(plain.capabilities, []);
+  assert.equal('capabilityHints' in plain, false);
 });
 
 test('materializes document-level redactions without expanding text', () => {

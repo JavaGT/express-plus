@@ -37,7 +37,7 @@ interface PlanBefore {
 }
 
 interface TextPlan {
-  version: 13;
+  version: 14;
   id: string;
   before: PlanBefore;
   after: { structuralRevision: number; frontier: Frontier };
@@ -79,12 +79,16 @@ function before(family: ContinuousTextFamily, structuralRevision: number): PlanB
 
 function unifiedPlan(data: Record<string, any>): TextPlan {
   return deepFreeze({
-    version: 13,
+    // v14 keeps the semantic operation and deterministic non-text facts, but
+    // no longer embeds the complete post-edit CRDT checkpoint in every event.
+    // The owning projection derives that checkpoint by reducing `operation`
+    // against its current state; historical v13 events remain replayable.
+    version: 14,
     id: data.id,
     before: data.before,
     after: data.after,
     operation: data.operation,
-    facts: packOperatedFacts(data),
+    facts: packOperatedFacts({ ...data, family: null }),
   });
 }
 

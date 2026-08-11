@@ -358,6 +358,7 @@ test('dependent text waits for settlement and reports a local conflict when its 
   let cursor = 0;
   let actionNumber = 0;
   const session = createAnnotatedTextHttpSession({
+    typingBurstIdleMs: 0,
     baseUrl: 'https://example.test/live-delivery',
     context: { entity: Document, field: Document.body, documentId: 'd1' },
     historySession: 'tab-a', createActionId: () => `action-${++actionNumber}`,
@@ -376,7 +377,7 @@ test('dependent text waits for settlement and reports a local conflict when its 
   await session.ready;
   const a = session.insert({ mutationId: 'a', at: { offset: 5, affinity: 'right' }, text: 'A' });
   const b = session.insert({ mutationId: 'b', at: { offset: 6, affinity: 'right' }, text: 'B' });
-  assert.equal(session.document.text, 'HelloA');
+  assert.equal(session.document.text, 'HelloAB', 'all queued text is visible immediately');
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(actionRequests.length, 1, 'second text action waits for first transport');
   pendingResponses.shift()({ ok: true, status: 200, json: async () => ({ ok: true, actionId: 'action-1', confirmedThrough: 1 }) });
@@ -424,7 +425,7 @@ test('queued action waits for settlement and translates through the replacement 
   await session.ready;
   const a = session.insert({ mutationId: 'a', at: { offset: 5, affinity: 'right' }, text: 'A' });
   const b = session.insert({ mutationId: 'b', at: { offset: 6, affinity: 'right' }, text: 'B' });
-  assert.equal(session.document.text, 'HelloA');
+  assert.equal(session.document.text, 'HelloAB', 'the queued dependent edit is already projected');
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(actionRequests.length, 1, 'second text action waits for first transport');
   const aAction = actionRequests[0];
@@ -434,6 +435,8 @@ test('queued action waits for settlement and translates through the replacement 
   // A's settlement installs a replacement snapshot and re-issues its token.
   // B is translated only after that binding is live.
   assert.equal(actionRequests.length, 2, 'B dispatches after A settles');
+  assert.equal(actionRequests[0].payload.authoring.mutationId, 'a');
+  assert.equal(actionRequests[1].payload.authoring.mutationId, 'b', 'caller mutation identities are never coalesced');
   assert.equal(actionRequests[1].payload.edit.at.positionToken, token('position2'), 'B uses the replacement token');
   assert.equal(session.document.text, 'HelloAB', 'B stays projected though its position token was replaced');
   assert.equal(ackRequests.some((request) => request.snapshot === token('snapshot2')), true,
@@ -448,11 +451,65 @@ test('queued action waits for settlement and translates through the replacement 
   session.close();
 });
 
+test('rapid dependent inserts project immediately and commit as one bounded typing burst', async () => {
+  const actionRequests = [];
+  const pendingResponses = [];
+  let cursor = 0;
+  let actionNumber = 0;
+  const texts = ['Hello', 'HelloXAB'];
+  const session = createAnnotatedTextHttpSession({
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: Document, field: Document.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => `rapid-${++actionNumber}`,
+    fetchImpl: async (url, options) => {
+      if (options?.method === 'POST') {
+        if (url.includes('/authoring/ack')) return { ok: true, status: 200, json: async () => ({ ok: true, acknowledgedThrough: cursor }) };
+        const request = JSON.parse(options.body);
+        actionRequests.push(request);
+        return new Promise((resolve) => pendingResponses.push(resolve));
+      }
+      cursor += 1;
+      const body = { ...snapshot().body, text: texts[Math.min(cursor - 1, texts.length - 1)] };
+      return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { body }, cursor, authoring: authoringEnvelope(cursor) }) };
+    },
+    eventSourceFactory: () => ({ close() {}, onmessage: null, onerror: null }),
+  });
+  await session.ready;
+
+  const x = session.insert({ at: { offset: 5, affinity: 'right' }, text: 'X' });
+  const a = session.insert({ at: { offset: 6, affinity: 'right' }, text: 'A' });
+  const b = session.insert({ at: { offset: 7, affinity: 'right' }, text: 'B' });
+  assert.equal(session.document.text, 'HelloXAB', 'rapid queued input is visible before transport settlement');
+
+  await new Promise((resolve) => setTimeout(resolve, 90));
+  assert.equal(actionRequests.length, 1, 'the contiguous typing burst uses one authoring action');
+  assert.equal(actionRequests[0].payload.edit.text, 'XAB');
+  pendingResponses.shift()({ ok: true, status: 200, json: async () => ({ ok: true, actionId: actionRequests[0].actionId, confirmedThrough: cursor }) });
+  for (const result of await Promise.all([x, a, b])) assert.equal(result.ok, true, result.failure?.message);
+  assert.equal(session.document.text, 'HelloXAB');
+  session.close();
+});
+
+test('close settles and cancels an unsent typing burst', async () => {
+  const { session, requests } = setup();
+  await session.ready;
+  const pending = session.insert({ at: { offset: 5, affinity: 'right' }, text: 'X' });
+  assert.equal(session.document.text, 'HelloX');
+  session.close();
+
+  const result = await pending;
+  assert.equal(result.ok, false);
+  assert.match(result.failure.message, /unavailable/);
+  await new Promise((resolve) => setTimeout(resolve, 90));
+  assert.equal(requests.length, 0, 'closing during the idle window never dispatches the cancelled burst');
+});
+
 test('known rejection releases deferred authoring acknowledgement', async () => {
   const actionResponses = [];
   const ackRequests = [];
   let cursor = 0;
   const session = createAnnotatedTextHttpSession({
+    typingBurstIdleMs: 0,
     baseUrl: 'https://example.test/live-delivery',
     context: { entity: Document, field: Document.body, documentId: 'd1' },
     historySession: 'tab-a', createActionId: () => 'action-1',
@@ -600,6 +657,7 @@ test('own-echo fold installs text without a second bootstrap snapshot', async ()
   let releaseReceipt;
   const receiptGate = new Promise((resolve) => { releaseReceipt = resolve; });
   const session = createAnnotatedTextHttpSession({
+    typingBurstIdleMs: 0,
     baseUrl: 'https://example.test/live-delivery',
     context: { entity: Document, field: Document.body, documentId: 'd1' },
     historySession: 'tab-a', createActionId: () => `action-${++actionNumber}`,
@@ -1025,5 +1083,46 @@ test('baseCursor mismatch forces snapshot recovery rather than applying fold', a
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.ok(snapshotRequests.length >= 2, 'baseCursor mismatch recovers via snapshot');
   assert.equal(session.document.text, 'Hello');
+  session.close();
+});
+
+test('materializes write-granted capability hints into document capabilities and replaces them on recovery', async () => {
+  const CapaDocument = entity('CapaLiveDoc', {
+    project: ref('Project'), owner: ref('User'), body: annotatedText({
+      project: 'project', owner: 'owner', annotations: [annotation('note', { fields: {} })],
+      capabilities: { edit: Object.freeze({}) },
+    }),
+  });
+  const sources = [];
+  const hints = ['edit'];
+  let number = 0;
+  const session = createAnnotatedTextHttpSession({
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: CapaDocument, field: CapaDocument.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => 'action-1',
+    fetchImpl: async (url, options) => {
+      if (options?.method === 'POST') return { ok: true, status: 200, json: async () => ({ ok: true, actionId: 'action-1', confirmedThrough: number }) };
+      const cursor = ++number;
+      const body = {
+        kind: 'workbench.annotatedText.recipient', version: 1,
+        text: 'Hello', ranges: [], annotations: [], orphans: [], measurements: [],
+        capabilityHints: hints,
+      };
+      return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { body }, cursor, authoring: authoringEnvelope(cursor) }) };
+    },
+    eventSourceFactory: () => {
+      const source = { close() {}, onmessage: null, onerror: null };
+      sources.push(source);
+      return source;
+    },
+  });
+  await session.ready;
+  assert.deepEqual(session.document.capabilities, ['edit']);
+  // A recovery that re-authorizes without write replaces the granted array;
+  // a stale ['edit'] must never survive ingest (sol: revoked-write check).
+  hints.length = 0;
+  sources[0].onmessage({ data: JSON.stringify([{ type: 'resync', seq: 2, reason: 'recipient-snapshot-required' }]) });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(session.document.capabilities, []);
   session.close();
 });

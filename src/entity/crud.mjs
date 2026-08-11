@@ -28,7 +28,7 @@ import { admitsInvitationRemoval } from '../auth/invitation-acceptance-authority
 import { clearAuthoringState, issueAuthoringSnapshot, buildAuthoringEnvelope } from '../annotated-text-authoring-stream.mjs';
 import { admitV9AnnotatedTextEdit, assertV9AuthoringBinding as assertV9AuthoringBindingFromAdmit } from '../annotated-text-admit.mjs';
 import { packOperatedFacts } from '../annotated-text-operated-facts.mjs';
-import { applyTextOperation, restoreTextFamily, materializeText, textFamilyCheckpoint as continuousTextFamilyCheckpoint } from '../annotated-text-continuous.mjs';
+import { applyTextOperation, compactTextFamilyCheckpoint, materializeText, restoreTextFamilySerialized, textFamilyBasis } from '../annotated-text-continuous.mjs';
 import { projectAnnotatedTextSnapshot } from '../annotated-text-snapshot.mjs';
 import { authoringRedactionsForRecipient } from '../annotated-text-recipient-projection.mjs';
 import { mapVisibleOffsetToCanonical } from '../annotated-text-recipient-projection.mjs';
@@ -1658,7 +1658,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         if (!sourceFact || sourceFact.version !== 2 || sourceFact.documentId !== payload.id) throw new ValidationError('invalid annotated text compensation fact');
         const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(payload.id);
         if (!state) throw new ValidationError(`${name}.${fieldName}.operation document does not exist`);
-        const family = restoreTextFamily(JSON.parse(state.family_checkpoint));
+        const family = restoreTextFamilySerialized(state.family_checkpoint);
         if (payload.history.direction === 'redo' && sourceFact.linkage?.outcome === 'noop') {
           return { events: [], privateFact: { version: 2, kind: 'annotated-text.compensation', documentId: payload.id, linkage: { rootActionId: payload.history.rootActionId, targetActionId: payload.history.targetActionId, direction: payload.history.direction, outcome: 'noop' } }, historyOutcome: 'noop' };
         }
@@ -1684,8 +1684,8 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         if (payload.history.direction === 'undo') compensation.redo = { kind: 'text.insert', opId: originalOp, anchor: contribution.anchor, text: contribution.text, scalarCount: contribution.scalarCount };
         const before = Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier });
         const after = Object.freeze({ structuralRevision: state.structure_version, frontier: nextFamily.checkpoint.frontier });
-        const operationData = { id: payload.id, before, after, operation: Object.freeze({ kind: 'text.apply', operation }), family: continuousTextFamilyCheckpoint(nextFamily) };
-        const envelope = { id: payload.id, before, after, operation: operationData.operation, version: 13, facts: packOperatedFacts(operationData) };
+        const operationData = { id: payload.id, before, after, operation: Object.freeze({ kind: 'text.apply', operation }), family: null };
+        const envelope = { id: payload.id, before, after, operation: operationData.operation, version: 14, facts: packOperatedFacts(operationData) };
         return { events: [Object.freeze({ handle, type: handle.type, scope, data: Object.freeze(envelope) })], privateFact: compensation, historyOutcome: 'applied' };
       }
       if (payload.version === 1) throw new ValidationError('annotated text compensation is history-authored only');
@@ -1701,7 +1701,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
             // bound to the post-commit family so the authoring client can keep
             // typing. The snapshot insert joins this origin transaction.
             const postState = receiptDb.prepare(`SELECT family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(command.id);
-            const postFamily = restoreTextFamily(JSON.parse(postState.family_checkpoint));
+            const postFamily = restoreTextFamilySerialized(postState.family_checkpoint);
             // Project the post-commit state through the ACTING principal's own
             // view (the recipient projection + its redaction WeakMap): the
             // issued frame must carry THAT principal's CURRENT wire→canonical
@@ -1714,7 +1714,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
             const receiptRedactions = authoringRedactionsForRecipient(receiptRecipient);
             const issued = issueAuthoringSnapshot({
               db: receiptDb, prefix, leaseId: command.authoring.lease, fence: confirmedThrough,
-              positions: [{ familyCheckpoint: continuousTextFamilyCheckpoint(postFamily), visibleAtIssue: true, redactions: receiptRedactions }],
+              positions: [{ familyCheckpoint: textFamilyBasis(postFamily), visibleAtIssue: true, redactions: receiptRedactions }],
             });
             const envelope = buildAuthoringEnvelope({
               streamToken: command.authoring.stream,
@@ -1726,7 +1726,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
             const fullyVisible = !receiptRecipient.restricted && !receiptRecipient.redactions?.length && receiptRedactions.length === 0;
             return Object.freeze({ version: 1, actionId, confirmedThrough, authoring: Object.freeze({
               ...envelope,
-              ...(fullyVisible ? { family: continuousTextFamilyCheckpoint(postFamily) } : {}),
+              ...(fullyVisible ? { family: compactTextFamilyCheckpoint(postFamily) } : {}),
             }) });
           },
         };
@@ -1802,13 +1802,13 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
 
           const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(payload.id);
           if (!state) throw new ValidationError(`${actionType} document state is unavailable`);
-          const family = restoreTextFamily(JSON.parse(state.family_checkpoint));
+           const family = restoreTextFamilySerialized(state.family_checkpoint);
            const principalType = principal?.type ?? 'principal';
            const principalId = principal?.id ?? '';
            const position = db.prepare(`SELECT position.*, checkpoint.family_checkpoint AS basis_checkpoint FROM ${prefix}_authoring_position AS position JOIN ${prefix}_authoring_checkpoint AS checkpoint ON checkpoint.id = position.checkpoint_id JOIN ${prefix}_authoring_lease AS lease ON lease.id = position.lease_id JOIN ${prefix}_authoring_stream AS stream ON stream.id = lease.stream_id WHERE position.token = ? AND stream.document_id = ? AND stream.principal_type = ? AND stream.principal_id = ?`).get(payload.basis, payload.id, principalType, principalId);
           if (!position || !position.visible_at_issue) throw new ValidationError(`${actionType} basis is unavailable`);
-          const basis = restoreTextFamily(JSON.parse(position.basis_checkpoint));
-          if (JSON.stringify(basis.checkpoint.frontier) !== JSON.stringify(family.checkpoint.frontier)) throw new ValidationError(`${actionType} basis is stale`);
+           const basis = JSON.parse(position.basis_checkpoint);
+           if (JSON.stringify(basis) !== JSON.stringify(textFamilyBasis(family))) throw new ValidationError(`${actionType} basis is stale`);
           const recipient = await projectAnnotatedTextSnapshot({ db, entity: record, row: documentRow, principal, fieldName, descriptor, mintBasis: false });
           if (JSON.stringify(JSON.parse(position.redactions ?? '[]')) !== JSON.stringify(authoringRedactionsForRecipient(recipient))) throw new ValidationError(`${actionType} basis is stale`);
           const redactions = JSON.parse(position.redactions ?? '[]');

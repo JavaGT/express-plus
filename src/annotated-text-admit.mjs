@@ -11,7 +11,7 @@ import { ValidationError,                      } from './field-strategy.mjs';
 import * as eventHandles from './event-handle.mjs';
 import { authorizeFieldOp } from './strategy/index.mjs';
 import { write } from './grant.mjs';
-import { restoreTextFamily, materializeText,                           } from './annotated-text-continuous.mjs';
+import { restoreTextFamilySerialized, materializeText, textFamilyBasis,                           } from './annotated-text-continuous.mjs';
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
 import { resolveStream, resolveLease, resolvePosition } from './annotated-text-authoring-stream.mjs';
 import { readSeq } from './committed-log.mjs';
@@ -197,7 +197,7 @@ async function assertV9AuthoringPrelude(ctx                )                    
   const { stream, lease } = assertV9AuthoringBinding({ name, fieldName, prefix, command, db, principal });
   const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(command.id);
   if (!state) throw new ValidationError(`${name}.${fieldName}.operation document does not exist`);
-  const family = restoreTextFamily(JSON.parse(state.family_checkpoint));
+  const family = restoreTextFamilySerialized(state.family_checkpoint);
   const cursor = readSeq(db, documentScope) + 1;
   const token = command.edit?.at?.positionToken ?? command.edit?.from?.positionToken ?? command.edit?.to?.positionToken ?? command.edit?.positionToken;
   const position = token
@@ -210,8 +210,7 @@ async function assertV9AuthoringPrelude(ctx                )                    
     // meaningful only against the family its position frame was issued for. If
     // the current family frontier differs, the offset can land somewhere else;
     // require the client to re-bootstrap instead of trusting the offset.
-    const positionFamily = restoreTextFamily(JSON.parse(position.family_checkpoint));
-    if (JSON.stringify(positionFamily.checkpoint.frontier) !== JSON.stringify(family.checkpoint.frontier)) {
+    if (!samePositionBasis(position.family_checkpoint, family)) {
       throw new ValidationError(`${name}.${fieldName}.operation authoring basis is stale; re-bootstrap the snapshot`, { code: 'position-stale' });
     }
     // A protection applied WITHOUT a text change leaves the family frontier
@@ -222,7 +221,14 @@ async function assertV9AuthoringPrelude(ctx                )                    
     assertRedactionsBasesMatch(await currentAuthoringRedactions(ctx, row), parsedRedactions(position), 'position');
   }
   const actor = createHash('sha256').update(`${name}\u0000${fieldName}\u0000${command.id}\u0000${principal?.id ?? ''}\u0000${command.authoring.mutationId}`).digest('hex').slice(0, 32);
-  const lamport = Math.max(0, ...Object.values(family.checkpoint.elements).map((element) => element.lamport)) + 1;
+  // The max element lamport is the next lamport. Never spread the elements
+  // array into Math.max — a large document (100k+ elements) exceeds the call
+  // stack. The scan is O(elements) but bounded.
+  let maxLamport = 0;
+  for (const element of Object.values(family.checkpoint.elements)) {
+    if (element.lamport > maxLamport) maxLamport = element.lamport;
+  }
+  const lamport = maxLamport + 1;
   return Object.freeze({
     name, fieldName, prefix, descriptor, record, compiledMeta, command, row, db, scope, principal, actionId,
     documentScope, stream, lease, state, family, cursor, position, actor, lamport,
@@ -306,6 +312,19 @@ function assertEditLandsInVisibleText(from        , to        , redactions      
   }
 }
 
+function positionBasis(serialized        )          {
+  const parsed = JSON.parse(serialized);
+  if (parsed?.version === 1 && typeof parsed.id === 'string' && Array.isArray(parsed.frontier)) return parsed;
+  if (typeof parsed?.id === 'string' && Array.isArray(parsed?.checkpoint?.frontier)) {
+    return { version: 1, id: parsed.id, frontier: parsed.checkpoint.frontier };
+  }
+  throw new ValidationError('annotated-text authoring basis is invalid', { code: 'position-stale' });
+}
+
+function samePositionBasis(serialized        , family                      )          {
+  return JSON.stringify(positionBasis(serialized)) === JSON.stringify(textFamilyBasis(family));
+}
+
 /** text.insert | text.delete | text.replace */
 async function admitTextEdit(ctx                                   )                     {
   const { name, fieldName, command, db, prefix, documentScope, lease, family, state, actor, lamport, edit } = ctx;
@@ -324,8 +343,7 @@ async function admitTextEdit(ctx                                   )            
     const toPosition = resolvePosition({ db, prefix, positionToken: edit.to.positionToken, leaseId: lease.id })                                       ;
     if (!toPosition) throw new ValidationError(`${name}.${fieldName}.operation replacement end position token unavailable`, { code: 'position-token-unavailable' });
     if (!toPosition.visible_at_issue) throw new ValidationError(`${name}.${fieldName}.operation replacement end position no longer visible`, { code: 'position-no-longer-visible' });
-    const toPositionFamily = restoreTextFamily(JSON.parse(toPosition.family_checkpoint));
-    if (JSON.stringify(toPositionFamily.checkpoint.frontier) !== JSON.stringify(family.checkpoint.frontier)) {
+    if (!samePositionBasis(toPosition.family_checkpoint, family)) {
       throw new ValidationError(`${name}.${fieldName}.operation replacement end authoring basis is stale; re-bootstrap the snapshot`, { code: 'position-stale' });
     }
     assertRedactionsBasesMatch(redactions, parsedRedactions(toPosition), 'replacement end');
@@ -370,10 +388,8 @@ async function admitTextRangeApply(ctx                                        ) 
   const toPos = resolvePosition({ db, prefix, positionToken: toToken, leaseId: lease.id })                                       ;
   if (!fromPos || !toPos) throw new ValidationError(`${name}.${fieldName}.operation annotation selection tokens unavailable`, { code: 'position-token-unavailable' });
   if (!fromPos.visible_at_issue || !toPos.visible_at_issue) throw new ValidationError(`${name}.${fieldName}.operation annotation selection position no longer visible`, { code: 'position-no-longer-visible' });
-  const fromPosFamily = restoreTextFamily(JSON.parse(fromPos.family_checkpoint));
-  const toPosFamily = restoreTextFamily(JSON.parse(toPos.family_checkpoint));
-  if (JSON.stringify(fromPosFamily.checkpoint.frontier) !== JSON.stringify(family.checkpoint.frontier) ||
-      JSON.stringify(toPosFamily.checkpoint.frontier) !== JSON.stringify(family.checkpoint.frontier)) {
+  if (!samePositionBasis(fromPos.family_checkpoint, family) ||
+      !samePositionBasis(toPos.family_checkpoint, family)) {
     throw new ValidationError(`${name}.${fieldName}.operation annotation selection authoring basis is stale; re-bootstrap the snapshot`, { code: 'position-stale' });
   }
   const redactions = parsedRedactions(fromPos);

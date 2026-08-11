@@ -6,9 +6,11 @@ import { CASCADE_DESCENDANT } from './removal-cascade.ts';
 import { applyTextOp, assertWellFormedText, canonicalTextOp, createTextState, restoreTextCheckpoint, textCheckpoint } from '../annotated-text.ts';
 import {
   applyTextOperation as applyContinuousTextOperation,
+  compactTextFamilyCheckpoint,
   importTextToFamily,
   resolveOffsetToEndpoint,
-  restoreTextFamily,
+  restoreTextFamilySerialized,
+  serializeCompactTextFamilyCheckpoint,
   textFamilyCheckpoint as continuousTextFamilyCheckpoint,
 } from '../annotated-text-continuous.ts';
 import { assertWordEvidencePayload } from '../word-evidence.ts';
@@ -145,10 +147,16 @@ function initializeAnnotatedText({ name, fields, event, db, row }: { name: strin
     }
     const fullText = imported.blocks.map((importedBlock) => importedBlock.text).join('');
     const family = importTextToFamily(row.id as string, imported.actor, fullText);
-    const checkpoint = JSON.stringify(continuousTextFamilyCheckpoint(family));
+    const checkpoint = serializeCompactTextFamilyCheckpoint(family);
     const state = db.prepare(`SELECT * FROM ${prefix}_state WHERE document_id = ?`).get(row.id);
     if (state) {
-      const expected = state.structure_version === 1 && state.family_checkpoint === checkpoint;
+      let expected = false;
+      try {
+        expected = state.structure_version === 1
+          && JSON.stringify(compactTextFamilyCheckpoint(restoreTextFamilySerialized(String(state.family_checkpoint)))) === checkpoint;
+      } catch {
+        expected = false;
+      }
       if (!expected) throw new Error(`${name}.${fieldName} created projection conflicts with existing initialization`);
       continue;
     }
@@ -267,8 +275,8 @@ function applyAnnotatedTextOperation({ name, fields, handle, event, db }: { name
   if (!data || typeof data !== 'object' || typeof data.id !== 'string' || data.id.length === 0) {
     throw new Error(`${name}.${handle.field}.operated event has no data`);
   }
-  if (data.version !== 13) {
-    throw new Error(`${name}.${handle.field}.operated event version ${data.version} is not supported: only operated version 13 is admitted; pre-13 lattice rows were retired and are never replayed (issue #23)`);
+  if (data.version !== 13 && data.version !== 14) {
+    throw new Error(`${name}.${handle.field}.operated event version ${data.version} is not supported: only operated versions 13 and 14 are replayable; pre-13 lattice rows were retired (issue #23)`);
   }
   return applySpanNativeAnnotatedTextOperation({ name, handle, db, descriptor, data: data as unknown as OperatedEnvelope });
 }
@@ -277,10 +285,10 @@ function applyAnnotatedTextOperation({ name, fields, handle, event, db }: { name
 // reducers below consume only the facts in this envelope; versions before 13
 // are deliberately not accepted by the projection.
 function applySpanNativeAnnotatedTextOperation({ name, handle, db, descriptor, data }: { name: string; handle: NativeEventHandle; db: Db; descriptor: FieldDescriptor; data: OperatedEnvelope }) {
-  const prefix = `${name}.${handle.field}.operated v13`;
+  const prefix = `${name}.${handle.field}.operated v${data.version}`;
   const factKeys = ['actorId', 'annotation', 'emptiedAnnotations', 'family', 'lifecycle', 'measurements', 'ranges', 'removedAnnotationIds', 'result', 'selectedRange'];
   if (!data || typeof data !== 'object' || Array.isArray(data) ||
-      Object.keys(data).sort().join() !== 'after,before,facts,id,operation,version' || data.version !== 13 ||
+      Object.keys(data).sort().join() !== 'after,before,facts,id,operation,version' || (data.version !== 13 && data.version !== 14) ||
       typeof data.id !== 'string' || !data.id || !isTextRevision(data.before) || !isTextRevision(data.after) ||
       !data.operation || typeof data.operation !== 'object' || Array.isArray(data.operation) ||
       !data.facts || typeof data.facts !== 'object' || Array.isArray(data.facts) ||
@@ -295,6 +303,7 @@ function applySpanNativeAnnotatedTextOperation({ name, handle, db, descriptor, d
       (f.result !== null && (!f.result || typeof f.result !== 'object')) ||
       (f.actorId !== null && (typeof f.actorId !== 'string' || !f.actorId)) ||
       (f.selectedRange !== null && (!f.selectedRange || typeof f.selectedRange !== 'object'))) throw new Error(`${prefix} event has invalid facts`);
+  if (data.version === 14 && f.family !== null) throw new Error(`${prefix} compact event must not carry a family checkpoint`);
   switch (data.operation.kind) {
     case 'text.apply': return projectBlocklessTextApply({ name, handle, db, data });
     case 'text.replace': return projectBlocklessTextReplace({ name, handle, db, data });
@@ -309,10 +318,10 @@ function projectBlocklessTextApply({ name, handle, db, data }: { name: string; h
   const operation = data.operation;
   const f = data.facts;
   if (!operation || operation.kind !== 'text.apply' || !Array.isArray(operation.operation) ||
-      !f.family || !isTextRevision(data.before) || !isTextRevision(data.after)) throw new Error(`${name}.${handle.field}.operated v13 text.apply event has invalid data`);
+      (data.version === 13 && !f.family) || !isTextRevision(data.before) || !isTextRevision(data.after)) throw new Error(`${name}.${handle.field}.operated v${data.version} text.apply event has invalid data`);
   const currentRow = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(data.id);
   if (!currentRow) throw new Error(`${name}.${handle.field}.operated v13 document does not exist`);
-  const current = restoreTextFamily(JSON.parse(currentRow.family_checkpoint as string));
+  const current = restoreTextFamilySerialized(currentRow.family_checkpoint as string);
   if (currentRow.structure_version !== data.before.structuralRevision ||
       JSON.stringify(current.checkpoint.frontier) !== JSON.stringify(data.before.frontier)) throw new Error(`${name}.${handle.field}.operated v13 event conflicts with projection state`);
   let canonical;
@@ -320,9 +329,9 @@ function projectBlocklessTextApply({ name, handle, db, data }: { name: string; h
   if (JSON.stringify(canonical) !== JSON.stringify(operation.operation) || JSON.stringify(canonical[4]) !== JSON.stringify(data.before.frontier)) throw new Error(`${name}.${handle.field}.operated v13 text operation is not canonical or has the wrong frontier`);
   let next;
   try { next = applyContinuousTextOperation(current, canonical); } catch { throw new Error(`${name}.${handle.field}.operated v13 text operation is not applicable to prior state`); }
-  if (JSON.stringify(continuousTextFamilyCheckpoint(next)) !== JSON.stringify(f.family) ||
-      JSON.stringify(data.after.frontier) !== JSON.stringify(next.checkpoint.frontier)) throw new Error(`${name}.${handle.field}.operated v13 family does not match the operation`);
-  db.prepare(`UPDATE ${prefix}_state SET structure_version = ?, family_checkpoint = ? WHERE document_id = ?`).run(data.after.structuralRevision, JSON.stringify(f.family), data.id);
+  if ((data.version === 13 && JSON.stringify(continuousTextFamilyCheckpoint(next)) !== JSON.stringify(f.family)) ||
+      JSON.stringify(data.after.frontier) !== JSON.stringify(next.checkpoint.frontier)) throw new Error(`${name}.${handle.field}.operated v${data.version} family does not match the operation`);
+  db.prepare(`UPDATE ${prefix}_state SET structure_version = ?, family_checkpoint = ? WHERE document_id = ?`).run(data.after.structuralRevision, serializeCompactTextFamilyCheckpoint(next), data.id);
   applyEmptiedAnnotationDispositions({ name, handle, db, prefix, data });
 }
 
@@ -331,10 +340,10 @@ function projectBlocklessTextReplace({ name, handle, db, data }: { name: string;
   const operation = data.operation;
   const f = data.facts;
   if (!operation || operation.kind !== 'text.replace' || !Array.isArray(operation.operations) || operation.operations.length !== 2 ||
-      !f.family || !isTextRevision(data.before) || !isTextRevision(data.after)) throw new Error(`${name}.${handle.field}.operated v13 text.replace event has invalid data`);
+      (data.version === 13 && !f.family) || !isTextRevision(data.before) || !isTextRevision(data.after)) throw new Error(`${name}.${handle.field}.operated v${data.version} text.replace event has invalid data`);
   const currentRow = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(data.id);
   if (!currentRow) throw new Error(`${name}.${handle.field}.operated v13 document does not exist`);
-  const current = restoreTextFamily(JSON.parse(currentRow.family_checkpoint as string));
+  const current = restoreTextFamilySerialized(currentRow.family_checkpoint as string);
   if (currentRow.structure_version !== data.before.structuralRevision ||
       JSON.stringify(current.checkpoint.frontier) !== JSON.stringify(data.before.frontier)) throw new Error(`${name}.${handle.field}.operated v13 event conflicts with projection state`);
   let next = current;
@@ -344,9 +353,9 @@ function projectBlocklessTextReplace({ name, handle, db, data }: { name: string;
     if (JSON.stringify(canonical[4]) !== JSON.stringify(next.checkpoint.frontier)) throw new Error(`${name}.${handle.field}.operated v13 replace operation has the wrong frontier`);
     try { next = applyContinuousTextOperation(next, canonical); } catch { throw new Error(`${name}.${handle.field}.operated v13 replace operation is not applicable to prior state`); }
   }
-  if (JSON.stringify(continuousTextFamilyCheckpoint(next)) !== JSON.stringify(f.family) ||
-      JSON.stringify(data.after.frontier) !== JSON.stringify(next.checkpoint.frontier)) throw new Error(`${name}.${handle.field}.operated v13 family does not match the replace`);
-  db.prepare(`UPDATE ${prefix}_state SET structure_version = ?, family_checkpoint = ? WHERE document_id = ?`).run(data.after.structuralRevision, JSON.stringify(f.family), data.id);
+  if ((data.version === 13 && JSON.stringify(continuousTextFamilyCheckpoint(next)) !== JSON.stringify(f.family)) ||
+      JSON.stringify(data.after.frontier) !== JSON.stringify(next.checkpoint.frontier)) throw new Error(`${name}.${handle.field}.operated v${data.version} family does not match the replace`);
+  db.prepare(`UPDATE ${prefix}_state SET structure_version = ?, family_checkpoint = ? WHERE document_id = ?`).run(data.after.structuralRevision, serializeCompactTextFamilyCheckpoint(next), data.id);
   applyEmptiedAnnotationDispositions({ name, handle, db, prefix, data });
 }
 
@@ -402,12 +411,12 @@ function projectBlocklessAnnotationApplyRange({ name, handle, db, descriptor, da
   }
   const currentRow = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(data.id);
   if (!currentRow) throw new Error(`${name}.${handle.field}.operated v13 document does not exist`);
-  const current = restoreTextFamily(JSON.parse(currentRow.family_checkpoint as string));
+  const current = restoreTextFamilySerialized(currentRow.family_checkpoint as string);
   if (currentRow.structure_version !== data.before.structuralRevision ||
       JSON.stringify(current.checkpoint.frontier) !== JSON.stringify(data.before.frontier)) throw new Error(`${name}.${handle.field}.operated v13 event conflicts with projection state`);
   if (JSON.stringify(current.checkpoint.frontier) !== JSON.stringify(data.after.frontier) ||
       data.after.structuralRevision !== data.before.structuralRevision) throw new Error(`${name}.${handle.field}.operated v13 annotation apply must not change the text family`);
-  if (JSON.stringify(continuousTextFamilyCheckpoint(current)) !== JSON.stringify(f.family)) throw new Error(`${name}.${handle.field}.operated v13 annotation family does not match the document`);
+  if (data.version === 13 && JSON.stringify(continuousTextFamilyCheckpoint(current)) !== JSON.stringify(f.family)) throw new Error(`${name}.${handle.field}.operated v13 annotation family does not match the document`);
   const row = rawRow(db, name, data.id);
   if (!row) throw new Error(`${name}.${handle.field}.operated v13 document row is missing`);
   const declared = descriptor.annotations!.find((entry) => entry.annotationName === annOp.family);
@@ -474,12 +483,12 @@ function projectBlocklessAnnotationRemove({ name, handle, db, data }: { name: st
       !isTextRevision(data.before) || !isTextRevision(data.after)) throw new Error(`${name}.${handle.field}.operated v13 annotation.remove event has invalid data`);
   const currentRow = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(data.id);
   if (!currentRow) throw new Error(`${name}.${handle.field}.operated v13 document does not exist`);
-  const current = restoreTextFamily(JSON.parse(currentRow.family_checkpoint as string));
+  const current = restoreTextFamilySerialized(currentRow.family_checkpoint as string);
   if (currentRow.structure_version !== data.before.structuralRevision ||
       JSON.stringify(current.checkpoint.frontier) !== JSON.stringify(data.before.frontier)) throw new Error(`${name}.${handle.field}.operated v13 event conflicts with projection state`);
   if (JSON.stringify(current.checkpoint.frontier) !== JSON.stringify(data.after.frontier) ||
       data.after.structuralRevision !== data.before.structuralRevision) throw new Error(`${name}.${handle.field}.operated v13 annotation remove must not change the text family`);
-  if (JSON.stringify(continuousTextFamilyCheckpoint(current)) !== JSON.stringify(f.family)) throw new Error(`${name}.${handle.field}.operated v13 annotation family does not match the document`);
+  if (data.version === 13 && JSON.stringify(continuousTextFamilyCheckpoint(current)) !== JSON.stringify(f.family)) throw new Error(`${name}.${handle.field}.operated v13 annotation family does not match the document`);
   const annotation = db.prepare(`SELECT id FROM ${prefix}_annotation WHERE id = ? AND document_id = ?`).get(operation.annotationId, data.id);
   if (!annotation) throw new Error(`${name}.${handle.field}.operated v13 annotation to remove does not exist`);
   deleteAnnotatedTextAnnotation(db, prefix, operation.annotationId);

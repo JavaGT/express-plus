@@ -87,6 +87,7 @@ export function attachApplicationLiveDelivery(app: ApplicationLiveApp, {
   app._applicationLiveDelivery = Object.freeze({
     consumer: owned.consumer,
     handler,
+    path,
     wake: owned.delivery.wake,
     close: owned.close,
     mountWebSocket: (httpServer: Parameters<typeof createLiveDeliveryWebSocket>[0]) => {
