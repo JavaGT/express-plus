@@ -179,9 +179,9 @@ export function materializeText(family: ContinuousTextFamily): string {
 
 /**
  * Build the immutable traversal data needed by endpoint projection once per
- * checkpoint. Word-evidence reads resolve two endpoints and compare text for
- * every word; rebuilding the RGA traversal and materializing the document in
- * each of those calls turns a linear read into quadratic work.
+ * checkpoint. Range projection resolves two endpoints and compares offsets for
+ * every annotation; rebuilding the RGA traversal and materializing the document
+ * in each of those calls turns a linear read into quadratic work.
  */
 function derivedIndex(family: ContinuousTextFamily): ContinuousTextDerivedIndex {
   assertTrustedFamily(family);

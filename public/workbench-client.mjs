@@ -3843,7 +3843,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       return queueAuthoringMutation(command, (current) => dispatchNow(current));
      },
       applyAnnotationAction(actionHandle, { mutationId, from, to, values }) {
-        if (!actionHandle || actionHandle.kind !== 'annotationEntityAction' || typeof actionHandle.actionName !== 'string') {
+        if (!actionHandle || (actionHandle.kind !== 'annotationEntityAction' && actionHandle.kind !== 'annotationAction') || typeof actionHandle.actionName !== 'string') {
           throw new TypeError('annotated text action handle is invalid');
         }
         const annotationHandle = field.annotations?.[actionHandle.family];
@@ -3858,14 +3858,14 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
           || !values || typeof values !== 'object' || Array.isArray(values)
           || (Object.getPrototypeOf(values) !== Object.prototype && Object.getPrototypeOf(values) !== null)
           || Reflect.ownKeys(values).some((key) => typeof key !== 'string')) throw new TypeError('annotated text action input is invalid');
-        const expectedNames = Object.keys(actionHandle.input ?? {});
+        const expectedNames = actionHandle.kind === 'annotationAction' ? actionHandle.inputNames : Object.keys(actionHandle.input ?? {});
         const valueNames = Object.keys(values);
         if (valueNames.length !== expectedNames.length || valueNames.some((key) => !expectedNames.includes(key))) throw new TypeError('annotated text action values contain unknown or missing fields');
         const command = { mutationId, from, to, values };
        return queueAuthoringMutation(command, async (current) => {
          if (!session.snapshot || !snapshotBinding.authoring) throw new ClientClosedError('Annotated text document is unavailable');
          const action = {
-           type: `${entity.name}.${field.fieldName}.${actionHandle.actionName}`,
+            type: `${entity.name}.${field.fieldName}.${actionHandle.family}.${actionHandle.actionName}`,
            payload: Object.freeze({ version: 1, id: documentId, basis: snapshotBinding.authoring.documentPositionToken, mutationId: current.mutationId, from: current.from?.offset, to: current.to?.offset, values: Object.freeze({ ...(current.values ?? {}) }) }),
          };
          translatedActions += 1;

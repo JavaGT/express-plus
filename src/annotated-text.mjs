@@ -88,7 +88,7 @@ export function assertUtf16Offset(text        , offset        )         {
   // Text well-formedness is validated once at import/operation boundaries
   // (assertWellFormedText in assertTextOp/assertCheckpoint). Re-scanning the
   // whole text here made bulk offset resolution O(offsets × text) — the hot
-  // path for word-evidence import and source-range seeding. Only the offset
+  // path for source-range seeding. Only the offset
   // itself is validated per call.
   if (!Number.isSafeInteger(offset) || offset < 0 || offset > text.length) fail('offset is outside text bounds');
   if (offset > 0 && offset < text.length && HIGH_SURROGATE.test(text[offset - 1]) && LOW_SURROGATE.test(text[offset])) {

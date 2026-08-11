@@ -172,9 +172,9 @@ export function createTextFamily(id: string, checkpoint: unknown, blockId: strin
 /**
  * Deterministically rebuild the post-create text family for a create event's
  * source blocks: insert the concatenated text as one RGA operation, then split
- * at each block boundary. Used by the create projection reducer and by the
- * committed-log word-timing consumer to resolve word spans to immutable RGA
- * anchors without consulting later document state (Sol D2).
+ * at each block boundary. Used by the create projection reducer to resolve
+ * create-source annotation ranges to immutable RGA anchors without consulting
+ * later document state.
  */
 export function importTextFamilyFromBlocks(documentId: string, actor: string, blocks: Array<{ id: string; text: string }>): TextFamily {
   if (typeof documentId !== 'string' || documentId.length === 0) fail('document id must be a non-empty string');

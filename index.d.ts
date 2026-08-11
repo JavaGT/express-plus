@@ -191,7 +191,7 @@ export interface TextFieldFactory {
 export const text: TextFieldFactory;
 export interface AnnotatedTextAnnotationDescriptor<
   Name extends string = string,
-  Actions extends readonly AnnotatedTextDeclaredActionDescriptor[] = readonly AnnotatedTextDeclaredActionDescriptor[],
+  Actions extends Readonly<Record<string, AnnotatedTextDeclaredActionDescriptor>> = Readonly<Record<string, AnnotatedTextDeclaredActionDescriptor>>,
 > {
   readonly kind: 'annotation';
   readonly annotationName: Name;
@@ -203,7 +203,7 @@ export interface AnnotatedTextAnnotationDescriptor<
 }
 export interface AnnotatedTextProtectingAnnotationDescriptor<
   Name extends string = string,
-  Actions extends readonly AnnotatedTextDeclaredActionDescriptor[] = readonly AnnotatedTextDeclaredActionDescriptor[],
+  Actions extends Readonly<Record<string, AnnotatedTextDeclaredActionDescriptor>> = Readonly<Record<string, AnnotatedTextDeclaredActionDescriptor>>,
 > {
   readonly kind: 'protectingAnnotation';
   readonly annotationName: Name;
@@ -221,26 +221,33 @@ export interface AnnotatedTextMeasurementDescriptor {
   readonly formatVersion: number;
   readonly queries: readonly string[];
 }
-export interface AnnotatedTextWordEvidenceFamily<Name extends string = string, Payload = unknown> {
-  readonly kind: 'wordEvidenceFamily';
-  readonly familyName: Name;
-  readonly formatVersion: number;
-  readonly parse: (value: unknown) => Payload;
+export interface AnnotatedTextActionContribution {
+  readonly fields: Readonly<Record<string, unknown>>;
 }
-export interface AnnotatedTextWordEvidenceFamilyHandle {
-  readonly familyName: string;
-  readonly formatVersion: number;
+export interface AnnotatedTextActionCurrent {
+  readonly id: string;
+  readonly family: string;
+  readonly fields: Readonly<Record<string, unknown>>;
+  readonly ranges: readonly Readonly<{ start: number | null; end: number | null }>[];
 }
-export interface AnnotatedTextActionDescriptor<Name extends string = string> {
+export interface AnnotatedTextActionContext<Input extends Readonly<Record<string, FieldDescriptor>>> {
+  readonly input: AnnotatedTextInputValues<Input>;
+  readonly annotationId: string;
+  readonly document: Readonly<Record<string, unknown>>;
+  readonly selection: Readonly<{ from: number; to: number }>;
+  readonly principal: Principal;
+  readonly current: AnnotatedTextActionCurrent | null;
+}
+export interface AnnotatedTextActionDescriptor<Input extends Readonly<Record<string, FieldDescriptor>> = Readonly<Record<string, FieldDescriptor>>> {
   readonly kind: 'annotationAction';
-  readonly actionName: Name;
+  readonly input: Input;
+  readonly authorize: ((context: Readonly<AnnotatedTextActionContext<Input>>) => boolean) | null;
+  readonly change: (context: Readonly<AnnotatedTextActionContext<Input>>) => AnnotatedTextActionContribution;
 }
 export interface AnnotatedTextAnnotationEntityActionDescriptor<
-  Name extends string = string,
   Input extends Readonly<Record<string, string>> = Readonly<Record<string, string>>,
 > {
   readonly kind: 'annotationEntityAction';
-  readonly actionName: Name;
   readonly relation: string;
   readonly project: string;
   readonly author: string;
@@ -252,7 +259,7 @@ export type AnnotatedTextDeclaredActionDescriptor =
   | AnnotatedTextAnnotationEntityActionDescriptor;
 export function annotation<
   Name extends string,
-  Actions extends readonly AnnotatedTextDeclaredActionDescriptor[] = readonly AnnotatedTextDeclaredActionDescriptor[],
+  Actions extends Readonly<Record<string, AnnotatedTextDeclaredActionDescriptor>> = Readonly<Record<string, never>>,
 >(name: Name, options?: {
   appliesTo?: 'text-range';
   cardinality?: 'many' | 'one';
@@ -262,7 +269,7 @@ export function annotation<
 }): AnnotatedTextAnnotationDescriptor<Name, Actions>;
 export function protectingAnnotation<
   Name extends string,
-  Actions extends readonly AnnotatedTextDeclaredActionDescriptor[] = readonly AnnotatedTextDeclaredActionDescriptor[],
+  Actions extends Readonly<Record<string, AnnotatedTextDeclaredActionDescriptor>> = Readonly<Record<string, never>>,
 >(name: Name, options?: {
   fields?: Record<string, FieldDescriptor>;
   protects?: string | null;
@@ -276,28 +283,28 @@ export function measurement(name: string, options?: {
   formatVersion?: number;
   queries?: readonly string[];
 }): AnnotatedTextMeasurementDescriptor;
-export function wordEvidenceFamily<Name extends string, Payload = unknown>(name: Name, options: {
-  formatVersion?: number;
-  parse: (value: unknown) => Payload;
-}): AnnotatedTextWordEvidenceFamily<Name, Payload>;
-export function annotationAction<Name extends string>(name: Name): AnnotatedTextActionDescriptor<Name>;
+export type AnnotatedTextFieldValue<Descriptor> = Descriptor extends FieldDescriptor<infer Value> ? Value : unknown;
+export type AnnotatedTextInputValues<Input extends Readonly<Record<string, FieldDescriptor>>> = { readonly [Name in keyof Input]: AnnotatedTextFieldValue<Input[Name]> };
+export function annotationAction<Input extends Readonly<Record<string, FieldDescriptor>>>(options: {
+  readonly input?: Input;
+  readonly authorize?: ((context: Readonly<AnnotatedTextActionContext<Input>>) => boolean) | null;
+  readonly change: AnnotatedTextActionDescriptor<Input>['change'];
+}): AnnotatedTextActionDescriptor<Input>;
 export function annotationEntityAction<
-  Name extends string,
   Input extends Readonly<Record<string, string>>,
->(name: Name, options: {
+>(options: {
   readonly relation: string;
   readonly project: string;
   readonly author: string;
   readonly capability: Capability<'write'>;
   readonly input: Input;
-}): AnnotatedTextAnnotationEntityActionDescriptor<Name, Input>;
+}): AnnotatedTextAnnotationEntityActionDescriptor<Input>;
 
 export interface AnnotatedTextOptions {
   project: string;
   owner: string;
   annotations?: readonly (AnnotatedTextAnnotationDescriptor | AnnotatedTextProtectingAnnotationDescriptor)[];
   measurements?: readonly AnnotatedTextMeasurementDescriptor[];
-  wordEvidence?: readonly AnnotatedTextWordEvidenceFamily<string, unknown>[];
   capabilities?: Readonly<Record<string, unknown>>;
   /** Names an enclosing ephemeral field/cell that owns presence carets for this document. */
   carets?: Readonly<{ field: string; cell: string }>;
@@ -308,7 +315,7 @@ export type AnnotatedTextAnnotationEntityActionHandle<
 > = Readonly<{
   readonly kind: 'annotationEntityAction';
   readonly family: string;
-  readonly actionName: Descriptor['actionName'];
+  readonly actionName: string;
   readonly entityName: string;
   readonly fieldName: string;
   readonly relation: string;
@@ -317,24 +324,28 @@ export type AnnotatedTextAnnotationEntityActionHandle<
   readonly capability: Capability<'write'>;
   readonly input: Descriptor['input'];
 }>;
+export type AnnotatedTextDomainActionHandle<
+  Descriptor extends AnnotatedTextActionDescriptor = AnnotatedTextActionDescriptor,
+> = Readonly<{
+  readonly kind: 'annotationAction';
+  readonly family: string;
+  readonly actionName: string;
+  readonly entityName: string;
+  readonly fieldName: string;
+  readonly inputNames: readonly (keyof Descriptor['input'] & string)[];
+}>;
 export type AnnotatedTextCompiledActionHandle<
   Descriptor extends AnnotatedTextDeclaredActionDescriptor = AnnotatedTextDeclaredActionDescriptor,
 > = Descriptor extends AnnotatedTextAnnotationEntityActionDescriptor
   ? AnnotatedTextAnnotationEntityActionHandle<Descriptor>
-  : Readonly<{
-      readonly kind: 'annotationAction';
-      readonly family: string;
-      readonly actionName: Descriptor['actionName'];
-      readonly entityName: string;
-      readonly fieldName: string;
-    }>;
+  : Descriptor extends AnnotatedTextActionDescriptor ? AnnotatedTextDomainActionHandle<Descriptor> : never;
 export type AnnotatedTextActionHandles<
-  Actions extends readonly AnnotatedTextDeclaredActionDescriptor[],
-> = readonly AnnotatedTextCompiledActionHandle<Actions[number]>[] & {
-  readonly [Action in Actions[number] as Action['actionName']]: AnnotatedTextCompiledActionHandle<Action>;
+  Actions extends Readonly<Record<string, AnnotatedTextDeclaredActionDescriptor>>,
+> = {
+  readonly [ActionName in keyof Actions]: AnnotatedTextCompiledActionHandle<Actions[ActionName]>;
 };
 export interface AnnotatedTextAnnotationHandle<
-  Actions extends readonly AnnotatedTextDeclaredActionDescriptor[] = readonly AnnotatedTextDeclaredActionDescriptor[],
+  Actions extends Readonly<Record<string, AnnotatedTextDeclaredActionDescriptor>> = Readonly<Record<string, AnnotatedTextDeclaredActionDescriptor>>,
 > {
   readonly family: string;
   readonly annotationName: string;
@@ -355,7 +366,7 @@ export type AnnotatedTextAnnotationHandles<
   Annotations extends readonly (AnnotatedTextAnnotationDescriptor | AnnotatedTextProtectingAnnotationDescriptor)[],
 > = {
   readonly [Annotation in Annotations[number] as Annotation['annotationName']]:
-    Annotation extends { readonly actions: infer Actions extends readonly AnnotatedTextDeclaredActionDescriptor[] }
+    Annotation extends { readonly actions: infer Actions extends Readonly<Record<string, AnnotatedTextDeclaredActionDescriptor>> }
       ? AnnotatedTextAnnotationHandle<Actions>
       : AnnotatedTextAnnotationHandle;
 };
@@ -379,7 +390,7 @@ export function annotatedTextClientHandle(
   field: AnnotatedTextFieldHandle,
 ): AnnotatedTextClientEntityHandle & Readonly<Record<string, unknown>>;
 
-export function registerAnnotatedTextContract(contractName: string, contract: { readonly kind: 'measurement' | 'measurement-query' | 'annotation-action' | 'event'; readonly [key: string]: unknown }): void;
+export function registerAnnotatedTextContract(contractName: string, contract: { readonly kind: 'measurement' | 'measurement-query' | 'event'; readonly [key: string]: unknown }): void;
 
 export interface AnnotatedTextMeasurementValidationInput {
   readonly version: 1;
@@ -511,10 +522,14 @@ export function annotatedTextAction(
   command: AnnotatedTextOperationCommand,
 ): AnnotatedTextActionRequest<AnnotatedTextOperationPayload>;
 export type AnnotatedTextAnnotationActionValues<
-  Action extends AnnotatedTextAnnotationEntityActionHandle,
-> = { readonly [Name in keyof Action['input']]: unknown };
+  Action extends AnnotatedTextAnnotationEntityActionHandle | AnnotatedTextDomainActionHandle,
+> = Action extends AnnotatedTextAnnotationEntityActionHandle
+  ? { readonly [Name in keyof Action['input']]: unknown }
+  : Action extends AnnotatedTextDomainActionHandle<infer Descriptor>
+    ? AnnotatedTextInputValues<Descriptor['input']>
+    : never;
 export function annotatedTextAnnotationAction<
-  Action extends AnnotatedTextAnnotationEntityActionHandle,
+  Action extends AnnotatedTextAnnotationEntityActionHandle | AnnotatedTextDomainActionHandle,
 >(
   entity: WorkbenchEntity,
   field: AnnotatedTextFieldHandle,
@@ -532,14 +547,6 @@ export interface AnnotatedTextCreateSourceMeasurement {
   readonly family: string;
   readonly payload: unknown;
 }
-export interface AnnotatedTextWordEvidenceInput {
-  readonly version: 1;
-  readonly ids: readonly string[];
-  readonly startsUtf16: readonly number[];
-  readonly endsUtf16: readonly number[];
-  readonly originalTokens?: readonly string[];
-  readonly families: Readonly<Record<string, { readonly formatVersion: number; readonly values: readonly unknown[] }>>;
-}
 export interface AnnotatedTextCreateInput {
   readonly id: string;
   readonly projectId: string;
@@ -555,7 +562,6 @@ export interface AnnotatedTextCreateInput {
       readonly fields?: Readonly<Record<string, unknown>>;
     }[];
     readonly measurements?: readonly AnnotatedTextCreateSourceMeasurement[];
-    readonly wordEvidence?: AnnotatedTextWordEvidenceInput;
   };
 }
 export function annotatedTextCreateAction(
@@ -692,45 +698,6 @@ export function exportAnnotatedText(input: {
   readonly principal: Principal;
 }): Promise<AnnotatedTextCanonicalDocument>;
 
-export interface AnnotatedTextWordEvidenceReadResult {
-  readonly structureVersion: number;
-  readonly words: ReadonlyArray<{
-    readonly wordId: string;
-    readonly start: number;
-    readonly end: number;
-    readonly text: string;
-    readonly edited: boolean;
-    readonly evidence: Readonly<Record<string, unknown>>;
-  }>;
-}
-export function readWordEvidence(input: {
-  readonly database: unknown;
-  readonly entityName: string;
-  readonly fieldName: string;
-  readonly tableName?: string;
-  readonly scope: string;
-  readonly documentId: string;
-  readonly families?: readonly string[];
-}): AnnotatedTextWordEvidenceReadResult | null;
-export function wordEvidenceFieldHandle(
-  entityName: string,
-  fieldName: string,
-  descriptor: { readonly wordEvidence?: readonly AnnotatedTextWordEvidenceFamily<string, unknown>[] },
-): {
-  readonly entityName: string;
-  readonly fieldName: string;
-  readonly tableName: string;
-  readonly families: readonly AnnotatedTextWordEvidenceFamilyHandle[];
-};
-export function wordEvidenceTableName(entityName: string, fieldName: string): string;
-export function assertWordEvidencePayload(
-  value: unknown,
-  context: {
-    readonly families?: readonly AnnotatedTextWordEvidenceFamily<string, unknown>[];
-    /** Historical name retained; whole-document text (issue #33). */
-    readonly blockText: string;
-  },
-): Readonly<Record<string, unknown>>;
 export function boolean(options?: FieldOptions<boolean>): FieldDescriptor<boolean>;
 export function date(options?: FieldOptions<Date | number | string>): FieldDescriptor<Date>;
 export function number(options?: FieldOptions<number>): FieldDescriptor<number>;

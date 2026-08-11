@@ -668,8 +668,8 @@ test('annotation.apply rejects unknown annotation family', async () => {
   await app.close?.();
 });
 
-test('annotation.apply rejects duplicate annotation id', async () => {
-  const { app, binding, authoringOf, documentPositionToken, refreshBinding } = await setupDoc('hello');
+test('annotation.apply reanchors an existing annotation id', async () => {
+  const { app, db, binding, authoringOf, documentPositionToken, refreshBinding } = await setupDoc('hello');
   assert.equal((await app.dispatch({
     actionId: 'first', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: {
@@ -682,6 +682,20 @@ test('annotation.apply rejects duplicate annotation id', async () => {
       },
     },
   })).ok, true);
+  const shared = await refreshBinding();
+  assert.equal((await app.dispatch({
+    actionId: 'shared', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: {
+      version: 9, id: 'd1', authoring: authoringOf(shared, 'm-shared'),
+      edit: {
+        kind: 'annotation.apply', annotation: { id: 'keeper', family: 'theme', fields: { color: 'blue', weight: 1 } },
+        from: { positionToken: shared.documentPositionToken, offset: 0, affinity: 'left' },
+        to: { positionToken: shared.documentPositionToken, offset: 5, affinity: 'right' },
+      },
+    },
+  })).ok, true);
+  const originalLinks = db.prepare("SELECT annotation_id, range_id FROM R4Doc_body_membership WHERE annotation_id IN ('dup', 'keeper') ORDER BY annotation_id").all();
+  assert.equal(originalLinks[0].range_id, originalLinks[1].range_id);
   const next = await refreshBinding();
   const dup = await app.dispatch({
     actionId: 'second', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
@@ -695,7 +709,11 @@ test('annotation.apply rejects duplicate annotation id', async () => {
       },
     },
   });
-  assert.equal(dup.ok, false);
+  assert.equal(dup.ok, true, dup.failure?.message);
+  const membership = db.prepare("SELECT range.start_point, range.end_point, membership.range_id FROM R4Doc_body_membership AS membership JOIN R4Doc_body_range AS range ON range.id = membership.range_id WHERE membership.annotation_id = 'dup'").get();
+  assert.ok(membership);
+  assert.notEqual(membership.range_id, originalLinks[0].range_id);
+  assert.equal(db.prepare("SELECT range_id FROM R4Doc_body_membership WHERE annotation_id = 'keeper'").get().range_id, originalLinks[0].range_id);
   await app.close?.();
 });
 

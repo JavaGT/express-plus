@@ -9,7 +9,6 @@ import { materializeAnnotatedTextSnapshot, projectPendingAnnotatedTextDocument }
 import { materializeAnnotatedTextSnapshot as clientSnapshot } from '../public/workbench-client.mjs';
 
 const suffix = 'snapshotT3';
-registerAnnotatedTextContract(`${suffix}Action`, Object.freeze({ kind: 'annotation-action' }));
 registerAnnotatedTextContract(`${suffix}Measurement`, Object.freeze({ kind: 'measurement' }));
 registerAnnotatedTextStructuralExtension(`${suffix}Measurement`, Object.freeze({
   version: 1,
@@ -24,7 +23,7 @@ function declaration() {
   return annotatedText({
     project: 'project',
     owner: 'owner',
-    annotations: [annotation('coding', { actions: [annotationAction(`${suffix}Action`)] })],
+    annotations: [annotation('coding', { actions: { revise: annotationAction({ change: () => ({ fields: {} }) }) } })],
     measurements: [measurement('words', {
       extension: `${suffix}Measurement`,
       queries: [`${suffix}Query`],

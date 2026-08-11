@@ -53,9 +53,8 @@ export const PUBLIC_API = Object.freeze({
     exact: true,
     named: Object.freeze([
        'annotatedText', 'annotation', 'protectingAnnotation', 'measurement',
-       'wordEvidenceFamily', 'annotationAction', 'annotationEntityAction', 'registerAnnotatedTextContract',
+       'annotationAction', 'annotationEntityAction', 'registerAnnotatedTextContract',
         'registerAnnotatedTextStructuralExtension', 'annotatedTextAction', 'annotatedTextAnnotationAction', 'annotatedTextCreateAction', 'annotatedTextRetireAction', 'exportAnnotatedText', 'readAnnotatedTextForRecipient',
-        'assertWordEvidencePayload', 'readWordEvidence', 'wordEvidenceFieldHandle', 'wordEvidenceTableName',
     ]),
   }),
   'workbench/annotated-text-coords': Object.freeze({

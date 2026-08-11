@@ -23,6 +23,7 @@ import { randomUUID } from 'node:crypto';
 import workbench, { entity } from '../src/internal.mjs';
 import {
   text, number, boolean, ref, scope, grant, read, write, subscribe, everyone, principal,
+  annotatedText, annotation, annotationAction,
 } from '../src/index.mjs';
 import { createServer, durableMutationVariant } from '../src/pipeline.mjs';
 import { executeDDL, executeFrameworkDDL } from '../src/ddl.mjs';
@@ -34,6 +35,9 @@ import {
   restoreTextFamily,
   textFamilyCheckpoint,
 } from '../src/annotated-text-continuous.mjs';
+import { projectAnnotatedTextSnapshot } from '../src/annotated-text-snapshot.mjs';
+import { ensureStream, ensureLease, hashClientNonce } from '../src/annotated-text-authoring-stream.mjs';
+import { materializeAnnotatedTextSnapshot } from '../public/workbench-client.mjs';
 
 const SCHEMA_VERSION = 2;
 const BENCHMARK_NAME = 'workbench-performance';
@@ -47,6 +51,7 @@ const BENCHMARK_NAMES = Object.freeze([
   'commit',
   'live-delivery',
   'annotated-text',
+  'annotated-text-unified',
 ]);
 
 // The three sizes keep the request shape constant while increasing the amount
@@ -104,6 +109,18 @@ const TEXT_WORKLOADS = Object.freeze({
   small: Object.freeze({ lines: 16, textChars: textWorkloadText(16).length, operations: 16 }),
   medium: Object.freeze({ lines: 96, textChars: textWorkloadText(96).length, operations: 32 }),
   large: Object.freeze({ lines: 256, textChars: textWorkloadText(256).length, operations: 64 }),
+});
+
+// Transcript-shaped unified annotation workloads: one annotatedText declaration
+// with timing + confidence + comment families and declaration-owned actions,
+// imported as ordinary source ranges, snapshotted eagerly, serialized, and
+// materialized by the client. `annotations` counts ranges per document;
+// `corrects` counts declaration-action dispatches against the same authoring
+// position frame.
+const UNIFIED_WORKLOADS = Object.freeze({
+  small: Object.freeze({ apps: 5, annotations: 50, corrects: 10 }),
+  medium: Object.freeze({ apps: 3, annotations: 500, corrects: 30 }),
+  large: Object.freeze({ apps: 1, annotations: 2000, corrects: 60 }),
 });
 
 const DEFAULT_SIZES = Object.freeze(Object.keys(WORKLOADS));
@@ -745,6 +762,206 @@ async function runAnnotatedTextSample(config) {
   };
 }
 
+// The unified annotated-text declaration: independent typed timing and
+// confidence families (exact common geometry interns one shared immutable
+// range), a comment family, and declaration-owned correct/revise actions that
+// route through the Commit loop rather than a separately registered contract.
+function unifiedAnnotationDocument() {
+  const nonNegativeMs = (value) => Number.isSafeInteger(value) && value >= 0;
+  const unitConfidence = (value) => typeof value === 'number' && value >= 0 && value <= 1;
+  return entity('UnifiedDoc', {
+    project: ref('Project'),
+    owner: ref('User', { role: 'owner' }),
+    body: annotatedText({
+      project: 'project',
+      owner: 'owner',
+      annotations: [
+        annotation('timing', {
+          fields: {
+            startMs: number({ validate: nonNegativeMs }),
+            durationMs: number({ validate: nonNegativeMs }),
+          },
+          actions: {
+            correct: annotationAction({
+              input: {
+                startMs: number({ validate: nonNegativeMs }),
+                durationMs: number({ validate: nonNegativeMs }),
+              },
+              change: ({ input }) => ({ fields: input }),
+            }),
+          },
+        }),
+        annotation('transcriptionConfidence', {
+          fields: { confidence: number({ validate: unitConfidence }) },
+          actions: {
+            revise: annotationAction({
+              input: { confidence: number({ validate: unitConfidence }) },
+              change: ({ input }) => ({ fields: input }),
+            }),
+          },
+        }),
+        annotation('comment', { empty: 'orphan' }),
+      ],
+    }),
+    grant: [scope(() => everyone()).can(() => grant(read, write))],
+  });
+}
+
+function unifiedProjectEntity() {
+  return entity('Project', {
+    owner: ref('User', { role: 'owner' }),
+    grant: [scope(() => everyone()).can(() => grant(read, write))],
+  });
+}
+
+function unifiedSourceText(annotations) {
+  return Array.from({ length: annotations }, (_, index) => `word${index}`).join(' ');
+}
+
+function unifiedSourceRanges(annotations, text) {
+  const ranges = [];
+  const widths = text.split(' ').map((word) => word.length);
+  let offset = 0;
+  for (let index = 0; index < annotations; index += 1) {
+    const width = widths[index];
+    ranges.push({
+      annotationId: `timing-${index}`, family: 'timing',
+      start: offset, end: offset + width,
+      fields: { startMs: index * 10, durationMs: 5 },
+    });
+    ranges.push({
+      annotationId: `confidence-${index}`, family: 'transcriptionConfidence',
+      start: offset, end: offset + width,
+      fields: { confidence: 0.9 },
+    });
+    offset += width + 1;
+  }
+  return ranges;
+}
+
+function unifiedFrameworkDb() {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE User (id TEXT PRIMARY KEY)');
+  db.exec("INSERT INTO User (id) VALUES ('bench-user')");
+  return db;
+}
+
+async function unifiedAuthoringBinding(db, Doc) {
+  const prefix = 'UnifiedDoc_body';
+  const clientNonce = 'a'.repeat(43);
+  const stream = ensureStream({
+    db, prefix, documentId: 'd1', principalType: 'user', principalId: 'bench-user',
+  });
+  const lease = ensureLease({
+    db, prefix, streamId: stream.id, clientNonceHash: hashClientNonce(clientNonce),
+  });
+  const row = db.prepare("SELECT * FROM UnifiedDoc WHERE id = 'd1'").get();
+  const snapshot = await projectAnnotatedTextSnapshot({
+    db, entity: Doc, row, principal: me,
+    fieldName: 'body', descriptor: Doc.fields.body,
+    authoring: {
+      streamToken: stream.id, leaseToken: lease.id, leaseId: lease.id,
+      clientNonceHash: hashClientNonce(clientNonce), fence: 0,
+    },
+  });
+  return { documentPositionToken: snapshot.authoring.positionFrames[0].positionToken };
+}
+
+async function runUnifiedAnnotatedTextSample(config) {
+  const Doc = unifiedAnnotationDocument();
+  const Project = unifiedProjectEntity();
+
+  // Declaration compilation: fresh schema preparation including the typed
+  // timing/confidence extension tables, the immutable range relation, and the
+  // membership relation.
+  const compileOps = await timed(config.apps, () => {
+    const db = unifiedFrameworkDb();
+    try {
+      executeDDL(Project, db);
+      db.exec("INSERT INTO Project (id, owner) VALUES ('p1', 'bench-user')");
+      executeDDL(Doc, db);
+    } finally {
+      db.close();
+    }
+  });
+
+  const db = unifiedFrameworkDb();
+  let app;
+  try {
+    executeDDL(Project, db);
+    db.exec("INSERT INTO Project (id, owner) VALUES ('p1', 'bench-user')");
+    executeDDL(Doc, db);
+    app = workbench({ db, entities: [Project, Doc], log: { level: 'warn' } });
+    await app.start();
+    await app.ready;
+
+    const text = unifiedSourceText(config.annotations);
+    const ranges = unifiedSourceRanges(config.annotations, text);
+    const annotationRows = ranges.length;
+
+    // Batch commit: one atomic transcript import through the ordinary Commit
+    // loop (one created Event, one projection).
+    const importOps = await timed(annotationRows, async () => {
+      const result = await app.dispatch({
+        actionId: 'bench-import', type: 'UnifiedDoc.create', scope: 'Project:p1',
+        payload: { id: 'd1', project: 'p1', owner: 'bench-user', body: { version: 1, blocks: [{ text }], ranges } },
+        principal: me,
+      });
+      if (!result?.ok) throw new Error(`unified import failed: ${result?.failure?.message}`);
+    });
+
+    // Eager snapshot: one canonical recipient projection assembled with a
+    // bounded query count (flat as annotation count grows).
+    const row = db.prepare("SELECT * FROM UnifiedDoc WHERE id = 'd1'").get();
+    let recipient;
+    const snapshotOps = await timed(annotationRows, () => {
+      recipient = projectAnnotatedTextSnapshot({
+        db, entity: Doc, row, principal: me,
+        fieldName: 'body', descriptor: Doc.fields.body, mintBasis: false,
+      });
+    });
+    recipient = await recipient;
+
+    // Serialization: the recipient snapshot over the wire.
+    const serializeOps = await timed(annotationRows, () => { JSON.stringify(recipient); });
+
+    // Client reconciliation: materialize the client's annotated document view
+    // from the canonical recipient snapshot.
+    const materializeOps = await timed(annotationRows, () => {
+      materializeAnnotatedTextSnapshot(recipient, Doc.body);
+    });
+
+    // Declaration action: timing.correct through the Commit loop against one
+    // stable authoring position frame.
+    const binding = await unifiedAuthoringBinding(db, Doc);
+    const correctOps = await timed(config.corrects, async () => {
+      const result = await app.dispatch({
+        actionId: `bench-correct-${Math.random().toString(36).slice(2)}`,
+        type: 'UnifiedDoc.body.timing.correct', scope: 'Project:p1', principal: me,
+        payload: {
+          version: 1, id: 'd1', basis: binding.documentPositionToken, mutationId: 'bench-correct',
+          from: 0, to: 5, values: { startMs: 0, durationMs: 10 },
+        },
+      });
+      if (!result?.ok) throw new Error(`unified correct failed: ${result?.failure?.message}`);
+    });
+
+    return {
+      compile_app_ops_s: compileOps,
+      import_annotation_ops_s: importOps,
+      snapshot_annotation_ops_s: snapshotOps,
+      serialize_annotation_ops_s: serializeOps,
+      materialize_annotation_ops_s: materializeOps,
+      declaration_action_ops_s: correctOps,
+      composite_ops_s: geometricMean([compileOps, importOps, snapshotOps, serializeOps, materializeOps, correctOps]),
+    };
+  } finally {
+    if (app) await app.shutdown();
+    db.close();
+  }
+}
+
 function operationsFor(config) {
   return { ...config };
 }
@@ -915,6 +1132,9 @@ function workloadParameters(workload) {
   if (workload.benchmark === 'annotated-text') {
     return `${config.textChars} UTF-16 characters across ${config.lines} lines; ${config.operations} CRDT operations; cached materialization, checkpoint restore, and apply-plus-materialize phases`;
   }
+  if (workload.benchmark === 'annotated-text-unified') {
+    return `${config.annotations} timing/confidence range pairs imported in one atomic Commit-loop batch; ${config.apps} fresh schema preparations; eager snapshot, serialization, client materialization, and ${config.corrects} declaration-action dispatches against one authoring frame`;
+  }
   return JSON.stringify(config);
 }
 
@@ -998,6 +1218,7 @@ const BENCHMARK_WORKLOADS = Object.freeze({
   commit: COMMIT_WORKLOADS,
   'live-delivery': LIVE_WORKLOADS,
   'annotated-text': TEXT_WORKLOADS,
+  'annotated-text-unified': UNIFIED_WORKLOADS,
 });
 
 const BENCHMARK_RUNNERS = Object.freeze({
@@ -1006,6 +1227,7 @@ const BENCHMARK_RUNNERS = Object.freeze({
   commit: runCommitSample,
   'live-delivery': runLiveDeliverySample,
   'annotated-text': runAnnotatedTextSample,
+  'annotated-text-unified': runUnifiedAnnotatedTextSample,
 });
 
 async function main() {

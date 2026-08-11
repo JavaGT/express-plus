@@ -124,6 +124,7 @@ function rebuildMembershipFamily(db          , prefix        ) {
   }
   const columns = db.prepare(`PRAGMA table_info(${prefix}_membership)`).all().map((r) => ({ name: r.name          , pk: r.pk           }));
   const pkColumns = columns.filter((c) => c.pk > 0).map((c) => c.name);
+  if (columns.some((column) => column.name === 'range_id') && columns.some((column) => column.name === 'ordinal')) return;
   const hasCanonicalShape = pkColumns.length === 2 && pkColumns.includes('annotation_id') && pkColumns.includes('start_point');
   if (hasCanonicalShape) return;
   if (pkColumns.length !== 1 || pkColumns[0] !== 'annotation_id') {

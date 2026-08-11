@@ -2,9 +2,9 @@ import { getAnnotatedTextCompiledMetadata } from './annotated-text-field.mjs';
 
 /** Closed public envelope for a declaration-derived related-entity action. */
 export function annotatedTextAnnotationAction(entity     , field     , actionHandle     , input     )                                 {
-  if (!entity || typeof entity.name !== 'string' || !entity.field || !field || typeof field.fieldName !== 'string'
-    || field.entityName !== entity.name) throw new TypeError('annotatedTextAnnotationAction requires compiled entity and field handles');
-  if (!actionHandle || actionHandle.kind !== 'annotationEntityAction' || typeof actionHandle.actionName !== 'string') throw new TypeError('annotatedTextAnnotationAction requires a compiled entity-action handle');
+  if (!entity || typeof entity.name !== 'string' || !field || typeof field.fieldName !== 'string'
+    || entity.fields?.[field.fieldName]?.kind !== 'annotatedText') throw new TypeError('annotatedTextAnnotationAction requires compiled entity and field handles');
+  if (!actionHandle || (actionHandle.kind !== 'annotationEntityAction' && actionHandle.kind !== 'annotationAction') || typeof actionHandle.actionName !== 'string') throw new TypeError('annotatedTextAnnotationAction requires a compiled annotation-action handle');
   const descriptor = entity.fields?.[field.fieldName];
   const metadata = getAnnotatedTextCompiledMetadata(descriptor);
   const expected = metadata?.annotationHandles?.[actionHandle.family]?.actions?.[actionHandle.actionName];
@@ -19,10 +19,10 @@ export function annotatedTextAnnotationAction(entity     , field     , actionHan
   if (!Number.isSafeInteger(input.from) || !Number.isSafeInteger(input.to)) throw new TypeError('annotatedTextAnnotationAction requires integer range');
   if (!input.values || typeof input.values !== 'object' || Array.isArray(input.values) || (Object.getPrototypeOf(input.values) !== Object.prototype && Object.getPrototypeOf(input.values) !== null) || Reflect.ownKeys(input.values).some((key) => typeof key !== 'string')) throw new TypeError('annotatedTextAnnotationAction values must be a plain object');
   const valueNames = Object.keys(input.values);
-  const expectedNames = Object.keys(actionHandle.input ?? {});
+  const expectedNames = actionHandle.kind === 'annotationAction' ? actionHandle.inputNames : Object.keys(actionHandle.input ?? {});
   if (valueNames.some((key) => !expectedNames.includes(key)) || valueNames.length !== expectedNames.length) throw new TypeError('annotatedTextAnnotationAction values has unknown or missing fields');
   return Object.freeze({
-    type: `${entity.name}.${field.fieldName}.${actionHandle.actionName}`,
+    type: `${entity.name}.${field.fieldName}.${actionHandle.family}.${actionHandle.actionName}`,
     payload: Object.freeze({ version: 1, id: input.id, basis: input.basis, mutationId: input.mutationId, from: input.from, to: input.to, values: Object.freeze({ ...input.values }) }),
   });
 }

@@ -24,15 +24,17 @@
 ```js
 import { annotation, protectingAnnotation, measurement, annotationAction } from 'workbench';
 
-// Annotation families
-const note = annotation('note', { fields: { severity: number() } });
+// Annotation declarations
 const full = protectingAnnotation('full', { fields: {}, protects: 'base' });
 
 // Measurements
 const audio = measurement('audio', { extension: 'speech', formatVersion: 2, queries: ['transcript'] });
 
-// Annotation actions (contract-bound)
-const resolve = annotationAction('resolve');
+// Annotation actions are keyed and implemented beside their declaration.
+const note = annotation('note', {
+  fields: { severity: number() },
+  actions: { resolve: annotationAction({ change: () => ({ fields: {} }) }) },
+});
 
 // Entity declaration
 const Doc = entity('Doc', {

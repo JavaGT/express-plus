@@ -17,7 +17,6 @@ import { createProjectedAsyncConsumer } from './projected-async.ts';
 import { buildDurableEffectsRegistry, createDurableEffectsConsumer } from './durable-effects.ts';
 import { createBlobLifecycle } from './blob-lifecycle.ts';
 import { createOperationalConsumers } from './operational-consumer.ts';
-import { createWordEvidenceConsumers } from './word-evidence.ts';
 import { createPendingBlobLifecycle } from './pending-blob.ts';
 import { readSeq } from './committed-log.ts';
 import { CRUD_CURSOR_POLICY, assertV9AnnotatedTextOffsetEditPayload, ANNOTATED_TEXT_COMPENSATION } from './entity/crud.ts';
@@ -449,8 +448,7 @@ export function buildKernel(app: any) {
   // pick it up here alongside the other reconcile sweeps kernel already owns.
   // No-op default when the email seam was never installed.
   app.reconcileEmailDelivery = app._reconcileEmailDelivery ?? (async () => ({ delivered: 0 }));
-  const wordEvidenceConsumers = createWordEvidenceConsumers({ db: app.db, entities });
-  const operational = createOperationalConsumers([...app.operationalConsumers, ...wordEvidenceConsumers] as any, {
+  const operational = createOperationalConsumers(app.operationalConsumers as any, {
     writeQueue: app.writeQueue,
     onShutdown: app.onShutdown,
   } as any);
@@ -517,13 +515,14 @@ export function buildKernel(app: any) {
       for (const entity of entities.values()) {
         for (const [fieldName, field] of Object.entries(entity.fields)) {
           if ((field as any).kind !== 'annotatedText') continue;
-          for (const annotation of (field as any).annotations ?? []) for (const action of annotation.actions ?? []) {
-            const actionType = `${entity.name}.${fieldName}.${action.actionName}`;
+          for (const annotation of (field as any).annotations ?? []) for (const [actionName, action] of Object.entries(annotation.actions ?? {}) as Array<[string, any]>) {
+            const actionType = `${entity.name}.${fieldName}.${annotation.annotationName}.${actionName}`;
             if (context.type !== actionType) continue;
             const id = context.payload?.id;
             const row = typeof id === 'string' ? rawRow(app.db, entity.name, id) : null;
             if (!row) return false;
             if (!(await admitRow({ kind: 'fieldOp', entity, row: entity.deserializeRow({ ...row }), fieldName, capability: write, principal: context.principal }))) return false;
+            if (action.kind === 'annotationAction') return true;
             const targetName = typeof (field as any).annotations?.find((candidate: any) => candidate.annotationName === annotation.annotationName)?.fields?.[action.relation]?.target === 'string'
               ? (field as any).annotations.find((candidate: any) => candidate.annotationName === annotation.annotationName).fields[action.relation].target
               : (field as any).annotations.find((candidate: any) => candidate.annotationName === annotation.annotationName).fields[action.relation].target?.name;

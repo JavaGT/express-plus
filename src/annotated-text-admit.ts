@@ -21,6 +21,7 @@ import { projectAnnotatedTextSnapshot } from './annotated-text-snapshot.ts';
 import type { StructuralEndpoint } from './annotated-text-family.ts';
 import type { Principal } from './principal.ts';
 import { rawRow } from './entity/query.ts';
+import { annotationRangeRows } from './annotated-text-storage.ts';
 
 interface Statement {
   run(...args: unknown[]): { changes: number };
@@ -178,7 +179,7 @@ function loadRanges({ db, prefix, documentId }: {
   prefix: string;
   documentId: string;
 }): LoadedRange[] {
-  const rows = db.prepare(`SELECT annotation_id, start_point, end_point FROM ${prefix}_membership WHERE annotation_id IN (SELECT id FROM ${prefix}_annotation WHERE document_id = ?)`).all(documentId);
+  const rows = annotationRangeRows(db as any, prefix, documentId);
   return rows.map((row) => ({
     annotationId: row.annotation_id,
     start: JSON.parse(row.start_point),

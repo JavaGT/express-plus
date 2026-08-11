@@ -85,7 +85,6 @@ export function annotatedText(options: FieldOptions = {}): FieldDescriptor {
     type: 'annotatedText',
     annotations: Object.freeze([]),
     measurements: Object.freeze([]),
-    wordEvidence: Object.freeze([]),
     ...options,
   });
 }
@@ -93,7 +92,7 @@ export function annotatedText(options: FieldOptions = {}): FieldDescriptor {
 // Declarative annotation/measurement constructors — re-exported from
 // annotated-text-field.mjs for the public surface. Named here so the
 // import-surface contract (index.mjs, internal.mjs) stays in field.mjs.
-export { annotation, protectingAnnotation, measurement, annotationAction, annotationEntityAction, wordEvidenceFamily } from './annotated-text-field.ts';
+export { annotation, protectingAnnotation, measurement, annotationAction, annotationEntityAction } from './annotated-text-field.ts';
 // `text.crdt()` — the `crdt` kind instance for collaborative text. One instance
 // of the crdt contract, not a privileged special case (ADR #9).
 type TextFactory = typeof text & {

@@ -5,7 +5,6 @@ export {
   annotation,
   protectingAnnotation,
   measurement,
-  wordEvidenceFamily,
   annotationAction,
   annotationEntityAction,
 } from './field.mjs';
@@ -20,9 +19,3 @@ export {
 } from './annotated-text-action.mjs';
 export { exportAnnotatedText, readAnnotatedTextForRecipient } from './annotated-text-snapshot.mjs';
 export { annotatedTextAnnotationAction } from './annotated-text-thread-action.mjs';
-export {
-  assertWordEvidencePayload,
-  readWordEvidence,
-  wordEvidenceFieldHandle,
-  wordEvidenceTableName,
-} from './word-evidence.mjs';

@@ -1,7 +1,6 @@
 import { assertUtf16Offset, assertWellFormedText } from './annotated-text.mjs';
 import { resolveDeclarationMeasurementExtension } from './annotated-text-field.mjs';
 import { frozenJsonSnapshot } from './annotated-text-r2.mjs';
-import { assertWordEvidencePayload } from './word-evidence.mjs';
 import { annotatedTextAction as buildAnnotatedTextAction } from './annotated-text-action-builder.mjs';
 
                                
@@ -25,12 +24,6 @@ import { annotatedTextAction as buildAnnotatedTextAction } from './annotated-tex
                                        
  
 
-                                               
-                     
-                        
-                                     
- 
-
                                              
                          
  
@@ -41,14 +34,12 @@ import { annotatedTextAction as buildAnnotatedTextAction } from './annotated-tex
                 
                                                                   
                                                                  
-                                                                    
  
 
                                     
                
                                    
                                                              
-                         
  
 
                                     
@@ -133,23 +124,12 @@ export function annotatedTextCreateAction(entity                     , field    
   if (input.source !== undefined) {
     const source = input.source;
     if (!source || typeof source !== 'object' || Array.isArray(source) ||
-        Object.keys(source).some((key) => !['text', 'ranges', 'measurements', 'wordEvidence'].includes(key)) ||
+        Object.keys(source).some((key) => !['text', 'ranges', 'measurements'].includes(key)) ||
         typeof source.text !== 'string' || source.text.length === 0) {
       throw new Error('annotatedTextCreateAction: source requires non-empty text');
     }
     const text = source.text;
     try { assertWellFormedText(text); } catch (error) { throw new Error(`annotatedTextCreateAction: source text ${(error         ).message}`); }
-    let wordEvidence;
-    if (source.wordEvidence !== undefined) {
-      try {
-        wordEvidence = assertWordEvidencePayload(source.wordEvidence, {
-          families: descriptor.wordEvidence,
-          blockText: text,
-        }       );
-      } catch (error) {
-        throw new Error(`annotatedTextCreateAction: source wordEvidence ${(error         ).message}`);
-      }
-    }
     const families = new Set        ();
     let measurements;
     if (source.measurements !== undefined) {
@@ -213,7 +193,6 @@ export function annotatedTextCreateAction(entity                     , field    
     const block                           = {
       text,
       ...(measurements === undefined ? {} : { measurements }),
-      ...(wordEvidence === undefined ? {} : { wordEvidence }),
     };
     payload[fieldName] = { version: 1, blocks: [block], ...(ranges === undefined ? {} : { ranges }) };
   }

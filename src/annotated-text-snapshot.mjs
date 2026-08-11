@@ -10,6 +10,7 @@ import { readSeq } from './cursor.mjs';
 import { rawRow } from './entity/query.mjs';
 import { scopeOf } from './scope-handle.mjs';
                                                                            
+import { annotationRangeRows } from './annotated-text-storage.mjs';
 
 function fail(message        )        {
   throw new Error(`annotated-text snapshot: ${message}`);
@@ -77,12 +78,17 @@ function loadAnnotations({ db, prefix, descriptor, documentId }                 
   ).all(documentId);
   const targetsByAnnotation = new Map                  ();
   for (const edge of targets) targetsByAnnotation.set(edge.annotation_id, [...(targetsByAnnotation.get(edge.annotation_id) ?? []), edge.target_annotation_id]);
+  const storedByFamily = new Map                          ();
+  for (const declared of descriptor.annotations) {
+    const familyRows = db.prepare(`SELECT child.* FROM ${prefix}_annotation_${declared.annotationName} AS child JOIN ${prefix}_annotation AS annotation ON annotation.id = child.annotation_id WHERE annotation.document_id = ?`).all(documentId);
+    storedByFamily.set(declared.annotationName, new Map(familyRows.map((stored     ) => [stored.annotation_id, stored])));
+  }
   const annotations        = [];
   for (const row of rows) {
     const declared = descriptor.annotations.find((entry     ) => entry.annotationName === row.family);
     if (!declared) fail(`annotation '${row.id}' has unknown family`);
     const fields                      = {};
-    const stored = db.prepare(`SELECT * FROM ${prefix}_annotation_${row.family} WHERE annotation_id = ?`).get(row.id);
+    const stored = storedByFamily.get(row.family)?.get(row.id);
     if (!stored && Object.keys(declared.fields).length !== 0) fail(`annotation '${row.id}' fields are missing`);
     for (const [name, field] of Object.entries(declared.fields)) fields[name] = deserializeField(field       , stored[name]);
     const targetIds = targetsByAnnotation.get(row.id);
@@ -122,7 +128,7 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
   // Document-scoped ranges: project stored historical-basis endpoints to
   // absolute offsets. An unprojectable PROTECTOR fails the whole document
   // (fail closed); an unprojectable non-protector is dropped.
-  const rangeRows = db.prepare(`SELECT annotation_id, start_point, end_point FROM ${prefix}_membership WHERE annotation_id IN (SELECT id FROM ${prefix}_annotation WHERE document_id = ?)`).all(row.id);
+  const rangeRows = annotationRangeRows(db, prefix, row.id);
   const ranges        = [];
   const droppedAnnotationIds = new Set        ();
   for (const rangeRow of rangeRows) {
@@ -290,7 +296,7 @@ function projectCanonicalExport({ db, entity, fieldName, descriptor, documentId 
   const family = restoreTextFamilySerialized(state.family_checkpoint);
   const text = materializeText(family);
   const annotations = loadAnnotations({ db, prefix, descriptor, documentId });
-  const rangeRows = db.prepare(`SELECT annotation_id, start_point, end_point FROM ${prefix}_membership WHERE annotation_id IN (SELECT id FROM ${prefix}_annotation WHERE document_id = ?)`).all(documentId);
+  const rangeRows = annotationRangeRows(db, prefix, documentId);
   const ranges        = [];
   for (const rangeRow of rangeRows) {
     const projected = projectRangeToOffsets(family, rangeRow.start_point, rangeRow.end_point);

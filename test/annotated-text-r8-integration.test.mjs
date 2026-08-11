@@ -30,7 +30,7 @@ function r8Doc({
   access = () => grant(read, write),
   thread = false,
   relationTarget = 'R8Comment',
-  threadAction = annotationEntityAction('compose', {
+  threadAction = annotationEntityAction({
     relation: 'comment', project: 'project', author: 'author', capability: write,
     input: { body: 'body' },
   }),
@@ -49,7 +49,7 @@ function r8Doc({
            empty: 'orphan',
            ...(thread ? {
              fields: { comment: ref(relationTarget) },
-             actions: [threadAction],
+              actions: { compose: threadAction },
            } : {}),
          }),
         protectingAnnotation('confidential', { protects: 'coding', access: protectingAccess }),
@@ -153,7 +153,7 @@ function threadPayload(binding, { basis = binding.documentPositionToken, from = 
 
 function dispatchThread(ctx, actionId, options = {}, principal = { id: 'u1' }) {
   return ctx.app.dispatch({
-    actionId, type: 'R8IntegrationDocument.body.compose', scope: 'Project:p1', principal,
+    actionId, type: 'R8IntegrationDocument.body.comment.compose', scope: 'Project:p1', principal,
     payload: threadPayload(ctx.binding, options),
   });
 }
@@ -214,7 +214,7 @@ test('annotation entity actions reject hostile envelopes without partial related
     if (label === 'unauthorised writer') ctx.db.exec("INSERT INTO User (id) VALUES ('u2')");
     const payload = await payloadOf(ctx);
     const result = await ctx.app.dispatch({
-      actionId: `hostile-${label}`, type: 'R8IntegrationDocument.body.compose',
+      actionId: `hostile-${label}`, type: 'R8IntegrationDocument.body.comment.compose',
       scope: label === 'cross-project scope and FK mismatch' ? 'Project:p2' : 'Project:p1',
       principal: label === 'unauthorised writer' ? { id: 'u2' } : { id: 'u1' }, payload,
     });
@@ -260,17 +260,17 @@ test('durable replay is idempotent, while changed payload conflicts', async () =
 
 test('annotation entity declaration validation rejects malformed relation, project, author, capability, and input mappings', async () => {
   for (const [label, action] of [
-    ['relation', annotationEntityAction('compose', { relation: 'missing', project: 'project', author: 'author', capability: write, input: { body: 'body' } })],
-    ['project', annotationEntityAction('compose', { relation: 'comment', project: 'missing', author: 'author', capability: write, input: { body: 'body' } })],
-    ['author', annotationEntityAction('compose', { relation: 'comment', project: 'project', author: 'missing', capability: write, input: { body: 'body' } })],
+    ['relation', annotationEntityAction({ relation: 'missing', project: 'project', author: 'author', capability: write, input: { body: 'body' } })],
+    ['project', annotationEntityAction({ relation: 'comment', project: 'missing', author: 'author', capability: write, input: { body: 'body' } })],
+    ['author', annotationEntityAction({ relation: 'comment', project: 'project', author: 'missing', capability: write, input: { body: 'body' } })],
   ]) {
     await assert.rejects(() => appFor(new DatabaseSync(':memory:'), null, { thread: true, threadAction: action }), new RegExp(label));
   }
-  assert.throws(() => annotationEntityAction('compose', { relation: 'comment', project: 'project', author: 'author', capability: {}, input: { body: 'body' } }), /capability/);
-  assert.throws(() => annotationEntityAction('compose', { relation: 'comment', project: 'project', author: 'author', capability: write, input: { 'bad-name': 'body' } }), /input/);
+  assert.throws(() => annotationEntityAction({ relation: 'comment', project: 'project', author: 'author', capability: {}, input: { body: 'body' } }), /capability/);
+  assert.throws(() => annotationEntityAction({ relation: 'comment', project: 'project', author: 'author', capability: write, input: { 'bad-name': 'body' } }), /input/);
   const invalidMapping = await appFor(new DatabaseSync(':memory:'), null, {
       thread: true,
-      threadAction: annotationEntityAction('compose', {
+      threadAction: annotationEntityAction({
         relation: 'comment', project: 'project', author: 'author', capability: write,
         input: { body: 'id' },
       }),
@@ -633,7 +633,7 @@ test('boundary inserts join the range at its start and stay out at its end', asy
     binding = await refreshBinding();
     const state = db.prepare("SELECT family_checkpoint FROM R8IntegrationDocument_body_state WHERE document_id = 'd1'").get();
     const family = restoreTextFamily(JSON.parse(state.family_checkpoint));
-    const membership = db.prepare("SELECT * FROM R8IntegrationDocument_body_membership WHERE annotation_id = 'edge-1'").get();
+    const membership = db.prepare("SELECT range.start_point, range.end_point FROM R8IntegrationDocument_body_membership AS membership JOIN R8IntegrationDocument_body_range AS range ON range.id = membership.range_id WHERE membership.annotation_id = 'edge-1'").get();
     return {
       text: materializeText(family),
       range: membership

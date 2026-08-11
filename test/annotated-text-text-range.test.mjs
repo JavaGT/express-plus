@@ -125,7 +125,7 @@ test('text-range annotation.apply persists one document membership without split
   assert.equal(afterState.structure_version, beforeRevision);
 
   // One document-scoped membership with structural endpoints (no block_id).
-  const memberships = db.prepare("SELECT annotation_id, start_point, end_point FROM RangeDoc_body_membership WHERE annotation_id = 'code-1'").all();
+  const memberships = db.prepare("SELECT membership.annotation_id, range.start_point, range.end_point FROM RangeDoc_body_membership AS membership JOIN RangeDoc_body_range AS range ON range.id = membership.range_id WHERE membership.annotation_id = 'code-1'").all();
   assert.equal(memberships.length, 1);
   assert.equal('block_id' in memberships[0], false);
   const startPoint = JSON.parse(memberships[0].start_point);
@@ -273,7 +273,7 @@ test('fold replay of a text-range apply is declaration-independent and revision-
   assert.equal(insert.ok, true, insert.failure?.message);
   assert.equal(familyText(db), 'hello world!');
 
-  const membership = db.prepare("SELECT start_point, end_point FROM RangeDoc_body_membership WHERE annotation_id = 'code-replay'").get();
+  const membership = db.prepare("SELECT range.start_point, range.end_point FROM RangeDoc_body_membership AS membership JOIN RangeDoc_body_range AS range ON range.id = membership.range_id WHERE membership.annotation_id = 'code-replay'").get();
   assert.ok(membership, 'membership survives follow-on fold');
   assert.ok(JSON.parse(membership.start_point).point && JSON.parse(membership.end_point).point);
   await app.close?.();

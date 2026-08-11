@@ -13,13 +13,13 @@ The declaration grammar is:
 ```js
 annotation('comments', {
   fields: { comment: ref(Comment) },
-  actions: [annotationEntityAction('compose', {
+  actions: { compose: annotationEntityAction({
     relation: 'comment',
     project: 'projectId',
     author: 'userId',
     capability: write,
     input: { body: 'body' },
-  })],
+  }) },
   empty: 'orphan',
 })
 ```

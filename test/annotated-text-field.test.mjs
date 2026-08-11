@@ -101,7 +101,7 @@ test('DDL generates correct table count and names', () => {
   const tables = ddl.filter(s => s.startsWith('CREATE TABLE'));
   const indexes = ddl.filter(s => s.startsWith('CREATE INDEX') || s.startsWith('CREATE UNIQUE INDEX'));
 
-  assert.equal(tables.length, 9);
+  assert.equal(tables.length, 10);
   assert.ok(tables.some(s => s.includes('Doc_body_retired')));
   assert.ok(tables.some(s => s.includes('Doc_body_state')));
   assert.ok(tables.some(s => s.includes('Doc_body_annotation')));
@@ -110,6 +110,7 @@ test('DDL generates correct table count and names', () => {
   assert.ok(tables.some(s => s.includes('Doc_body_annotation_orphan_state')));
   assert.ok(tables.some(s => s.includes('Doc_body_annotation_protected_target')));
   assert.ok(tables.some(s => s.includes('Doc_body_membership')));
+  assert.ok(tables.some(s => s.includes('Doc_body_range')));
   assert.ok(tables.some(s => s.includes('Doc_body_measurement')));
   assert.ok(!tables.some(s => s.includes('Doc_body_block')));
   assert.ok(!tables.some(s => s.includes('Doc_body_block_group')));
@@ -119,20 +120,33 @@ test('DDL generates correct table count and names', () => {
   assert.ok(indexes.some(s => s.includes('idx_Doc_body_measurement_once')));
 });
 
-test('membership table has correct columns, PK, and FK cascade', () => {
+test('membership table links annotations to immutable reusable ranges', () => {
   const ddl = annotatedTextDDL('Doc', 'body', fd(
     null, { highlight: { col1: { kind: 'value', type: 'text' } } },
   ), makeFields());
   const mem = ddl.find(s => s.includes('Doc_body_membership'));
-  // The composite PK admits the multiple membership rows an exclusive
-  // 'one'-cardinality apply needs for a trimmed annotation's remnants.
   assert.ok(mem.includes('annotation_id TEXT NOT NULL'));
-  assert.ok(mem.includes('PRIMARY KEY (annotation_id, start_point)'));
-  assert.ok(mem.includes('start_point TEXT NOT NULL CHECK (json_valid(start_point))'));
-  assert.ok(mem.includes('end_point TEXT NOT NULL CHECK (json_valid(end_point))'));
-  assert.ok(mem.includes('FOREIGN KEY (annotation_id) REFERENCES Doc_body_annotation(id) ON DELETE CASCADE'));
+  assert.ok(mem.includes('range_id INTEGER NOT NULL'));
+  assert.ok(mem.includes('document_id TEXT NOT NULL'));
+  assert.ok(mem.includes('ordinal INTEGER NOT NULL'));
+  assert.ok(mem.includes('PRIMARY KEY (annotation_id, range_id)'));
+  assert.ok(mem.includes('UNIQUE (annotation_id, ordinal)'));
+  assert.ok(mem.includes('FOREIGN KEY (annotation_id, document_id) REFERENCES Doc_body_annotation(id, document_id) ON DELETE CASCADE'));
+  assert.ok(mem.includes('FOREIGN KEY (range_id, document_id) REFERENCES Doc_body_range(id, document_id) ON DELETE CASCADE'));
   assert.ok(!mem.includes('block_id'));
-  assert.ok(!mem.includes('ordinal'));
+});
+
+test('range storage is document-scoped and canonically interned', () => {
+  const ddl = annotatedTextDDL('Doc', 'body', fd(
+    null, { highlight: { col1: { kind: 'value', type: 'text' } } },
+  ), makeFields());
+  const range = ddl.find(s => s.includes('Doc_body_range'));
+  assert.ok(range.includes('id INTEGER PRIMARY KEY'));
+  assert.ok(range.includes('document_id TEXT NOT NULL'));
+  assert.ok(range.includes('UNIQUE (document_id, start_point, end_point)'));
+  assert.ok(range.includes('UNIQUE (id, document_id)'));
+  assert.ok(range.includes('FOREIGN KEY (document_id) REFERENCES Doc(id) ON DELETE CASCADE'));
+  assert.ok(ddl.some(s => s.includes('Doc_body_range_immutable_update')));
 });
 
 test('membership table has no block-era indexes', () => {
@@ -354,7 +368,8 @@ test('generated tables execute against real SQLite and accept inserts', () => {
 
   db.exec("INSERT INTO Doc_body_annotation (id, document_id, project_id, owner_id, family) VALUES ('a1', 'd1', 'p1', 'u1', 'highlight')");
   db.exec("INSERT INTO Doc_body_annotation_highlight (annotation_id, col1) VALUES ('a1', 'v1')");
-  db.exec("INSERT INTO Doc_body_membership (annotation_id, start_point, end_point) VALUES ('a1', '[1,2]', '[1,3]')");
+  db.exec("INSERT INTO Doc_body_range (id, document_id, start_point, end_point) VALUES (1, 'd1', '[1,2]', '[1,3]')");
+  db.exec("INSERT INTO Doc_body_membership (annotation_id, range_id, document_id, ordinal) VALUES ('a1', 1, 'd1', 0)");
   db.exec("INSERT INTO Doc_body_measurement (id, document_id, family, format_version, payload) VALUES ('m1', 'd1', 'audio', 1, '{}')");
 
   const rows = db.prepare('SELECT id, document_id, project_id, owner_id FROM Doc_body_annotation').all();
@@ -382,7 +397,8 @@ test('ON DELETE CASCADE removes child rows when parent document is deleted', () 
   db.exec("INSERT INTO Doc (id, title) VALUES ('d1', 'test')");
   db.exec("INSERT INTO Doc_body_annotation (id, document_id, project_id, owner_id, family) VALUES ('a1', 'd1', 'p1', 'u1', 'highlight')");
   db.exec("INSERT INTO Doc_body_annotation_highlight (annotation_id, col1) VALUES ('a1', 'v1')");
-  db.exec("INSERT INTO Doc_body_membership (annotation_id, start_point, end_point) VALUES ('a1', '[1,2]', '[1,3]')");
+  db.exec("INSERT INTO Doc_body_range (id, document_id, start_point, end_point) VALUES (1, 'd1', '[1,2]', '[1,3]')");
+  db.exec("INSERT INTO Doc_body_membership (annotation_id, range_id, document_id, ordinal) VALUES ('a1', 1, 'd1', 0)");
   db.exec("INSERT INTO Doc_body_measurement (id, document_id, family, format_version, payload) VALUES ('m1', 'd1', 'audio', 1, '{}')");
 
   db.exec("DELETE FROM Doc WHERE id = 'd1'");
@@ -411,7 +427,8 @@ test('ON DELETE CASCADE removes annotation family and membership when annotation
   db.exec("INSERT INTO Doc (id, title) VALUES ('d1', 'test')");
   db.exec("INSERT INTO Doc_body_annotation (id, document_id, project_id, owner_id, family) VALUES ('a1', 'd1', 'p1', 'u1', 'highlight')");
   db.exec("INSERT INTO Doc_body_annotation_highlight (annotation_id, col1) VALUES ('a1', 'v1')");
-  db.exec("INSERT INTO Doc_body_membership (annotation_id, start_point, end_point) VALUES ('a1', '[1,2]', '[1,3]')");
+  db.exec("INSERT INTO Doc_body_range (id, document_id, start_point, end_point) VALUES (1, 'd1', '[1,2]', '[1,3]')");
+  db.exec("INSERT INTO Doc_body_membership (annotation_id, range_id, document_id, ordinal) VALUES ('a1', 1, 'd1', 0)");
 
   db.exec("DELETE FROM Doc_body_annotation WHERE id = 'a1'");
 
@@ -561,7 +578,7 @@ test('annotation() returns a frozen descriptor with correct shape', () => {
   assert.ok(Object.isFrozen(a));
   assert.ok(Object.isFrozen(a.fields));
   assert.deepEqual(Object.keys(a.fields), ['col1']);
-  assert.deepEqual(a.actions, []);
+  assert.deepEqual(a.actions, {});
   assert.equal(a.empty, 'delete');
   assert.equal(a.appliesTo, 'text-range');
   assert.equal(a.cardinality, 'many');
@@ -633,7 +650,7 @@ test('annotation empty policy is closed and compiled into its static handle', ()
 });
 
 test('protectingAnnotation() returns a frozen descriptor with protects', () => {
-  const a = protectingAnnotation('full', { fields: {}, protects: 'base', actions: [] });
+  const a = protectingAnnotation('full', { fields: {}, protects: 'base' });
   assert.equal(a.kind, 'protectingAnnotation');
   assert.equal(a.annotationName, 'full');
   assert.equal(a.protects, 'base');
@@ -705,14 +722,17 @@ test('measurement() rejects invalid query identifiers', () => {
 });
 
 test('annotationAction() returns a frozen descriptor', () => {
-  const a = annotationAction('resolve');
+  const change = () => ({ fields: {} });
+  const a = annotationAction({ input: { reason: text() }, change });
   assert.equal(a.kind, 'annotationAction');
-  assert.equal(a.actionName, 'resolve');
+  assert.deepEqual(Object.keys(a.input), ['reason']);
+  assert.equal(a.change, change);
   assert.ok(Object.isFrozen(a));
+  assert.ok(Object.isFrozen(a.input));
 });
 
-test('annotationAction() rejects invalid name', () => {
-  assert.throws(() => annotationAction(''), /valid identifier/);
+test('annotationAction() requires a change function', () => {
+  assert.throws(() => annotationAction({}), /requires a change function/);
 });
 
 test('validation rejects duplicate annotation names', () => {
@@ -769,28 +789,16 @@ test('validation rejects unknown keys on measurement descriptors', () => {
   }, /unknown key/);
 });
 
-test('validation rejects handlers/reducers on annotation actions at T3', () => {
+test('validation rejects imperative handlers on annotation actions', () => {
   assert.throws(() => {
-    const badAction = Object.freeze({ kind: 'annotationAction', actionName: 'resolve', handler: () => {} });
-    const badAnn = annotation('hl', { actions: [badAction] });
+    const badAction = Object.freeze({ kind: 'annotationAction', input: Object.freeze({}), change: () => ({}), authorize: null, handler: () => {} });
+    const badAnn = annotation('hl', { actions: { resolve: badAction } });
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [badAnn],
       measurements: [measurement('m', { extension: 'testFieldExt' })],
     }), makeFields());
-  }, /T3 does not accept action handlers/);
-});
-
-test('validation rejects actions referencing unregistered contracts', () => {
-  assert.throws(() => {
-    const badAction = annotationAction('unregisteredContract');
-    const badAnn = annotation('hl', { actions: [badAction] });
-    validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
-      project: 'project', owner: 'owner',
-      annotations: [badAnn],
-      measurements: [measurement('m', { extension: 'testFieldExt' })],
-    }), makeFields());
-  }, /not a registered contract/);
+  }, /does not accept action handlers/);
 });
 
 test('validation rejects queries referencing unregistered contracts', () => {
@@ -830,10 +838,9 @@ test('registered contract allows validation to pass', () => {
     combine: function combine() {},
   }));
   registerAnnotatedTextContract('myQuery', Object.freeze({ kind: 'measurement-query' }));
-  registerAnnotatedTextContract('myAction', Object.freeze({ kind: 'annotation-action' }));
   const result = validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
     project: 'project', owner: 'owner',
-    annotations: [annotation('hl', { actions: [annotationAction('myAction')] })],
+    annotations: [annotation('hl', { actions: { resolve: annotationAction({ change: () => ({ fields: {} }) }) } })],
     measurements: [measurement('m', { extension: 'myExt', queries: ['myQuery'] })],
   }), makeFields());
   assert.deepEqual(result.families, ['hl']);
@@ -949,7 +956,7 @@ test('rejects: capabilities must be frozen', () => {
 test('T3 rejects action with wrong kind (not annotationAction)', () => {
   assert.throws(() => {
     const badAction = Object.freeze({ kind: 'measurement', actionName: 'myAction' });
-    const badAnn = annotation('hl', { actions: [badAction] });
+    const badAnn = annotation('hl', { actions: { myAction: badAction } });
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [badAnn],
@@ -961,7 +968,7 @@ test('T3 rejects action with wrong kind (not annotationAction)', () => {
 test('T3 rejects action with no kind field', () => {
   assert.throws(() => {
     const badAction = Object.freeze({ actionName: 'myAction' });
-    const badAnn = annotation('hl', { actions: [badAction] });
+    const badAnn = annotation('hl', { actions: { myAction: badAction } });
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [badAnn],
@@ -973,7 +980,7 @@ test('T3 rejects action with no kind field', () => {
 test('T3 rejects action with extra unknown key', () => {
   assert.throws(() => {
     const badAction = Object.freeze({ kind: 'annotationAction', actionName: 'myAction', payload: 'extra' });
-    const badAnn = annotation('hl', { actions: [badAction] });
+    const badAnn = annotation('hl', { actions: { myAction: badAction } });
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [badAnn],
@@ -985,7 +992,7 @@ test('T3 rejects action with extra unknown key', () => {
 test('T3 rejects action with SQL callback', () => {
   assert.throws(() => {
     const badAction = Object.freeze({ kind: 'annotationAction', actionName: 'myAction', sql: 'DELETE FROM x' });
-    const badAnn = annotation('hl', { actions: [badAction] });
+    const badAnn = annotation('hl', { actions: { myAction: badAction } });
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [badAnn],
@@ -997,7 +1004,7 @@ test('T3 rejects action with SQL callback', () => {
 test('T3 rejects action with SQL uppercase callback', () => {
   assert.throws(() => {
     const badAction = Object.freeze({ kind: 'annotationAction', actionName: 'myAction', SQL: 'DELETE FROM x' });
-    const badAnn = annotation('hl', { actions: [badAction] });
+    const badAnn = annotation('hl', { actions: { myAction: badAction } });
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [badAnn],
@@ -1009,7 +1016,7 @@ test('T3 rejects action with SQL uppercase callback', () => {
 test('T3 rejects action with reducer callback', () => {
   assert.throws(() => {
     const badAction = Object.freeze({ kind: 'annotationAction', actionName: 'myAction', reducer: () => ({}) });
-    const badAnn = annotation('hl', { actions: [badAction] });
+    const badAnn = annotation('hl', { actions: { myAction: badAction } });
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [badAnn],
@@ -1021,7 +1028,7 @@ test('T3 rejects action with reducer callback', () => {
 test('T3 rejects unfrozen action descriptor', () => {
   assert.throws(() => {
     const badAction = { kind: 'annotationAction', actionName: 'myAction' };
-    const badAnn = annotation('hl', { actions: [badAction] });
+    const badAnn = annotation('hl', { actions: { myAction: badAction } });
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [badAnn],
@@ -1030,29 +1037,16 @@ test('T3 rejects unfrozen action descriptor', () => {
   }, /each action must be a frozen object/);
 });
 
-test('T3 rejects action with invalid actionName identifier', () => {
+test('T3 rejects action with invalid keyed identifier', () => {
   assert.throws(() => {
-    const badAction = Object.freeze({ kind: 'annotationAction', actionName: 'bad name!' });
-    const badAnn = annotation('hl', { actions: [badAction] });
+    const badAction = annotationAction({ change: () => ({ fields: {} }) });
+    const badAnn = annotation('hl', { actions: { 'bad name!': badAction } });
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [badAnn],
       measurements: [measurement('m', { extension: 'testFieldExt' })],
     }), makeFields());
-  }, /not a valid identifier/);
-});
-
-test('T3 rejects action with wrong contract kind', () => {
-  registerAnnotatedTextContract('notAnAction', Object.freeze({ kind: 'measurement', schema: {} }));
-  assert.throws(() => {
-    const badAction = annotationAction('notAnAction');
-    const badAnn = annotation('hl', { actions: [badAction] });
-    validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
-      project: 'project', owner: 'owner',
-      annotations: [badAnn],
-      measurements: [measurement('m', { extension: 'testFieldExt' })],
-    }), makeFields());
-  }, /not an 'annotation-action' contract/);
+  }, /invalid or reserved identifier/);
 });
 
 // ---- T8 measurement structural adapter registration tests ----
@@ -1264,7 +1258,7 @@ test('T8 rejects measurement with registered semantic contract but no structural
 });
 
 test('T8 rejects measurement with wrong contract kind (not measurement)', () => {
-  registerAnnotatedTextContract('t8wrongKind', Object.freeze({ kind: 'annotation-action' }));
+  registerAnnotatedTextContract('t8wrongKind', Object.freeze({ kind: 'event' }));
   registerAnnotatedTextStructuralExtension('t8wrongKind', Object.freeze({
     version: 1,
     validate: function validate() {},
@@ -1278,7 +1272,7 @@ test('T8 rejects measurement with wrong contract kind (not measurement)', () => 
       annotations: [annotation('hl')],
       measurements: [measurement('m', { extension: 't8wrongKind' })],
     }), makeFields());
-  }, /is a 'annotation-action' contract, not a 'measurement' contract/);
+  }, /is a 'event' contract, not a 'measurement' contract/);
 });
 
 test('T8 accepts measurement with both semantic contract and structural adapter', () => {
@@ -1354,7 +1348,8 @@ test('ON DELETE CASCADE removes annotation and measurement rows when project is 
   db.exec("INSERT INTO Doc (id, title) VALUES ('d1', 'test')");
   db.exec("INSERT INTO Doc_body_annotation (id, document_id, project_id, owner_id, family) VALUES ('a1', 'd1', 'p1', 'u1', 'highlight')");
   db.exec("INSERT INTO Doc_body_annotation_highlight (annotation_id, col1) VALUES ('a1', 'v1')");
-  db.exec("INSERT INTO Doc_body_membership (annotation_id, start_point, end_point) VALUES ('a1', '[1,2]', '[1,3]')");
+  db.exec("INSERT INTO Doc_body_range (id, document_id, start_point, end_point) VALUES (1, 'd1', '[1,2]', '[1,3]')");
+  db.exec("INSERT INTO Doc_body_membership (annotation_id, range_id, document_id, ordinal) VALUES ('a1', 1, 'd1', 0)");
   db.exec("INSERT INTO Doc_body_measurement (id, document_id, family, format_version, payload) VALUES ('m1', 'd1', 'audio', 1, '{}')");
 
   db.exec("DELETE FROM Project WHERE id = 'p1'");
@@ -1385,7 +1380,8 @@ test('ON DELETE CASCADE removes annotation and measurement rows when owner is de
   db.exec("INSERT INTO Doc (id, title) VALUES ('d1', 'test')");
   db.exec("INSERT INTO Doc_body_annotation (id, document_id, project_id, owner_id, family) VALUES ('a1', 'd1', 'p1', 'u1', 'highlight')");
   db.exec("INSERT INTO Doc_body_annotation_highlight (annotation_id, col1) VALUES ('a1', 'v1')");
-  db.exec("INSERT INTO Doc_body_membership (annotation_id, start_point, end_point) VALUES ('a1', '[1,2]', '[1,3]')");
+  db.exec("INSERT INTO Doc_body_range (id, document_id, start_point, end_point) VALUES (1, 'd1', '[1,2]', '[1,3]')");
+  db.exec("INSERT INTO Doc_body_membership (annotation_id, range_id, document_id, ordinal) VALUES ('a1', 1, 'd1', 0)");
   db.exec("INSERT INTO Doc_body_measurement (id, document_id, family, format_version, payload) VALUES ('m1', 'd1', 'audio', 1, '{}')");
 
   db.exec("DELETE FROM User WHERE id = 'u1'");

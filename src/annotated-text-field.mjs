@@ -67,12 +67,10 @@ export function getAnnotatedTextCompiledMetadata(descriptor     )      {
   return compiledMeta.get(descriptor) ?? null;
 }
 
-// -- Contract registry for semantic measurement extensions and action/event contracts --
-// Each contract must declare a semantic kind: 'measurement', 'measurement-query',
-// 'annotation-action', or 'event'. Queries must match 'measurement-query' contracts,
-// annotation actions must match 'annotation-action' contracts, and measurement
-// extensions must match 'measurement' contracts.
-const CONTRACT_KINDS = new Set(['measurement', 'measurement-query', 'annotation-action', 'event']);
+// -- Contract registry for semantic measurement extensions and event contracts --
+// Queries must match 'measurement-query' contracts and measurement extensions
+// must match 'measurement' contracts. Annotation actions live in declarations.
+const CONTRACT_KINDS = new Set(['measurement', 'measurement-query', 'event']);
 const contractRegistry = new Map             ();
 
 export function registerAnnotatedTextContract(contractName        , contract     ) {
@@ -255,7 +253,14 @@ function validateEntityActionDeclaration(entity        , field        , ann     
 
 // -- Declarative annotation / measurement descriptor constructors --
 
-export function annotation(name        , { appliesTo = 'text-range', cardinality = 'many', fields = {}       , actions = [], empty = 'delete' }      = {})      {
+function freezeAnnotationActions(actions     , owner        )      {
+  if (!actions || typeof actions !== 'object' || Array.isArray(actions) || Object.getPrototypeOf(actions) !== Object.prototype) {
+    throw new Error(`annotation '${owner}' actions must be a keyed plain object`);
+  }
+  return Object.freeze({ ...actions });
+}
+
+export function annotation(name        , { appliesTo = 'text-range', cardinality = 'many', fields = {}       , actions = {}, empty = 'delete' }      = {})      {
   if (typeof name !== 'string' || !IDENTIFIER.test(name)) {
     throw new Error(`annotation name '${name}' is not a valid identifier`);
   }
@@ -275,7 +280,7 @@ export function annotation(name        , { appliesTo = 'text-range', cardinality
   for (const [k, v] of Object.entries(fields                       )) {
     frozenFields[k] = Object.freeze({ ...v });
   }
-  const frozenActions = Object.freeze([...actions]);
+  const frozenActions = freezeAnnotationActions(actions, name);
   return Object.freeze({
     kind: 'annotation',
     annotationName: name,
@@ -287,7 +292,7 @@ export function annotation(name        , { appliesTo = 'text-range', cardinality
   });
 }
 
-export function protectingAnnotation(name        , { fields = {}       , protects = null, placeholder = '[Restricted]', access = null, actions = [], empty = 'delete' }      = {})      {
+export function protectingAnnotation(name        , { fields = {}       , protects = null, placeholder = '[Restricted]', access = null, actions = {}, empty = 'delete' }      = {})      {
   if (typeof name !== 'string' || !IDENTIFIER.test(name)) {
     throw new Error(`protectingAnnotation name '${name}' is not a valid identifier`);
   }
@@ -309,7 +314,7 @@ export function protectingAnnotation(name        , { fields = {}       , protect
   for (const [k, v] of Object.entries(fields                       )) {
     frozenFields[k] = Object.freeze({ ...v });
   }
-  const frozenActions = Object.freeze([...actions]);
+  const frozenActions = freezeAnnotationActions(actions, name);
   return Object.freeze({
     kind: 'protectingAnnotation',
     annotationName: name,
@@ -347,59 +352,41 @@ export function measurement(name        , { extension = null, formatVersion = 1,
   });
 }
 
-/**
- * Declare a word-evidence family on an annotatedText field. Word evidence is
- * event-only import data (never CRDT state) materialized into the generated
- * relational word-evidence table by a committed-log consumer. Each family
- * declares a `parse(value)` that validates one per-word payload value and
- * returns its canonical JSON-safe form.
- */
-export function wordEvidenceFamily(name        , { formatVersion = 1, parse }      = {})      {
-  if (typeof name !== 'string' || !IDENTIFIER.test(name)) {
-    throw new Error(`word evidence family name '${name}' is not a valid identifier`);
+function assertDirectSynchronousFunction(fn     , label        )       {
+  if (typeof fn !== 'function') throw new Error(`annotationAction ${label} must be a function`);
+  const source = Function.prototype.toString.call(fn);
+  if (source.startsWith('async ') || source.includes('[native code]')) {
+    throw new Error(`annotationAction ${label} must be a direct synchronous function`);
   }
-  if (typeof formatVersion !== 'number' || !Number.isSafeInteger(formatVersion) || formatVersion <= 0) {
-    throw new Error(`word evidence family '${name}' formatVersion must be a positive integer`);
-  }
-  if (typeof parse !== 'function') {
-    throw new Error(`word evidence family '${name}' requires a parse function`);
-  }
-  return Object.freeze({
-    kind: 'wordEvidenceFamily',
-    familyName: name,
-    formatVersion,
-    parse,
-  });
+  Object.freeze(fn);
 }
 
-export function annotationAction(name        )      {
-  if (typeof name !== 'string' || !IDENTIFIER.test(name)) {
-    throw new Error(`annotationAction name '${name}' is not a valid identifier`);
-  }
-  return Object.freeze({
-    kind: 'annotationAction',
-    actionName: name,
-  });
+export function annotationAction({ input = {}, authorize = null, change }      = {})      {
+  if (!input || typeof input !== 'object' || Array.isArray(input) || Object.getPrototypeOf(input) !== Object.prototype) throw new Error('annotationAction input must be a plain object of field descriptors');
+  if (authorize !== null && typeof authorize !== 'function') throw new Error('annotationAction authorize must be a function or null');
+  if (typeof change !== 'function') throw new Error('annotationAction requires a change function');
+  assertDirectSynchronousFunction(change, 'change');
+  if (authorize !== null) assertDirectSynchronousFunction(authorize, 'authorize');
+  return Object.freeze({ kind: 'annotationAction', input: Object.freeze({ ...input }), authorize, change });
 }
 
 /** Declare the one Workbench-owned action which joins a related entity row to
  * an annotation.  The descriptor is deliberately data-only; the compiler
  * supplies the handler and all identities. */
-export function annotationEntityAction(name        , options      = {})      {
-  if (typeof name !== 'string' || !IDENTIFIER.test(name)) throw new Error(`annotationEntityAction name '${name}' is not a valid identifier`);
-  if (!options || typeof options !== 'object' || Array.isArray(options)) throw new Error(`annotationEntityAction '${name}' options must be an object`);
-  if (Object.getPrototypeOf(options) !== Object.prototype) throw new Error(`annotationEntityAction '${name}' options must be a plain object`);
+export function annotationEntityAction(options      = {})      {
+  if (!options || typeof options !== 'object' || Array.isArray(options)) throw new Error('annotationEntityAction options must be an object');
+  if (Object.getPrototypeOf(options) !== Object.prototype) throw new Error('annotationEntityAction options must be a plain object');
   const optionKeys = ['relation', 'project', 'author', 'capability', 'input'];
-  if (Reflect.ownKeys(options).some((key) => typeof key !== 'string' || !optionKeys.includes(key))) throw new Error(`annotationEntityAction '${name}' options contain an unknown key`);
-  for (const key of optionKeys) if (!Object.hasOwn(options, key)) throw new Error(`annotationEntityAction '${name}' requires '${key}'`);
-  if (typeof options.relation !== 'string' || typeof options.project !== 'string' || typeof options.author !== 'string') throw new Error(`annotationEntityAction '${name}' relation, project, and author must be field names`);
-  if (options.capability !== undefined && (typeof options.capability !== 'object' || !Object.isFrozen(options.capability))) throw new Error(`annotationEntityAction '${name}' capability must be a typed capability handle`);
-  if (!options.input || typeof options.input !== 'object' || Array.isArray(options.input) || Object.getPrototypeOf(options.input) !== Object.prototype) throw new Error(`annotationEntityAction '${name}' input must be a plain object`);
-  if (Reflect.ownKeys(options.input).some((key) => typeof key !== 'string')) throw new Error(`annotationEntityAction '${name}' input contains an unknown key`);
+  if (Reflect.ownKeys(options).some((key) => typeof key !== 'string' || !optionKeys.includes(key))) throw new Error('annotationEntityAction options contain an unknown key');
+  for (const key of optionKeys) if (!Object.hasOwn(options, key)) throw new Error(`annotationEntityAction requires '${key}'`);
+  if (typeof options.relation !== 'string' || typeof options.project !== 'string' || typeof options.author !== 'string') throw new Error('annotationEntityAction relation, project, and author must be field names');
+  if (options.capability !== undefined && (typeof options.capability !== 'object' || !Object.isFrozen(options.capability))) throw new Error('annotationEntityAction capability must be a typed capability handle');
+  if (!options.input || typeof options.input !== 'object' || Array.isArray(options.input) || Object.getPrototypeOf(options.input) !== Object.prototype) throw new Error('annotationEntityAction input must be a plain object');
+  if (Reflect.ownKeys(options.input).some((key) => typeof key !== 'string')) throw new Error('annotationEntityAction input contains an unknown key');
   for (const [publicName, entityField] of Object.entries(options.input)) {
-    if (!IDENTIFIER.test(publicName) || typeof entityField !== 'string' || !IDENTIFIER.test(entityField)) throw new Error(`annotationEntityAction '${name}' input must map identifiers to entity fields`);
+    if (!IDENTIFIER.test(publicName) || typeof entityField !== 'string' || !IDENTIFIER.test(entityField)) throw new Error('annotationEntityAction input must map identifiers to entity fields');
   }
-  return Object.freeze({ kind: 'annotationEntityAction', actionName: name, ...options, input: Object.freeze({ ...options.input }) });
+  return Object.freeze({ kind: 'annotationEntityAction', ...options, input: Object.freeze({ ...options.input }) });
 }
 
 // -- Main validation and compilation --
@@ -539,34 +526,6 @@ export function validateAnnotatedTextDeclaration(entity        , field        , 
     }
   }
 
-  // Validate wordEvidence families array
-  const wordEvidenceNames = new Set        ();
-  if (descriptor.wordEvidence !== undefined) {
-    if (!Array.isArray(descriptor.wordEvidence)) {
-      fail(entity, field, 'wordEvidence', 'must be an array of word evidence family descriptors');
-    }
-    for (const family of descriptor.wordEvidence) {
-      if (!family || typeof family !== 'object' || !Object.isFrozen(family)) {
-        fail(entity, field, 'wordEvidence', 'each family must be a frozen descriptor');
-      }
-      if (family.kind !== 'wordEvidenceFamily') {
-        fail(entity, field, 'wordEvidence', `expected wordEvidenceFamily descriptor, got '${String(family.kind)}'`);
-      }
-      const familyName = family.familyName;
-      if (wordEvidenceNames.has(familyName)) {
-        fail(entity, field, `wordEvidence.${familyName}`, 'duplicate family name');
-      }
-      assertName(entity, field, `wordEvidence.${familyName}`, familyName);
-      if (typeof family.formatVersion !== 'number' || !Number.isSafeInteger(family.formatVersion) || family.formatVersion <= 0) {
-        fail(entity, field, `wordEvidence.${familyName}.formatVersion`, 'must be a positive integer');
-      }
-      if (typeof family.parse !== 'function') {
-        fail(entity, field, `wordEvidence.${familyName}.parse`, 'must be a function');
-      }
-      wordEvidenceNames.add(familyName);
-    }
-  }
-
   // Validate capabilities
   if (descriptor.capabilities !== undefined) {
     if (!descriptor.capabilities || typeof descriptor.capabilities !== 'object' || Array.isArray(descriptor.capabilities)) {
@@ -587,7 +546,7 @@ export function validateAnnotatedTextDeclaration(entity        , field        , 
   // `access` is set by makeDescriptor's initial properties, and `can` is a
   // method added by makeDescriptor. Both are field descriptor properties, not
   // declaration keys, and are allowed to pass through.
-  const ALLOWED_KEYS = new Set(['project', 'owner', 'annotations', 'measurements', 'capabilities', 'carets', 'wordEvidence', 'kind', 'type', 'access', 'can']);
+  const ALLOWED_KEYS = new Set(['project', 'owner', 'annotations', 'measurements', 'capabilities', 'carets', 'kind', 'type', 'access', 'can']);
   for (const key of Object.keys(descriptor)) {
     if (!ALLOWED_KEYS.has(key)) {
       fail(entity, field, key, `unknown key '${key}'`);
@@ -614,21 +573,9 @@ export function validateAnnotatedTextDeclaration(entity        , field        , 
     }
   }
 
-  // Validate no unknown keys on word evidence family descriptors
-  const ALLOWED_WORD_EVIDENCE_KEYS = new Set(['kind', 'familyName', 'formatVersion', 'parse']);
-  if (descriptor.wordEvidence !== undefined) {
-    for (const family of descriptor.wordEvidence) {
-      for (const key of Object.keys(family)) {
-        if (!ALLOWED_WORD_EVIDENCE_KEYS.has(key)) {
-          fail(entity, field, `wordEvidence.${family.familyName}.${key}`, `unknown key '${key}'`);
-        }
-      }
-    }
-  }
-
   // Reject handlers/reducers/SQL callbacks at T3 boundary
   for (const ann of descriptor.annotations) {
-    for (const action of ann.actions) {
+    for (const action of Object.values(ann.actions)         ) {
       if (action && typeof action === 'object' && (action.handler || action.reducer || action.sql || action.SQL)) {
         fail(entity, field, `annotations.${ann.annotationName}.actions`,
           'T3 does not accept action handlers, reducers, or SQL callbacks');
@@ -651,13 +598,12 @@ export function validateAnnotatedTextDeclaration(entity        , field        , 
     }
   }
 
-  // Validate annotation actions — each must be a frozen annotationAction descriptor
-  // with exactly allowed keys and a registered contract of kind 'annotation-action'
-  const ALLOWED_ACTION_KEYS = new Set(['kind', 'actionName']);
+  // Action identity comes from its declaration key. Server functions remain on
+  // the declaration and never enter the compiled public handle.
   for (const ann of descriptor.annotations) {
-    if (!Array.isArray(ann.actions)) fail(entity, field, `annotations.${ann.annotationName}.actions`, 'must be an array');
-    const actionNames = new Set        ();
-    for (const action of ann.actions) {
+    if (!ann.actions || typeof ann.actions !== 'object' || Array.isArray(ann.actions)) fail(entity, field, `annotations.${ann.annotationName}.actions`, 'must be a keyed object');
+    for (const [actionName, action] of Object.entries(ann.actions)                        ) {
+      assertName(entity, field, `annotations.${ann.annotationName}.actions.${actionName}`, actionName);
       if (typeof action !== 'object' || !action || !Object.isFrozen(action)) {
         fail(entity, field, `annotations.${ann.annotationName}.actions`,
           'each action must be a frozen object');
@@ -666,39 +612,23 @@ export function validateAnnotatedTextDeclaration(entity        , field        , 
         fail(entity, field, `annotations.${ann.annotationName}.actions`,
           `expected annotationAction descriptor, got '${String(action.kind)}'`);
       }
-      if (typeof action.actionName !== 'string' || !IDENTIFIER.test(action.actionName)) {
-        fail(entity, field, `annotations.${ann.annotationName}.actions`,
-          `actionName '${String(action.actionName)}' is not a valid identifier`);
-      }
-      if (actionNames.has(action.actionName)) fail(entity, field, `annotations.${ann.annotationName}.actions`, `duplicate action name '${action.actionName}'`);
-      actionNames.add(action.actionName);
       if (action.kind === 'annotationEntityAction') {
-        for (const key of ['relation', 'project', 'author', 'capability', 'input']) if (!Object.hasOwn(action, key)) fail(entity, field, `annotations.${ann.annotationName}.actions`, `entity action '${action.actionName}' is missing '${key}'`);
+        for (const key of ['relation', 'project', 'author', 'capability', 'input']) if (!Object.hasOwn(action, key)) fail(entity, field, `annotations.${ann.annotationName}.actions`, `entity action '${actionName}' is missing '${key}'`);
         const relation = ann.fields?.[action.relation];
         if (!relation || relation.type !== 'ref') fail(entity, field, `annotations.${ann.annotationName}.actions`, `relation '${action.relation}' must be a declared ref field`);
-        if (action.capability !== write) fail(entity, field, `annotations.${ann.annotationName}.actions.${action.actionName}.capability`, 'must be the imported write capability handle');
-        if (!IDENTIFIER.test(action.project) || !IDENTIFIER.test(action.author)) fail(entity, field, `annotations.${ann.annotationName}.actions.${action.actionName}`, 'project and author must be identifiers');
-        validateEntityActionDeclaration(entity, field, ann, action, targetName(fields[descriptor.project]) , targetName(fields[descriptor.owner]) );
+        if (action.capability !== write) fail(entity, field, `annotations.${ann.annotationName}.actions.${actionName}.capability`, 'must be the imported write capability handle');
+        if (!IDENTIFIER.test(action.project) || !IDENTIFIER.test(action.author)) fail(entity, field, `annotations.${ann.annotationName}.actions.${actionName}`, 'project and author must be identifiers');
+        validateEntityActionDeclaration(entity, field, ann, { ...action, actionName }, targetName(fields[descriptor.project]) , targetName(fields[descriptor.owner]) );
         for (const [publicName, entityField] of Object.entries(action.input ?? {})) {
-          if (!IDENTIFIER.test(publicName) || typeof entityField !== 'string' || !IDENTIFIER.test(entityField)) fail(entity, field, `annotations.${ann.annotationName}.actions.${action.actionName}.input`, 'public names and entity fields must be identifiers');
+          if (!IDENTIFIER.test(publicName) || typeof entityField !== 'string' || !IDENTIFIER.test(entityField)) fail(entity, field, `annotations.${ann.annotationName}.actions.${actionName}.input`, 'public names and entity fields must be identifiers');
         }
-      }
-      for (const key of Object.keys(action)) {
-        if (action.kind === 'annotationEntityAction' && ['relation', 'project', 'author', 'capability', 'input'].includes(key)) continue;
-        if (!ALLOWED_ACTION_KEYS.has(key)) {
-          fail(entity, field, `annotations.${ann.annotationName}.actions`,
-            `unknown key '${key}' on action '${action.actionName}'`);
+      } else {
+        if (Object.keys(action).some((key) => !['kind', 'input', 'authorize', 'change'].includes(key))) fail(entity, field, `annotations.${ann.annotationName}.actions.${actionName}`, 'has an unknown key');
+        if (typeof action.change !== 'function' || (action.authorize !== null && typeof action.authorize !== 'function')) fail(entity, field, `annotations.${ann.annotationName}.actions.${actionName}`, 'requires a change function and optional authorize function');
+        assertScalarFields(entity, field, `annotations.${ann.annotationName}.actions.${actionName}.input`, action.input, new Set());
+        for (const declaredInput of Object.values(action.input)) {
+          if ((declaredInput       ).type === 'ref') fail(entity, field, `annotations.${ann.annotationName}.actions.${actionName}.input`, 'ref inputs are not supported');
         }
-      }
-      if (action.kind === 'annotationEntityAction') continue;
-      const actionContract = contractRegistry.get(action.actionName);
-      if (!actionContract) {
-        fail(entity, field, `annotations.${ann.annotationName}.actions`,
-          `'${action.actionName}' is not a registered contract`);
-      }
-      if (actionContract.kind !== 'annotation-action') {
-        fail(entity, field, `annotations.${ann.annotationName}.actions`,
-          `'${action.actionName}' is a '${actionContract.kind}' contract, not an 'annotation-action' contract`);
       }
     }
   }
@@ -706,19 +636,12 @@ export function validateAnnotatedTextDeclaration(entity        , field        , 
   // Compile metadata and store in WeakMap
   const families = [...annotationNames].sort();
   const measurementFamilyList = [...measurementNames].sort();
-  const wordEvidenceFamilyList = descriptor.wordEvidence === undefined ? [] : [...wordEvidenceNames].sort();
-  const wordEvidenceConfigs                      = {};
-  if (descriptor.wordEvidence !== undefined) {
-    for (const family of descriptor.wordEvidence) {
-      wordEvidenceConfigs[family.familyName] = family;
-    }
-  }
 
   // Build action identifiers per annotation
   const annotationActionIds                      = {};
   const protectingFamilies                      = {};
   for (const ann of descriptor.annotations) {
-    const actionIds = ann.actions.map((a     ) => a.actionName);
+    const actionIds = Object.keys(ann.actions);
     annotationActionIds[ann.annotationName] = Object.freeze([...actionIds]);
     if (ann.kind === 'protectingAnnotation') protectingFamilies[ann.annotationName] = Object.freeze({ placeholder: ann.placeholder, access: ann.access });
   }
@@ -736,8 +659,6 @@ export function validateAnnotatedTextDeclaration(entity        , field        , 
     annotationFields,
     measurementConfigs,
     measurementFamilyList,
-    wordEvidenceConfigs: Object.freeze({ ...wordEvidenceConfigs }),
-    wordEvidenceFamilyList: Object.freeze(wordEvidenceFamilyList),
     capabilities: descriptor.capabilities ? Object.freeze({ ...descriptor.capabilities }) : null,
     protectingFamilies: Object.freeze({ ...protectingFamilies }),
     restrictedPlaceholder: protectingPlaceholders[0] ?? null,
@@ -747,21 +668,14 @@ export function validateAnnotatedTextDeclaration(entity        , field        , 
     annotationHandles: Object.freeze(
       Object.fromEntries([...annotationNames].map((n     ) => {
         const annConfig = descriptor.annotations.find((a     ) => a.annotationName === n);
-        const actionEntries = (annConfig?.actions ?? []).map((action     ) => [action.actionName, Object.freeze({
-          family: n, actionName: action.actionName, kind: action.kind,
+        const actionEntries = Object.entries(annConfig?.actions ?? {}).map(([actionName, action]     ) => [actionName, Object.freeze({
+          family: n, actionName, kind: action.kind,
           entityName: entity,
           fieldName: field,
-          ...(action.kind === 'annotationEntityAction' ? { relation: action.relation, project: action.project, author: action.author, capability: action.capability, input: action.input } : {}),
+          ...(action.kind === 'annotationAction' ? { inputNames: Object.freeze(Object.keys(action.input)) } : { input: action.input }),
+          ...(action.kind === 'annotationEntityAction' ? { relation: action.relation, project: action.project, author: action.author, capability: action.capability } : {}),
         })]);
-        // Keep the historical array-valued `actions` surface while exposing
-        // declaration-derived keyed handles. Named properties are deliberately
-        // non-enumerable so existing deep-equality/iteration consumers see the
-        // exact old array shape.
-        const actionHandles        = actionEntries.map((entry       ) => entry[1]);
-        for (const [actionName, handle] of actionEntries) {
-          Object.defineProperty(actionHandles, actionName, { value: handle, enumerable: false });
-        }
-        Object.freeze(actionHandles);
+        const actionHandles = Object.freeze(Object.fromEntries(actionEntries));
         return [n, Object.freeze({
           family: n,
           annotationName: n,
@@ -793,7 +707,7 @@ export function validateAnnotatedTextDeclaration(entity        , field        , 
   };
   compiledMeta.set(descriptor, Object.freeze(compiled));
 
-  return { blockFields, families, measurements: measurementFamilyList, wordEvidence: wordEvidenceFamilyList };
+  return { blockFields, families, measurements: measurementFamilyList };
 }
 
 /** Validate the target-dependent half once the application entity registry exists. */
@@ -803,9 +717,9 @@ export function validateAnnotatedTextEntityActions(entities               ) {
     if ((descriptor       ).kind !== 'annotatedText') continue;
     const projectTarget = targetName(owner.fields[(descriptor       ).project]);
     const ownerTarget = targetName(owner.fields[(descriptor       ).owner]);
-    for (const ann of (descriptor       ).annotations ?? []) for (const action of ann.actions ?? []) {
+    for (const ann of (descriptor       ).annotations ?? []) for (const [actionName, action] of Object.entries(ann.actions ?? {})                        ) {
       if (action.kind !== 'annotationEntityAction') continue;
-      validateEntityActionDeclaration(owner.name, fieldName, ann, action, projectTarget , ownerTarget , (name) => byName.get(name));
+      validateEntityActionDeclaration(owner.name, fieldName, ann, { ...action, actionName }, projectTarget , ownerTarget , (name) => byName.get(name));
     }
   }
 }
@@ -821,13 +735,14 @@ function extensionColumns(fields     , names          )           {
 }
 
 export function annotatedTextDDL(entity        , field        , descriptor     , fields     )           {
-  const { families, measurements, wordEvidence } = validateAnnotatedTextDeclaration(entity, field, descriptor, fields);
+  const { families, measurements } = validateAnnotatedTextDeclaration(entity, field, descriptor, fields);
   const prefix = `${entity}_${field}`;
   const projectTarget = targetName(fields[descriptor.project]);
   const ownerTarget = targetName(fields[descriptor.owner]);
   const annotation = `${prefix}_annotation`;
   const orphan = `${prefix}${ORPHAN_TABLE_SUFFIX}`;
   const protectedTarget = `${prefix}_annotation_protected_target`;
+  const range = `${prefix}_range`;
   const membership = `${prefix}_membership`;
   const measurement = `${prefix}_measurement`;
   const state = `${prefix}_state`;
@@ -835,7 +750,7 @@ export function annotatedTextDDL(entity        , field        , descriptor     ,
   const statements = [
     `CREATE TABLE IF NOT EXISTS ${retired} (\n  document_id TEXT PRIMARY KEY,\n  generation TEXT NOT NULL,\n  retired_at TEXT NOT NULL\n);`,
     `CREATE TABLE IF NOT EXISTS ${state} (\n  document_id TEXT PRIMARY KEY,\n  structure_version INTEGER NOT NULL CHECK (structure_version >= 0),\n  family_checkpoint TEXT NOT NULL CHECK (json_valid(family_checkpoint)),\n  FOREIGN KEY (document_id) REFERENCES ${entity}(id) ON DELETE CASCADE\n);`,
-    `CREATE TABLE IF NOT EXISTS ${annotation} (\n  id TEXT PRIMARY KEY,\n  document_id TEXT NOT NULL,\n  project_id TEXT NOT NULL,\n  owner_id TEXT NOT NULL,\n  family TEXT NOT NULL CHECK (family IN (${families.map((name     ) => `'${name}'`).join(', ')})),\n  FOREIGN KEY (document_id) REFERENCES ${entity}(id) ON DELETE CASCADE,\n  FOREIGN KEY (project_id) REFERENCES ${projectTarget}(id) ON DELETE CASCADE,\n  FOREIGN KEY (owner_id) REFERENCES ${ownerTarget}(id) ON DELETE CASCADE\n);`,
+    `CREATE TABLE IF NOT EXISTS ${annotation} (\n  id TEXT PRIMARY KEY,\n  document_id TEXT NOT NULL,\n  project_id TEXT NOT NULL,\n  owner_id TEXT NOT NULL,\n  family TEXT NOT NULL CHECK (family IN (${families.map((name     ) => `'${name}'`).join(', ')})),\n  UNIQUE (id, document_id),\n  FOREIGN KEY (document_id) REFERENCES ${entity}(id) ON DELETE CASCADE,\n  FOREIGN KEY (project_id) REFERENCES ${projectTarget}(id) ON DELETE CASCADE,\n  FOREIGN KEY (owner_id) REFERENCES ${ownerTarget}(id) ON DELETE CASCADE\n);`,
     `CREATE TABLE IF NOT EXISTS ${protectedTarget} (\n  annotation_id TEXT NOT NULL,\n  target_annotation_id TEXT NOT NULL,\n  PRIMARY KEY (annotation_id, target_annotation_id),\n  FOREIGN KEY (annotation_id) REFERENCES ${annotation}(id) ON DELETE CASCADE,\n  FOREIGN KEY (target_annotation_id) REFERENCES ${annotation}(id) ON DELETE RESTRICT\n);`,
     `CREATE INDEX IF NOT EXISTS idx_${prefix}_annotation_protected_target_target ON ${protectedTarget} (target_annotation_id, annotation_id);`,
     `CREATE TABLE IF NOT EXISTS ${orphan} (\n  annotation_id TEXT PRIMARY KEY,\n  saved_quote TEXT NOT NULL,\n  last_range TEXT NOT NULL CHECK (json_valid(last_range)),\n  FOREIGN KEY (annotation_id) REFERENCES ${annotation}(id) ON DELETE CASCADE\n);`,
@@ -858,18 +773,12 @@ export function annotatedTextDDL(entity        , field        , descriptor     ,
      }
   }
   statements.push(
-    `CREATE TABLE IF NOT EXISTS ${membership} (\n  annotation_id TEXT NOT NULL,\n  start_point TEXT NOT NULL CHECK (json_valid(start_point)),\n  end_point TEXT NOT NULL CHECK (json_valid(end_point)),\n  PRIMARY KEY (annotation_id, start_point),\n  FOREIGN KEY (annotation_id) REFERENCES ${annotation}(id) ON DELETE CASCADE\n);`,
+    `CREATE TABLE IF NOT EXISTS ${range} (\n  id INTEGER PRIMARY KEY,\n  document_id TEXT NOT NULL,\n  start_point TEXT NOT NULL CHECK (json_valid(start_point)),\n  end_point TEXT NOT NULL CHECK (json_valid(end_point)),\n  UNIQUE (document_id, start_point, end_point),\n  UNIQUE (id, document_id),\n  FOREIGN KEY (document_id) REFERENCES ${entity}(id) ON DELETE CASCADE\n);`,
+    `CREATE TRIGGER IF NOT EXISTS ${prefix}_range_immutable_update BEFORE UPDATE ON ${range} BEGIN SELECT RAISE(ABORT, 'annotated-text ranges are immutable'); END;`,
+    `CREATE TABLE IF NOT EXISTS ${membership} (\n  annotation_id TEXT NOT NULL,\n  range_id INTEGER NOT NULL,\n  document_id TEXT NOT NULL,\n  ordinal INTEGER NOT NULL CHECK (ordinal >= 0),\n  PRIMARY KEY (annotation_id, range_id),\n  UNIQUE (annotation_id, ordinal),\n  FOREIGN KEY (annotation_id, document_id) REFERENCES ${annotation}(id, document_id) ON DELETE CASCADE,\n  FOREIGN KEY (range_id, document_id) REFERENCES ${range}(id, document_id) ON DELETE CASCADE\n);`,
     `CREATE TABLE IF NOT EXISTS ${measurement} (\n  id TEXT PRIMARY KEY,\n  document_id TEXT NOT NULL,\n  family TEXT NOT NULL CHECK (family IN (${measurements.map((name     ) => `'${name}'`).join(', ')})),\n  format_version INTEGER NOT NULL CHECK (format_version > 0),\n  payload TEXT NOT NULL CHECK (json_valid(payload)),\n  FOREIGN KEY (document_id) REFERENCES ${entity}(id) ON DELETE CASCADE\n);`,
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_${prefix}_measurement_once ON ${measurement} (document_id, family);`,
   );
-  if (wordEvidence.length > 0) {
-    const wordEvidenceTable = `${prefix}_word_evidence`;
-    const familyCheck = wordEvidence.map((name     ) => `'${name}'`).join(', ');
-    statements.push(
-      `CREATE TABLE IF NOT EXISTS ${wordEvidenceTable} (\n  scope TEXT NOT NULL,\n  document_id TEXT NOT NULL,\n  word_id TEXT NOT NULL,\n  family TEXT NOT NULL CHECK (family IN (${familyCheck})),\n  start_anchor TEXT NOT NULL CHECK (json_valid(start_anchor)),\n  end_anchor TEXT NOT NULL CHECK (json_valid(end_anchor)),\n  source_start_utf16 INTEGER NOT NULL,\n  source_end_utf16 INTEGER NOT NULL,\n  original_token TEXT NOT NULL,\n  payload TEXT NOT NULL CHECK (json_valid(payload)),\n  origin_seq INTEGER NOT NULL,\n  format_version INTEGER NOT NULL,\n  PRIMARY KEY (scope, document_id, word_id, family),\n  FOREIGN KEY (document_id) REFERENCES ${entity}(id) ON DELETE CASCADE\n);`,
-      `CREATE INDEX IF NOT EXISTS idx_${prefix}_word_evidence_doc ON ${wordEvidenceTable} (scope, document_id, family, source_start_utf16);`,
-    );
-  }
   return statements;
 }
 

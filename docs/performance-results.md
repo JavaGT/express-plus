@@ -4,34 +4,20 @@
 
 ## Run
 
-- Recorded at: `2026-08-11T08:01:55.569Z`
+- Recorded at: `2026-08-11T12:35:20.067Z`
 - Node: `v26.7.0`
 - Platform: `darwin/arm64`
 - Report: `workbench-performance` schema `v2`
-- Samples per workload: `5`
-- Benchmark families: `compile, http-crud, commit, live-delivery, annotated-text`
-- Sizes: `small, medium, large`
+- Samples per workload: `3`
+- Benchmark families: `annotated-text-unified`
+- Sizes: `small`
 - Git commit: not recorded (worktree had uncommitted changes; the worktree was not verified as a stable clean commit)
 
 ## Workload Parameters
 
 | Workload | Parameters | Exact operation configuration |
 | --- | --- | --- |
-| compile/small | 5 fresh in-memory schema preparations; 1 Entity declarations per preparation; 6 fields per Entity; framework DDL included | `{"apps":5,"entities":1,"fields":6}` |
-| compile/medium | 3 fresh in-memory schema preparations; 4 Entity declarations per preparation; 10 fields per Entity; framework DDL included | `{"apps":3,"entities":4,"fields":10}` |
-| compile/large | 1 fresh in-memory schema preparations; 10 Entity declarations per preparation; 14 fields per Entity; framework DDL included | `{"apps":1,"entities":10,"fields":14}` |
-| http-crud/small | 50 warmup cycles; 200 creates, 200 reads, 50 lists, 200 updates; 25 seeded Feed rows; sequential requests; JSON bodies with title/body/count/done | `{"warmup":50,"create":200,"read":200,"list":50,"update":200,"listSeed":25}` |
-| http-crud/medium | 100 warmup cycles; 600 creates, 600 reads, 120 lists, 600 updates; 60 seeded Feed rows; sequential requests; JSON bodies with title/body/count/done | `{"warmup":100,"create":600,"read":600,"list":120,"update":600,"listSeed":60}` |
-| http-crud/large | 200 warmup cycles; 1200 creates, 1200 reads, 240 lists, 1200 updates; 120 seeded Feed rows; sequential requests; JSON bodies with title/body/count/done | `{"warmup":200,"create":1200,"read":1200,"list":240,"update":1200,"listSeed":120}` |
-| commit/small | 100 warmup dispatches; 500 new durable dispatches; 200 retries of one committed action ID; 100 batches of 4 actions; one Probe scope | `{"warmup":100,"dispatch":500,"dedupe":200,"batch":100,"batchSize":4}` |
-| commit/medium | 300 warmup dispatches; 1500 new durable dispatches; 600 retries of one committed action ID; 300 batches of 8 actions; one Probe scope | `{"warmup":300,"dispatch":1500,"dedupe":600,"batch":300,"batchSize":8}` |
-| commit/large | 600 warmup dispatches; 4000 new durable dispatches; 1500 retries of one committed action ID; 600 batches of 16 actions; one Probe scope | `{"warmup":600,"dispatch":4000,"dedupe":1500,"batch":600,"batchSize":16}` |
-| live-delivery/small | 25 seeded history events; 1 authorized subscribers; 100 new events fanned out to every subscriber; one Note scope | `{"history":25,"subscribers":1,"fanout":100}` |
-| live-delivery/medium | 100 seeded history events; 10 authorized subscribers; 250 new events fanned out to every subscriber; one Note scope | `{"history":100,"subscribers":10,"fanout":250}` |
-| live-delivery/large | 400 seeded history events; 40 authorized subscribers; 500 new events fanned out to every subscriber; one Note scope | `{"history":400,"subscribers":40,"fanout":500}` |
-| annotated-text/small | 997 UTF-16 characters across 16 lines; 16 CRDT operations; cached materialization, checkpoint restore, and apply-plus-materialize phases | `{"lines":16,"textChars":997,"operations":16}` |
-| annotated-text/medium | 6037 UTF-16 characters across 96 lines; 32 CRDT operations; cached materialization, checkpoint restore, and apply-plus-materialize phases | `{"lines":96,"textChars":6037,"operations":32}` |
-| annotated-text/large | 16273 UTF-16 characters across 256 lines; 64 CRDT operations; cached materialization, checkpoint restore, and apply-plus-materialize phases | `{"lines":256,"textChars":16273,"operations":64}` |
+| annotated-text-unified/small | 50 timing/confidence range pairs imported in one atomic Commit-loop batch; 5 fresh schema preparations; eager snapshot, serialization, client materialization, and 10 declaration-action dispatches against one authoring frame | `{"apps":5,"annotations":50,"corrects":10}` |
 
 ## Throughput
 
@@ -39,60 +25,13 @@ Values are operations per second. The median is the primary reference number; sa
 
 | Workload | Metric | Median | Mean | Min | Max | Relative stddev | Samples |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| compile/small | schema_prepare_ops_s | 9232.195 | 8517.914 | 4439.019 | 10749.798 | 28.636% | 4439.019, 8367.039, 9232.195, 9801.519, 10749.798 |
-| compile/small | composite_ops_s | 9232.195 | 8517.914 | 4439.019 | 10749.798 | 28.636% | 4439.019, 8367.039, 9232.195, 9801.519, 10749.798 |
-| compile/medium | schema_prepare_ops_s | 4227.585 | 4283.542 | 4136.271 | 4485.425 | 3.325% | 4196.051, 4227.585, 4136.271, 4372.381, 4485.425 |
-| compile/medium | composite_ops_s | 4227.585 | 4283.542 | 4136.271 | 4485.425 | 3.325% | 4196.051, 4227.585, 4136.271, 4372.381, 4485.425 |
-| compile/large | schema_prepare_ops_s | 812.155 | 793.779 | 632.911 | 913.624 | 12.827% | 812.155, 787.299, 632.911, 822.904, 913.624 |
-| compile/large | composite_ops_s | 812.155 | 793.779 | 632.911 | 913.624 | 12.827% | 812.155, 787.299, 632.911, 822.904, 913.624 |
-| http-crud/small | create_ops_s | 5023.779 | 4693.337 | 3310.331 | 5360.008 | 17.491% | 3310.331, 4608.215, 5164.35, 5360.008, 5023.779 |
-| http-crud/small | read_ops_s | 9621.359 | 9248.631 | 6452.897 | 11327.488 | 19.297% | 6452.897, 8971.124, 9870.288, 9621.359, 11327.488 |
-| http-crud/small | list_ops_s | 5686.934 | 5557.723 | 5066.305 | 6082.91 | 7.668% | 5066.305, 5775.589, 6082.91, 5686.934, 5176.877 |
-| http-crud/small | update_ops_s | 4332.447 | 4284.443 | 3719.261 | 4714.438 | 8.388% | 3719.261, 4272.165, 4383.902, 4332.447, 4714.438 |
-| http-crud/small | composite_ops_s | 5970.399 | 5655.522 | 4479.129 | 6104.716 | 12.052% | 4479.129, 5651.399, 6071.967, 5970.399, 6104.716 |
-| http-crud/medium | create_ops_s | 4843.765 | 4768.996 | 4119.868 | 5056.16 | 7.982% | 4119.868, 4843.765, 4792.39, 5032.795, 5056.16 |
-| http-crud/medium | read_ops_s | 10910.413 | 10892.923 | 10635.265 | 11123.075 | 1.693% | 10807.582, 10635.265, 10910.413, 11123.075, 10988.281 |
-| http-crud/medium | list_ops_s | 3827.604 | 3803.48 | 3652.375 | 3955.311 | 2.96% | 3652.375, 3835.423, 3955.311, 3827.604, 3746.687 |
-| http-crud/medium | update_ops_s | 3320.037 | 3322.811 | 3174.278 | 3441.428 | 3.252% | 3174.278, 3268.315, 3320.037, 3441.428, 3409.998 |
-| http-crud/medium | composite_ops_s | 5118.93 | 5059.844 | 4766.593 | 5211.047 | 3.467% | 4766.593, 5041.005, 5118.93, 5211.047, 5161.644 |
-| http-crud/large | create_ops_s | 4025.539 | 3954.694 | 3663.295 | 4136.49 | 4.947% | 3663.295, 3852.927, 4025.539, 4095.22, 4136.49 |
-| http-crud/large | read_ops_s | 12138.797 | 12147.551 | 11400.523 | 12635.491 | 3.955% | 11400.523, 12067.993, 12494.951, 12138.797, 12635.491 |
-| http-crud/large | list_ops_s | 2254.641 | 2207.055 | 1913.991 | 2392.138 | 8.013% | 2257.99, 1913.991, 2254.641, 2216.517, 2392.138 |
-| http-crud/large | update_ops_s | 2221.771 | 2234.097 | 2171.281 | 2336.152 | 2.735% | 2171.281, 2215.069, 2226.213, 2221.771, 2336.152 |
-| http-crud/large | composite_ops_s | 3955.54 | 3921.106 | 3747.039 | 4134.07 | 4.037% | 3782.759, 3747.039, 3986.123, 3955.54, 4134.07 |
-| commit/small | dispatch_ops_s | 22538.851 | 22431.447 | 21647.169 | 22875.748 | 2.16% | 21647.169, 22337.509, 22757.961, 22875.748, 22538.851 |
-| commit/small | dedupe_ops_s | 84925.69 | 82373.416 | 65450.38 | 92687.383 | 12.335% | 82754.363, 65450.38, 84925.69, 86049.263, 92687.383 |
-| commit/small | batch_action_ops_s | 39497.396 | 39751.46 | 37657.103 | 42071.681 | 4.136% | 37657.103, 42071.681, 39066.792, 39497.396, 40464.328 |
-| commit/small | composite_ops_s | 42266.218 | 41803.292 | 39474.102 | 43887.574 | 4.135% | 40707.988, 39474.102, 42266.218, 42680.579, 43887.574 |
-| commit/medium | dispatch_ops_s | 12544.909 | 12732.378 | 12510.104 | 13054.608 | 2.17% | 12510.104, 12544.909, 12538.373, 13054.608, 13013.895 |
-| commit/medium | dedupe_ops_s | 94171.816 | 92794.014 | 88369.577 | 95886.225 | 3.211% | 88369.577, 91273.841, 94268.61, 95886.225, 94171.816 |
-| commit/medium | batch_action_ops_s | 37585.227 | 38917.644 | 37358.519 | 41650.186 | 5.117% | 37585.227, 37358.519, 37552.319, 40441.969, 41650.186 |
-| commit/medium | composite_ops_s | 35406.393 | 35820.651 | 34635.938 | 37094.974 | 3.211% | 34635.938, 34973.13, 35406.393, 36992.821, 37094.974 |
-| commit/large | dispatch_ops_s | 6404.455 | 6358.547 | 6187.544 | 6437.181 | 1.63% | 6187.544, 6428.46, 6335.098, 6404.455, 6437.181 |
-| commit/large | dedupe_ops_s | 95018.142 | 94334.603 | 92139.245 | 95764.802 | 1.605% | 95764.802, 95332.417, 92139.245, 93418.411, 95018.142 |
-| commit/large | batch_action_ops_s | 35734.787 | 36022.953 | 35408.969 | 36980.753 | 1.97% | 36558.592, 36980.753, 35734.787, 35431.665, 35408.969 |
-| commit/large | composite_ops_s | 27874.377 | 27850.651 | 27527.265 | 28299.217 | 1.043% | 27876.477, 28299.217, 27527.265, 27675.92, 27874.377 |
-| live-delivery/small | catchup_event_ops_s | 233644.86 | 187282.4 | 30329.058 | 255971.823 | 50.135% | 30329.058, 170260.294, 246205.966, 255971.823, 233644.86 |
-| live-delivery/small | fanout_delivery_ops_s | 47685.285 | 46675.162 | 41907.478 | 48806.272 | 5.885% | 41907.478, 48020.153, 46956.624, 47685.285, 48806.272 |
-| live-delivery/small | composite_ops_s | 106786.397 | 90172.355 | 35651.288 | 110481.171 | 34.903% | 35651.288, 90420.824, 107522.095, 110481.171, 106786.397 |
-| live-delivery/medium | catchup_event_ops_s | 583870.689 | 557788.084 | 434845.756 | 613999.056 | 13.254% | 545864.043, 434845.756, 583870.689, 613999.056, 610360.876 |
-| live-delivery/medium | fanout_delivery_ops_s | 99222.099 | 99846.184 | 97298.666 | 103368.968 | 2.433% | 99222.099, 101129.618, 97298.666, 103368.968, 98211.567 |
-| live-delivery/medium | composite_ops_s | 238348.147 | 235508.825 | 209704.042 | 251929.452 | 6.841% | 232726.827, 209704.042, 238348.147, 251929.452, 244835.656 |
-| live-delivery/large | catchup_event_ops_s | 708730.313 | 714081.829 | 677338.272 | 742818.431 | 3.731% | 677338.272, 742818.431, 708730.313, 704247.298, 737274.832 |
-| live-delivery/large | fanout_delivery_ops_s | 111998.282 | 111500.416 | 109725.221 | 112422.025 | 0.959% | 109725.221, 112039.038, 111998.282, 111317.512, 112422.025 |
-| live-delivery/large | composite_ops_s | 281738.492 | 282146.926 | 272618.949 | 288486.85 | 2.303% | 272618.949, 288486.85, 281738.492, 279991.174, 287899.166 |
-| annotated-text/small | materialize_ops_s | 113575.865 | 93848.675 | 25492.93 | 118336.193 | 41.541% | 25492.93, 97959.384, 118336.193, 113575.865, 113879.004 |
-| annotated-text/small | restore_materialize_ops_s | 183.921 | 178.179 | 167.681 | 185.856 | 5.246% | 168.259, 167.681, 183.921, 185.856, 185.177 |
-| annotated-text/small | apply_materialize_ops_s | 2586.817 | 2473.938 | 2225.932 | 2686.799 | 8.954% | 2225.932, 2243.135, 2586.817, 2686.799, 2627.006 |
-| annotated-text/small | composite_ops_s | 3812.095 | 3387.184 | 2121.468 | 3842.078 | 21.853% | 2121.468, 3327.579, 3832.698, 3842.078, 3812.095 |
-| annotated-text/medium | materialize_ops_s | 21406.472 | 21432.054 | 19558.91 | 22792.023 | 5.618% | 19558.91, 22086.101, 21316.763, 21406.472, 22792.023 |
-| annotated-text/medium | restore_materialize_ops_s | 14.694 | 14.688 | 14.494 | 14.95 | 1.16% | 14.95, 14.694, 14.593, 14.711, 14.494 |
-| annotated-text/medium | apply_materialize_ops_s | 304.988 | 302.891 | 297.049 | 307.2 | 1.421% | 305.508, 299.707, 297.049, 307.2, 304.988 |
-| annotated-text/medium | composite_ops_s | 459.061 | 456.677 | 447.029 | 465.315 | 1.566% | 447.029, 459.89, 452.093, 459.061, 465.315 |
-| annotated-text/large | materialize_ops_s | 14301.676 | 13560.217 | 10574.725 | 14748.386 | 12.547% | 13817.672, 14748.386, 14301.676, 10574.725, 14358.629 |
-| annotated-text/large | restore_materialize_ops_s | 2.967 | 2.969 | 2.961 | 2.977 | 0.229% | 2.977, 2.975, 2.967, 2.961, 2.965 |
-| annotated-text/large | apply_materialize_ops_s | 97.993 | 97.588 | 95.006 | 98.681 | 1.507% | 98.276, 97.993, 97.986, 95.006, 98.681 |
-| annotated-text/large | composite_ops_s | 160.81 | 157.581 | 143.816 | 162.608 | 4.941% | 159.304, 162.608, 160.81, 143.816, 161.366 |
+| annotated-text-unified/small | compile_app_ops_s | 4003.469 | 3595.198 | 2555.584 | 4226.543 | 25.234% | 2555.584, 4226.543, 4003.469 |
+| annotated-text-unified/small | import_annotation_ops_s | 17762.778 | 13900.859 | 6049.378 | 17890.422 | 48.917% | 6049.378, 17762.778, 17890.422 |
+| annotated-text-unified/small | snapshot_annotation_ops_s | 109529.025 | 99583.821 | 60921.412 | 128301.025 | 34.919% | 60921.412, 109529.025, 128301.025 |
+| annotated-text-unified/small | serialize_annotation_ops_s | 3519020.305 | 3424389.31 | 2727247.934 | 4026899.69 | 19.127% | 2727247.934, 3519020.305, 4026899.69 |
+| annotated-text-unified/small | materialize_annotation_ops_s | 1496266.814 | 1166865.967 | 439802.089 | 1564528.999 | 54.04% | 439802.089, 1496266.814, 1564528.999 |
+| annotated-text-unified/small | declaration_action_ops_s | 2333.133 | 2253.189 | 1768.451 | 2657.984 | 19.977% | 1768.451, 2333.133, 2657.984 |
+| annotated-text-unified/small | composite_ops_s | 68244.23 | 58978.86 | 35488.77 | 73203.58 | 34.747% | 35488.77, 68244.23, 73203.58 |
 
 ## Interpretation
 

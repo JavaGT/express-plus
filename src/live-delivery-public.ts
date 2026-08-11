@@ -14,6 +14,7 @@ import { compileSnapshots, captureSnapshot, authorizeSnapshot, projectSnapshot }
 import { hasAnnotatedTextFields, projectEntitySnapshot } from './entity-snapshot-projection.ts';
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.ts';
 import { rawRow } from './entity/query.ts';
+import { mayRow } from './row-grant.ts';
 import { ensureStream, ensureLease, hashClientNonce, resolveStream, resolveLease, acknowledgeAndPruneSnapshot } from './annotated-text-authoring-stream.ts';
 import { createPrincipalSnapshotDelivery, isPrincipalSnapshotScope, validatePrincipalSnapshotDeclarations } from './principal-snapshot-delivery.ts';
 import type { Principal } from './principal.ts';
@@ -210,6 +211,22 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
     // The caller receives only an opaque recovery result, never an unstable pair.
     return { kind: 'retry' };
   }
+  async function authorizedAnnotatedTextRow(document: AnnotatedTextDocument, principal: Principal): Promise<Record<string, unknown> | null> {
+    const project = tryParseScopeKey(document.scope);
+    const projectEntity = project && resolveEntity(project.entity);
+    if (projectEntity) {
+      const projectScope = projectEntity.scopeFilter(principal);
+      const projectRow = db.prepare(`SELECT * FROM ${projectEntity.name} AS t0 WHERE ${projectScope.sql} AND t0.id = :id`)
+        .get({ ...projectScope.params, id: project.id });
+      if (!projectRow || !(await mayRow(projectEntity as never, 'subscribe', projectRow, principal, mayVerb as never))) return null;
+    }
+    const { sql, params } = document.entity.scopeFilter(principal);
+    const row = db.prepare(`SELECT * FROM ${document.entity.name} AS t0 WHERE ${sql} AND t0.id = :id`)
+      .get({ ...params, id: document.documentId });
+    if (!row || !(await mayRow(document.entity as never, 'subscribe', row, principal, mayVerb as never))) return null;
+    return row;
+  }
+
   // Public delivery deliberately has no connection state. It emits only
   // recipient-hydrated lifecycle snapshots or opaque recovery controls.
   const envelopes = createLiveEnvelopeBuilder({ stateful: false, includeActionId });
@@ -229,9 +246,14 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
       // ordinary envelope grammar (snapshot/resync) for non-foldable events.
       // The fold builder needs the full committed event (including data);
       // buildEnvelope must keep the stripped event (raw eventData never leaves).
-      const document = base.document;
+      let document = base.document;
+      if (document) {
+        const row = await authorizedAnnotatedTextRow(document as AnnotatedTextDocument, context.principal as Principal);
+        if (!row) throw new Error('annotated-text document reauthorization denied');
+        document = Object.freeze({ ...document, row });
+      }
       if (document && (context.event as { eventType?: string }).eventType?.startsWith(`${(document as { entity?: LiveEntityRecord }).entity?.name}.`)) {
-        const folded = await tryBuildAnnotatedTextFoldEnvelopes({ ...base, event: context.event } as never, { db: db as never, document: document as never });
+        const folded = await tryBuildAnnotatedTextFoldEnvelopes({ ...base, document, event: context.event } as never, { db: db as never, document: document as never });
         if (folded) return folded;
       }
       // A composite shell subscriber resyncs only when the committed event can
@@ -269,19 +291,7 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
       return Object.freeze({ scope: resolveAnnotatedTextOwningScope(descriptor, entity.fields as Record<string, any>, row as Record<string, any>).key, entity, row, fieldName, descriptor, documentId });
     },
     async authorizeAnnotatedTextDocument(document: AnnotatedTextDocument, principal: Principal): Promise<Record<string, unknown> | null> {
-      const project = tryParseScopeKey(document.scope);
-      const projectEntity = project && resolveEntity(project.entity);
-      if (projectEntity) {
-        const projectScope = projectEntity.scopeFilter(principal);
-        const projectRow = db.prepare(`SELECT * FROM ${projectEntity.name} AS t0 WHERE ${projectScope.sql} AND t0.id = :id`)
-          .get({ ...projectScope.params, id: project.id });
-        if (!projectRow || !(await mayVerb(projectEntity, 'subscribe', projectRow, principal))) return null;
-      }
-      const { sql, params } = document.entity.scopeFilter(principal);
-      const row = db.prepare(`SELECT * FROM ${document.entity.name} AS t0 WHERE ${sql} AND t0.id = :id`)
-        .get({ ...params, id: document.documentId });
-      if (!row || !(await mayVerb(document.entity, 'subscribe', row, principal))) return null;
-      return row;
+      return authorizedAnnotatedTextRow(document, principal);
     },
     // Public subscribers always acknowledge before any durable batch drains.
     subscribe(input: PublicSubscribeInput): Promise<PublicActivation> {

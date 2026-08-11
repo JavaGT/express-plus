@@ -8,11 +8,12 @@ import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  admin, annotatedText, annotation, deny, entity, everyone, executeDDL, executeFrameworkDDL, grant, read, ref, scope, text, write,
+  admin, annotatedText, annotation, deny, entity, everyone, executeDDL, executeFrameworkDDL, grant, number as numberField, read, ref, scope, text, write,
 } from '../src/internal.mjs';
 import { materializeText, restoreTextFamily } from '../src/annotated-text-continuous.mjs';
 import { projectRangeToOffsets } from '../src/annotated-text-ranges.mjs';
 import { exportAnnotatedText } from '../src/annotated-text-public.mjs';
+import { attachAnnotationRange } from '../src/annotated-text-storage.mjs';
 
 function doc() {
   return entity('RangeDoc', {
@@ -25,6 +26,8 @@ function doc() {
         annotation('turn', { fields: { label: text({ optional: true, nullable: true }) } }),
         annotation('mention', { fields: { user: ref('User', { optional: true, nullable: true }), label: text({ optional: true, nullable: true }) } }),
         annotation('code', { fields: {} }),
+        annotation('timing', { fields: { startMs: numberField({ validate: (value) => Number.isSafeInteger(value) && value >= 0 }), durationMs: numberField({ validate: (value) => Number.isSafeInteger(value) && value >= 0 }) } }),
+        annotation('transcriptionConfidence', { fields: { confidence: numberField({ validate: (value) => typeof value === 'number' && value >= 0 && value <= 1 }) } }),
       ],
     }),
     grant: [scope(() => everyone()).can(() => grant(read, write))],
@@ -63,7 +66,7 @@ function createWithRanges(app, id, ranges, blocks = [{ text: 'hello world' }]) {
 }
 
 function committedMemberships(db, documentId) {
-  return db.prepare('SELECT annotation_id, start_point, end_point FROM RangeDoc_body_membership').all()
+  return db.prepare('SELECT membership.annotation_id, range.start_point, range.end_point FROM RangeDoc_body_membership AS membership JOIN RangeDoc_body_range AS range ON range.id = membership.range_id').all()
     .filter((row) => {
       const annotation = db.prepare('SELECT document_id FROM RangeDoc_body_annotation WHERE id = ?').get(row.annotation_id);
       return annotation?.document_id === documentId;
@@ -73,7 +76,7 @@ function committedMemberships(db, documentId) {
 async function committedOffsets(db, documentId, annotationId) {
   const state = db.prepare("SELECT family_checkpoint FROM RangeDoc_body_state WHERE document_id = ?").get(documentId);
   const family = restoreTextFamily(JSON.parse(state.family_checkpoint));
-  const membership = db.prepare('SELECT start_point, end_point FROM RangeDoc_body_membership WHERE annotation_id = ?').get(annotationId);
+  const membership = db.prepare('SELECT range.start_point, range.end_point FROM RangeDoc_body_membership AS membership JOIN RangeDoc_body_range AS range ON range.id = membership.range_id WHERE membership.annotation_id = ?').get(annotationId);
   return {
     text: materializeText(family),
     range: membership
@@ -120,6 +123,43 @@ test('create with source.ranges seeds one membership per range over multi-block 
   assert.deepEqual((await committedOffsets(db, 'd2', 'turn-1')).range, { start: 0, end: 6 });
   assert.deepEqual((await committedOffsets(db, 'd2', 'turn-2')).range, { start: 6, end: 11 });
   assert.equal(committedMemberships(db, 'd2').length, 2);
+  await app.close?.();
+});
+
+test('independent timing and confidence annotations share only an exactly equal structural range', async () => {
+  const { app, db } = await appFor();
+  const created = await createWithRanges(app, 'shared-range', [
+    { annotationId: 'timing-1', family: 'timing', start: 0, end: 5, fields: { startMs: 0, durationMs: 420 } },
+    { annotationId: 'confidence-1', family: 'transcriptionConfidence', start: 0, end: 5, fields: { confidence: 0.98 } },
+    { annotationId: 'timing-2', family: 'timing', start: 6, end: 11, fields: { startMs: 430, durationMs: 470 } },
+  ]);
+  assert.equal(created.ok, true, created.failure?.message);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM RangeDoc_body_range').get().count, 2);
+  const links = db.prepare("SELECT annotation_id, range_id FROM RangeDoc_body_membership WHERE annotation_id IN ('timing-1', 'confidence-1') ORDER BY annotation_id").all();
+  assert.equal(links[0].range_id, links[1].range_id);
+  assert.throws(() => db.prepare('UPDATE RangeDoc_body_range SET start_point = start_point WHERE id = ?').run(links[0].range_id), /immutable/);
+  await app.close?.();
+});
+
+test('reordered endpoint keys canonicalize to the same immutable range', async () => {
+  const { app, db } = await appFor();
+  const created = await createWithRanges(app, 'reordered-keys', [
+    { annotationId: 'timing-1', family: 'timing', start: 0, end: 5, fields: { startMs: 0, durationMs: 420 } },
+  ]);
+  assert.equal(created.ok, true, created.failure?.message);
+  const stored = db.prepare("SELECT range.start_point, range.end_point, range.id FROM RangeDoc_body_membership AS membership JOIN RangeDoc_body_range AS range ON range.id = membership.range_id WHERE membership.annotation_id = 'timing-1'").get();
+  const start = JSON.parse(stored.start_point);
+  const end = JSON.parse(stored.end_point);
+  // The same structural endpoints serialized with REORDERED object keys must
+  // intern to the identical range row: canonicalization reads point and
+  // basisFrontier by key, never by property order.
+  const reorderedStart = { basisFrontier: start.basisFrontier, point: start.point };
+  const reorderedEnd = { basisFrontier: end.basisFrontier, point: end.point };
+  db.prepare("INSERT INTO RangeDoc_body_annotation (id, document_id, project_id, owner_id, family) VALUES ('timing-reordered', 'reordered-keys', 'p1', 'u1', 'timing')").run();
+  db.prepare("INSERT INTO RangeDoc_body_annotation_timing (annotation_id, startMs, durationMs) VALUES ('timing-reordered', 0, 420)").run();
+  attachAnnotationRange(db, 'RangeDoc_body', 'reordered-keys', 'timing-reordered', reorderedStart, reorderedEnd, 0);
+  const reorderedRangeId = db.prepare("SELECT range_id FROM RangeDoc_body_membership WHERE annotation_id = 'timing-reordered'").get().range_id;
+  assert.equal(reorderedRangeId, stored.id, 'reordered endpoint keys must canonicalize to the same range row');
   await app.close?.();
 });
 
@@ -176,6 +216,40 @@ test('create with source.ranges leaves the durable state empty when rejected', a
   const before = db.serialize();
   const result = await createWithRanges(app, 'd3', [{ annotationId: 'x', family: 'nope', start: 0, end: 5, fields: {} }]);
   assert.equal(result.ok, false);
+  assert.deepEqual(db.serialize(), before);
+  await app.close?.();
+});
+
+test('a transcript-sized import creates ordinary timing/confidence records in one atomic committed batch', async () => {
+  const { app, db } = await appFor();
+  // A diarized transcript: hundreds of timing + confidence ranges over one text.
+  const words = Array.from({ length: 120 }, (_, i) => `w${i}`).join(' ');
+  const ranges = [];
+  let offset = 0;
+  for (let i = 0; i < 120; i += 1) {
+    const width = `w${i}`.length;
+    ranges.push({ annotationId: `timing-${i}`, family: 'timing', start: offset, end: offset + width, fields: { startMs: i * 100, durationMs: 60 } });
+    ranges.push({ annotationId: `confidence-${i}`, family: 'transcriptionConfidence', start: offset, end: offset + width, fields: { confidence: 0.5 + (i % 40) / 100 } });
+    offset += width + 1;
+  }
+  const created = await createWithRanges(app, 'transcript', ranges, [{ text: words }]);
+  assert.equal(created.ok, true, created.failure?.message);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM RangeDoc_body_annotation').get().count, 240);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM RangeDoc_body_membership').get().count, 240);
+  // Exact common geometry: every timing-i / confidence-i pair interns ONE range.
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM RangeDoc_body_range').get().count, 120);
+
+  // The whole batch was ONE ordinary committed create — no separate evidence
+  // consumer, no second write path.
+  const events = db.prepare("SELECT eventType FROM _Log WHERE scope = 'Project:p1' ORDER BY seq").all();
+  assert.deepEqual(events.map((row) => row.eventType), ['RangeDoc.created']);
+
+  // A malformed range anywhere in a transcript-sized batch rejects atomically.
+  const badRanges = [...ranges];
+  badRanges[60] = { ...badRanges[60], fields: { confidence: 2 } };
+  const before = db.serialize();
+  const rejected = await createWithRanges(app, 'transcript-bad', badRanges, [{ text: words }]);
+  assert.equal(rejected.ok, false);
   assert.deepEqual(db.serialize(), before);
   await app.close?.();
 });

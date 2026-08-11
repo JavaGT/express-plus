@@ -20,7 +20,6 @@ import { assertR2BlockSplitPayload, frozenJsonSnapshot } from '../annotated-text
 import { assertR3BlockMergePayload, canonicalJsonEqual } from '../annotated-text-r3.mjs';
 import { assertR4AnnotationApplyPayload } from '../annotated-text-r4.mjs';
 import { assertR5AnnotationDetachPayload } from '../annotated-text-r5.mjs';
-import { assertWordEvidencePayload } from '../word-evidence.mjs';
 import { erasureDirectivePreparation } from '../erasure-directive.mjs';
 import { CASCADE_DESCENDANT, CASCADE_PREAUTHORIZED } from './removal-cascade.mjs';
 import { admitRow } from '../row-grant.mjs';
@@ -28,11 +27,12 @@ import { admitsInvitationRemoval } from '../auth/invitation-acceptance-authority
 import { clearAuthoringState, issueAuthoringSnapshot, buildAuthoringEnvelope } from '../annotated-text-authoring-stream.mjs';
 import { admitV9AnnotatedTextEdit, assertV9AuthoringBinding as assertV9AuthoringBindingFromAdmit } from '../annotated-text-admit.mjs';
 import { packOperatedFacts } from '../annotated-text-operated-facts.mjs';
-import { applyTextOperation, compactTextFamilyCheckpoint, materializeText, restoreTextFamilySerialized, textFamilyBasis } from '../annotated-text-continuous.mjs';
+import { applyTextOperation, compactTextFamilyCheckpoint, materializeText, projectEndpointToOffset, restoreTextFamilySerialized, textFamilyBasis } from '../annotated-text-continuous.mjs';
 import { projectAnnotatedTextSnapshot } from '../annotated-text-snapshot.mjs';
 import { authoringRedactionsForRecipient } from '../annotated-text-recipient-projection.mjs';
 import { mapVisibleOffsetToCanonical } from '../annotated-text-recipient-projection.mjs';
 import { planTextRangeApply } from '../annotated-text-plan.mjs';
+import { annotationRangeRows } from '../annotated-text-storage.mjs';
 import { assertUtf16Range } from '../annotated-text.mjs';
 import { rawRow } from './query.mjs';
 
@@ -188,7 +188,7 @@ function assertAnnotatedTextImportPayload(name        , fieldName        , descr
     if (!block || typeof block !== 'object' || Array.isArray(block)) {
       throw new ValidationError(`${name}.${fieldName} annotated-text import blocks[${i}] must be a non-array object`);
     }
-    const allowedBlock = new Set(['text', 'fields', 'measurements', 'wordEvidence']);
+    const allowedBlock = new Set(['text', 'fields', 'measurements']);
     for (const key of Object.keys(block)) {
       if (!allowedBlock.has(key)) throw new ValidationError(`${name}.${fieldName} annotated-text import blocks[${i}] has unknown key '${key}'`);
     }
@@ -257,20 +257,11 @@ function assertAnnotatedTextImportPayload(name        , fieldName        , descr
         measurements.push(Object.freeze({ id: randomUUID(), family: measurement.family, formatVersion: config.formatVersion, payload }));
       }
     }
-    let wordEvidence;
-    if (block.wordEvidence !== undefined) {
-      try {
-        wordEvidence = assertWordEvidencePayload(block.wordEvidence, { families: descriptor.wordEvidence, blockText: block.text });
-      } catch (error     ) {
-        throw new ValidationError(`${name}.${fieldName} annotated-text import blocks[${i}].wordEvidence ${error.message}`);
-      }
-    }
     canonicalBlocks.push(Object.freeze({
       id: randomUUID(),
       text: block.text,
       fields: Object.freeze(fields),
       measurements: Object.freeze(measurements),
-      ...(wordEvidence === undefined ? {} : { wordEvidence }),
     }));
   }
   // Document-absolute annotation ranges over the concatenated block texts
@@ -1769,9 +1760,142 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
     // both rows.
     const annotationDeclarations = descriptor.annotations ?? [];
     for (const annotationDeclaration of annotationDeclarations) {
-      for (const action of annotationDeclaration.actions ?? []) {
+      for (const [actionName, action] of Object.entries(annotationDeclaration.actions ?? {})                        ) {
+        if (action.kind === 'annotationAction') {
+          const actionType = `${name}.${fieldName}.${annotationDeclaration.annotationName}.${actionName}`;
+          const domainHandler = async ({ payload, db, scope, principal, actionId }     ) => {
+            if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+              || (Object.getPrototypeOf(payload) !== Object.prototype && Object.getPrototypeOf(payload) !== null)
+              || Reflect.ownKeys(payload).some((key) => typeof key !== 'string')
+              || Object.keys(payload).sort().join() !== 'basis,from,id,mutationId,to,values,version'
+              || payload.version !== 1 || typeof payload.id !== 'string' || !payload.id || typeof payload.basis !== 'string' || !payload.basis
+              || typeof payload.mutationId !== 'string' || !payload.mutationId || !Number.isSafeInteger(payload.from) || !Number.isSafeInteger(payload.to)
+              || !payload.values || typeof payload.values !== 'object' || Array.isArray(payload.values)
+              || (Object.getPrototypeOf(payload.values) !== Object.prototype && Object.getPrototypeOf(payload.values) !== null)
+              || Reflect.ownKeys(payload.values).some((key) => typeof key !== 'string')) throw new ValidationError(`${actionType} requires a closed selection payload`);
+            const expectedInputs = Object.keys(action.input);
+            if (Object.keys(payload.values).sort().join() !== expectedInputs.sort().join()) throw new ValidationError(`${actionType} values contain unknown or missing fields`);
+            const canonicalInput                          = {};
+            for (const inputName of expectedInputs) {
+              const inputField = action.input[inputName];
+              const validation = resolveStrategy(inputField.kind).validate(payload.values[inputName], inputField);
+              if (validation !== true || (typeof inputField.validate === 'function' && inputField.validate(payload.values[inputName]) !== true)) throw new ValidationError(`${actionType} input '${inputName}' failed validation`);
+              canonicalInput[inputName] = payload.values[inputName];
+            }
+            const documentRow = rawRow(db, name, payload.id);
+            if (!documentRow) throw new ValidationError(`${actionType} document does not exist`);
+            const documentScope = resolveAnnotatedTextOwningScope(descriptor, fields, documentRow).key;
+            if (scope !== documentScope) throw new ValidationError(`${actionType} requires its declared document scope`);
+            const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(payload.id);
+            if (!state) throw new ValidationError(`${actionType} document state is unavailable`);
+            const family = restoreTextFamilySerialized(state.family_checkpoint);
+            const principalType = principal?.type ?? 'principal';
+            const principalId = principal?.id ?? '';
+            const position = db.prepare(`SELECT position.*, checkpoint.family_checkpoint AS basis_checkpoint FROM ${prefix}_authoring_position AS position JOIN ${prefix}_authoring_checkpoint AS checkpoint ON checkpoint.id = position.checkpoint_id JOIN ${prefix}_authoring_lease AS lease ON lease.id = position.lease_id JOIN ${prefix}_authoring_stream AS stream ON stream.id = lease.stream_id WHERE position.token = ? AND stream.document_id = ? AND stream.principal_type = ? AND stream.principal_id = ?`).get(payload.basis, payload.id, principalType, principalId);
+            if (!position || !position.visible_at_issue || JSON.stringify(JSON.parse(position.basis_checkpoint)) !== JSON.stringify(textFamilyBasis(family))) throw new ValidationError(`${actionType} basis is unavailable or stale`);
+            const recipient = await projectAnnotatedTextSnapshot({ db, entity: record, row: documentRow, principal, fieldName, descriptor, mintBasis: false });
+            const redactions = JSON.parse(position.redactions ?? '[]');
+            if (JSON.stringify(redactions) !== JSON.stringify(authoringRedactionsForRecipient(recipient))) throw new ValidationError(`${actionType} basis is stale`);
+            const from = mapVisibleOffsetToCanonical(payload.from, 'right', redactions, 'right');
+            const to = mapVisibleOffsetToCanonical(payload.to, 'left', redactions, 'left');
+            const text = materializeText(family);
+            try { assertUtf16Range(text, from, to); } catch { throw new ValidationError(`${actionType} selection splits a UTF-16 surrogate pair`); }
+            if (redactions.some((entry     ) => entry.start < from && from < entry.end || entry.start < to && to < entry.end)
+              || redactions.some((entry     ) => Math.min(from, to) <= entry.start && entry.end <= Math.max(from, to))) throw new ValidationError(`${actionType} selection is hidden`);
+            if (from < 0 || to > text.length || from >= to) throw new ValidationError(`${actionType} selection is invalid`);
+            const generatedAnnotationId = createHash('sha256').update(`${scope}\0${actionId}\0${actionType}\0annotation`).digest('hex').slice(0, 32);
+            // Load the document's committed annotation records and ranges ONCE
+            // (before the change function runs) so the function receives frozen
+            // current state and the handler can merge a partial contribution
+            // over the committed record inside the same transaction.
+            const rangeRows = annotationRangeRows(db, prefix, payload.id);
+            const ranges = rangeRows.map((range) => ({ annotationId: range.annotation_id, start: JSON.parse(range.start_point), end: JSON.parse(range.end_point) }));
+            const annotationRows = db.prepare(`SELECT id, family FROM ${prefix}_annotation WHERE document_id = ?`).all(payload.id)                                         ;
+            const sameFamilyAnnotationIds = new Set        (annotationRows.filter((candidate) => candidate.family === annotationDeclaration.annotationName).map((candidate) => String(candidate.id)));
+            const declaredFieldNames = Object.keys(annotationDeclaration.fields ?? {}).sort();
+            const currentRangeOffsets = (annotationId        )                                                      => ranges
+              .filter((range) => range.annotationId === annotationId)
+              .map((range) => {
+                let start = null;
+                let end = null;
+                try {
+                  start = projectEndpointToOffset(family, range.start);
+                  end = projectEndpointToOffset(family, range.end);
+                } catch { /* unprojectable */ }
+                return { start, end };
+              });
+            // A correction targets the single same-family annotation whose
+            // committed range covers the selection, so a partial field
+            // contribution merges over the current record instead of replacing
+            // it. Ambiguous (zero or many covering) corrections fall back to a
+            // fresh deterministic annotation identity.
+            let current                                                                                                                                                                  = null;
+            const coveringIds = [...sameFamilyAnnotationIds].filter((annotationId) => currentRangeOffsets(annotationId)
+              .some((offsets) => offsets.start !== null && offsets.end !== null && offsets.start <= from && to <= offsets.end));
+            if (coveringIds.length === 1) {
+              const currentId = coveringIds[0];
+              const fieldRow = db.prepare(`SELECT * FROM ${prefix}_annotation_${annotationDeclaration.annotationName} WHERE annotation_id = ?`).get(currentId);
+              const currentFields                          = {};
+              for (const fieldName of declaredFieldNames) {
+                currentFields[fieldName] = fieldRow ? deserializeField(annotationDeclaration.fields[fieldName], fieldRow[fieldName]) : null;
+              }
+              current = Object.freeze({
+                id: currentId,
+                family: annotationDeclaration.annotationName,
+                fields: Object.freeze(currentFields),
+                ranges: Object.freeze(currentRangeOffsets(currentId).map((offsets) => Object.freeze({ start: offsets.start, end: offsets.end }))),
+              });
+            }
+            const context = Object.freeze({
+              input: Object.freeze(canonicalInput),
+              annotationId: generatedAnnotationId,
+              document: Object.freeze({ ...documentRow }),
+              selection: Object.freeze({ from, to }),
+              principal,
+              current,
+            });
+            const authorization = action.authorize ? action.authorize(context) : true;
+            if (authorization && typeof authorization.then === 'function') throw new ValidationError(`${actionType} authorize returned a promise; authorize must be synchronous`);
+            if (authorization !== true) throw new ValidationError(`${actionType} is not authorized`);
+            const contribution = action.change(context);
+            if (contribution && typeof contribution.then === 'function') throw new ValidationError(`${actionType} change returned a promise; change must be synchronous`);
+            if (!contribution || typeof contribution !== 'object' || Array.isArray(contribution)
+              || (Object.getPrototypeOf(contribution) !== Object.prototype && Object.getPrototypeOf(contribution) !== null)
+              || Reflect.ownKeys(contribution).some((key) => typeof key !== 'string')
+              || Object.keys(contribution).sort().join() !== 'fields') throw new ValidationError(`${actionType} change returned an invalid contribution`);
+            if (!contribution.fields || typeof contribution.fields !== 'object' || Array.isArray(contribution.fields)
+              || (Object.getPrototypeOf(contribution.fields) !== Object.prototype && Object.getPrototypeOf(contribution.fields) !== null)
+              || Reflect.ownKeys(contribution.fields).some((key) => typeof key !== 'string')) throw new ValidationError(`${actionType} change returned an invalid contribution`);
+            // The handler owns annotation identity and range: the change
+            // function returns only declared field contributions, and the
+            // handler targets the single covering annotation (or a fresh
+            // deterministic record) at the client's mapped selection. A
+            // callback cannot redirect to another annotation or alter
+            // identity, range, lifecycle, protection edges, or ownership.
+            const annotationId = current?.id ?? generatedAnnotationId;
+            const suppliedFieldNames = Object.keys(contribution.fields);
+            if (suppliedFieldNames.some((fieldName) => !declaredFieldNames.includes(fieldName))) throw new ValidationError(`${actionType} change contributed an undeclared field`);
+            // Partial contributions merge over the committed record; the merged
+            // result must exactly cover the declared field set and validate.
+            const mergedFields                          = { ...(current?.fields ?? {}) };
+            for (const fieldName of suppliedFieldNames) mergedFields[fieldName] = contribution.fields[fieldName];
+            if (JSON.stringify(Object.keys(mergedFields).sort()) !== JSON.stringify(declaredFieldNames)) throw new ValidationError(`${actionType} change contribution does not cover every declared field`);
+            for (const fieldName of declaredFieldNames) {
+              const field = annotationDeclaration.fields[fieldName];
+              const validation = resolveStrategy(field.kind).validate(mergedFields[fieldName], field);
+              if (validation !== true || (typeof field.validate === 'function' && field.validate(mergedFields[fieldName]) !== true)) throw new ValidationError(`${actionType} field '${fieldName}' failed validation`);
+            }
+            const plannedAnnotation = { id: annotationId, family: annotationDeclaration.annotationName, empty: annotationDeclaration.empty, fields: mergedFields, protectedTargetIds: [] };
+            const plan = planTextRangeApply({ documentId: payload.id, structureVersion: state.structure_version, family, annotation: plannedAnnotation, from: { offset: from, affinity: 'right' }, to: { offset: to, affinity: 'left' }, ranges, actorId: principal?.id ?? '', cardinality: annotationDeclaration.cardinality, sameFamilyAnnotationIds });
+            const handle = eventHandles.native(name, fieldName, 'operated');
+            return { events: [{ handle, type: handle.type, scope: documentScope, data: plan }], canonicalPayload: payload, authoringReceipt: async ({ confirmedThrough }     ) => Object.freeze({ actionId, confirmedThrough, annotationId }) };
+          };
+          Object.defineProperties(domainHandler, { inTransaction: { value: true }, batchForbidden: { value: true }, dedupeReceiptMatches: { value: (receipt     , request     ) => receipt.actionType === actionType && receipt.actionData === JSON.stringify(request.payload) } });
+          handlers[actionType] = domainHandler;
+          continue;
+        }
         if (action.kind !== 'annotationEntityAction') continue;
-        const actionType = `${name}.${fieldName}.${action.actionName}`;
+        const actionType = `${name}.${fieldName}.${annotationDeclaration.annotationName}.${actionName}`;
         const relation = annotationDeclaration.fields?.[action.relation];
         const targetName = typeof relation?.target === 'string' ? relation.target : relation?.target?.name;
         const target = targetName ? record.runtime?.entityOf(targetName) : null;
@@ -1838,7 +1962,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
             else if ((fieldDescriptor       ).optional || (fieldDescriptor       ).nullable) annotationFields[fieldKey] = null;
             else throw new ValidationError(`${actionType} annotation field '${fieldKey}' has no derived value`);
           }
-           const rangeRows = db.prepare(`SELECT annotation_id, start_point, end_point FROM ${prefix}_membership WHERE annotation_id IN (SELECT id FROM ${prefix}_annotation WHERE document_id = ?)`).all(payload.id);
+            const rangeRows = annotationRangeRows(db, prefix, payload.id);
            const ranges = rangeRows.map((range     ) => ({ annotationId: range.annotation_id, start: JSON.parse(range.start_point), end: JSON.parse(range.end_point) }));
            const plan = planTextRangeApply({ documentId: payload.id, structureVersion: state.structure_version, family, annotation: { id: annotationId, family: annotationDeclaration.annotationName, fields: annotationFields }       , from: { offset: from, affinity: 'right' }, to: { offset: to, affinity: 'left' }, ranges, actorId: principal?.id ?? '' });
           const handle = eventHandles.native(name, fieldName, 'operated');

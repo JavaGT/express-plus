@@ -76,13 +76,13 @@ export const Doc = entity('Doc', {
            color: text({ oneOf: COMMENT_COLORS, default: COMMENT_COLORS[0] }),
            comment: ref('Comment'),
          },
-         actions: [annotationEntityAction('compose', {
+         actions: { compose: annotationEntityAction({
            relation: 'comment',
            project: 'project',
            author: 'author',
            capability: write,
            input: { body: 'body' },
-         })],
+         }) },
        }),
       // `sensitive` is the protected target that a confidential span covers. It
       // is projection-internal: it never renders as a comment card, so marking
@@ -239,9 +239,8 @@ export function createAnnotatedDocApp({ db = DB_PATH } = {}) {
 
   app.use('/client-handle.mjs', (req, res, next) => {
     if (req.method !== 'GET') return next();
-    // Keyed action handles are non-enumerable on the server's compatibility
-    // action array. Preserve the typed compose handle across this zero-import
-    // browser boundary rather than exposing a raw action name or payload path.
+    // Preserve the typed compose handle across this zero-import browser
+    // boundary rather than exposing a raw action name or payload path.
     const clientHandle = {
       ...DocClient,
       body: {

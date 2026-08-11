@@ -21,6 +21,7 @@ import { projectAnnotatedTextSnapshot } from './annotated-text-snapshot.mjs';
                                                                      
                                                 
 import { rawRow } from './entity/query.mjs';
+import { annotationRangeRows } from './annotated-text-storage.mjs';
 
                      
                                                
@@ -178,7 +179,7 @@ function loadRanges({ db, prefix, documentId }
                  
                      
  )                {
-  const rows = db.prepare(`SELECT annotation_id, start_point, end_point FROM ${prefix}_membership WHERE annotation_id IN (SELECT id FROM ${prefix}_annotation WHERE document_id = ?)`).all(documentId);
+  const rows = annotationRangeRows(db       , prefix, documentId);
   return rows.map((row) => ({
     annotationId: row.annotation_id,
     start: JSON.parse(row.start_point),

@@ -75,6 +75,7 @@ const PROJECTION_TABLES = [
   'ReplayDoc_body_annotation_theme',
   'ReplayDoc_body_annotation_speaker',
   'ReplayDoc_body_membership',
+  'ReplayDoc_body_range',
   'ReplayDoc_body_annotation_orphan_state',
 ];
 
@@ -302,9 +303,8 @@ test('one-cardinality exclusive trim survives replay through the real projector 
   });
   assert.equal(applyB.ok, true, applyB.failure?.message);
 
-  // Live state: A owns two remnants [0,3] + [7,11], B owns [3,7]. The composite
-  // membership key admits both A rows.
-  const membership = (db) => db.prepare('SELECT annotation_id, start_point, end_point FROM ReplayDoc_body_membership ORDER BY annotation_id, start_point').all()
+  // Live state: A owns two ordered remnants [0,3] + [7,11], B owns [3,7].
+  const membership = (db) => db.prepare('SELECT membership.annotation_id, range.start_point, range.end_point FROM ReplayDoc_body_membership AS membership JOIN ReplayDoc_body_range AS range ON range.id = membership.range_id ORDER BY membership.annotation_id, membership.ordinal').all()
     .map((row) => [row.annotation_id, JSON.parse(row.start_point), JSON.parse(row.end_point)]);
   const liveMembership = membership(live);
   assert.equal(liveMembership.length, 3, 'two A remnants plus one B range');

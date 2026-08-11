@@ -334,8 +334,8 @@ export function admitsApplicationHttpAction(app                , request        
   if (admitsGeneratedCrudAction(app, request)) return true;
   for (const entity of app.entities?.values() ?? []) for (const [fieldName, field] of Object.entries(entity.fields ?? {})) {
     if ((field       ).kind !== 'annotatedText') continue;
-    for (const annotation of (field       ).annotations ?? []) for (const action of annotation.actions ?? []) {
-      if (request.type === `${entity.name}.${fieldName}.${action.actionName}`) return true;
+    for (const annotation of (field       ).annotations ?? []) for (const actionName of Object.keys(annotation.actions ?? {})) {
+      if (request.type === `${entity.name}.${fieldName}.${annotation.annotationName}.${actionName}`) return true;
     }
   }
   return admitsAnnotatedTextAction(app, request);

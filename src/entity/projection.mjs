@@ -8,13 +8,14 @@ import {
   applyTextOperation as applyContinuousTextOperation,
   compactTextFamilyCheckpoint,
   importTextToFamily,
+  projectEndpointToOffset,
   resolveOffsetToEndpoint,
   restoreTextFamilySerialized,
   serializeCompactTextFamilyCheckpoint,
   textFamilyCheckpoint as continuousTextFamilyCheckpoint,
 } from '../annotated-text-continuous.mjs';
-import { assertWordEvidencePayload } from '../word-evidence.mjs';
 import { resolveDeclarationMeasurementExtension } from '../annotated-text-field.mjs';
+import { annotationRangeRows, attachAnnotationRange, canonicalEndpointJSON } from '../annotated-text-storage.mjs';
 import { frozenJsonSnapshot } from '../annotated-text-r2.mjs';
 import { markAnnotatedEntityProjection } from '../annotated-text-history.mjs';
                                              
@@ -29,7 +30,6 @@ import { rawRow } from './query.mjs';
                 
                    
                  
-                         
                                                                              
                                                                                             
                                           
@@ -134,16 +134,9 @@ function initializeAnnotatedText({ name, fields, event, db, row }               
           (importedBlock.fields !== null && (!importedBlock.fields || typeof importedBlock.fields !== 'object' || Array.isArray(importedBlock.fields)))) {
         throw new Error(`${name}.${fieldName} created event has invalid imported block ${blockIndex}`);
       }
-      for (const key of Object.keys(importedBlock)) if (!['id', 'text', 'fields', 'measurements', 'wordEvidence'].includes(key)) throw new Error(`${name}.${fieldName} created event has unknown imported block key '${key}'`);
+      for (const key of Object.keys(importedBlock)) if (!['id', 'text', 'fields', 'measurements'].includes(key)) throw new Error(`${name}.${fieldName} created event has unknown imported block key '${key}'`);
       assertWellFormedText(importedBlock.text);
       if (importedBlock.text.length === 0 && imported.blocks.some((candidate) => candidate.fields !== null)) throw new Error(`${name}.${fieldName} created event has an empty imported block`);
-      if (importedBlock.wordEvidence !== undefined) {
-        try {
-          assertWordEvidencePayload(importedBlock.wordEvidence, { families: fields[fieldName].wordEvidence           , blockText: importedBlock.text });
-        } catch (error) {
-          throw new Error(`${name}.${fieldName} created event block ${blockIndex} has invalid word evidence payload: ${(error         ).message}`);
-        }
-      }
     }
     const fullText = imported.blocks.map((importedBlock) => importedBlock.text).join('');
     const family = importTextToFamily(row.id          , imported.actor, fullText);
@@ -262,8 +255,7 @@ function seedImportedAnnotationRanges({ name, fieldName, prefix, descriptor, db,
       db.prepare(`INSERT INTO ${prefix}_annotation_${rangeFamily} (annotation_id, ${names.join(', ')}) VALUES (?, ${names.map(() => '?').join(', ')})`)
         .run(annotationId, ...storedFields);
     }
-    db.prepare(`INSERT INTO ${prefix}_membership (annotation_id, start_point, end_point) VALUES (?, ?, ?)`)
-      .run(annotationId, JSON.stringify(startEndpoint), JSON.stringify(endEndpoint));
+    attachAnnotationRange(db, prefix, row.id          , annotationId          , startEndpoint, endEndpoint, 0);
   }
 }
 
@@ -390,6 +382,7 @@ function projectBlocklessAnnotationApplyRange({ name, handle, db, descriptor, da
       typeof annOp.id !== 'string' || typeof annOp.family !== 'string' ||
       !annOp.fields || typeof annOp.fields !== 'object' || Array.isArray(annOp.fields)) throw new Error(`${name}.${handle.field}.operated v13 annotation facts do not match the operation`);
   if (f.selectedRange.annotationId !== annOp.id) throw new Error(`${name}.${handle.field}.operated v13 selected range does not match the annotation`);
+  const selection = operation.selection                                                  ;
   // The plan's `ranges` facts are the authoritative postimage of the document's
   // membership relation: every existing range is carried forward, trimmed (an
   // exclusive 'one'-family apply), or replaced. Validate the WHOLE postimage
@@ -421,14 +414,15 @@ function projectBlocklessAnnotationApplyRange({ name, handle, db, descriptor, da
   if (!row) throw new Error(`${name}.${handle.field}.operated v13 document row is missing`);
   const declared = descriptor.annotations .find((entry) => entry.annotationName === annOp.family);
   if (!declared) throw new Error(`${name}.${handle.field}.operated v13 annotation family is not declared`);
+  const declaredCardinality = 'cardinality' in declared ? declared.cardinality : undefined;
   const targetIds = (annOp.protectedTargetIds ?? [])            ;
   if (Array.isArray(targetIds) && targetIds.some((id, index, ids) => typeof id !== 'string' || (index > 0 && ids[index - 1] >= id))) throw new Error(`${name}.${handle.field}.operated v13 protected targets are invalid`);
   for (const targetId of targetIds) {
     const target = db.prepare(`SELECT id FROM ${prefix}_annotation WHERE id = ? AND document_id = ?`).get(targetId, data.id);
     if (!target) throw new Error(`${name}.${handle.field}.operated v13 protected target does not exist`);
   }
-  db.prepare(`INSERT INTO ${prefix}_annotation (id, document_id, project_id, owner_id, family) VALUES (?, ?, ?, ?, ?)`)
-    .run(annOp.id, data.id, row[descriptor.project          ], row[descriptor.owner          ], annOp.family);
+  const existingAnnotation = db.prepare(`SELECT family FROM ${prefix}_annotation WHERE id = ? AND document_id = ?`).get(annOp.id, data.id);
+  if (existingAnnotation && existingAnnotation.family !== annOp.family) throw new Error(`${name}.${handle.field}.operated v13 annotation family cannot change`);
   const fieldNames = Object.keys(declared.fields);
   // Fail closed: the annotation's field payload must EXACTLY match the declared
   // schema — unknown keys (including on a zero-field family) are rejected, so
@@ -437,16 +431,99 @@ function projectBlocklessAnnotationApplyRange({ name, handle, db, descriptor, da
   if (suppliedFieldNames.length !== fieldNames.length || [...fieldNames].sort().some((fieldName, index) => suppliedFieldNames[index] !== fieldName)) {
     throw new Error(`${name}.${handle.field}.operated v13 annotation fields disagree with declaration`);
   }
+  // Everything below validates the FULL postimage (typed fields, protected
+  // edges, membership, exclusivity) BEFORE the first annotation, typed-row,
+  // protection-edge, or membership write; a forged event fails closed with zero
+  // writes across every projection table.
   const stored = db.prepare(`SELECT * FROM ${prefix}_annotation_${annOp.family} WHERE annotation_id = ?`).get(annOp.id);
+  const values = fieldNames.map((fieldName) => {
+    if (!Object.hasOwn(annOp.fields , fieldName)) throw new Error(`${name}.${handle.field}.operated v13 annotation is missing field '${fieldName}'`);
+    const field = declared.fields[fieldName];
+    const strategy = resolveStrategy(field.kind);
+    const validation = strategy.validate(annOp.fields [fieldName], field);
+    if (validation !== true || (typeof field.validate === 'function' && field.validate(annOp.fields [fieldName]) !== true)) throw new Error(`${name}.${handle.field}.operated v13 annotation field '${fieldName}' failed validation`);
+    return serializeField(field, annOp.fields [fieldName]);
+  });
+  for (const entry of f.ranges) {
+    if (entry.annotationId !== annOp.id &&
+        !db.prepare(`SELECT id FROM ${prefix}_annotation WHERE id = ? AND document_id = ?`).get(entry.annotationId, data.id)) {
+      throw new Error(`${name}.${handle.field}.operated v13 annotation range names an unknown annotation`);
+    }
+  }
+  // Fail closed on a forged postimage: an exclusive 'one'-cardinality family
+  // must never carry overlapping ranges. Overlap is judged in the current
+  // family's offset space (the same space the planner trims in); a stale-basis
+  // or malformed endpoint throws and rejects the WHOLE event before any row is
+  // written or replaced. The applied annotation counts even when this event
+  // creates it (its row does not exist in the database yet).
+  const familyByAnnotationId = new Map                ();
+  for (const familyRow of db.prepare(`SELECT id, family FROM ${prefix}_annotation WHERE document_id = ?`).all(data.id)) {
+    familyByAnnotationId.set(String(familyRow.id), String(familyRow.family));
+  }
+  if (!existingAnnotation) familyByAnnotationId.set(annOp.id, annOp.family);
+  if (!Number.isSafeInteger(selection.startOffset) || !Number.isSafeInteger(selection.endOffset)) {
+    throw new Error(`${name}.${handle.field}.operated v13 annotation selection is invalid`);
+  }
+  const startOffset = selection.startOffset          ;
+  const endOffset = selection.endOffset          ;
+  const postimageRanges = f.ranges                                                                                                                                       ;
+  const selectedRange = f.selectedRange                                    ;
+  for (const entry of postimageRanges) {
+    let start        ;
+    let end        ;
+    try {
+      start = projectEndpointToOffset(current, entry.start);
+      end = projectEndpointToOffset(current, entry.end);
+    } catch {
+      throw new Error(`${name}.${handle.field}.operated v13 annotation range is not projectable`);
+    }
+    if (start >= end) throw new Error(`${name}.${handle.field}.operated v13 annotation range must be forward and non-empty`);
+  }
+  const currentRanges = annotationRangeRows(db, prefix, data.id).map((entry) => ({
+    annotationId: entry.annotation_id,
+    start: JSON.parse(entry.start_point),
+    end: JSON.parse(entry.end_point),
+  }));
+  const selectedStart = projectEndpointToOffset(current, selectedRange.start);
+  const selectedEnd = projectEndpointToOffset(current, selectedRange.end);
+  if (selectedStart !== startOffset || selectedEnd !== endOffset || selectedStart >= selectedEnd) {
+    throw new Error(`${name}.${handle.field}.operated v13 selected range disagrees with the semantic operation`);
+  }
+  const expectedRanges = [];
+  for (const entry of currentRanges) {
+    if (entry.annotationId === annOp.id) continue;
+    if (declaredCardinality === 'one' && familyByAnnotationId.get(entry.annotationId) === annOp.family) {
+      const start = projectEndpointToOffset(current, entry.start);
+      const end = projectEndpointToOffset(current, entry.end);
+      if (end > selectedStart && start < selectedEnd) {
+        if (start < selectedStart) expectedRanges.push({
+          annotationId: entry.annotationId,
+          start: entry.start,
+          end: resolveOffsetToEndpoint(current, selectedStart, current.checkpoint.frontier, 'left'),
+        });
+        if (end > selectedEnd) expectedRanges.push({
+          annotationId: entry.annotationId,
+          start: resolveOffsetToEndpoint(current, selectedEnd, current.checkpoint.frontier, 'right'),
+          end: entry.end,
+        });
+        continue;
+      }
+    }
+    expectedRanges.push(entry);
+  }
+  expectedRanges.push(selectedRange);
+  const rangeSignatures = (entries       ) => entries.map((entry) => JSON.stringify([
+    entry.annotationId,
+    canonicalEndpointJSON(entry.start),
+    canonicalEndpointJSON(entry.end),
+  ]));
+  if (JSON.stringify(rangeSignatures(postimageRanges)) !== JSON.stringify(rangeSignatures(expectedRanges))) {
+    throw new Error(`${name}.${handle.field}.operated v13 annotation range postimage disagrees with the semantic operation`);
+  }
+  // Validation complete — the writes that follow cannot fail validation.
+  if (!existingAnnotation) db.prepare(`INSERT INTO ${prefix}_annotation (id, document_id, project_id, owner_id, family) VALUES (?, ?, ?, ?, ?)`)
+    .run(annOp.id, data.id, row[descriptor.project          ], row[descriptor.owner          ], annOp.family);
   if (fieldNames.length) {
-    const values = fieldNames.map((fieldName) => {
-      if (!Object.hasOwn(annOp.fields , fieldName)) throw new Error(`${name}.${handle.field}.operated v13 annotation is missing field '${fieldName}'`);
-      const field = declared.fields[fieldName];
-      const strategy = resolveStrategy(field.kind);
-      const validation = strategy.validate(annOp.fields [fieldName], field);
-      if (validation !== true || (typeof field.validate === 'function' && field.validate(annOp.fields [fieldName]) !== true)) throw new Error(`${name}.${handle.field}.operated v13 annotation field '${fieldName}' failed validation`);
-      return serializeField(field, annOp.fields [fieldName]);
-    });
     if (stored) {
       db.prepare(`UPDATE ${prefix}_annotation_${annOp.family} SET ${fieldNames.map((fieldName) => `${fieldName} = ?`).join(', ')} WHERE annotation_id = ?`).run(...values, annOp.id);
     } else {
@@ -457,19 +534,16 @@ function projectBlocklessAnnotationApplyRange({ name, handle, db, descriptor, da
   for (const targetId of targetIds) db.prepare(`INSERT INTO ${prefix}_annotation_protected_target (annotation_id, target_annotation_id) VALUES (?, ?)`).run(annOp.id, targetId);
   // Sync the membership relation to the plan's postimage. The applied annotation
   // row (and every other annotation a range names) exists before this write, and
-  // the composite (annotation_id, start_point) primary key admits the multiple
-  // rows a trimmed annotation's left+right remnants require. Writing the WHOLE
-  // postimage makes the exclusive trim of another annotation's range durable and
-  // replay deterministically from the committed event.
-  for (const entry of f.ranges) {
-    if (!db.prepare(`SELECT id FROM ${prefix}_annotation WHERE id = ? AND document_id = ?`).get(entry.annotationId, data.id)) {
-      throw new Error(`${name}.${handle.field}.operated v13 annotation range names an unknown annotation`);
-    }
-  }
+  // ordered links admit the multiple rows a trimmed annotation's left+right
+  // remnants require. Writing the WHOLE postimage makes the exclusive trim of
+  // another annotation's range durable and replay deterministically from the
+  // committed event.
   db.prepare(`DELETE FROM ${prefix}_membership WHERE annotation_id IN (SELECT id FROM ${prefix}_annotation WHERE document_id = ?)`).run(data.id);
+  const ordinalByAnnotation = new Map                ();
   for (const entry of f.ranges) {
-    db.prepare(`INSERT INTO ${prefix}_membership (annotation_id, start_point, end_point) VALUES (?, ?, ?)`)
-      .run(entry.annotationId, JSON.stringify(entry.start), JSON.stringify(entry.end));
+    const ordinal = ordinalByAnnotation.get(entry.annotationId          ) ?? 0;
+    attachAnnotationRange(db, prefix, data.id          , entry.annotationId          , entry.start, entry.end, ordinal);
+    ordinalByAnnotation.set(entry.annotationId          , ordinal + 1);
   }
   db.prepare(`UPDATE ${prefix}_state SET structure_version = ? WHERE document_id = ?`).run(data.after.structuralRevision, data.id);
 }

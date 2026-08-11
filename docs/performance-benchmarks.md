@@ -76,6 +76,7 @@ unless the workload explicitly measures schema preparation.
 | `commit` | Durable dispatch, receipt dedupe, and batched durable actions | 500 / 1,500 / 4,000 dispatches; batch sizes 4 / 8 / 16 |
 | `live-delivery` | Authorized history catch-up and live fan-out to subscribers | 25 / 100 / 400 history events; 1 / 10 / 40 subscribers |
 | `annotated-text` | Cached materialization, checkpoint restore plus materialization, and operation apply plus materialization | 16 / 96 / 256 lines; 997 / 6,037 / 16,273 UTF-16 characters; 16 / 32 / 64 operations |
+| `annotated-text-unified` | Declaration compilation of a timing + confidence + comment annotatedText declaration; one atomic transcript import batch; eager recipient snapshot; snapshot serialization; client materialization; and declaration-action dispatch | 50 / 500 / 2,000 timing/confidence range pairs; 10 / 30 / 60 declaration-action dispatches |
 
 The HTTP benchmark keeps its request shape constant while increasing the amount
 of live database state. It engages both default authorization layers: the route
@@ -83,7 +84,10 @@ gate and the owner-scoped row grant's SQL scope and runtime capability check.
 The commit benchmark keeps its durable `_Log` growing through warmup and
 dispatch phases. The live benchmark measures both replaying existing history and
 delivering new events to multiple subscribers. The text benchmark uses the
-same immutable-family operations used by the annotated-text runtime.
+same immutable-family operations used by the annotated-text runtime. The unified
+annotated-text benchmark exercises the one annotation mechanism end to end:
+declaration → Commit-loop batch import → eager snapshot → serialization →
+client materialization → declaration-owned action dispatch.
 
 ## JSON Report
 
@@ -94,7 +98,7 @@ of `benchmark` and `name`, for example `commit/medium`:
 {
   "schema_version": 2,
   "benchmark": "workbench-performance",
-  "benchmarks": ["compile", "http-crud", "commit", "live-delivery", "annotated-text"],
+  "benchmarks": ["compile", "http-crud", "commit", "live-delivery", "annotated-text", "annotated-text-unified"],
   "sizes": ["small", "medium", "large"],
   "samples": 5,
   "workloads": [

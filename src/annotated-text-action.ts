@@ -1,7 +1,6 @@
 import { assertUtf16Offset, assertWellFormedText } from './annotated-text.ts';
 import { resolveDeclarationMeasurementExtension } from './annotated-text-field.ts';
 import { frozenJsonSnapshot } from './annotated-text-r2.ts';
-import { assertWordEvidencePayload } from './word-evidence.ts';
 import { annotatedTextAction as buildAnnotatedTextAction } from './annotated-text-action-builder.ts';
 
 interface AnnotatedTextEntity {
@@ -25,12 +24,6 @@ interface AnnotatedTextMeasurementExtension {
   combine: (input: unknown) => unknown;
 }
 
-interface AnnotatedTextWordEvidenceDescriptor {
-  familyName: string;
-  formatVersion: number;
-  parse: (value: unknown) => unknown;
-}
-
 interface AnnotatedTextAnnotationDescriptor {
   annotationName: string;
 }
@@ -41,14 +34,12 @@ interface AnnotatedTextFieldDescriptor {
   owner: string;
   measurements: ReadonlyArray<AnnotatedTextMeasurementDescriptor>;
   annotations?: ReadonlyArray<AnnotatedTextAnnotationDescriptor>;
-  wordEvidence?: ReadonlyArray<AnnotatedTextWordEvidenceDescriptor>;
 }
 
 interface AnnotatedTextSourceBlock {
   text: string;
   fields?: Record<string, unknown>;
   measurements?: Array<{ family: string; payload: unknown }>;
-  wordEvidence?: unknown;
 }
 
 interface AnnotatedTextSourceRange {
@@ -133,23 +124,12 @@ export function annotatedTextCreateAction(entity: AnnotatedTextEntity, field: An
   if (input.source !== undefined) {
     const source = input.source;
     if (!source || typeof source !== 'object' || Array.isArray(source) ||
-        Object.keys(source).some((key) => !['text', 'ranges', 'measurements', 'wordEvidence'].includes(key)) ||
+        Object.keys(source).some((key) => !['text', 'ranges', 'measurements'].includes(key)) ||
         typeof source.text !== 'string' || source.text.length === 0) {
       throw new Error('annotatedTextCreateAction: source requires non-empty text');
     }
     const text = source.text;
     try { assertWellFormedText(text); } catch (error) { throw new Error(`annotatedTextCreateAction: source text ${(error as Error).message}`); }
-    let wordEvidence;
-    if (source.wordEvidence !== undefined) {
-      try {
-        wordEvidence = assertWordEvidencePayload(source.wordEvidence, {
-          families: descriptor.wordEvidence,
-          blockText: text,
-        } as any);
-      } catch (error) {
-        throw new Error(`annotatedTextCreateAction: source wordEvidence ${(error as Error).message}`);
-      }
-    }
     const families = new Set<string>();
     let measurements;
     if (source.measurements !== undefined) {
@@ -213,7 +193,6 @@ export function annotatedTextCreateAction(entity: AnnotatedTextEntity, field: An
     const block: AnnotatedTextSourceBlock = {
       text,
       ...(measurements === undefined ? {} : { measurements }),
-      ...(wordEvidence === undefined ? {} : { wordEvidence }),
     };
     payload[fieldName] = { version: 1, blocks: [block], ...(ranges === undefined ? {} : { ranges }) };
   }

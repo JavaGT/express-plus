@@ -13,6 +13,7 @@ import { materializeText, restoreTextFamily, importTextToFamily, textFamilyCheck
 import { projectAnnotatedTextSnapshot } from '../src/internal.mjs';
 import { durableHistory } from '../src/internal.mjs';
 import { withAuthoringBinding } from './annotated-text-authoring-fixture.mjs';
+import { attachAnnotationRange } from '../src/annotated-text-storage.mjs';
 
 // #29 recipient projection, Scope shape: an inherit-child transcript whose
 // confidentiality access resolves `is.owner()` through the PARENT Project's
@@ -111,9 +112,9 @@ function seedDocument(db, Doc, text, annotations = []) {
   for (const annotation of annotations) {
     db.prepare('INSERT INTO SecretDoc_body_annotation (id, document_id, project_id, owner_id, family) VALUES (?, ?, ?, ?, ?)')
       .run(annotation.id, 'd1', 'p1', 'owner', annotation.family);
-    const start = JSON.stringify(resolveOffsetToEndpoint(family, annotation.start, family.checkpoint.frontier, 'right'));
-    const end = JSON.stringify(resolveOffsetToEndpoint(family, annotation.end, family.checkpoint.frontier, 'right'));
-    db.prepare('INSERT INTO SecretDoc_body_membership (annotation_id, start_point, end_point) VALUES (?, ?, ?)').run(annotation.id, start, end);
+    const start = resolveOffsetToEndpoint(family, annotation.start, family.checkpoint.frontier, 'right');
+    const end = resolveOffsetToEndpoint(family, annotation.end, family.checkpoint.frontier, 'right');
+    attachAnnotationRange(db, 'SecretDoc_body', 'd1', annotation.id, start, end, 0);
     if (annotation.protectedTargetIds) {
       for (const target of annotation.protectedTargetIds) {
         db.prepare('INSERT INTO SecretDoc_body_annotation_protected_target (annotation_id, target_annotation_id) VALUES (?, ?)').run(annotation.id, target);
@@ -306,9 +307,9 @@ function seedDanglingProjectDocument(db) {
     ]) {
       db.prepare('INSERT INTO SecretDoc_body_annotation (id, document_id, project_id, owner_id, family) VALUES (?, ?, ?, ?, ?)')
         .run(annotation.id, 'd1', 'missing-project', 'owner', annotation.family);
-      const start = JSON.stringify(resolveOffsetToEndpoint(family, annotation.start, family.checkpoint.frontier, 'right'));
-      const end = JSON.stringify(resolveOffsetToEndpoint(family, annotation.end, family.checkpoint.frontier, 'right'));
-      db.prepare('INSERT INTO SecretDoc_body_membership (annotation_id, start_point, end_point) VALUES (?, ?, ?)').run(annotation.id, start, end);
+      const start = resolveOffsetToEndpoint(family, annotation.start, family.checkpoint.frontier, 'right');
+      const end = resolveOffsetToEndpoint(family, annotation.end, family.checkpoint.frontier, 'right');
+      attachAnnotationRange(db, 'SecretDoc_body', 'd1', annotation.id, start, end, 0);
       if (annotation.protectedTargetIds) {
         for (const target of annotation.protectedTargetIds) {
           db.prepare('INSERT INTO SecretDoc_body_annotation_protected_target (annotation_id, target_annotation_id) VALUES (?, ?)').run(annotation.id, target);

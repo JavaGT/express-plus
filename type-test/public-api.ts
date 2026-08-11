@@ -53,7 +53,7 @@ if (claimedBlobState.kind === 'available') claimedBlobState.readRange([0, 1]);
 
 const annotatedTextOptions: AnnotatedTextOptions = {
   project: 'project', owner: 'owner',
-  annotations: [annotation('note', { actions: [annotationAction('pin')] })],
+  annotations: [annotation('note', { actions: { pin: annotationAction({ change: () => ({ fields: {} }) }) } })],
   measurements: [measurement('wordCount', { extension: 'wordMeasurement' })],
 };
 const annotatedTextField = annotatedText(annotatedTextOptions);
@@ -526,6 +526,27 @@ declare const snapshot: SnapshotResponse<ProjectRow>;
 declare const eventsSince: EventsSinceResponse;
 declare const stale: StaleResponse<ProjectRow>;
 void [envelope, snapshot, eventsSince, stale, Renamed, liveFailure];
+
+// The retired word-evidence mechanism is absent from every public surface: the
+// root entry, the annotated-text entry, and the server entry expose no
+// constructor, reader, handle, table name, payload validator, or payload type.
+// @ts-expect-error word evidence was retired into ordinary annotations
+declare const removedWordEvidenceFamily: typeof import('workbench').wordEvidenceFamily;
+// @ts-expect-error word evidence was retired into ordinary annotations
+declare const removedWordEvidenceRead: typeof import('workbench').readWordEvidence;
+// @ts-expect-error word evidence was retired into ordinary annotations
+declare const removedWordEvidenceFieldHandle: typeof import('workbench').wordEvidenceFieldHandle;
+// @ts-expect-error word evidence was retired into ordinary annotations
+declare const removedWordEvidenceTableName: typeof import('workbench').wordEvidenceTableName;
+// @ts-expect-error word evidence was retired into ordinary annotations
+declare const removedWordEvidencePayload: typeof import('workbench').assertWordEvidencePayload;
+// @ts-expect-error the annotated-text entry also no longer exports word evidence
+declare const removedAnnotatedTextWordEvidence: typeof import('workbench/annotated-text').wordEvidenceFamily;
+// @ts-expect-error the annotated-text entry no longer exports the payload validator
+declare const removedAnnotatedTextWordEvidenceRead: typeof import('workbench/annotated-text').readWordEvidence;
+// @ts-expect-error the word-evidence payload type is gone from the public types
+declare const removedWordEvidenceType: import('workbench').AnnotatedTextWordEvidenceFamily;
+void [removedWordEvidenceFamily, removedWordEvidenceRead, removedWordEvidenceFieldHandle, removedWordEvidenceTableName, removedWordEvidencePayload, removedAnnotatedTextWordEvidence, removedAnnotatedTextWordEvidenceRead, removedWordEvidenceType];
 
 const boundWithMembership = membership(app.entity(Project), {
   member: { can: [read] },

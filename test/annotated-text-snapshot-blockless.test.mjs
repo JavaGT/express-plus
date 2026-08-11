@@ -8,6 +8,7 @@ import { registerAnnotatedTextContract } from '../src/index.mjs';
 import { importTextToFamily, textFamilyCheckpoint } from '../src/annotated-text-continuous.mjs';
 import { projectAnnotatedTextSnapshot, exportAnnotatedText } from '../src/annotated-text-snapshot.mjs';
 import { resolveOffsetToEndpoint } from '../src/annotated-text-continuous.mjs';
+import { attachAnnotationRange } from '../src/annotated-text-storage.mjs';
 
 registerAnnotatedTextContract('m', Object.freeze({ kind: 'measurement' }));
 registerAnnotatedTextStructuralExtension('m', Object.freeze({ version: 1, validate() {}, edit() {}, partition() {}, combine() {} }));
@@ -45,9 +46,9 @@ function seedDocument(db, Doc, text, annotations = []) {
   for (const annotation of annotations) {
     db.prepare('INSERT INTO Doc_body_annotation (id, document_id, project_id, owner_id, family) VALUES (?, ?, ?, ?, ?)')
       .run(annotation.id, 'd1', 'p1', 'u1', annotation.family);
-    const start = JSON.stringify(resolveOffsetToEndpoint(family, annotation.start, family.checkpoint.frontier, 'right'));
-    const end = JSON.stringify(resolveOffsetToEndpoint(family, annotation.end, family.checkpoint.frontier, 'right'));
-    db.prepare('INSERT INTO Doc_body_membership (annotation_id, start_point, end_point) VALUES (?, ?, ?)').run(annotation.id, start, end);
+    const start = resolveOffsetToEndpoint(family, annotation.start, family.checkpoint.frontier, 'right');
+    const end = resolveOffsetToEndpoint(family, annotation.end, family.checkpoint.frontier, 'right');
+    attachAnnotationRange(db, 'Doc_body', 'd1', annotation.id, start, end, 0);
     if (annotation.protectedTargetIds) {
       for (const target of annotation.protectedTargetIds) {
         db.prepare('INSERT INTO Doc_body_annotation_protected_target (annotation_id, target_annotation_id) VALUES (?, ?)').run(annotation.id, target);

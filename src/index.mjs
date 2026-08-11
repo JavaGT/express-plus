@@ -1,5 +1,5 @@
 export { text, boolean, date, number, json, ref, hash, blob, link, map, list, log, ephemeral, state, computed, projected, raster, polyline, vector } from './field.mjs';
-export { annotatedText, annotation, protectingAnnotation, measurement, annotationAction, annotationEntityAction, wordEvidenceFamily, registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension, annotatedTextAction, annotatedTextAnnotationAction, annotatedTextCreateAction, annotatedTextRetireAction, exportAnnotatedText, readAnnotatedTextForRecipient, assertWordEvidencePayload, readWordEvidence, wordEvidenceFieldHandle, wordEvidenceTableName } from './annotated-text-public.mjs';
+export { annotatedText, annotation, protectingAnnotation, measurement, annotationAction, annotationEntityAction, registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension, annotatedTextAction, annotatedTextAnnotationAction, annotatedTextCreateAction, annotatedTextRetireAction, exportAnnotatedText, readAnnotatedTextForRecipient } from './annotated-text-public.mjs';
 export { annotatedTextClientHandle } from './annotated-text-field.mjs';
 export { owner } from './owner.mjs';
 export { now } from './deferred.mjs';
