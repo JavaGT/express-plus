@@ -1,5 +1,10 @@
 # Annotated Text T4 Runtime R2
 
+> Superseded (issue #33): annotated text is now **blockless continuous text**.
+> The `block.split` command and block-topology event described below are
+> historical — there are no blocks to split. The current runtime handles
+> whole-document offset edits only; see `src/annotated-text-continuous.ts`.
+
 ## Status
 
 [APPROVED 2026-07-25]

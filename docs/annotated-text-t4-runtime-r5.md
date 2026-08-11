@@ -1,5 +1,12 @@
 # Annotated Text T4 Runtime R5
 
+> Superseded (issue #33): annotated text is now **blockless continuous text**.
+> The `annotation.detach` command with a `blockId` and the ordered membership
+> postimage below are historical. The current model detaches an annotation range
+> (`{annotationId, start, end}`) from the continuous document — no block identity —
+> see `src/annotated-text-ranges.mjs`. The empty-policy (delete/orphan) and
+> orphan-provenance semantics still hold.
+
 ## Scope
 
 R5 provides the one-path transactional `annotation.detach` action for one

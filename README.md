@@ -33,6 +33,7 @@ node projects/chat/server.mjs
 ```sh
 npm test                 # full suite
 npm run test:coverage    # suite + Node experimental coverage
+npm run bench             # compile/commit/deliver performance report
 ```
 
 ## Functionality reference
@@ -54,6 +55,8 @@ schedule/tick, email).
 | **[docs/architecture-map.md](docs/architecture-map.md)** | Modules mapped to compile / commit / deliver |
 | **[docs/semantic-operations.md](docs/semantic-operations.md)** | Required durable programming model: Actions, semantic operations, projections, compensation, snapshots |
 | **[docs/durable-history-contract.md](docs/durable-history-contract.md)** | Durable history and collaborative-compensation contract |
+| **[docs/performance-benchmarks.md](docs/performance-benchmarks.md)** | Repeatable performance workloads, reports, and regression comparison |
+| **[docs/performance-results.md](docs/performance-results.md)** | Latest generated benchmark parameters and runtime reference |
 | **[SPEC.md](SPEC.md)** | Long-form specification (some historical roadmap wording remains) |
 | **[DECISIONLOG.md](DECISIONLOG.md)** | Append-only decision ledger |
 | **[docs/adr/](docs/adr/)** | Numbered ADRs for settled seams |

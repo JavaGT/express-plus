@@ -316,7 +316,7 @@ export function resolveOffsetToEndpoint(family: ContinuousTextFamily, utf16Offse
   if (JSON.stringify(family.checkpoint.frontier) !== JSON.stringify(basisFrontier)) {
     fail('resolveOffsetToEndpoint requires basisFrontier equal to family checkpoint frontier');
   }
-  const { order, text } = derivedIndex(family);
+  const { order, text, visibleOffsets } = derivedIndex(family);
   assertUtf16Offset(text, utf16Offset);
   if (affinity !== 'left' && affinity !== 'right') fail('resolveOffsetToEndpoint requires an explicit affinity');
 
@@ -327,21 +327,25 @@ export function resolveOffsetToEndpoint(family: ContinuousTextFamily, utf16Offse
     return endpointAfterLastVisible(family, order, basisFrontier);
   }
 
-  let accumulated = 0;
-  for (const [, element] of order) {
-    if (element.deletedBy.length) continue;
-    const width = element.scalar.length;
-    const postScalar = accumulated + width;
-    if (accumulated < utf16Offset && utf16Offset <= postScalar) {
-      const anchor = ['element', [[...element.op], element.ordinal]];
-      if (utf16Offset === postScalar) {
-        return assertStructuralEndpoint({ point: ['point', anchor, 'right'], basisFrontier });
-      }
-      return assertStructuralEndpoint({ point: ['point', anchor, 'left'], basisFrontier });
-    }
-    accumulated = postScalar;
+  // First traversal position whose cumulative visible offset >= the request.
+  // visibleOffsets[i] is the visible offset AFTER element i (deleted elements
+  // leave it flat). The owning element is the one whose span satisfies
+  // visibleOffsets[i] < offset <= visibleOffsets[i+1] — i.e. the element BEFORE
+  // the first cumulative value that reaches the offset. Boundary offsets take
+  // right affinity on that element, exactly like the historical linear scan.
+  let lo = 1;
+  let hi = visibleOffsets.length - 1;
+  while (lo < hi) {
+    const mid = lo + ((hi - lo) >> 1);
+    if (visibleOffsets[mid] >= utf16Offset) hi = mid;
+    else lo = mid + 1;
   }
-  fail('failed to resolve offset to endpoint');
+  const element = order[lo - 1][1];
+  const anchor = ['element', [[...element.op], element.ordinal]];
+  if (utf16Offset === visibleOffsets[lo]) {
+    return assertStructuralEndpoint({ point: ['point', anchor, 'right'], basisFrontier });
+  }
+  return assertStructuralEndpoint({ point: ['point', anchor, 'left'], basisFrontier });
 }
 
 function endpointAfterLastVisible(_family: ContinuousTextFamily, order: Array<[string, TextElement]>, basisFrontier: Frontier): StructuralEndpoint {

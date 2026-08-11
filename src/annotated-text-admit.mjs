@@ -212,7 +212,14 @@ async function assertV9AuthoringPrelude(ctx                )                    
     }
   }
   const actor = createHash('sha256').update(`${name}\u0000${fieldName}\u0000${command.id}\u0000${principal?.id ?? ''}\u0000${command.authoring.mutationId}`).digest('hex').slice(0, 32);
-  const lamport = Math.max(0, ...Object.values(family.checkpoint.elements).map((element) => element.lamport)) + 1;
+  // The max element lamport is the next lamport. Never spread the elements
+  // array into Math.max — a large document (100k+ elements) exceeds the call
+  // stack. The scan is O(elements) but bounded.
+  let maxLamport = 0;
+  for (const element of Object.values(family.checkpoint.elements)) {
+    if (element.lamport > maxLamport) maxLamport = element.lamport;
+  }
+  const lamport = maxLamport + 1;
   return Object.freeze({
     name, fieldName, prefix, descriptor, record, compiledMeta, command, row, db, scope, principal, actionId,
     documentScope, stream, lease, state, family, cursor, position, actor, lamport,

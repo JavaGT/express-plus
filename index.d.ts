@@ -189,10 +189,26 @@ export interface TextFieldFactory {
 }
 
 export const text: TextFieldFactory;
+// ── Annotated-text family (blockless continuous model) ─────────────────────
+//
+// TYPE AUTHORITY: the annotated-text declarations below describe the BLOCKLESS
+// continuous model. The runtime/type authority lives in:
+//   src/annotated-text-continuous.ts           one RGA text stream per document,
+//                                              absolute UTF-16 offsets, annotations
+//                                              as character ranges resolved to
+//                                              structural endpoints (issue #33)
+//   src/annotated-text-recipient-projection.ts canonical -> recipient projection
+//                                              ({text, ranges, annotations,
+//                                              measurements, capabilityHints}).
+// Public functions come from src/annotated-text-public.ts and the operation
+// grammar from src/annotated-text-action-builder.ts. The block-era
+// document/group shapes below are marked `@deprecated` and retained only for
+// historical/interop consumers.
 export interface AnnotatedTextAnnotationDescriptor {
   readonly kind: 'annotation';
   readonly annotationName: string;
-  readonly appliesTo: 'block' | 'block-group' | 'text-range';
+  /** Blockless model: only 'text-range' is legal (the runtime rejects 'block'/'block-group'). */
+  readonly appliesTo: 'text-range';
   readonly cardinality: 'many' | 'one';
   readonly fields: Readonly<Record<string, FieldDescriptor>>;
   readonly actions: readonly AnnotatedTextActionDescriptor[];
@@ -230,7 +246,7 @@ export interface AnnotatedTextActionDescriptor {
   readonly actionName: string;
 }
 export function annotation(name: string, options?: {
-  appliesTo?: 'block' | 'block-group' | 'text-range';
+  appliesTo?: 'text-range';
   cardinality?: 'many' | 'one';
   fields?: Record<string, FieldDescriptor>;
   actions?: readonly AnnotatedTextActionDescriptor[];
@@ -258,6 +274,10 @@ export function annotationAction(name: string): AnnotatedTextActionDescriptor;
 export interface AnnotatedTextOptions {
   project: string;
   owner: string;
+  /**
+   * @deprecated Block-era option (issue #33 removed the block layer). Ignored by
+   * the runtime; retained only for legacy declarations.
+   */
   block?: Record<string, FieldDescriptor>;
   annotations?: readonly (AnnotatedTextAnnotationDescriptor | AnnotatedTextProtectingAnnotationDescriptor)[];
   measurements?: readonly AnnotatedTextMeasurementDescriptor[];
@@ -273,7 +293,8 @@ export interface AnnotatedTextOptions {
 export interface AnnotatedTextAnnotationHandle {
   readonly family: string;
   readonly annotationName: string;
-  readonly appliesTo: 'block' | 'block-group' | 'text-range';
+  /** Blockless model: annotations always apply to 'text-range'. */
+  readonly appliesTo: 'text-range';
   readonly cardinality: 'many' | 'one';
   readonly actions: readonly string[];
   readonly empty: 'delete' | 'orphan';
@@ -346,52 +367,104 @@ export interface AnnotatedTextStructuralExtensionSpec {
 }
 export function registerAnnotatedTextStructuralExtension(extensionName: string, spec: AnnotatedTextStructuralExtensionSpec): void;
 
-export interface AnnotatedTextPosition {
-  readonly blockId: string;
-  readonly offset: number;
-  readonly affinity: 'left' | 'right';
-}
 export interface AnnotatedTextActionAnnotation {
   readonly id: string;
   readonly family: string;
   readonly fields: Readonly<Record<string, unknown>>;
 }
-export interface AnnotatedTextOneSelection { readonly kind: 'one'; readonly blockGroupId: string; }
-export interface AnnotatedTextGroupSelection { readonly kind: 'consecutive' | 'listed'; readonly blockGroupIds: readonly [string, ...string[]]; }
+
+/**
+ * Authoring-stream binding minted by the package (see
+ * src/annotated-text-authoring-stream.ts). Every operation command names a
+ * stream + lease binding plus its mutation id.
+ */
+export interface AnnotatedTextAuthoringBinding {
+  readonly version: 1;
+  readonly stream: string;
+  readonly lease: string;
+  readonly mutationId: string;
+}
+
+/**
+ * Authoring position: an opaque server-minted position token resolved against
+ * the authoring stream's family basis, plus a recipient-visible offset.
+ * Blockless model: `offset` is an ABSOLUTE UTF-16 offset into the whole
+ * document text — there is no blockId (issue #33).
+ */
+export interface AnnotatedTextAuthoringPosition {
+  readonly positionToken: string;
+  readonly offset: number;
+  readonly affinity: 'left' | 'right';
+}
+
+export interface AnnotatedTextOneSelection { readonly kind: 'one'; readonly groupToken: string; }
+export interface AnnotatedTextGroupSelection { readonly kind: 'consecutive' | 'listed'; readonly groupTokens: readonly [string, ...string[]]; }
 export type AnnotatedTextSelection = AnnotatedTextOneSelection | AnnotatedTextGroupSelection;
 interface AnnotatedTextCommandBase {
   readonly id: string;
-  readonly mutationId: string;
+  readonly authoring: AnnotatedTextAuthoringBinding;
 }
 export interface AnnotatedTextInsertCommand extends AnnotatedTextCommandBase {
   readonly kind: 'text.insert';
-  readonly at: AnnotatedTextPosition;
+  readonly at: AnnotatedTextAuthoringPosition;
   readonly text: string;
 }
 export interface AnnotatedTextDeleteCommand extends AnnotatedTextCommandBase {
   readonly kind: 'text.delete';
-  readonly from: AnnotatedTextPosition;
-  readonly to: AnnotatedTextPosition;
+  readonly from: AnnotatedTextAuthoringPosition;
+  readonly to: AnnotatedTextAuthoringPosition;
 }
-export interface AnnotatedTextSplitCommand extends AnnotatedTextCommandBase { readonly kind: 'block.split'; readonly at: AnnotatedTextPosition; }
-export interface AnnotatedTextMergeCommand extends AnnotatedTextCommandBase { readonly kind: 'block.merge'; readonly leftBlockId: string; readonly rightBlockId: string; }
-export interface AnnotatedTextApplyAnnotationCommand extends AnnotatedTextCommandBase { readonly kind: 'annotation.apply'; readonly annotation: { readonly id: string; readonly family: string; readonly fields: Readonly<Record<string, unknown>>; readonly protectedTargetIds?: readonly string[] }; readonly from: AnnotatedTextPosition; readonly to: AnnotatedTextPosition; }
-export interface AnnotatedTextDetachAnnotationCommand extends AnnotatedTextCommandBase { readonly kind: 'annotation.detach'; readonly annotationId: string; readonly blockId: string; }
-export interface AnnotatedTextContinueBlockCommand extends AnnotatedTextCommandBase { readonly kind: 'block.continue'; readonly at: AnnotatedTextPosition; }
+export interface AnnotatedTextReplaceCommand extends AnnotatedTextCommandBase {
+  readonly kind: 'text.replace';
+  readonly from: AnnotatedTextAuthoringPosition;
+  readonly to: AnnotatedTextAuthoringPosition;
+  readonly text: string;
+}
+export interface AnnotatedTextSplitCommand extends AnnotatedTextCommandBase { readonly kind: 'block.split'; readonly at: AnnotatedTextAuthoringPosition; readonly temporaryBlock?: string; }
+export interface AnnotatedTextMergeCommand extends AnnotatedTextCommandBase { readonly kind: 'block.merge'; readonly leftPositionToken: string; readonly rightPositionToken: string; }
+export interface AnnotatedTextApplyAnnotationCommand extends AnnotatedTextCommandBase { readonly kind: 'annotation.apply'; readonly annotation: { readonly id: string; readonly family: string; readonly fields: Readonly<Record<string, unknown>>; readonly protectedTargetIds?: readonly string[] }; readonly from: AnnotatedTextAuthoringPosition; readonly to: AnnotatedTextAuthoringPosition; }
+export interface AnnotatedTextDetachAnnotationCommand extends AnnotatedTextCommandBase { readonly kind: 'annotation.detach'; readonly annotationId: string; readonly positionToken: string; }
+export interface AnnotatedTextRemoveAnnotationCommand extends AnnotatedTextCommandBase { readonly kind: 'annotation.remove'; readonly annotationId: string; }
+export interface AnnotatedTextContinueBlockCommand extends AnnotatedTextCommandBase { readonly kind: 'block.continue'; readonly at: AnnotatedTextAuthoringPosition; readonly temporaryBlock?: string; }
 export interface AnnotatedTextSetGroupAssignmentCommand extends AnnotatedTextCommandBase { readonly kind: 'block-group.assignment.set'; readonly selection: AnnotatedTextSelection; readonly annotation: AnnotatedTextActionAnnotation; }
 export interface AnnotatedTextClearGroupAssignmentCommand extends AnnotatedTextCommandBase { readonly kind: 'block-group.assignment.clear'; readonly selection: AnnotatedTextSelection; readonly family: string; }
-export interface AnnotatedTextSplitAndAssignCommand extends AnnotatedTextCommandBase { readonly kind: 'block.split-and-assign'; readonly at: AnnotatedTextPosition; readonly annotation: AnnotatedTextActionAnnotation; }
+export interface AnnotatedTextSplitAndAssignCommand extends AnnotatedTextCommandBase { readonly kind: 'block.split-and-assign'; readonly at: AnnotatedTextAuthoringPosition; readonly temporaryBlock?: string; readonly annotation: AnnotatedTextActionAnnotation; }
 export type AnnotatedTextOperationCommand =
   | AnnotatedTextInsertCommand
   | AnnotatedTextDeleteCommand
+  | AnnotatedTextReplaceCommand
   | AnnotatedTextSplitCommand
   | AnnotatedTextMergeCommand
   | AnnotatedTextApplyAnnotationCommand
   | AnnotatedTextDetachAnnotationCommand
+  | AnnotatedTextRemoveAnnotationCommand
   | AnnotatedTextContinueBlockCommand
   | AnnotatedTextSetGroupAssignmentCommand
   | AnnotatedTextClearGroupAssignmentCommand
   | AnnotatedTextSplitAndAssignCommand;
+
+/** The `edit` half of a v9 operation payload (command minus id/authoring). */
+export type AnnotatedTextOperationEdit =
+  | Omit<AnnotatedTextInsertCommand, 'id' | 'authoring'>
+  | Omit<AnnotatedTextDeleteCommand, 'id' | 'authoring'>
+  | Omit<AnnotatedTextReplaceCommand, 'id' | 'authoring'>
+  | Omit<AnnotatedTextSplitCommand, 'id' | 'authoring'>
+  | Omit<AnnotatedTextMergeCommand, 'id' | 'authoring'>
+  | Omit<AnnotatedTextApplyAnnotationCommand, 'id' | 'authoring'>
+  | Omit<AnnotatedTextDetachAnnotationCommand, 'id' | 'authoring'>
+  | Omit<AnnotatedTextRemoveAnnotationCommand, 'id' | 'authoring'>
+  | Omit<AnnotatedTextContinueBlockCommand, 'id' | 'authoring'>
+  | Omit<AnnotatedTextSetGroupAssignmentCommand, 'id' | 'authoring'>
+  | Omit<AnnotatedTextClearGroupAssignmentCommand, 'id' | 'authoring'>
+  | Omit<AnnotatedTextSplitAndAssignCommand, 'id' | 'authoring'>;
+
+/** The v9 operation action payload emitted by `annotatedTextAction`. */
+export interface AnnotatedTextOperationPayload {
+  readonly version: 9;
+  readonly id: string;
+  readonly authoring: AnnotatedTextAuthoringBinding;
+  readonly edit: AnnotatedTextOperationEdit;
+}
 export interface AnnotatedTextActionRequest<Payload = unknown> {
   readonly type: string;
   readonly payload: Payload;
@@ -400,7 +473,7 @@ export function annotatedTextAction(
   entity: WorkbenchEntity,
   field: AnnotatedTextFieldHandle,
   command: AnnotatedTextOperationCommand,
-): AnnotatedTextActionRequest;
+): AnnotatedTextActionRequest<AnnotatedTextOperationPayload>;
 export interface AnnotatedTextCreateSourceMeasurement {
   readonly family: string;
   readonly payload: unknown;
@@ -424,7 +497,17 @@ export interface AnnotatedTextCreateInput {
   readonly projectId: string;
   readonly ownerId: string;
   readonly fields?: Readonly<Record<string, unknown>>;
-  readonly source?: { readonly blocks: readonly AnnotatedTextCreateSourceBlock[] };
+  readonly source?: {
+    readonly blocks: readonly AnnotatedTextCreateSourceBlock[];
+    /** Blockless model: optional initial character ranges over the joined source text. */
+    readonly ranges?: readonly {
+      readonly annotationId: string;
+      readonly family: string;
+      readonly start: number;
+      readonly end: number;
+      readonly fields?: Readonly<Record<string, unknown>>;
+    }[];
+  };
 }
 export function annotatedTextCreateAction(
   entity: WorkbenchEntity,
@@ -433,12 +516,19 @@ export function annotatedTextCreateAction(
 ): AnnotatedTextActionRequest;
 export function annotatedTextRetireAction(entity: WorkbenchEntity, documentId: string): AnnotatedTextActionRequest<{ readonly id: string }>;
 
+// ── Block-era shapes (superseded by the blockless continuous model) ────────
+// Retained only for historical/interop consumers of the previous annotated-text
+// model. The live canonical/recipient documents below carry ONE continuous
+// `text` string plus document-scoped `ranges`; there are no blocks, memberships,
+// or block groups (issue #33).
+/** @deprecated Block-era. The blockless model has one continuous text stream and no blocks. */
 export interface AnnotatedTextBlock {
   readonly id: string;
   readonly text: string;
   readonly fields: Readonly<Record<string, unknown>>;
   readonly annotationIds: readonly string[];
 }
+/** @deprecated Block-era. Superseded by the blockless canonical document. */
 export interface AnnotatedTextCanonicalBlock extends AnnotatedTextBlock {
   readonly groupId: string;
 }
@@ -449,6 +539,7 @@ export interface AnnotatedTextAnnotation {
   /** Principal id of the user who applied this annotation; absent on legacy/interop snapshots that predate attribution. */
   readonly owner?: string;
 }
+/** @deprecated Block-era. Replaced by document-scoped ranges: `{annotationId, start, end}`. */
 export interface AnnotatedTextMembership {
   readonly annotationId: string;
   readonly blockId: string;
@@ -456,11 +547,13 @@ export interface AnnotatedTextMembership {
   readonly start?: number;
   readonly end?: number;
 }
+/** @deprecated Block-era group membership. */
 export interface AnnotatedTextGroupMembership {
   readonly annotationId: string;
   readonly groupId: string;
   readonly ordinal: number;
 }
+/** @deprecated Block-era. Superseded by the blockless recipient projection. */
 export interface AnnotatedTextRecipientVisibleBlock {
   readonly kind: 'visible';
   readonly id: string;
@@ -468,24 +561,21 @@ export interface AnnotatedTextRecipientVisibleBlock {
   readonly fields: Readonly<Record<string, unknown>>;
   readonly annotationIds: readonly string[];
 }
+/** @deprecated Block-era. Superseded by the blockless recipient projection. */
 export interface AnnotatedTextRecipientRestrictedBlock {
   readonly kind: 'restricted';
   readonly id: string;
   readonly placeholder: string;
 }
+/** @deprecated Block-era. Superseded by the blockless recipient projection. */
 export type AnnotatedTextRecipientBlock = AnnotatedTextRecipientVisibleBlock | AnnotatedTextRecipientRestrictedBlock;
+/** @deprecated Block-era. Superseded by the blockless recipient projection. */
 export interface AnnotatedTextRecipientBlockGroup {
   readonly id: string;
   readonly blockIds: readonly string[];
   readonly annotationIds: readonly string[];
 }
-export interface AnnotatedTextMeasurement {
-  readonly id: string;
-  readonly blockId: string;
-  readonly family: string;
-  readonly formatVersion: number;
-  readonly payload: unknown;
-}
+/** @deprecated Block-era generic document. Use AnnotatedTextCanonicalDocument / AnnotatedTextRecipientDocument. */
 export interface AnnotatedTextDocument {
   readonly version: 1;
   readonly blocks: readonly AnnotatedTextBlock[];
@@ -494,24 +584,65 @@ export interface AnnotatedTextDocument {
   readonly measurements: readonly AnnotatedTextMeasurement[];
   readonly capabilities: readonly string[] | null;
 }
+
+// ── Blockless document shapes (live contract) ──────────────────────────────
+/** One character range in the document text. Half-open absolute UTF-16 offsets. */
+export interface AnnotatedTextDocumentRange {
+  readonly annotationId: string;
+  readonly start: number;
+  readonly end: number;
+}
+/** An annotation orphaned by a text edit (empty policy 'orphan'): its quote survives. */
+export interface AnnotatedTextOrphan {
+  readonly id: string;
+  readonly family: string;
+  readonly fields: Readonly<Record<string, unknown>>;
+  readonly savedQuote: string;
+  readonly savedRange: readonly [number, number];
+  readonly owner?: string;
+}
+/**
+ * Document-scoped measurement. Blockless model: measurements belong to the
+ * whole document — there is no blockId (issue #33).
+ */
+export interface AnnotatedTextMeasurement {
+  readonly id: string;
+  readonly family: string;
+  readonly formatVersion: number;
+  readonly payload: unknown;
+}
 export interface AnnotatedTextCanonicalDocument {
-  readonly kind: 'workbench.annotatedText.canonical'; readonly version: 1;
-  readonly blocks: readonly AnnotatedTextCanonicalBlock[];
+  readonly kind: 'workbench.annotatedText.canonical';
+  readonly version: 1;
+  readonly text: string;
   readonly annotations: readonly (AnnotatedTextAnnotation & { readonly protectedTargetIds?: readonly string[] })[];
-  readonly memberships: readonly AnnotatedTextMembership[];
-  readonly groupMemberships: readonly AnnotatedTextGroupMembership[];
+  readonly ranges: readonly AnnotatedTextDocumentRange[];
   readonly measurements: readonly AnnotatedTextMeasurement[];
-  readonly capabilities: readonly [];
+  readonly capabilityHints: readonly string[];
+  readonly orphans?: readonly AnnotatedTextOrphan[];
+}
+/** An inline redaction inserted into a recipient projection (placeholder replaces the interval). */
+export interface AnnotatedTextRecipientRedaction {
+  readonly start: number;
+  readonly end: number;
+  readonly placeholder: string;
 }
 export interface AnnotatedTextRecipientDocument {
   readonly kind: 'workbench.annotatedText.recipient';
   readonly version: 1;
-  readonly blockGroups: readonly AnnotatedTextRecipientBlockGroup[];
-  readonly blocks: readonly AnnotatedTextRecipientBlock[];
+  readonly text: string;
+  readonly ranges: readonly AnnotatedTextDocumentRange[];
   readonly annotations: readonly AnnotatedTextAnnotation[];
-  readonly memberships: readonly AnnotatedTextMembership[];
   readonly measurements: readonly AnnotatedTextMeasurement[];
   readonly capabilityHints: readonly string[];
+  /** Present only when a denied whole-document protector restricted the projection (no text). */
+  readonly restricted?: boolean;
+  /** Present only when denied protectors redacted intervals inline. */
+  readonly redactions?: readonly AnnotatedTextRecipientRedaction[];
+  /** Orphan annotations disclosed to this recipient (never across a redaction). */
+  readonly orphans?: readonly Omit<AnnotatedTextOrphan, 'savedRange'>[];
+  /** Authoring envelope appended when the snapshot minted a stream basis. */
+  readonly authoring?: Readonly<Record<string, unknown>>;
 }
 export interface AnnotatedTextExpectedOwningScope {
   readonly entity: WorkbenchEntity;
@@ -542,7 +673,6 @@ export interface AnnotatedTextWordEvidenceReadResult {
   readonly structureVersion: number;
   readonly words: ReadonlyArray<{
     readonly wordId: string;
-    readonly blockId: string | null;
     readonly start: number;
     readonly end: number;
     readonly text: string;

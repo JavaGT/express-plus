@@ -1,8 +1,9 @@
-// Repeatable performance harness for the workbench HTTP CRUD hot path.
+// Repeatable performance harness for the workbench compile, commit, and deliver loops.
 //
-// The benchmark exercises the real node:http transport with both default-on
-// authorization layers engaged: the route gate and the owner-scoped row grant's
-// SQL scope plus runtime capability check. It has no package dependencies.
+// The HTTP workload exercises the real node:http transport with both default-on
+// authorization layers engaged. The other workloads measure the durable kernel,
+// live delivery, schema preparation, and annotated-text fold paths directly.
+// It has no package dependencies beyond the Node runtime.
 //
 // Normal output is exactly one stable JSON object on stdout. Progress and
 // diagnostics go to stderr, so a report can be captured directly:
@@ -14,26 +15,38 @@
 
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import inspector from 'node:inspector';
 import { dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 import workbench, { entity } from '../src/internal.mjs';
 import {
-  text, number, boolean, ref, scope, grant, read, write, subscribe, principal,
+  text, number, boolean, ref, scope, grant, read, write, subscribe, everyone, principal,
 } from '../src/index.mjs';
+import { createServer, durableMutationVariant } from '../src/pipeline.mjs';
+import { executeDDL, executeFrameworkDDL } from '../src/ddl.mjs';
+import { createLiveDeliveryCore } from '../src/live-delivery-core.mjs';
+import {
+  applyTextOperation,
+  importTextToFamily,
+  materializeText,
+  restoreTextFamily,
+  textFamilyCheckpoint,
+} from '../src/annotated-text-continuous.mjs';
 
-const SCHEMA_VERSION = 1;
-const BENCHMARK_NAME = 'http-crud-hot-path';
+const SCHEMA_VERSION = 2;
+const BENCHMARK_NAME = 'workbench-performance';
 const DEFAULT_SAMPLES = 5;
 const DEFAULT_MAX_REGRESSION_PCT = 10;
-const DEFAULT_PROFILE_PATH = 'bench/hot-path.cpuprofile';
-const METRICS = Object.freeze([
-  'create_ops_s',
-  'read_ops_s',
-  'list_ops_s',
-  'update_ops_s',
-  'composite_ops_s',
+const DEFAULT_PROFILE_PATH = 'bench/workbench-performance.cpuprofile';
+const DEFAULT_RECORD_PATH = 'docs/performance-results.md';
+const BENCHMARK_NAMES = Object.freeze([
+  'compile',
+  'http-crud',
+  'commit',
+  'live-delivery',
+  'annotated-text',
 ]);
 
 // The three sizes keep the request shape constant while increasing the amount
@@ -66,7 +79,35 @@ const WORKLOADS = Object.freeze({
   }),
 });
 
+// These workloads cover the durable kernel, delivery loop, and the largest
+// known client/server data structure. Counts are deliberately small enough for
+// a quick local run while still exposing growth with state and history size.
+const COMMIT_WORKLOADS = Object.freeze({
+  small: Object.freeze({ warmup: 100, dispatch: 500, dedupe: 200, batch: 100, batchSize: 4 }),
+  medium: Object.freeze({ warmup: 300, dispatch: 1500, dedupe: 600, batch: 300, batchSize: 8 }),
+  large: Object.freeze({ warmup: 600, dispatch: 4000, dedupe: 1500, batch: 600, batchSize: 16 }),
+});
+
+const COMPILE_WORKLOADS = Object.freeze({
+  small: Object.freeze({ apps: 5, entities: 1, fields: 6 }),
+  medium: Object.freeze({ apps: 3, entities: 4, fields: 10 }),
+  large: Object.freeze({ apps: 1, entities: 10, fields: 14 }),
+});
+
+const LIVE_WORKLOADS = Object.freeze({
+  small: Object.freeze({ history: 25, subscribers: 1, fanout: 100 }),
+  medium: Object.freeze({ history: 100, subscribers: 10, fanout: 250 }),
+  large: Object.freeze({ history: 400, subscribers: 40, fanout: 500 }),
+});
+
+const TEXT_WORKLOADS = Object.freeze({
+  small: Object.freeze({ lines: 16, textChars: textWorkloadText(16).length, operations: 16 }),
+  medium: Object.freeze({ lines: 96, textChars: textWorkloadText(96).length, operations: 32 }),
+  large: Object.freeze({ lines: 256, textChars: textWorkloadText(256).length, operations: 64 }),
+});
+
 const DEFAULT_SIZES = Object.freeze(Object.keys(WORKLOADS));
+const DEFAULT_BENCHMARKS = Object.freeze([...BENCHMARK_NAMES]);
 const me = principal({ type: 'user', id: 'bench-user' });
 
 function log(message) {
@@ -77,12 +118,16 @@ function usage() {
   return `Usage: node bench/hot-path.mjs [options]
 
 Options:
+  --benchmarks <names>         Comma-separated families: ${BENCHMARK_NAMES.join(',')}
+                               (default: all families)
   --sizes <names>             Comma-separated sizes: small,medium,large
                               (default: all three)
   --samples <count>           Samples per size (default: ${DEFAULT_SAMPLES})
   --compare <file>            Compare current medians with a JSON report
   --max-regression-pct <pct>  Allowed median slowdown per metric (default: ${DEFAULT_MAX_REGRESSION_PCT})
   --profile [file]             Write a V8 CPU profile (default: ${DEFAULT_PROFILE_PATH})
+  --record [file]              Write Markdown results (default: ${DEFAULT_RECORD_PATH})
+  --no-record                   Do not write the Markdown results file
   --help                      Show this help
 
 Output is one JSON object on stdout; progress is written to stderr.`;
@@ -116,16 +161,19 @@ function percentage(value, name) {
 
 function parseOptions(argv) {
   const options = {
+    benchmarks: [...DEFAULT_BENCHMARKS],
     sizes: [...DEFAULT_SIZES],
     samples: DEFAULT_SAMPLES,
     comparePath: null,
     maxRegressionPct: DEFAULT_MAX_REGRESSION_PCT,
     profilePath: null,
+    recordPath: DEFAULT_RECORD_PATH,
     help: false,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
+    if (argument === '--') continue;
     const separator = argument.indexOf('=');
     const name = separator === -1 ? argument : argument.slice(0, separator);
     const inlineValue = separator === -1 ? undefined : argument.slice(separator + 1);
@@ -146,6 +194,22 @@ function parseOptions(argv) {
       }
       if (new Set(sizes).size !== sizes.length) throw new Error('--sizes cannot contain duplicates');
       options.sizes = sizes;
+      continue;
+    }
+    if (name === '--benchmarks') {
+      const selected = optionValue(argv, index, name, inlineValue);
+      index = selected.index;
+      const benchmarks = selected.value.split(',').map((value) => value.trim()).filter(Boolean);
+      if (benchmarks.length === 0) throw new Error('--benchmarks must name at least one family');
+      for (const benchmark of benchmarks) {
+        if (!BENCHMARK_NAMES.includes(benchmark)) {
+          throw new Error(`unknown benchmark '${benchmark}' (choose ${BENCHMARK_NAMES.join(', ')})`);
+        }
+      }
+      if (new Set(benchmarks).size !== benchmarks.length) {
+        throw new Error('--benchmarks cannot contain duplicates');
+      }
+      options.benchmarks = benchmarks;
       continue;
     }
     if (name === '--samples') {
@@ -179,6 +243,17 @@ function parseOptions(argv) {
           options.profilePath = DEFAULT_PROFILE_PATH;
         }
       }
+      continue;
+    }
+    if (name === '--record') {
+      const selected = optionValue(argv, index, name, inlineValue);
+      index = selected.index;
+      options.recordPath = selected.value;
+      continue;
+    }
+    if (name === '--no-record') {
+      if (inlineValue !== undefined) throw new Error('--no-record does not take a value');
+      options.recordPath = null;
       continue;
     }
     throw new Error(`unknown option '${argument}'`);
@@ -322,18 +397,7 @@ function summarize(values) {
   };
 }
 
-function operationsFor(config) {
-  return {
-    warmup: config.warmup,
-    create: config.create,
-    read: config.read,
-    list: config.list,
-    update: config.update,
-    list_seed: config.listSeed,
-  };
-}
-
-async function runSample(config) {
+async function runHttpSample(config) {
   const db = new DatabaseSync(':memory:');
   let app;
   try {
@@ -395,24 +459,317 @@ async function runSample(config) {
   }
 }
 
-async function runWorkload(name, config, samples) {
-  log(`${name}: ${samples} samples`);
-  const values = Object.fromEntries(METRICS.map((metric) => [metric, []]));
+function compileEntities(config) {
+  const entities = [];
+  for (let entityIndex = 0; entityIndex < config.entities; entityIndex += 1) {
+    const fields = {};
+    for (let fieldIndex = 0; fieldIndex < config.fields; fieldIndex += 1) {
+      fields[`text${fieldIndex}`] = fieldIndex % 3 === 0
+        ? text()
+        : fieldIndex % 3 === 1 ? number() : boolean();
+    }
+    fields.grant = () => [
+      scope(() => everyone()).can(() => grant(read, write, subscribe)),
+    ];
+    entities.push(entity(`BenchEntity${entityIndex}`, fields));
+  }
+  return entities;
+}
+
+async function runCompileSample(config) {
+  const schemaOps = await timed(config.apps, () => {
+    const db = new DatabaseSync(':memory:');
+    try {
+      executeFrameworkDDL(db);
+      for (const declaration of compileEntities(config)) executeDDL(declaration, db);
+    } finally {
+      db.close();
+    }
+  });
+  return { schema_prepare_ops_s: schemaOps, composite_ops_s: schemaOps };
+}
+
+function commitServer(db) {
+  executeFrameworkDDL(db);
+  return createServer({
+    db,
+    authorize: async () => true,
+    pipeline: durableMutationVariant(),
+    handlers: {
+      'Probe.add': ({ payload, scope: actionScope }) => [{
+        type: 'Probe.added',
+        scope: actionScope,
+        data: payload,
+      }],
+    },
+  });
+}
+
+function assertCommitResult(result, expectedEvents, label) {
+  if (!result?.ok || result.events?.length !== expectedEvents) {
+    throw new Error(`${label} produced an invalid commit result`);
+  }
+}
+
+async function runCommitSample(config) {
+  const db = new DatabaseSync(':memory:');
+  const server = commitServer(db);
+  const principalOf = { type: 'system', id: 'bench' };
+  const scopeKey = 'Probe:p1';
+  try {
+    for (let index = 0; index < config.warmup; index += 1) {
+      const result = await server.dispatch({
+        actionId: `warm-${index}`,
+        type: 'Probe.add',
+        scope: scopeKey,
+        payload: { value: index },
+        principal: principalOf,
+      });
+      assertCommitResult(result, 1, 'warmup');
+    }
+
+    const dispatchOps = await timed(config.dispatch, async () => {
+      for (let index = 0; index < config.dispatch; index += 1) {
+        const result = await server.dispatch({
+          actionId: `dispatch-${index}`,
+          type: 'Probe.add',
+          scope: scopeKey,
+          payload: { value: index },
+          principal: principalOf,
+        });
+        assertCommitResult(result, 1, 'dispatch');
+      }
+    });
+
+    const dedupeAction = {
+      actionId: 'dedupe-seed',
+      type: 'Probe.add',
+      scope: scopeKey,
+      payload: { value: 'dedupe' },
+      principal: principalOf,
+    };
+    assertCommitResult(await server.dispatch(dedupeAction), 1, 'dedupe seed');
+    const dedupeOps = await timed(config.dedupe, async () => {
+      for (let index = 0; index < config.dedupe; index += 1) {
+        const result = await server.dispatch(dedupeAction);
+        assertCommitResult(result, 1, 'dedupe');
+        if (!result.deduped) throw new Error('dedupe did not use the receipt path');
+      }
+    });
+
+    const batchOps = await timed(config.batch * config.batchSize, async () => {
+      for (let batchIndex = 0; batchIndex < config.batch; batchIndex += 1) {
+        const actions = Array.from({ length: config.batchSize }, (_, actionIndex) => ({
+          type: 'Probe.add',
+          payload: { value: `${batchIndex}:${actionIndex}` },
+        }));
+        const result = await server.dispatchBatch({
+          actionId: `batch-${batchIndex}`,
+          actions,
+          scope: scopeKey,
+          principal: principalOf,
+        });
+        assertCommitResult(result, config.batchSize, 'batch');
+      }
+    });
+
+    return {
+      dispatch_ops_s: dispatchOps,
+      dedupe_ops_s: dedupeOps,
+      batch_action_ops_s: batchOps,
+      composite_ops_s: geometricMean([dispatchOps, dedupeOps, batchOps]),
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function appendLiveEvent(db, scopeKey, seq, value) {
+  db.prepare(
+    `INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(
+    scopeKey,
+    seq,
+    'Note.updated',
+    JSON.stringify({ value }),
+    `live-${seq}`,
+    new Date().toISOString(),
+  );
+  db.prepare(
+    `INSERT INTO _Cursor (scope, lastSeq) VALUES (?, ?)
+     ON CONFLICT(scope) DO UPDATE SET lastSeq = excluded.lastSeq`,
+  ).run(scopeKey, seq);
+}
+
+function liveEntityRecord() {
+  return {
+    name: 'Note',
+    hydrate: (row) => ({ ...row }),
+    scopeFilter: () => ({ sql: '1=1', params: {} }),
+    grant: () => [scope(() => everyone()).can(() => grant(read, subscribe))],
+    registry: {},
+  };
+}
+
+async function runLiveDeliverySample(config) {
+  const db = new DatabaseSync(':memory:');
+  const scopeKey = 'Note:n1';
+  db.exec('CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT, owner TEXT)');
+  db.prepare('INSERT INTO Note (id, title, owner) VALUES (?, ?, ?)').run('n1', 'bench', 'bench-user');
+  executeFrameworkDDL(db);
+  for (let seq = 1; seq <= config.history; seq += 1) appendLiveEvent(db, scopeKey, seq, seq);
+
+  const core = createLiveDeliveryCore({
+    db,
+    entities: new Map([['Note', liveEntityRecord()]]),
+    mayVerb: async () => true,
+    projectRecipient: ({ event, scope: eventScope }) => [{
+      scope: eventScope,
+      seq: event.seq,
+      type: event.eventType,
+      data: event.data,
+    }],
+  });
+  const principalOf = { type: 'user', id: 'bench-user' };
+
+  try {
+    const catchupOps = await timed(config.history * config.subscribers, async () => {
+      for (let subscriber = 0; subscriber < config.subscribers; subscriber += 1) {
+        const result = await core.catchup({ principal: principalOf, scope: scopeKey, after: 0 });
+        if (result.kind !== 'catchup' || result.envelopes.length !== config.history) {
+          throw new Error('live catch-up returned an unexpected event count');
+        }
+      }
+    });
+
+    let delivered = 0;
+    let expected = 0;
+    let resolveDelivery;
+    const deliver = async (batch) => {
+      delivered += batch.length;
+      if (delivered >= expected) resolveDelivery?.();
+    };
+    for (let subscriber = 0; subscriber < config.subscribers; subscriber += 1) {
+      await core.subscribe({
+        principal: principalOf,
+        scope: scopeKey,
+        after: config.history,
+        signal: null,
+        deliver,
+      });
+    }
+
+    const fanoutOps = await timed(config.fanout * config.subscribers, async () => {
+      for (let index = 0; index < config.fanout; index += 1) {
+        expected += config.subscribers;
+        const deliveredThisWake = new Promise((resolve) => { resolveDelivery = resolve; });
+        appendLiveEvent(db, scopeKey, config.history + index + 1, index);
+        await core.wake(scopeKey);
+        await deliveredThisWake;
+        resolveDelivery = undefined;
+      }
+    });
+
+    return {
+      catchup_event_ops_s: catchupOps,
+      fanout_delivery_ops_s: fanoutOps,
+      composite_ops_s: geometricMean([catchupOps, fanoutOps]),
+    };
+  } finally {
+    core.close();
+    db.close();
+  }
+}
+
+function textActor(index) {
+  return index.toString(16).padStart(32, '0');
+}
+
+function textWorkloadText(lines) {
+  const words = Array.from({ length: 10 }, (_, index) => `word${index}`).join(' ');
+  return Array.from({ length: lines }, (_, index) => `${words} ${index}`).join('\n');
+}
+
+function textOperation(index) {
+  return [
+    'workbench.text',
+    1,
+    [textActor(index + 1), 1],
+    index + 2,
+    [],
+    ['insert', ['root'], 'x'],
+  ];
+}
+
+function textFamilyFor(config) {
+  let family = importTextToFamily('bench-document', textActor(0), textWorkloadText(config.lines));
+  for (let index = 0; index < config.operations; index += 1) {
+    family = applyTextOperation(family, textOperation(index));
+  }
+  return family;
+}
+
+async function runAnnotatedTextSample(config) {
+  const family = textFamilyFor(config);
+  const checkpoint = JSON.stringify({ id: family.id, checkpoint: textFamilyCheckpoint(family).checkpoint });
+  const materializeOps = await timed(config.operations, () => {
+    let length = 0;
+    for (let index = 0; index < config.operations; index += 1) length += materializeText(family).length;
+    return length;
+  });
+  const restoreOps = await timed(config.operations, () => {
+    let length = 0;
+    for (let index = 0; index < config.operations; index += 1) {
+      length += materializeText(restoreTextFamily(JSON.parse(checkpoint))).length;
+    }
+    return length;
+  });
+  let nextFamily = family;
+  let nextOperation = config.operations + 1;
+  const applyOps = await timed(config.operations, () => {
+    let length = 0;
+    for (let index = 0; index < config.operations; index += 1) {
+      nextFamily = applyTextOperation(nextFamily, textOperation(nextOperation));
+      nextOperation += 1;
+      length += materializeText(nextFamily).length;
+    }
+    return length;
+  });
+
+  return {
+    materialize_ops_s: materializeOps,
+    restore_materialize_ops_s: restoreOps,
+    apply_materialize_ops_s: applyOps,
+    composite_ops_s: geometricMean([materializeOps, restoreOps, applyOps]),
+  };
+}
+
+function operationsFor(config) {
+  return { ...config };
+}
+
+async function runWorkload(benchmark, name, config, samples, sampleRunner) {
+  const workloadName = `${benchmark}/${name}`;
+  log(`${workloadName}: ${samples} samples`);
+  const results = [];
   for (let sample = 1; sample <= samples; sample += 1) {
-    const result = await runSample(config);
-    for (const metric of METRICS) values[metric].push(result[metric]);
+    const result = await sampleRunner(config);
+    results.push(result);
+    const summary = Object.entries(result)
+      .filter(([, value]) => Number.isFinite(value))
+      .map(([metric, value]) => `${metric.replace(/_ops_s$/, '')} ${value.toFixed(0)}`)
+      .join(' · ');
     log(
-      `  sample ${sample}/${samples}: `
-      + `create ${result.create_ops_s.toFixed(0)} · `
-      + `read ${result.read_ops_s.toFixed(0)} · `
-      + `list ${result.list_ops_s.toFixed(0)} · `
-      + `update ${result.update_ops_s.toFixed(0)} ops/s`,
+      `  sample ${sample}/${samples}: ${summary} ops/s`,
     );
   }
 
+  const metricNames = Object.keys(results[0]);
   const metrics = {};
-  for (const metric of METRICS) metrics[metric] = summarize(values[metric]);
+  for (const metric of metricNames) metrics[metric] = summarize(results.map((result) => result[metric]));
   return {
+    benchmark,
     name,
     operations: operationsFor(config),
     metrics,
@@ -471,30 +828,32 @@ function readBaseline(path) {
 }
 
 function compareReports(current, baseline, baselinePath, maxRegressionPct) {
-  const baselineByName = new Map((baseline.workloads ?? []).map((workload) => [workload.name, workload]));
+  const workloadKey = (workload) => `${workload.benchmark ?? ''}/${workload.name}`;
+  const baselineByName = new Map((baseline.workloads ?? []).map((workload) => [workloadKey(workload), workload]));
   const checks = [];
 
   for (const workload of current.workloads) {
-    const previous = baselineByName.get(workload.name);
-    if (!previous) throw new Error(`baseline has no '${workload.name}' workload`);
+    const key = workloadKey(workload);
+    const previous = baselineByName.get(key);
+    if (!previous) throw new Error(`baseline has no '${key}' workload`);
     if (JSON.stringify(previous.operations) !== JSON.stringify(workload.operations)) {
-      throw new Error(`baseline '${workload.name}' workload operations do not match current run`);
+      throw new Error(`baseline '${key}' workload operations do not match current run`);
     }
 
-    for (const metric of METRICS) {
+    for (const metric of Object.keys(workload.metrics ?? {})) {
       const baselineMedian = previous.metrics?.[metric]?.median_ops_s;
       const currentMedian = workload.metrics?.[metric]?.median_ops_s;
       if (!Number.isFinite(baselineMedian) || baselineMedian <= 0) {
-        throw new Error(`baseline '${workload.name}' metric '${metric}' has no positive median`);
+        throw new Error(`baseline '${key}' metric '${metric}' has no positive median`);
       }
       if (!Number.isFinite(currentMedian) || currentMedian <= 0) {
-        throw new Error(`current '${workload.name}' metric '${metric}' has no positive median`);
+        throw new Error(`current '${key}' metric '${metric}' has no positive median`);
       }
 
       const changePct = ((currentMedian - baselineMedian) / baselineMedian) * 100;
       const regressionPct = Math.max(0, -changePct);
       checks.push({
-        workload: workload.name,
+        workload: key,
         metric,
         baseline_median_ops_s: baselineMedian,
         current_median_ops_s: currentMedian,
@@ -513,6 +872,142 @@ function compareReports(current, baseline, baselinePath, maxRegressionPct) {
   };
 }
 
+function gitOutput(argumentsList) {
+  const result = spawnSync('git', argumentsList, {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+  });
+  if (result.error || result.status !== 0) return null;
+  return result.stdout.trim();
+}
+
+function gitContext() {
+  const status = gitOutput(['status', '--porcelain=v1', '--untracked-files=all']);
+  if (status === null) return { clean: false, commit: null, reason: 'git status unavailable' };
+  if (status !== '') return { clean: false, commit: null, reason: 'worktree had uncommitted changes' };
+  const commit = gitOutput(['rev-parse', 'HEAD']);
+  if (!commit) return { clean: false, commit: null, reason: 'HEAD unavailable' };
+  return { clean: true, commit, reason: null };
+}
+
+function stableGitContext(start, end) {
+  if (start.clean && end.clean && start.commit === end.commit) {
+    return { clean: true, commit: start.commit, reason: null };
+  }
+  const reason = start.reason ?? end.reason ?? 'worktree changed while benchmarking';
+  return { clean: false, commit: null, reason };
+}
+
+function workloadParameters(workload) {
+  const config = workload.operations;
+  if (workload.benchmark === 'compile') {
+    return `${config.apps} fresh in-memory schema preparations; ${config.entities} Entity declarations per preparation; ${config.fields} fields per Entity; framework DDL included`;
+  }
+  if (workload.benchmark === 'http-crud') {
+    return `${config.warmup} warmup cycles; ${config.create} creates, ${config.read} reads, ${config.list} lists, ${config.update} updates; ${config.listSeed} seeded Feed rows; sequential requests; JSON bodies with title/body/count/done`;
+  }
+  if (workload.benchmark === 'commit') {
+    return `${config.warmup} warmup dispatches; ${config.dispatch} new durable dispatches; ${config.dedupe} retries of one committed action ID; ${config.batch} batches of ${config.batchSize} actions; one Probe scope`;
+  }
+  if (workload.benchmark === 'live-delivery') {
+    return `${config.history} seeded history events; ${config.subscribers} authorized subscribers; ${config.fanout} new events fanned out to every subscriber; one Note scope`;
+  }
+  if (workload.benchmark === 'annotated-text') {
+    return `${config.textChars} UTF-16 characters across ${config.lines} lines; ${config.operations} CRDT operations; cached materialization, checkpoint restore, and apply-plus-materialize phases`;
+  }
+  return JSON.stringify(config);
+}
+
+function markdownCell(value) {
+  return String(value).replaceAll('|', '\\|').replaceAll('\n', ' ');
+}
+
+function renderResultsMarkdown(report, source, recordPath) {
+  const lines = [
+    '# Performance Results',
+    '',
+    '> Generated by `bench/hot-path.mjs`. This file contains the latest recorded run; use the JSON report or a committed result for CI-grade comparison.',
+    '',
+    '## Run',
+    '',
+    `- Recorded at: \`${new Date().toISOString()}\``,
+    `- Node: \`${process.version}\``,
+    `- Platform: \`${process.platform}/${process.arch}\``,
+    `- Report: \`${report.benchmark}\` schema \`v${report.schema_version}\``,
+    `- Samples per workload: \`${report.samples}\``,
+    `- Benchmark families: \`${report.benchmarks.join(', ')}\``,
+    `- Sizes: \`${report.sizes.join(', ')}\``,
+  ];
+  if (source.clean) {
+    lines.push(`- Git commit: \`${source.commit}\` (worktree clean before and after the run)`);
+  } else {
+    lines.push(`- Git commit: not recorded (${source.reason}; the worktree was not verified as a stable clean commit)`);
+  }
+  lines.push(
+    '',
+    '## Workload Parameters',
+    '',
+    '| Workload | Parameters | Exact operation configuration |',
+    '| --- | --- | --- |',
+  );
+  for (const workload of report.workloads) {
+    lines.push(
+      `| ${workload.benchmark}/${workload.name} | ${markdownCell(workloadParameters(workload))} | \`${markdownCell(JSON.stringify(workload.operations))}\` |`,
+    );
+  }
+
+  lines.push(
+    '',
+    '## Throughput',
+    '',
+    'Values are operations per second. The median is the primary reference number; sample values are included to show local variance.',
+    '',
+    '| Workload | Metric | Median | Mean | Min | Max | Relative stddev | Samples |',
+    '| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |',
+  );
+  for (const workload of report.workloads) {
+    for (const [metric, summary] of Object.entries(workload.metrics)) {
+      lines.push(
+        `| ${workload.benchmark}/${workload.name} | ${metric} | ${summary.median_ops_s} | ${summary.mean_ops_s} | ${summary.min_ops_s} | ${summary.max_ops_s} | ${summary.relative_stddev_pct}% | ${summary.sample_ops_s.join(', ')} |`,
+      );
+    }
+  }
+
+  lines.push(
+    '',
+    '## Interpretation',
+    '',
+    '- A run without a Git commit is a local directional measurement, not a versioned library expectation.',
+    '- Compare runs with the same Node version, machine load, benchmark families, sizes, sample count, and operation configuration.',
+    `- Markdown record path: \`${recordPath}\`.`,
+    '',
+  );
+  return lines.join('\n');
+}
+
+function recordResults(report, source, recordPath) {
+  const outputPath = resolve(recordPath);
+  mkdirSync(dirname(outputPath), { recursive: true });
+  writeFileSync(outputPath, `${renderResultsMarkdown(report, source, recordPath)}\n`);
+  log(`recorded Markdown results: ${recordPath}`);
+}
+
+const BENCHMARK_WORKLOADS = Object.freeze({
+  compile: COMPILE_WORKLOADS,
+  'http-crud': WORKLOADS,
+  commit: COMMIT_WORKLOADS,
+  'live-delivery': LIVE_WORKLOADS,
+  'annotated-text': TEXT_WORKLOADS,
+});
+
+const BENCHMARK_RUNNERS = Object.freeze({
+  compile: runCompileSample,
+  'http-crud': runHttpSample,
+  commit: runCommitSample,
+  'live-delivery': runLiveDeliverySample,
+  'annotated-text': runAnnotatedTextSample,
+});
+
 async function main() {
   const options = parseOptions(process.argv.slice(2));
   if (options.help) {
@@ -520,16 +1015,27 @@ async function main() {
     return;
   }
 
+  const sourceAtStart = gitContext();
   const stopProfiler = options.profilePath ? await startCpuProfile(options.profilePath) : null;
   let report;
   try {
     const workloads = [];
-    for (const name of options.sizes) {
-      workloads.push(await runWorkload(name, WORKLOADS[name], options.samples));
+    for (const benchmark of options.benchmarks) {
+      for (const name of options.sizes) {
+        workloads.push(await runWorkload(
+          benchmark,
+          name,
+          BENCHMARK_WORKLOADS[benchmark][name],
+          options.samples,
+          BENCHMARK_RUNNERS[benchmark],
+        ));
+      }
     }
     report = {
       schema_version: SCHEMA_VERSION,
       benchmark: BENCHMARK_NAME,
+      benchmarks: options.benchmarks,
+      sizes: options.sizes,
       samples: options.samples,
       workloads,
       profile: options.profilePath
@@ -549,6 +1055,11 @@ async function main() {
       options.comparePath,
       options.maxRegressionPct,
     );
+  }
+
+  if (options.recordPath) {
+    const source = stableGitContext(sourceAtStart, gitContext());
+    recordResults(report, source, options.recordPath);
   }
 
   process.stdout.write(`${JSON.stringify(report)}\n`);

@@ -236,6 +236,8 @@ export function createWordEvidenceConsumer({ db, entityName, fieldName, tableNam
               for (let i = 0; i < evidence.ids.length; i++) {
                 const start = evidence.startsUtf16[i] + utf16Cursor;
                 const end = evidence.endsUtf16[i] + utf16Cursor;
+                // resolveOffsetToEndpoint binary-searches the derived index,
+                // so bulk imports stay ~O(log E) per offset.
                 const startAnchor = resolveOffsetToEndpoint(family, start, frontier, 'right');
                 const endAnchor = resolveOffsetToEndpoint(family, end, frontier, 'right');
                 for (const familyName of Object.keys(evidence.families)) {

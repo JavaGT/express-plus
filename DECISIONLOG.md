@@ -794,6 +794,14 @@ Architecture-review program deepenings 2–4 (Schedule was #1, already merged).
 
 ## 2026-07-29 — AT-R9 typed annotated-text source creation grammar
 
+> Superseded (issue #33): annotated text is now **blockless continuous text** —
+> one RGA text stream per document, no blocks, no block fields, no block/measurement
+> identities. The "source blocks may carry declared block fields" language below is
+> historical. The current model lives in `src/annotated-text-continuous.ts`,
+> `src/annotated-text-ranges.mjs`, and the canonical recipient projection in
+> `src/annotated-text-recipient-projection.ts` (measurements are
+> `{id, family, formatVersion, payload}` — no blockId, no offsets).
+
 - **Decision:** `annotatedTextCreateAction(entity, field, input)` is the public source-creation grammar for annotated text. It takes the declared annotated-text field plus explicit `id`, `projectId`, and `ownerId`; optional source blocks may carry declared block fields and one JSON measurement payload per declared family. It does not accept raw canonical document state, caller-chosen block/measurement identities or format versions, annotation geometry, or arbitrary document ownership fields.
 - **Why:** creation must bind ownership and import validation to the selected declaration before dispatch, while the package remains the sole owner of canonical CRDT state and generated durable identities. This closes the former generic create-payload escape hatch rather than preserving it as a compatibility path.
 - **Consequences:** source text and measurement payloads are validated before writes and revalidated from the durable event during projection; imported measurements survive restart and ordinary text edits without becoming mutable source input. Empty source blocks and undeclared/duplicate measurement families fail closed.

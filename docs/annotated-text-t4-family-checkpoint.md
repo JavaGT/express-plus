@@ -1,5 +1,12 @@
 # Annotated Text T4 Family Checkpoint
 
+> Superseded (issue #33): annotated text is now **blockless continuous text**.
+> The block-ownership family described below (blocks, elementKeys, split/merge)
+> is historical. The current family is `{id, checkpoint}` only — one RGA text
+> stream per document with absolute UTF-16 offsets — see
+> `src/annotated-text-continuous.ts`. The RGA checkpoint grammar it builds on
+> remains authoritative (ADR 0005).
+
 ## Concept
 
 A text family is an immutable projection of a canonical v1 RGA checkpoint onto

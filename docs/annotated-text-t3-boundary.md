@@ -1,5 +1,14 @@
 # Annotated Text T3 Boundary
 
+> Superseded (issue #33): annotated text is now **blockless continuous text**.
+> The physical schema described below — block relation/table, block rows,
+> `(block_id, family)` measurement uniqueness, "logical blocks, whole-block
+> memberships" snapshots — is historical. The current model is one continuous
+> family per document plus character-range annotations; the canonical document
+> carries `text`, `annotations`, `ranges`, `measurements` (`{id, family,
+> formatVersion, payload}` — no blockId), `capabilityHints`, and optional
+> `orphans` (see `src/annotated-text-recipient-projection.ts`).
+
 ## Delivery Cutover
 
 - `src/annotated-text-field.mjs` owns T3 declaration validation and physical schema. Its frozen declarative constructors (`annotation`, `protectingAnnotation`, `measurement`, `annotationAction`) make duplicate family names detectable before application startup.

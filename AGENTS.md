@@ -22,6 +22,8 @@ Use the canonical Matt Pocock skill labels: `needs-triage`, `needs-info`, `ready
 
 This is a single-context repository. Read `CONTEXT.md` and relevant records under `docs/adr/`. See `docs/agents/domain.md`.
 
+Performance reference: read `docs/performance-results.md` for the latest recorded benchmark parameters and expected runtimes. Treat results without a recorded Git commit as directional measurements from a dirty or otherwise unverified worktree.
+
 ## Naming
 
 - **Be specific.** A name should say what a thing IS, not a generic category it

@@ -1,5 +1,11 @@
 # Annotated Text T4 Initialization
 
+> Superseded (issue #33): annotated text is now **blockless continuous text**.
+> The initial-block identity/epoch/derived-block initialization described below
+> is historical. The current family is `{id, checkpoint}` — plain text imports
+> as a single root element with no block layer — see
+> `src/annotated-text-continuous.ts` (`importTextToFamily`).
+
 [IMPLEMENTED — TERRA APPROVED 2026-07-25]
 
 ## Contract

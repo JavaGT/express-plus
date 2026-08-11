@@ -36,6 +36,7 @@ import {
   registerAnnotatedTextContract,
   registerAnnotatedTextStructuralExtension,
   type AnnotatedTextFieldHandle, type AnnotatedTextOptions,
+  type AnnotatedTextCanonicalDocument, type AnnotatedTextRecipientDocument,
 } from 'workbench/annotated-text';
 import {
   changedRange, classifyDisplayOffset, displayToWirePosition, placeholderDisplayWidth,
@@ -119,11 +120,29 @@ annotatedTextCreateAction(annotatedTextEntity, requiredAnnotatedTextHandle, { id
 // @ts-expect-error package generates measurement identities and format versions
 annotatedTextCreateAction(annotatedTextEntity, requiredAnnotatedTextHandle, { id: 'document-1', projectId: 'project-1', ownerId: 'owner-1', source: { blocks: [{ text: 'hello', measurements: [{ id: 'raw-id', family: 'wordCount', formatVersion: 1, payload: {} }] }] } });
 annotatedTextAction(annotatedTextEntity, requiredAnnotatedTextHandle, {
-  kind: 'text.insert', id: 'document-1', mutationId: 'insert-1',
-  at: { blockId: 'block-1', offset: 1, affinity: 'right' }, text: 'x',
+  kind: 'text.insert', id: 'document-1',
+  authoring: { version: 1, stream: 'opaque-stream-token', lease: 'opaque-lease-token', mutationId: 'insert-1' },
+  at: { positionToken: 'opaque-position-token', offset: 1, affinity: 'right' }, text: 'x',
 });
-// @ts-expect-error public positions require a recipient-visible block id
-annotatedTextAction(annotatedTextEntity, requiredAnnotatedTextHandle, { kind: 'text.insert', id: 'document-1', mutationId: 'insert-1', at: { offset: 1 }, text: 'x' });
+// @ts-expect-error public positions require an authoring position token
+annotatedTextAction(annotatedTextEntity, requiredAnnotatedTextHandle, { kind: 'text.insert', id: 'document-1', authoring: { version: 1, stream: 'opaque-stream-token', lease: 'opaque-lease-token', mutationId: 'insert-1' }, at: { offset: 1 }, text: 'x' });
+
+// Blockless document shapes (issue #33): one continuous text, document-scoped ranges.
+declare const canonicalDoc: AnnotatedTextCanonicalDocument;
+const canonicalText: string = canonicalDoc.text;
+const canonicalRanges: readonly { annotationId: string; start: number; end: number }[] = canonicalDoc.ranges;
+declare const recipientDoc: AnnotatedTextRecipientDocument;
+const recipientText: string = recipientDoc.text;
+const recipientRanges: readonly { annotationId: string; start: number; end: number }[] = recipientDoc.ranges;
+// @ts-expect-error the blockless canonical document has no blocks
+canonicalDoc.blocks;
+// @ts-expect-error the blockless canonical document has no memberships
+canonicalDoc.memberships;
+// @ts-expect-error the blockless recipient projection has no blocks
+recipientDoc.blocks;
+// @ts-expect-error the blockless recipient projection has no memberships
+recipientDoc.memberships;
+void [canonicalText, canonicalRanges, recipientText, recipientRanges];
 
 declare const projectedAnnotatedTextSnapshot: Record<string, unknown>;
 declare const compiledAnnotatedTextHandle: AnnotatedTextFieldHandle;

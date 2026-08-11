@@ -88,8 +88,8 @@ of the following: reload the document; resolve its declared Project; authorize
 the principal as an explicit member of that exact Project with `write`, and for
 the annotated field's declared document-authoring `write` capability, through
 the normal grant engine; validate the recipient-bound basis and current
-projected blocks;
-validate a non-empty, same-visible-block UTF-16 range; revalidate the selected
+projected continuous text;
+validate a non-empty UTF-16 range; revalidate the selected
 action and related entity declaration; authorize creation of the related row
 in that same Project; materialize canonical fields/defaults; emit/project the
 entity creation and annotation application; and insert the receipt. The related
@@ -100,7 +100,7 @@ Both grants are mandatory. Editor/owner Project membership may satisfy them;
 viewer/review-only access does not. Organization membership is irrelevant.
 Author attribution is always the authenticated principal. A missing/revoked
 document, stale or foreign
-basis, hidden/cross-restricted block, invalid/reversed/cross-block offsets,
+basis, hidden/cross-restricted text, invalid/reversed/out-of-range offsets,
 cross-Project relation, malformed declaration, ID collision, authorization
 failure, validation failure, or either projection failure rolls back everything.
 Authorization runs again before receipt dedupe, so a revoked replay is denied;
@@ -128,7 +128,7 @@ publish or pin a declaration-only or browser-only subset.
 
 Acceptance tests must prove: editor/owner success and viewer, organization-only,
 revoked, missing, and retired denial; absent/foreign/stale basis denial; hidden,
-cross-restricted, cross-block, collapsed, reversed, out-of-range, and
+cross-restricted, collapsed, reversed, out-of-range, and
 surrogate-splitting selection denial; malformed, missing, optional, mismatched,
 duplicated, and unknown declaration pieces—including relation, project, author,
 capability, input mappings, and defaults—fail at startup; related-row

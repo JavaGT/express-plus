@@ -1,5 +1,11 @@
 # Annotated Text T4 Runtime R4
 
+> Superseded (issue #33): annotated text is now **blockless continuous text**.
+> The "one current block", internal-split, and whole-block-membership description
+> below is historical. The current model applies an annotation as a character
+> range `{annotationId, start, end}` over the continuous document — no block
+> splits — see `src/annotated-text-ranges.mjs` and `src/annotated-text-continuous.ts`.
+
 ## Scope
 
 R4 adds the generated version-4 `annotation.apply` operation. It applies one

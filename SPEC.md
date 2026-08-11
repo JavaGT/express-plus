@@ -416,7 +416,7 @@ replay core (bootstrap snapshot, then stream; gap/duplicate/next unchanged).
 
 The field-type plugin publishes a lawful coalescer + a sequence-span reducer +
 named pace-profiles — *data semantics* decide what is lawful to drop (a position
-is loss-tolerant; block edits are not). The subscriber selects
+is loss-tolerant; document text edits are not). The subscriber selects
 `pace.coalesce({ window, by })` or a profile *within* the plugin-permitted bounds
 (data, not code; runs after re-auth and interest; narrowing only). A spectator
 and a player may choose different temporal policy for the same field.

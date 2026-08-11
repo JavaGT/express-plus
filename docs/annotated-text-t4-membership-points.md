@@ -1,5 +1,14 @@
 # Annotated Text T4 Membership Points
 
+> Superseded (issue #33): annotated text is now **blockless continuous text**.
+> The block-level membership ranges and block-targeted endpoint API below
+> (`projectEndpointToBlockOffset`, `resolvePositionToEndpoint`, `assertMembershipRange`)
+> are historical. The current model projects structural endpoints against the whole
+> document: `projectEndpointToOffset`, `resolveOffsetToEndpoint`, and character
+> ranges `{annotationId, start, end}` — see `src/annotated-text-continuous.ts` and
+> `src/annotated-text-ranges.mjs`. The structural-endpoint and basisFrontier
+> semantics (root semantics, markers, tombstones) still hold.
+
 [IMPLEMENTED — TERRA APPROVED 2026-07-25]
 
 ## Concept
