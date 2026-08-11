@@ -4,20 +4,22 @@
 
 ## Run
 
-- Recorded at: `2026-08-11T12:35:20.067Z`
+- Recorded at: `2026-08-11T12:59:14.621Z`
 - Node: `v26.7.0`
 - Platform: `darwin/arm64`
 - Report: `workbench-performance` schema `v2`
-- Samples per workload: `3`
+- Samples per workload: `5`
 - Benchmark families: `annotated-text-unified`
-- Sizes: `small`
-- Git commit: not recorded (worktree had uncommitted changes; the worktree was not verified as a stable clean commit)
+- Sizes: `small, medium, large`
+- Git commit: `01744a6ce5c1d4e6454426cf86b954ee60e544dd` (worktree clean before and after the run)
 
 ## Workload Parameters
 
 | Workload | Parameters | Exact operation configuration |
 | --- | --- | --- |
 | annotated-text-unified/small | 50 timing/confidence range pairs imported in one atomic Commit-loop batch; 5 fresh schema preparations; eager snapshot, serialization, client materialization, and 10 declaration-action dispatches against one authoring frame | `{"apps":5,"annotations":50,"corrects":10}` |
+| annotated-text-unified/medium | 500 timing/confidence range pairs imported in one atomic Commit-loop batch; 3 fresh schema preparations; eager snapshot, serialization, client materialization, and 30 declaration-action dispatches against one authoring frame | `{"apps":3,"annotations":500,"corrects":30}` |
+| annotated-text-unified/large | 2000 timing/confidence range pairs imported in one atomic Commit-loop batch; 1 fresh schema preparations; eager snapshot, serialization, client materialization, and 60 declaration-action dispatches against one authoring frame | `{"apps":1,"annotations":2000,"corrects":60}` |
 
 ## Throughput
 
@@ -25,13 +27,27 @@ Values are operations per second. The median is the primary reference number; sa
 
 | Workload | Metric | Median | Mean | Min | Max | Relative stddev | Samples |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| annotated-text-unified/small | compile_app_ops_s | 4003.469 | 3595.198 | 2555.584 | 4226.543 | 25.234% | 2555.584, 4226.543, 4003.469 |
-| annotated-text-unified/small | import_annotation_ops_s | 17762.778 | 13900.859 | 6049.378 | 17890.422 | 48.917% | 6049.378, 17762.778, 17890.422 |
-| annotated-text-unified/small | snapshot_annotation_ops_s | 109529.025 | 99583.821 | 60921.412 | 128301.025 | 34.919% | 60921.412, 109529.025, 128301.025 |
-| annotated-text-unified/small | serialize_annotation_ops_s | 3519020.305 | 3424389.31 | 2727247.934 | 4026899.69 | 19.127% | 2727247.934, 3519020.305, 4026899.69 |
-| annotated-text-unified/small | materialize_annotation_ops_s | 1496266.814 | 1166865.967 | 439802.089 | 1564528.999 | 54.04% | 439802.089, 1496266.814, 1564528.999 |
-| annotated-text-unified/small | declaration_action_ops_s | 2333.133 | 2253.189 | 1768.451 | 2657.984 | 19.977% | 1768.451, 2333.133, 2657.984 |
-| annotated-text-unified/small | composite_ops_s | 68244.23 | 58978.86 | 35488.77 | 73203.58 | 34.747% | 35488.77, 68244.23, 73203.58 |
+| annotated-text-unified/small | compile_app_ops_s | 4396.408 | 4140.308 | 2821.206 | 4753.417 | 19.034% | 2821.206, 4047.764, 4396.408, 4682.744, 4753.417 |
+| annotated-text-unified/small | import_annotation_ops_s | 19934.38 | 17523.32 | 6511.247 | 21874.457 | 35.552% | 6511.247, 19934.38, 19970.045, 19326.472, 21874.457 |
+| annotated-text-unified/small | snapshot_annotation_ops_s | 85708.164 | 102423.862 | 65546.907 | 149551.271 | 34.963% | 65546.907, 80672.226, 130640.741, 149551.271, 85708.164 |
+| annotated-text-unified/small | serialize_annotation_ops_s | 4047272.139 | 3815629.832 | 2944814.182 | 4316484.655 | 14.086% | 2944814.182, 4047272.139, 3680936.43, 4316484.655, 4088641.753 |
+| annotated-text-unified/small | materialize_annotation_ops_s | 1799111.239 | 2071750.69 | 420388.86 | 3301201.637 | 57.408% | 420388.86, 1675996.38, 1799111.239, 3301201.637, 3162055.336 |
+| annotated-text-unified/small | declaration_action_ops_s | 2350.383 | 2231.265 | 1617.643 | 2466.902 | 15.566% | 1617.643, 2397.794, 2466.902, 2350.383, 2323.6 |
+| annotated-text-unified/small | composite_ops_s | 75646.237 | 69794.479 | 36619.057 | 87645.714 | 28.336% | 36619.057, 68780.429, 75646.237, 87645.714, 80280.959 |
+| annotated-text-unified/medium | compile_app_ops_s | 2709.721 | 2689.561 | 2522.244 | 2818.336 | 4.348% | 2522.244, 2629.657, 2767.847, 2818.336, 2709.721 |
+| annotated-text-unified/medium | import_annotation_ops_s | 22383.529 | 22020.298 | 18029.401 | 23891.913 | 10.651% | 18029.401, 22383.529, 23891.913, 23569.341, 22227.305 |
+| annotated-text-unified/medium | snapshot_annotation_ops_s | 76541.84 | 84074.748 | 70702.402 | 99091.666 | 15.777% | 97634.397, 70702.402, 76541.84, 76403.434, 99091.666 |
+| annotated-text-unified/medium | serialize_annotation_ops_s | 4343105.32 | 4287175.118 | 3927992.05 | 4495230.56 | 5.383% | 3927992.05, 4463448.818, 4206098.843, 4495230.56, 4343105.32 |
+| annotated-text-unified/medium | materialize_annotation_ops_s | 4603860.798 | 4665005.779 | 3541389.996 | 6145941.528 | 20.261% | 3541389.996, 4603860.798, 4329791.564, 4704045.008, 6145941.528 |
+| annotated-text-unified/medium | declaration_action_ops_s | 718.633 | 713.065 | 694.837 | 726.102 | 1.917% | 702.534, 694.837, 726.102, 718.633, 723.22 |
+| annotated-text-unified/medium | composite_ops_s | 63719.547 | 64092.969 | 59278.498 | 69756.488 | 6.01% | 59278.498, 62467.81, 63719.547, 65242.504, 69756.488 |
+| annotated-text-unified/large | compile_app_ops_s | 874.858 | 862.925 | 806.886 | 901.782 | 4.289% | 901.782, 883.88, 806.886, 847.219, 874.858 |
+| annotated-text-unified/large | import_annotation_ops_s | 21039.579 | 21224.158 | 20316.936 | 22029.207 | 3.333% | 20316.936, 21039.579, 21844.365, 22029.207, 20890.706 |
+| annotated-text-unified/large | snapshot_annotation_ops_s | 42405.093 | 42147.064 | 40016.757 | 43804.373 | 3.82% | 42405.093, 41030.638, 43478.458, 40016.757, 43804.373 |
+| annotated-text-unified/large | serialize_annotation_ops_s | 4774933.509 | 4741913.138 | 4574042.31 | 4860757.525 | 2.446% | 4574042.31, 4821699.577, 4678132.77, 4860757.525, 4774933.509 |
+| annotated-text-unified/large | materialize_annotation_ops_s | 5862953.463 | 5879638.809 | 5198741.385 | 6639918.86 | 9.002% | 6639918.86, 5198741.385, 6044204.288, 5862953.463, 5652376.047 |
+| annotated-text-unified/large | declaration_action_ops_s | 231.961 | 231.176 | 226.762 | 235.077 | 1.406% | 231.961, 226.762, 232.899, 229.181, 235.077 |
+| annotated-text-unified/large | composite_ops_s | 41415.922 | 41284.332 | 40383.24 | 41980.001 | 1.41% | 41980.001, 40383.24, 41415.922, 41181.849, 41460.647 |
 
 ## Interpretation
 
