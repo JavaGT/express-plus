@@ -1279,9 +1279,22 @@ export interface ErasurePreparationContext<Payload = Record<string, unknown>> {
   }>;
   readonly subject: Readonly<{ readonly owningScope: string; readonly id: string }>;
 }
+export interface ProtectedArtefactStore {
+  /** Insert a row into a declared application-owned protected table, atomically with this action's commit. */
+  write(table: string, values: Readonly<Record<string, unknown>>): number | bigint;
+  /** Permanently delete rows from a declared protected table by equality predicate, atomically with this action's commit. */
+  erase(table: string, where: Readonly<Record<string, unknown>>): number | bigint;
+}
 export interface RegisteredActionCommit {
   readonly events: readonly Readonly<{ type: string; scope: string; data: unknown }>[];
   readonly directive?: ErasureDirectiveV1 | ErasureDirectivePreparationV1;
+  /**
+   * The non-sensitive action identity stored as the receipt's canonical
+   * `actionData` instead of the request payload. REQUIRED for an action that
+   * declares `protectedArtefacts`: the request payload may carry protected
+   * payloads and must never become canonical history.
+   */
+  readonly canonicalPayload?: unknown;
   readonly privateFact?: { readonly before: unknown; readonly after: unknown };
   readonly effects?: readonly PostCommitEffectDeclaration[];
 }
@@ -1349,6 +1362,13 @@ export interface RegisteredAction<
     readonly scope: string;
     /** Package-attested staged-blob identity and metadata; transaction-bound and never serialized. */
     readonly claimedBlobs?: DeclaredClaimedBlobs;
+    /**
+     * Transaction-bound write/erase authority over exactly the application-owned
+     * tables declared in `protectedArtefacts`. Present only when that declaration
+     * exists; the capability closes when the handler returns and its writes roll
+     * back with the action on any failure.
+     */
+    readonly protectedArtefact?: ProtectedArtefactStore;
     /** Present only for a Workbench-owned inverse/redo dispatch; never serialized. */
     readonly history?: Readonly<{
       readonly operation: 'undo' | 'redo';
@@ -1357,6 +1377,16 @@ export interface RegisteredAction<
   }): readonly Readonly<{ type: string; scope: string; data: unknown }>[] | RegisteredActionCommit | Promise<readonly Readonly<{ type: string; scope: string; data: unknown }>[] | RegisteredActionCommit>;
   readonly projections?: readonly Projection[];
   readonly history?: { readonly cursor?: 'eligible' | 'excluded' };
+  /**
+   * Declared application-owned protected-artefact store. The handler receives a
+   * transaction-bound `protectedArtefact` capability restricted to exactly these
+   * tables; writes and erasures join the action's own commit and roll back with
+   * it. Protected payloads never appear in events, receipts, snapshots, live
+   * delivery, undo history, or exports — return a `canonicalPayload` containing
+   * only the IDs/provenance needed to reference each artefact (required). Erase
+   * permanently hard-deletes the declared rows. Requires single dispatch.
+   */
+  readonly protectedArtefacts?: Readonly<{ tables: readonly string[] }>;
   /** Privileged durable-pipeline erasure directive; requires history.cursor excluded. */
   readonly erasure?: true | Readonly<{
     /** Exact application-owned tables the preparation callback may mutate. */

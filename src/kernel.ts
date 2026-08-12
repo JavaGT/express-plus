@@ -30,6 +30,7 @@ import { installRemovalCascades } from './entity/removal-cascade.ts';
 import { rawRow } from './entity/query.ts';
 import { readDeletedRowAnchor } from './deleted-row-anchor.ts';
 import { validateAnnotatedTextEntityActions } from './annotated-text-field.ts';
+import { validateProtectedArtefactsDeclaration } from './protected-artefact-store.ts';
 
 // Framework auth entities are always-available effect targets (an app's effect
 // may target Inbox without mounting it — auth entities are never request-facing
@@ -75,6 +76,9 @@ function collectAppEntities(app: any) {
     if (declaration.erasure && declaration.history?.cursor !== 'excluded') {
       throw new Error(`erasure action '${declaration.type}' must exclude its history cursor`);
     }
+    // The bounded protected-artefact store is validated here so a malformed
+    // declaration fails at app assembly, never at dispatch time.
+    const protectedArtefactTables = validateProtectedArtefactsDeclaration(declaration.protectedArtefacts, declaration.type);
     if (handlers[declaration.type]) throw new Error(`action '${declaration.type}' is already registered`);
     const handler = async (context: any) => {
       const lifecycle = app.pendingBlobLifecycle;
@@ -131,6 +135,7 @@ function collectAppEntities(app: any) {
       }
       if (!lifecycle) return Array.isArray(result) ? result : {
         events: commit.events,
+        ...(commit.canonicalPayload === undefined ? {} : { canonicalPayload: commit.canonicalPayload }),
         ...(commit.directive === undefined ? {} : { directive: commit.directive }),
         ...(commit.privateFact === undefined ? {} : { privateFact: commit.privateFact }),
         ...(commit.effects === undefined ? {} : { effects: commit.effects }),
@@ -164,7 +169,8 @@ function collectAppEntities(app: any) {
     };
     Object.defineProperty(handler, 'inTransaction', { value: true });
     Object.defineProperty(handler, 'batchForbidden', {
-      value: (app._blobLifecycleOptions?.fields ?? []).some((field: any) => field.actionName === declaration.type),
+      value: (app._blobLifecycleOptions?.fields ?? []).some((field: any) => field.actionName === declaration.type)
+        || protectedArtefactTables.length > 0,
     });
     Object.defineProperty(handler, 'erasureCapable', { value: Boolean(declaration.erasure) });
     Object.defineProperty(handler, 'erasurePrepare', {
@@ -177,6 +183,9 @@ function collectAppEntities(app: any) {
     Object.defineProperty(handler, 'erasurePreparationReadTables', {
       value: declaration.erasure && declaration.erasure !== true
         ? Object.freeze([...(declaration.erasure.readTables ?? [])]) : Object.freeze([]),
+    });
+    Object.defineProperty(handler, 'protectedArtefactTables', {
+      value: protectedArtefactTables,
     });
     Object.defineProperty(handler, 'privateFactProjection', {
       value: declaration.projections?.some((projection: any) => projection?.privateFact === true) ?? false,

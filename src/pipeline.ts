@@ -24,6 +24,7 @@ import { failure, failureFromError, failureOutcome } from './outcome.ts';
 import { principalKeyOf } from './principal.ts';
 import { applyErasureDirective, isErasureDirective, isErasureDirectivePreparation, prepareErasureDirective } from './erasure-directive.ts';
 import { declarePostCommitEffectsInTxn } from './post-commit-effects.ts';
+import { protectedArtefactCapability } from './protected-artefact-store.ts';
 
 // `action(type)` — declare an imperative request type. The handler that turns it
 // into events is attached later by the entity/dispatch wiring.
@@ -495,10 +496,26 @@ async function commitEvents(db: any, events: any, {
         }
       }
 
-      if (handler) events = await handler({
-        payload, principal, db, now, scope, actionId,
-        ...(historyCommit?.handlerInputs ? { history: historyCommit.handlerInputs[0] } : {}),
-      });
+      if (handler) {
+        // A declared protected-artefact store hands the handler a transaction-
+        // bound write/erase authority over exactly its declared application
+        // tables, live only for this handler call. The capability joins this
+        // origin transaction: any later failure rolls back its writes with the
+        // log, cursor, projection, and receipt. It closes after the handler so
+        // no later pipeline stage can reach the store.
+        const protectedArtefact = handler.protectedArtefactTables?.length
+          ? protectedArtefactCapability(db, handler.protectedArtefactTables)
+          : null;
+        try {
+          events = await handler({
+            payload, principal, db, now, scope, actionId,
+            ...(protectedArtefact ? { protectedArtefact } : {}),
+            ...(historyCommit?.handlerInputs ? { history: historyCommit.handlerInputs[0] } : {}),
+          });
+        } finally {
+          protectedArtefact?.close();
+        }
+      }
       const commit = Array.isArray(events) ? { events } : events;
       if (!commit || !Array.isArray(commit.events)) {
         throw new TypeError(`action '${type}' handler must return an event array`);
@@ -506,6 +523,13 @@ async function commitEvents(db: any, events: any, {
       const directive = commit.directive;
       if (directive !== undefined && (!handler?.erasureCapable || Array.isArray(payload) || historyCommit?.apply)) {
         throw new TypeError(`action '${type}' cannot return an erasure directive`);
+      }
+      // A protected-artefact action's request payload must never become the
+      // receipt's canonical actionData (undo history reads it): the handler
+      // must return a canonicalPayload containing only the non-sensitive IDs
+      // and provenance needed to reference the protected artefacts.
+      if (handler?.protectedArtefactTables?.length && directive === undefined && commit.canonicalPayload === undefined) {
+        throw new TypeError(`action '${type}' declares protected artefacts and must return a canonicalPayload without protected payloads`);
       }
 
       const requirePrivateFact = pipeline.requiresPrivateFact?.(commit.events, type) ?? false;
@@ -631,6 +655,15 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     function dispatch({ actionId, type, payload, principal, scope = '' }: any) {
       const handler = checkHandler(handlers, type);
       if (!handler) return unknownActionOutcome(type);
+      // A protected-artefact store needs the durable transaction the in-memory
+      // kernel cannot provide — fail closed instead of silently dropping the
+      // capability (the handler would otherwise write nothing and commit anyway).
+      if (handler.protectedArtefactTables?.length) {
+        return executionFailure(
+          new ValidationError(`action '${type}' declares protected artefacts and requires a durable database`),
+          { actionId, type },
+        );
+      }
 
       // Fork C — AUTHORIZE FIRST. A retried action by a since-revoked principal
       // returns denied (403), even if the mutation already committed. This
