@@ -1,0 +1,70 @@
+import {               } from './driver.mjs';
+import { frameworkTableNamesWithoutAuthCompile } from './framework-table-names.mjs';
+
+// The shared table-safety guard for transaction-bound capabilities that reach
+// explicitly declared application-owned tables: erasure preparation writes and
+// reads, and the protected-artefact store. ONE guard — a second copy of this
+// logic beside the erasure capability would be the exact seam where the two
+// paths drift (AGENTS.md: singular system).
+
+const PACKAGE_TABLES = new Set(frameworkTableNamesWithoutAuthCompile.map((name) => name.toLowerCase()));
+
+                                                        
+
+function identifier(name        )         {
+  return `"${name.replaceAll('"', '""')}"`;
+}
+
+// Resolve a declared application table to its qualified `main."Table"` SQL name
+// inside the caller's transaction, refusing anything that is not an explicitly
+// allowlisted canonical application-owned table: Workbench package tables,
+// shadowed temp tables, views, non-canonical or sqlite_ names, and (for writes)
+// tables whose triggers or foreign keys could escape the bounded authority.
+// `operation` names the failing path in the error message ('reads' | 'writes').
+export function applicationTable(
+  db          ,
+  table         ,
+  allowedTables                     ,
+  operation                    ,
+  fail                ,
+)         {
+  if (typeof table !== 'string' || table.length === 0) {
+    fail(`application ${operation} table must be a non-empty string`);
+  }
+  if (!allowedTables.has(table)) {
+    fail(`application ${operation} cannot access undeclared table '${table}'`);
+  }
+  if (db.prepare('SELECT 1 FROM sqlite_temp_master WHERE lower(name) = lower(?)').get(table)) {
+    fail(`application ${operation} cannot access shadowed table '${table}'`);
+  }
+  const stored = db.prepare("SELECT type FROM sqlite_master WHERE name = ? COLLATE NOCASE AND type IN ('table', 'view')").get(table);
+  if (stored?.type !== 'table') fail(`application ${operation} require table '${table}'`);
+  const canonical         = db.prepare("SELECT name FROM sqlite_master WHERE name = ? COLLATE NOCASE AND type = 'table'").get(table)?.name           ?? '';
+  if (canonical !== table
+    || (canonical.startsWith('_') && !/^_[A-Za-z][A-Za-z0-9_]*$/.test(canonical))
+    || canonical.toLowerCase().startsWith('sqlite_')
+    || PACKAGE_TABLES.has(canonical.toLowerCase())) {
+    fail(`application ${operation} cannot access undeclared table '${table}'`);
+  }
+  const name = identifier(canonical);
+  if (operation === 'writes' && (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ? COLLATE NOCASE").get(canonical)
+    || db.prepare("SELECT 1 FROM sqlite_temp_master WHERE type = 'trigger' AND tbl_name = ? COLLATE NOCASE").get(canonical))) {
+    fail(`application ${operation} cannot access triggered table '${table}'`);
+  }
+  if (operation === 'writes') {
+    if (db.prepare(`PRAGMA foreign_key_list(${name})`).get()) {
+      fail(`application ${operation} cannot access foreign-key table '${table}'`);
+    }
+    const tables = [
+      ...db.prepare("SELECT 'main' AS schema, name FROM sqlite_master WHERE type = 'table'").all(),
+      ...db.prepare("SELECT 'temp' AS schema, name FROM sqlite_temp_master WHERE type = 'table'").all(),
+    ];
+    for (const candidate of tables) {
+      if (db.prepare(`PRAGMA ${candidate.schema}.foreign_key_list(${identifier(candidate.name          )})`).all()
+        .some((fk) => (fk.table                      )?.toLowerCase() === canonical.toLowerCase())) {
+        fail(`application ${operation} cannot access referenced table '${table}'`);
+      }
+    }
+  }
+  return `main.${name}`;
+}

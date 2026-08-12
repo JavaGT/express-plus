@@ -1,11 +1,10 @@
 import { createHash } from 'node:crypto';
 import {               } from './driver.mjs';
-import { frameworkTableNamesWithoutAuthCompile } from './framework-table-names.mjs';
+import { applicationTable as resolveApplicationTable } from './application-table-guard.mjs';
 
 const TOMBSTONE_TYPE = '$workbench.erased';
 const TOMBSTONE_ACTION_ID = '$workbench.erased';
 const TOMBSTONE_DATA = JSON.stringify({ version: 1 });
-const PACKAGE_TABLES = new Set(frameworkTableNamesWithoutAuthCompile.map((name) => name.toLowerCase()));
 
                              
                                     
@@ -144,13 +143,6 @@ function identifier(name        , label = 'identifier')         {
   text(name, label);
   return `"${name.replaceAll('"', '""')}"`;
 }
-function applicationTable(name        , allowedTables                     , operation        )         {
-  text(name, 'table');
-  if (!allowedTables.has(name)) {
-    fail(`application ${operation} cannot access undeclared table '${name}'`);
-  }
-  return identifier(name);
-}
 function columns(record         , name        )                           {
   if (!record || typeof record !== 'object' || Array.isArray(record) || Object.keys(record).length === 0) {
     fail(`${name} must be a non-empty record`);
@@ -167,42 +159,8 @@ function erasurePreparationCapabilities(db          , writeTables          , rea
   let active = true;
   const revoke                    = [];
   const open = (operation        ) => { if (!active) fail(`application ${operation} are available only during erasure preparation`); };
-  const safeTable = (table        , allowedTables                     , operation        ) => {
-    applicationTable(table, allowedTables, operation);
-    if (db.prepare('SELECT 1 FROM sqlite_temp_master WHERE lower(name) = lower(?)').get(table)) {
-      fail(`application ${operation} cannot access shadowed table '${table}'`);
-    }
-    const stored = db.prepare("SELECT type FROM sqlite_master WHERE name = ? COLLATE NOCASE AND type IN ('table', 'view')").get(table);
-    if (stored?.type !== 'table') fail(`application ${operation} require table '${table}'`);
-    const canonical         = db.prepare("SELECT name FROM sqlite_master WHERE name = ? COLLATE NOCASE AND type = 'table'").get(table)?.name           ?? '';
-    if (canonical !== table
-      || (canonical.startsWith('_') && !/^_[A-Za-z][A-Za-z0-9_]*$/.test(canonical))
-      || canonical.toLowerCase().startsWith('sqlite_')
-      || PACKAGE_TABLES.has(canonical.toLowerCase())) {
-      fail(`application ${operation} cannot access undeclared table '${table}'`);
-    }
-    const name = identifier(canonical);
-    if (operation === 'writes' && (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ? COLLATE NOCASE").get(canonical)
-      || db.prepare("SELECT 1 FROM sqlite_temp_master WHERE type = 'trigger' AND tbl_name = ? COLLATE NOCASE").get(canonical))) {
-      fail(`application ${operation} cannot access triggered table '${table}'`);
-    }
-    if (operation === 'writes') {
-      if (db.prepare(`PRAGMA foreign_key_list(${name})`).get()) {
-        fail(`application writes cannot access foreign-key table '${table}'`);
-      }
-      const tables = [
-        ...db.prepare("SELECT 'main' AS schema, name FROM sqlite_master WHERE type = 'table'").all(),
-        ...db.prepare("SELECT 'temp' AS schema, name FROM sqlite_temp_master WHERE type = 'table'").all(),
-      ];
-      for (const candidate of tables) {
-        if (db.prepare(`PRAGMA ${candidate.schema}.foreign_key_list(${identifier(candidate.name          )})`).all()
-          .some((fk) => (fk.table                      )?.toLowerCase() === canonical.toLowerCase())) {
-          fail(`application writes cannot access referenced table '${table}'`);
-        }
-      }
-    }
-    return `main.${name}`;
-  };
+  const safeTable = (table        , allowedTables                     , operation                    ) =>
+    resolveApplicationTable(db, table, allowedTables, operation, fail);
   const writes                                     = Object.freeze({
     insert(table        , values                                   ) {
       open('writes');

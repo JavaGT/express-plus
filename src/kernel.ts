@@ -161,7 +161,9 @@ function collectAppEntities(app: any) {
       }
       return {
         events: commit.events,
-        ...(claimedFields.length === 0 ? {} : { canonicalPayload: handlerContext.payload, claimedBlobs: handlerContext.claimedBlobs }),
+        ...(claimedFields.length === 0
+          ? (commit.canonicalPayload === undefined ? {} : { canonicalPayload: commit.canonicalPayload })
+          : { canonicalPayload: handlerContext.payload, claimedBlobs: handlerContext.claimedBlobs }),
         ...(commit.directive === undefined ? {} : { directive: commit.directive }),
         ...(commit.privateFact === undefined ? {} : { privateFact: commit.privateFact }),
         ...(commit.effects === undefined ? {} : { effects: commit.effects }),
