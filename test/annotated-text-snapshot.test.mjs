@@ -3,8 +3,8 @@ import test from 'node:test';
 import {
   annotatedText, annotation, annotationAction, entity, measurement, ref,
   registerAnnotatedTextContract,
-} from '../src/index.mjs';
-import { registerAnnotatedTextStructuralExtension } from '../src/internal.mjs';
+} from '../build/index.mjs';
+import { registerAnnotatedTextStructuralExtension } from '../build/internal.mjs';
 import { materializeAnnotatedTextSnapshot, projectPendingAnnotatedTextDocument } from '../public/workbench-annotated-text-snapshot.mjs';
 import { materializeAnnotatedTextSnapshot as clientSnapshot } from '../public/workbench-client.mjs';
 
@@ -229,6 +229,15 @@ test('projectPendingAnnotatedTextDocument splices absolute offsets', () => {
     payload: { version: 9, edit: { kind: 'text.replace', from: { offset: 6 }, to: { offset: 11 }, text: 'there' } },
   });
   assert.equal(afterReplace.text, 'Hello there');
+
+  const afterAnnotationRemove = projectPendingAnnotatedTextDocument(insert, {
+    payload: { version: 9, edit: { kind: 'annotation.remove', annotationId: 'a1' } },
+  });
+  assert.deepEqual(afterAnnotationRemove.ranges, []);
+  assert.deepEqual(afterAnnotationRemove.annotations, []);
+  assert.equal(afterAnnotationRemove.text, insert.text);
+  assert.ok(Object.isFrozen(afterAnnotationRemove.ranges));
+  assert.ok(Object.isFrozen(afterAnnotationRemove.annotations));
 
   // Non-v9 payloads are ignored and return the original document.
   assert.equal(projectPendingAnnotatedTextDocument(insert, { payload: { version: 8, edit: { kind: 'text.insert' } } }), insert);

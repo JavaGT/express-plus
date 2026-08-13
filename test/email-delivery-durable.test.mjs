@@ -15,10 +15,10 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 
-import { text, grant, read, write, subscribe } from '../src/index.mjs';
-import workbench, { entity } from '../src/internal.mjs';
-import { emailSeam } from '../src/email-seam.mjs';
-import { executeFrameworkDDL } from '../src/ddl.mjs';
+import { text, grant, read, write, subscribe } from '../build/index.mjs';
+import workbench, { entity } from '../build/internal.mjs';
+import { emailSeam } from '../build/email-seam.mjs';
+import { executeFrameworkDDL } from '../build/ddl.mjs';
 
 function recordingTransport(sent, { fail = () => false } = {}) {
   return async (msg) => {

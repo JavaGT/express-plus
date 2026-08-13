@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { text, boolean, ref, map, scope, grant, read, write, subscribe, inherit, entity, generateDDL, executeFrameworkDDL, principal, anonymous, anyOf, bindReadScope } from '../src/internal.mjs';
+import { text, boolean, ref, map, scope, grant, read, write, subscribe, inherit, entity, generateDDL, executeFrameworkDDL, principal, anonymous, anyOf, bindReadScope } from '../build/internal.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 

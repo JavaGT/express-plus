@@ -9,11 +9,11 @@ import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
   admin, annotatedText, annotation, deny, entity, everyone, executeDDL, executeFrameworkDDL, grant, number as numberField, read, ref, scope, text, write,
-} from '../src/internal.mjs';
-import { materializeText, restoreTextFamily } from '../src/annotated-text-continuous.mjs';
-import { projectRangeToOffsets } from '../src/annotated-text-ranges.mjs';
-import { exportAnnotatedText } from '../src/annotated-text-public.mjs';
-import { attachAnnotationRange } from '../src/annotated-text-storage.mjs';
+} from '../build/internal.mjs';
+import { materializeText, restoreTextFamily } from '../build/annotated-text-continuous.mjs';
+import { projectRangeToOffsets } from '../build/annotated-text-ranges.mjs';
+import { exportAnnotatedText } from '../build/annotated-text-public.mjs';
+import { attachAnnotationRange } from '../build/annotated-text-storage.mjs';
 
 function doc() {
   return entity('RangeDoc', {

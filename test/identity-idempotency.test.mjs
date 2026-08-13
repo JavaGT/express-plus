@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import { createServer, generateFrameworkDDL } from '../src/internal.mjs';
+import { createServer, generateFrameworkDDL } from '../build/internal.mjs';
 
 const principal = { type: 'user', id: 'identity-fixture-user' };
 

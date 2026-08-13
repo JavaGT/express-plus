@@ -7,13 +7,13 @@ import workbench, {
   annotatedText, annotation, entity, everyone, executeDDL, executeFrameworkDDL,
   protectingAnnotation, grant, admin, read, write, subscribe, ref, scope, map,
   inherit, text,
-} from '../src/internal.mjs';
-import { membership } from '../src/index.mjs';
-import { materializeText, restoreTextFamily, importTextToFamily, textFamilyCheckpoint, resolveOffsetToEndpoint } from '../src/annotated-text-continuous.mjs';
-import { projectAnnotatedTextSnapshot } from '../src/internal.mjs';
-import { durableHistory } from '../src/internal.mjs';
+} from '../build/internal.mjs';
+import { membership } from '../build/index.mjs';
+import { materializeText, restoreTextFamily, importTextToFamily, textFamilyCheckpoint, resolveOffsetToEndpoint } from '../build/annotated-text-continuous.mjs';
+import { projectAnnotatedTextSnapshot } from '../build/internal.mjs';
+import { durableHistory } from '../build/internal.mjs';
 import { withAuthoringBinding } from './annotated-text-authoring-fixture.mjs';
-import { attachAnnotationRange } from '../src/annotated-text-storage.mjs';
+import { attachAnnotationRange } from '../build/annotated-text-storage.mjs';
 
 // #29 recipient projection, Scope shape: an inherit-child transcript whose
 // confidentiality access resolves `is.owner()` through the PARENT Project's

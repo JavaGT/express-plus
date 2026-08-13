@@ -2,14 +2,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import { createServer, durableMutationVariant } from '../src/pipeline.mjs';
-import { buildEffectsRegistry } from '../src/effect-compiler.mjs';
-import { entity } from '../src/entity/compile.mjs';
-import { text } from '../src/field.mjs';
-import { scope } from '../src/scope.mjs';
-import { everyone } from '../src/scope-sql.mjs';
-import { grant, read, write } from '../src/grant.mjs';
-import { executeFrameworkDDL } from '../src/ddl.mjs';
+import { createServer, durableMutationVariant } from '../build/pipeline.mjs';
+import { buildEffectsRegistry } from '../build/effect-compiler.mjs';
+import { entity } from '../build/entity/compile.mjs';
+import { text } from '../build/field.mjs';
+import { scope } from '../build/scope.mjs';
+import { everyone } from '../build/scope-sql.mjs';
+import { grant, read, write } from '../build/grant.mjs';
+import { executeFrameworkDDL } from '../build/ddl.mjs';
 
 function setupDb() {
   const db = new DatabaseSync(':memory:');

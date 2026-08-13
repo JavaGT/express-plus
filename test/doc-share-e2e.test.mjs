@@ -6,12 +6,12 @@
 // them against the REAL doc.mjs (not a re-declared stand-in) is the binding
 // use-case validation.
 
-import { User, Inbox } from '../src/index.mjs';
+import { User, Inbox } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { executeDDL } from '../src/internal.mjs';
+import workbench, { executeDDL } from '../build/internal.mjs';
 import { Doc } from '../projects/doc.mjs';
 
 function setup() {

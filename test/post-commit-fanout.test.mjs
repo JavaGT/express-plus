@@ -23,8 +23,8 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
-import { createServer, durableMutationVariant } from '../src/pipeline.mjs';
-import { executeFrameworkDDL } from '../src/ddl.mjs';
+import { createServer, durableMutationVariant } from '../build/pipeline.mjs';
+import { executeFrameworkDDL } from '../build/ddl.mjs';
 
 // A minimal durable kernel: a Note projection (events → rows) + CRUD handlers
 // (events only, no DB writes — Fork A). Each test gets a fresh :memory: db.

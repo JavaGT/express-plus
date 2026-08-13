@@ -16,7 +16,7 @@ import {
 } from '../annotated-text-continuous.mjs';
 import { resolveDeclarationMeasurementExtension } from '../annotated-text-field.mjs';
 import { annotationRangeRows, attachAnnotationRange, canonicalEndpointJSON } from '../annotated-text-storage.mjs';
-import { frozenJsonSnapshot } from '../annotated-text-r2.mjs';
+import { frozenJsonSnapshot } from '../frozen-json.mjs';
 import { markAnnotatedEntityProjection } from '../annotated-text-history.mjs';
                                              
                                                                                          

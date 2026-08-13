@@ -6,9 +6,9 @@ import workbench, {
   admin, annotatedText, annotatedTextCreateAction, annotation,
   deny, entity, everyone, exportAnnotatedText, grant, map, measurement, read, readAnnotatedTextForRecipient, ref,
   registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension, scope, write,
-} from '../src/index.mjs';
-import { executeDDL, executeFrameworkDDL } from '../src/internal.mjs';
-import { projectAnnotatedTextSnapshot } from '../src/annotated-text-snapshot.mjs';
+} from '../build/index.mjs';
+import { executeDDL, executeFrameworkDDL } from '../build/internal.mjs';
+import { projectAnnotatedTextSnapshot } from '../build/annotated-text-snapshot.mjs';
 
 const principal = (id) => ({ type: 'user', id, attributes: {} });
 registerAnnotatedTextContract('exportAuthorizationMeasurement', Object.freeze({ kind: 'measurement' }));

@@ -5,13 +5,13 @@ import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
   annotatedText, annotation, entity, everyone, grant, read, ref, write, scope, deny, subscribe, admin,
-} from '../src/internal.mjs';
-import { executeDDL, executeFrameworkDDL, registerAnnotatedTextStructuralExtension } from '../src/internal.mjs';
-import { registerAnnotatedTextContract } from '../src/index.mjs';
-import { durableHistory } from '../src/internal.mjs';
-import { annotatedTextCreateAction } from '../src/annotated-text-action.mjs';
-import { restoreTextFamily, materializeText } from '../src/annotated-text-continuous.mjs';
-import { tryBuildAnnotatedTextFoldEnvelopes } from '../src/annotated-text-fold-envelope.mjs';
+} from '../build/internal.mjs';
+import { executeDDL, executeFrameworkDDL, registerAnnotatedTextStructuralExtension } from '../build/internal.mjs';
+import { registerAnnotatedTextContract } from '../build/index.mjs';
+import { durableHistory } from '../build/internal.mjs';
+import { annotatedTextCreateAction } from '../build/annotated-text-action.mjs';
+import { restoreTextFamily, materializeText } from '../build/annotated-text-continuous.mjs';
+import { tryBuildAnnotatedTextFoldEnvelopes } from '../build/annotated-text-fold-envelope.mjs';
 import { createAnnotatedTextHttpSession } from '../public/workbench-client.mjs';
 import { withAuthoringBinding } from './annotated-text-authoring-fixture.mjs';
 

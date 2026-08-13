@@ -1,4 +1,4 @@
-import { readRequestBody, readRawBody, BodyError } from '../src/http-body.mjs';
+import { readRequestBody, readRawBody, BodyError } from '../build/http-body.mjs';
 import { Readable } from 'node:stream';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

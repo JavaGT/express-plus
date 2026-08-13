@@ -18,13 +18,13 @@
 // canonical row. This is trusted framework code minting a session server-side —
 // the same trust class as the unscoped query API, not a second auth path.
 
-import { Session } from '../src/index.mjs';
+import { Session } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { User } from '../src/internal.mjs';
-import { sessionPrincipalOf, SESSION_COOKIE } from '../src/auth/session.mjs';
+import workbench, { User } from '../build/internal.mjs';
+import { sessionPrincipalOf, SESSION_COOKIE } from '../build/auth/session.mjs';
 
 // Seed the two framework tables. The framework does not generate DDL in Phase 1;
 // the app/test harness owns CREATE TABLE. The Session schema is exactly the shape

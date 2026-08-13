@@ -5,7 +5,7 @@
 // (document/layer) is readable iff its parent Project admits the principal via
 // owner/member scope.
 
-import { entity, grant, inherit, map, read, ref, scope, subscribe, text, write, deny } from '../src/index.mjs';
+import { entity, grant, inherit, map, read, ref, scope, subscribe, text, write, deny } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
@@ -13,8 +13,8 @@ import { connect as tcpConnect } from 'node:net';
 import { randomBytes } from 'node:crypto';
 
 import workbench, {
-  anyOf, executeDDL, executeFrameworkDDL } from '../src/internal.mjs';
-import { principal } from '../src/principal.mjs';
+  anyOf, executeDDL, executeFrameworkDDL } from '../build/internal.mjs';
+import { principal } from '../build/principal.mjs';
 
 const owner = principal({ type: 'user', id: 'owner-1' });
 const member = principal({ type: 'user', id: 'member-1' });

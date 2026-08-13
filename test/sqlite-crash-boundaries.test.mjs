@@ -9,7 +9,7 @@ import {
   createServer,
   durableMutationVariant,
   executeFrameworkDDL,
-} from '../src/internal.mjs';
+} from '../build/internal.mjs';
 
 const ACTION_ID = 'crash-boundary-action';
 const NOTE_ID = 'note-1';

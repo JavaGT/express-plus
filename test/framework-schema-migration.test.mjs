@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 test('frameworkCursorSchema declares _ProjectedCursor and _ConsumerCursor via defineSqliteSchema', async () => {
-  const { frameworkCursorSchema } = await import('../src/ddl.mjs');
+  const { frameworkCursorSchema } = await import('../build/ddl.mjs');
   const schema = frameworkCursorSchema();
 
   assert.equal(typeof schema, 'object');
@@ -48,7 +48,7 @@ test('frameworkCursorSchema declares _ProjectedCursor and _ConsumerCursor via de
 });
 
 test('generateFrameworkDDL still includes cursor tables (backwards compatible)', async () => {
-  const { generateFrameworkDDL } = await import('../src/ddl.mjs');
+  const { generateFrameworkDDL } = await import('../build/ddl.mjs');
   const frameworkDdl = generateFrameworkDDL();
   const joined = frameworkDdl.join('\n');
 

@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { decodeResult } from '../public/workbench-client.mjs';
-import { isWorkbenchFailure, failure } from '../src/outcome.mjs';
+import { isWorkbenchFailure, failure } from '../build/outcome.mjs';
 
 describe('decodeResult — browser HTTP response decoder', () => {
   it('204 returns a successful HTTP outcome', async () => {

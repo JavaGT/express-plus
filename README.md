@@ -68,7 +68,7 @@ schedule/tick, email).
 
 | Import | Purpose |
 | --- | --- |
-| `workbench` | Server public API (`src/index.mjs`) |
+| `workbench` | Server public API (`build/index.mjs`) |
 | `workbench/client` | Browser SDK (`public/workbench-client.mjs`) |
 | `workbench/server` | Server-only helpers for sessions, jobs, blobs, and migrations |
 

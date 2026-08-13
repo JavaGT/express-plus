@@ -5,7 +5,7 @@ import {
   assertNoFrameworkTableSql,
   collectTableNamesFromDdl,
   frameworkTableNames,
-} from '../src/schema-table-census.mjs';
+} from '../build/schema-table-census.mjs';
 
 test('frameworkTableNames is a frozen, sorted, duplicate-free array of persistent framework tables', () => {
   assert.ok(Array.isArray(frameworkTableNames), 'frameworkTableNames must be an array');

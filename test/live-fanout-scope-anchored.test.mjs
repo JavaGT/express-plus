@@ -5,8 +5,8 @@
 // anchor row; delta projection and ephemeral-field pacing are skipped.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createLiveFanout } from '../src/live-fanout.mjs';
-import { scope, grant, subscribe } from '../src/internal.mjs';
+import { createLiveFanout } from '../build/live-fanout.mjs';
+import { scope, grant, subscribe } from '../build/internal.mjs';
 
 function makeConn(id, principalId = id) {
   const messages = [];

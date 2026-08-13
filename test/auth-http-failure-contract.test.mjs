@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { allowAnonymous, failure } from '../src/index.mjs';
-import workbench, { router } from '../src/internal.mjs';
+import { allowAnonymous, failure } from '../build/index.mjs';
+import workbench, { router } from '../build/internal.mjs';
 
 async function serve(t, app) {
   app.listen(0);

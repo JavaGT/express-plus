@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { resolveStrategy } from '../src/field-strategy.mjs';
+import { resolveStrategy } from '../build/field-strategy.mjs';
 
 test('value kind is invertible and coalescible', () => {
   const s = resolveStrategy('value');

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { defineSqliteSchema } from '../src/server.mjs';
+import { defineSqliteSchema } from '../build/server.mjs';
 
 function taskSchema(overrides = {}) {
   return defineSqliteSchema({

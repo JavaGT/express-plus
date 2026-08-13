@@ -7,8 +7,8 @@ import {
   failureOutcome,
   isWorkbenchFailure,
   sanitizeUnexpectedFailure,
-} from '../src/index.mjs';
-import { failureFromError } from '../src/outcome.mjs';
+} from '../build/index.mjs';
+import { failureFromError } from '../build/outcome.mjs';
 
 test('failure categories are the six stable public categories', () => {
   assert.deepEqual(FAILURE_CATEGORIES, [

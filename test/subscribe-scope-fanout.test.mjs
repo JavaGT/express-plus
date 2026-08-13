@@ -3,8 +3,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { entity, text, generateDDL, grant, scope, read, write, subscribe as subVerb } from '../src/internal.mjs';
-import { createLiveFanout } from '../src/live-fanout.mjs';
+import workbench, { entity, text, generateDDL, grant, scope, read, write, subscribe as subVerb } from '../build/internal.mjs';
+import { createLiveFanout } from '../build/live-fanout.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

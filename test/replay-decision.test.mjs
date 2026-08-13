@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { decideReplay, normalizeSeqSpan } from '../src/replay-decision.mjs';
+import { decideReplay, normalizeSeqSpan } from '../build/replay-decision.mjs';
 
 test('normalizeSeqSpan treats a single seq as a one-wide span', () => {
   assert.deepEqual(normalizeSeqSpan(5), [5, 5]);

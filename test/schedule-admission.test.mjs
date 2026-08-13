@@ -1,16 +1,16 @@
-import { schedule, date, scope, everyone, grant, read, write, subscribe } from '../src/index.mjs';
+import { schedule, date, scope, everyone, grant, read, write, subscribe } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import workbench, { entity, executeFrameworkDDL } from '../src/internal.mjs';
-import { generateDDL } from '../src/ddl.mjs';
+import workbench, { entity, executeFrameworkDDL } from '../build/internal.mjs';
+import { generateDDL } from '../build/ddl.mjs';
 import {
   admitSystemMutation,
   clearRemovedScheduleReceipts,
   pruneInactiveScheduleReceipts,
   rearmChangedScheduleReceipts,
   schedulerSource,
-} from '../src/schedule.mjs';
+} from '../build/schedule.mjs';
 
 // P6d Spine A step 4b — scheduler admission (Option A, in-txn re-check).
 // A reaper-fired dispatch runs under a SCHEDULER SYSTEM PRINCIPAL. The scheduler
@@ -223,8 +223,8 @@ test('admitSystemMutation: schedule.after due = row.field + delay <= now', () =>
 // END-TO-END: the wired dispatch spine admits / denies a scheduler principal
 // through the durable variant's beforeProjection admission seam.
 // ============================================================
-import { createServer, durableMutationVariant } from '../src/pipeline.mjs';
-import { principal as makePrincipal } from '../src/principal.mjs';
+import { createServer, durableMutationVariant } from '../build/pipeline.mjs';
+import { principal as makePrincipal } from '../build/principal.mjs';
 
 function setupAppServer() {
   const db = new DatabaseSync(':memory:');

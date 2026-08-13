@@ -3,10 +3,10 @@
 // entity compiler accepts and the scope compiler can compare like any other
 // value field.
 
-import { entity, scope, everyone, grant, read, computed } from '../src/index.mjs';
+import { entity, scope, everyone, grant, read, computed } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { number } from '../src/internal.mjs';
+import { number } from '../build/internal.mjs';
 
 test('number is a value-kind descriptor typed number', () => {
   const d = number();

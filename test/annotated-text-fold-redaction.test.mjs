@@ -5,9 +5,9 @@ import { DatabaseSync } from 'node:sqlite';
 import workbench, {
   annotatedText, annotation, entity, everyone, executeDDL, executeFrameworkDDL,
   protectingAnnotation, grant, admin, read, write, ref, scope,
-} from '../src/internal.mjs';
-import { durableHistory } from '../src/internal.mjs';
-import { tryBuildAnnotatedTextFoldEnvelopes } from '../src/annotated-text-fold-envelope.mjs';
+} from '../build/internal.mjs';
+import { durableHistory } from '../build/internal.mjs';
+import { tryBuildAnnotatedTextFoldEnvelopes } from '../build/annotated-text-fold-envelope.mjs';
 import { withAuthoringBinding } from './annotated-text-authoring-fixture.mjs';
 
 // The fold envelope no longer ships the canonical family (the snapshot's

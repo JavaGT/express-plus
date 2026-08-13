@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { entity, everyone, executeDDL, executeFrameworkDDL, grant, read, scope, text, write } from '../src/internal.mjs';
-import { canonicalTextOp } from '../src/annotated-text.mjs';
+import workbench, { entity, everyone, executeDDL, executeFrameworkDDL, grant, read, scope, text, write } from '../build/internal.mjs';
+import { canonicalTextOp } from '../build/annotated-text.mjs';
 
 const A = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const insert = ['workbench.text', 1, [A, 1], 1, [], ['insert', ['root'], 'hello']];

@@ -6,7 +6,7 @@ import {
   assertAnchor, assertFrontier, assertOpId, compareOpId,
   assertTextOp, assertUtf16Offset, assertUtf16Range, assertWellFormedText,
   canonicalTextOp, scalarCount,
-} from '../src/annotated-text.mjs';
+} from '../build/annotated-text.mjs';
 import {
   resolveUtf16ToAnchor, collectVisibleScalarIds, insertText, deleteText,
 } from '../public/workbench-text-edit.mjs';

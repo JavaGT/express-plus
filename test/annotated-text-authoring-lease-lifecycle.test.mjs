@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import {
   AUTHORING_STREAM_LIMITS, ensureLease, ensureStream, hashClientNonce, resolveLease,
-} from '../src/annotated-text-authoring-stream.mjs';
+} from '../build/annotated-text-authoring-stream.mjs';
 
 const prefix = 'Doc_body';
 

@@ -15,7 +15,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { action, event } from '../src/internal.mjs';
+import { action, event } from '../build/internal.mjs';
 
 test('action(type) declares an action with that type', () => {
   const Publish = action('post.publish');

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { canUndoField, undoableFieldKinds } from '../src/field-laws.mjs';
+import { canUndoField, undoableFieldKinds } from '../build/field-laws.mjs';
 
 test('canUndoField returns true for invertible kinds', () => {
   assert.equal(canUndoField('value'), true);

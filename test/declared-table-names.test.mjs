@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { entity, text, ref, map } from '../src/index.mjs';
-import { declaredTableNames } from '../src/server.mjs';
+import { entity, text, ref, map } from '../build/index.mjs';
+import { declaredTableNames } from '../build/server.mjs';
 
 test('declaredTableNames — simple entity yields its main table', () => {
   const Widget = entity('Widget', { name: text() });

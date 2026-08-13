@@ -4,12 +4,12 @@ import { DatabaseSync } from 'node:sqlite';
 import http from 'node:http';
 import { once } from 'node:events';
 
-import { createLiveDelivery, createLiveDeliveryHttpHandler } from '../src/server.mjs';
-import { entity, ref, snapshot, text } from '../src/index.mjs';
-import { executeFrameworkDDL } from '../src/ddl.mjs';
-import { grant, subscribe } from '../src/grant.mjs';
-import { scope } from '../src/scope.mjs';
-import { everyone } from '../src/scope-sql.mjs';
+import { createLiveDelivery, createLiveDeliveryHttpHandler } from '../build/server.mjs';
+import { entity, ref, snapshot, text } from '../build/index.mjs';
+import { executeFrameworkDDL } from '../build/ddl.mjs';
+import { grant, subscribe } from '../build/grant.mjs';
+import { scope } from '../build/scope.mjs';
+import { everyone } from '../build/scope-sql.mjs';
 
 function setup({ mayVerb = () => true, relatedScope = () => ({ sql: 't0.visible = 1', params: {} }), relatedHydrate = (row) => ({ ...row }) } = {}) {
   const db = new DatabaseSync(':memory:');

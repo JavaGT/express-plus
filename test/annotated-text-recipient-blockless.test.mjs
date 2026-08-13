@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { entity, annotatedText, annotation, protectingAnnotation, everyone, grant, read, write, ref, scope } from '../src/index.mjs';
-import { registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension } from '../src/index.mjs';
+import { entity, annotatedText, annotation, protectingAnnotation, everyone, grant, read, write, ref, scope } from '../build/index.mjs';
+import { registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension } from '../build/index.mjs';
 
-import { projectAnnotatedTextForRecipient, authoringRedactionsForRecipient } from '../src/annotated-text-recipient-projection.mjs';
+import { projectAnnotatedTextForRecipient, authoringRedactionsForRecipient } from '../build/annotated-text-recipient-projection.mjs';
 
 registerAnnotatedTextContract('m', Object.freeze({ kind: 'measurement' }));
 registerAnnotatedTextStructuralExtension('m', Object.freeze({ version: 1, validate() {}, edit() {}, partition() {}, combine() {} }));

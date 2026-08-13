@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { annotatedText, annotation, entity, grant, measurement, protectingAnnotation, read, ref, registerAnnotatedTextContract } from '../src/index.mjs';
-import { registerAnnotatedTextStructuralExtension, projectAnnotatedTextForRecipient } from '../src/internal.mjs';
+import { annotatedText, annotation, entity, grant, measurement, protectingAnnotation, read, ref, registerAnnotatedTextContract } from '../build/index.mjs';
+import { registerAnnotatedTextStructuralExtension, projectAnnotatedTextForRecipient } from '../build/internal.mjs';
 
 const suffix = 'recipientProjection';
 registerAnnotatedTextContract(`${suffix}Measurement`, Object.freeze({ kind: 'measurement' }));

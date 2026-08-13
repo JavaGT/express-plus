@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import workbench, { principal, defineOperationalEvent, operationalConsumer } from '../src/index.mjs';
-import { entity } from '../src/internal.mjs';
-import { text, grant, read, write, subscribe } from '../src/index.mjs';
-import { operationalConsumerAdmin } from '../src/server.mjs';
+import workbench, { principal, defineOperationalEvent, operationalConsumer } from '../build/index.mjs';
+import { entity } from '../build/internal.mjs';
+import { text, grant, read, write, subscribe } from '../build/index.mjs';
+import { operationalConsumerAdmin } from '../build/server.mjs';
 
 function consumer(results, terminal = false) {
   return operationalConsumer({

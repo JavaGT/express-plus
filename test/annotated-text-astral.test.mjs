@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { createTextState, textCheckpoint } from '../src/annotated-text.mjs';
+import { createTextState, textCheckpoint } from '../build/annotated-text.mjs';
 import {
   createTextFamily,
   materializeText,
@@ -9,12 +9,12 @@ import {
   textOperationForOffsetEdit,
   applyTextOperation,
   projectEndpointToOffset,
-} from '../src/annotated-text-continuous.mjs';
+} from '../build/annotated-text-continuous.mjs';
 import {
   assertAnnotationRange,
   rangeText,
   projectRangeToOffsets,
-} from '../src/annotated-text-ranges.mjs';
+} from '../build/annotated-text-ranges.mjs';
 
 function actorFor(index) {
   return (index + 1).toString(16).padStart(32, '0');

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
-  EventKind, created, updated, removed, fieldSet, native, parseEventType, lifecycleVerb, event, action, createServer, generateFrameworkDDL } from '../src/internal.mjs';
+  EventKind, created, updated, removed, fieldSet, native, parseEventType, lifecycleVerb, event, action, createServer, generateFrameworkDDL } from '../build/internal.mjs';
 
 test('event handle constructors derive stable persisted event types', () => {
   const createdHandle = created('Project');

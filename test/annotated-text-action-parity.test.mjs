@@ -4,10 +4,10 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { annotatedTextAction as publicBuilder } from '../public/workbench-annotated-text-action.mjs';
-import { annotatedTextAction as builder } from '../src/annotated-text-action-builder.mjs';
-import { annotatedTextAction as serverAction } from '../src/annotated-text-action.mjs';
-import { annotatedText, annotation } from '../src/field.mjs';
-import { annotatedTextClientHandle, entity, ref, grant, read } from '../src/index.mjs';
+import { annotatedTextAction as builder } from '../build/annotated-text-action-builder.mjs';
+import { annotatedTextAction as serverAction } from '../build/annotated-text-action.mjs';
+import { annotatedText, annotation } from '../build/field.mjs';
+import { annotatedTextClientHandle, entity, ref, grant, read } from '../build/index.mjs';
 
 const token = (label) => `${label}${'x'.repeat(43)}`.slice(0, 43);
 
@@ -87,13 +87,13 @@ test('pure builder throws on a non-annotatedText field', () => {
 });
 
 test('builder has zero import statements (browser serve-safe)', () => {
-  const source = readFileSync(fileURLToPath(new URL('../src/annotated-text-action-builder.mjs', import.meta.url)), 'utf8');
+  const source = readFileSync(fileURLToPath(new URL('../build/annotated-text-action-builder.mjs', import.meta.url)), 'utf8');
   for (const line of source.split('\n')) {
     assert.ok(!line.startsWith('import '), `unexpected import: ${line}`);
   }
 });
 
 test('HTTP path constant serves the pure builder', () => {
-  const routes = readFileSync(fileURLToPath(new URL('../src/http-framework-routes.mjs', import.meta.url)), 'utf8');
+  const routes = readFileSync(fileURLToPath(new URL('../build/http-framework-routes.mjs', import.meta.url)), 'utf8');
   assert.match(routes, /annotated-text-action-builder\.mjs/);
 });

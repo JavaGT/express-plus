@@ -13,12 +13,12 @@
 // hydrated member rows — a hash password stays a {verify} handle, not a raw
 // digest leaking into the response.
 
-import { text, ref, map, hash, grant, read } from '../src/index.mjs';
+import { text, ref, map, hash, grant, read } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { entity, generateDDL, createServer, durableMutationVariant, executeFrameworkDDL } from '../src/internal.mjs';
+import workbench, { entity, generateDDL, createServer, durableMutationVariant, executeFrameworkDDL } from '../build/internal.mjs';
 
 // A User with a hash password — the security reason toArray must hydrate.
 const User = entity('User', {

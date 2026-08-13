@@ -11,7 +11,7 @@ Node’s built-ins only.
 | This repository | Clone or open the workbench monorepo; the package name is `workbench` |
 
 From the **repository root**, Node resolves `import … from 'workbench'` to
-`src/index.mjs` via `package.json` `exports`.
+`build/index.mjs` via `package.json` `exports`.
 
 ```sh
 cd /path/to/workbench
@@ -101,7 +101,7 @@ What this shows beyond Option A:
 
 | Import | Path |
 | --- | --- |
-| `workbench` | Server app API (`src/index.mjs`) |
+| `workbench` | Server app API (`build/index.mjs`) |
 | `workbench/client` | Browser SDK (`public/workbench-client.mjs`) — also served as `/workbench.mjs` when listening |
 | `workbench/server` | Server-only helpers for sessions, jobs, blobs, and migrations |
 

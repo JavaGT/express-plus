@@ -14,8 +14,8 @@ import { DatabaseSync } from 'node:sqlite';
 import workbench, {
   annotatedText, annotation, annotationAction, entity, everyone, executeDDL,
   executeFrameworkDDL, grant, number as numberField, read, ref, scope, write,
-} from '../src/internal.mjs';
-import { annotatedTextAnnotationAction } from '../src/annotated-text-public.mjs';
+} from '../build/internal.mjs';
+import { annotatedTextAnnotationAction } from '../build/annotated-text-public.mjs';
 import { withAuthoringBinding } from './annotated-text-authoring-fixture.mjs';
 
 function timingAnnotation({ change, authorize = null, input = {} } = {}) {

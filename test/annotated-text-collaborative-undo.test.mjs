@@ -40,13 +40,13 @@ import { DatabaseSync } from 'node:sqlite';
 import workbench, {
   annotatedText, durableHistory, entity, everyone, executeDDL, executeFrameworkDDL,
   grant, read, ref, scope, write,
-} from '../src/internal.mjs';
+} from '../build/internal.mjs';
 import {
   materializeText, restoreTextFamily,
-} from '../src/annotated-text-continuous.mjs';
-import { tryBuildAnnotatedTextFoldEnvelopes } from '../src/annotated-text-fold-envelope.mjs';
-import { projectAnnotatedTextSnapshot } from '../src/annotated-text-snapshot.mjs';
-import { ensureLease, ensureStream, hashClientNonce } from '../src/annotated-text-authoring-stream.mjs';
+} from '../build/annotated-text-continuous.mjs';
+import { tryBuildAnnotatedTextFoldEnvelopes } from '../build/annotated-text-fold-envelope.mjs';
+import { projectAnnotatedTextSnapshot } from '../build/annotated-text-snapshot.mjs';
+import { ensureLease, ensureStream, hashClientNonce } from '../build/annotated-text-authoring-stream.mjs';
 import { createAnnotatedTextHttpSession } from '../public/workbench-client.mjs';
 import { withAuthoringBinding } from './annotated-text-authoring-fixture.mjs';
 

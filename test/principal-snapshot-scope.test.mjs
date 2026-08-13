@@ -1,6 +1,6 @@
 import { strict as a } from 'node:assert';
-import { principalSnapshotScope, parsePrincipalSnapshotScope } from '../src/principal-snapshot-scope.mjs';
-import { parseScopeKey } from '../src/scope-handle.mjs';
+import { principalSnapshotScope, parsePrincipalSnapshotScope } from '../build/principal-snapshot-scope.mjs';
+import { parseScopeKey } from '../build/scope-handle.mjs';
 
 // ── Canonical round trips ──────────────────────────────────────────────────
 

@@ -11,7 +11,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { entity, everyone, grant, principal, read, ref, scope, subscribe, text, write } from '../src/index.mjs';
+import workbench, { entity, everyone, grant, principal, read, ref, scope, subscribe, text, write } from '../build/index.mjs';
 import { createLiveStore, LiveChannel, WorkbenchFailureError } from '../public/workbench-client.mjs';
 
 const owner = principal({ type: 'user', id: 'alice' });

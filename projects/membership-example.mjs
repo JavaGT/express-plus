@@ -10,9 +10,9 @@ import { DatabaseSync } from 'node:sqlite';
 
 import {
   entity, map, ref, owner, text, read, write, subscribe, inherit, membership,
-} from '../src/index.mjs';
-import workbench, { executeDDL } from '../src/internal.mjs';
-import { principal } from '../src/principal.mjs';
+} from '../build/index.mjs';
+import workbench, { executeDDL } from '../build/internal.mjs';
+import { principal } from '../build/principal.mjs';
 
 // ---- Entities ----
 

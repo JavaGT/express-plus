@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import { generateFrameworkDDL, executeFrameworkDDL } from '../src/ddl.mjs';
+import { generateFrameworkDDL, executeFrameworkDDL } from '../build/ddl.mjs';
 
 test('generateFrameworkDDL returns Log and Cursor CREATE TABLE statements', () => {
   const statements = generateFrameworkDDL();
@@ -116,8 +116,8 @@ test('executeFrameworkDDL creates Log and Cursor tables', () => {
 test('app.ddl() creates framework tables (Log and Cursor) alongside entity tables', async () => {
   // This tests that the app assembly auto-creates framework tables.
   // Import dynamically to avoid circular issues.
-  const { default: workbench } = await import('../src/app.mjs');
-  const { entity: entityFn, text, ref, grant, read, write, scope } = await import('../src/index.mjs');
+  const { default: workbench } = await import('../build/app.mjs');
+  const { entity: entityFn, text, ref, grant, read, write, scope } = await import('../build/index.mjs');
 
   const db = new DatabaseSync(':memory:');
 

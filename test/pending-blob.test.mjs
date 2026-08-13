@@ -4,8 +4,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import workbench, { principal } from '../src/index.mjs';
-import { pendingBlobStager, declaredBlobField, readClaimedBlob, claimedBlobLifecycle } from '../src/server.mjs';
+import workbench, { principal } from '../build/index.mjs';
+import { pendingBlobStager, declaredBlobField, readClaimedBlob, claimedBlobLifecycle } from '../build/server.mjs';
 
 test('pending blob staging retains Scope canonical key and immutable digest identity', async (t) => {
   const db = new DatabaseSync(':memory:');

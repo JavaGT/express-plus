@@ -1,7 +1,7 @@
 // Scope subscription: normalizeSubscribeMsg + end-to-end subscribeScope.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeSubscribeMsg } from '../src/live-admission.mjs';
+import { normalizeSubscribeMsg } from '../build/live-admission.mjs';
 import { LiveChannel } from '../public/workbench-client.mjs';
 
 function makeOpenChannel() {

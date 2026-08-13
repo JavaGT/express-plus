@@ -9,14 +9,14 @@
 // test/csrf-origin.test.mjs for the WebSocket transport (AGENTS.md → no second
 // auth path: one same-origin implementation for both transports).
 
-import { text, ref, grant, read, write, subscribe, scope } from '../src/index.mjs';
+import { text, ref, grant, read, write, subscribe, scope } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { connect as tcpConnect } from 'node:net';
 import { randomBytes } from 'node:crypto';
 
-import workbench, { entity, generateDDL } from '../src/internal.mjs';
+import workbench, { entity, generateDDL } from '../build/internal.mjs';
 
 function makeNote() {
   return entity('Note', {

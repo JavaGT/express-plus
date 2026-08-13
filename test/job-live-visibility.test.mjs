@@ -6,14 +6,14 @@
 // Fail-closed: a missing anchor row delivers nothing live, though the event
 // stays durable in _Log for catch-up.
 
-import { text, ref, grant, read, write, subscribe, scope } from '../src/index.mjs';
+import { text, ref, grant, read, write, subscribe, scope } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { connect as tcpConnect } from 'node:net';
 import { randomBytes } from 'node:crypto';
 
-import workbench, { entity, generateDDL } from '../src/internal.mjs';
+import workbench, { entity, generateDDL } from '../build/internal.mjs';
 
 const SECRET = 's3cret-shared-deployment-key';
 

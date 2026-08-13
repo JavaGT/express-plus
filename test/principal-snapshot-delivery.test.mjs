@@ -2,15 +2,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import { defineSqliteSchema } from '../src/sqlite-schema.mjs';
-import { executeFrameworkDDL } from '../src/ddl.mjs';
-import { projectionSource, principalSnapshot } from '../src/principal-snapshot-declaration.mjs';
-import { principalSnapshotScope } from '../src/principal-snapshot-scope.mjs';
-import { createPrincipalSnapshotDelivery } from '../src/principal-snapshot-delivery.mjs';
-import { createPrincipalSnapshotTransaction } from '../src/principal-snapshot-transaction.mjs';
-import { createWriteQueue } from '../src/write-queue.mjs';
-import { validatePrincipalSnapshotDeclarations } from '../src/principal-snapshot-delivery.mjs';
-import { createOwnedLiveDelivery } from '../src/live-delivery-public.mjs';
+import { defineSqliteSchema } from '../build/sqlite-schema.mjs';
+import { executeFrameworkDDL } from '../build/ddl.mjs';
+import { projectionSource, principalSnapshot } from '../build/principal-snapshot-declaration.mjs';
+import { principalSnapshotScope } from '../build/principal-snapshot-scope.mjs';
+import { createPrincipalSnapshotDelivery } from '../build/principal-snapshot-delivery.mjs';
+import { createPrincipalSnapshotTransaction } from '../build/principal-snapshot-transaction.mjs';
+import { createWriteQueue } from '../build/write-queue.mjs';
+import { validatePrincipalSnapshotDeclarations } from '../build/principal-snapshot-delivery.mjs';
+import { createOwnedLiveDelivery } from '../build/live-delivery-public.mjs';
 
 function setup() {
   const db = new DatabaseSync(':memory:');

@@ -1,10 +1,10 @@
-import { ref, map, scope, grant, deny, read, write, subscribe, inherit } from '../src/index.mjs';
+import { ref, map, scope, grant, deny, read, write, subscribe, inherit } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { compileEntityAuthz } from '../src/authz.mjs';
+import { compileEntityAuthz } from '../build/authz.mjs';
 import {
-  text, NonCompilableError } from '../src/internal.mjs';
+  text, NonCompilableError } from '../build/internal.mjs';
 
 const ownerCan = async ({ is }) => (await is.owner()) ? grant(read, write, subscribe) : deny('no');
 

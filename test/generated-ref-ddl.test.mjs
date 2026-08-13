@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { computed, entity, grant, map, principal, read, ref, text, write } from '../src/index.mjs';
-import { defineSqliteSchema } from '../src/server.mjs';
+import workbench, { computed, entity, grant, map, principal, read, ref, text, write } from '../build/index.mjs';
+import { defineSqliteSchema } from '../build/server.mjs';
 
 const user = principal({ type: 'user', id: 'ref-user' });
 const grants = () => grant(read, write);

@@ -25,7 +25,7 @@ import { mayVerb, mayRow } from './row-grant.mjs';
 import { config } from './config.mjs';
 import { applySecurityHeaders, renderError, isSameOriginRequest } from './middleware.mjs';
 import { sessionPrincipalOf, sessionTokenOf, apiKeyPrincipalOf } from './auth/session.mjs';
-import { createLiveDelivery } from './live-delivery.mjs';
+import { createWebSocketLiveDelivery } from './live-delivery.mjs';
 import { getLog, withLog } from './log.mjs';
 import { createRateLimiter } from './rate-limit.mjs';
 import { BodyError, readRequestBody } from './http-body.mjs';
@@ -519,7 +519,7 @@ export function listen(app     , port     , optionsOrCallback      = {}) {
   // WebSocket handshake degraded into an ordinary GET and 400'd against the
   // SSE handler.
   if (app.db && !app._applicationLiveDelivery) {
-    app.live = createLiveDelivery(httpServer, {
+    app.live = createWebSocketLiveDelivery(httpServer, {
       path: '/events',
       mayVerb: (entity     , verb     , row     , principal     ) => mayVerb(entity, verb, row, principal),
       principalOf,

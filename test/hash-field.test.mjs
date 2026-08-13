@@ -5,15 +5,15 @@
 // `value`, so a scope predicate cannot compare it (fail closed: a plaintext
 // password must never reach the SQL filter).
 
-import { text, hash, scope, grant, read, everyone } from '../src/index.mjs';
+import { text, hash, scope, grant, read, everyone } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { scryptSync } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import workbench, {
-  entity } from '../src/internal.mjs';
-import { serializeField } from '../src/field-strategy.mjs';
-import { fieldHandle } from '../src/scope-sql.mjs';
+  entity } from '../build/internal.mjs';
+import { serializeField } from '../build/field-strategy.mjs';
+import { fieldHandle } from '../build/scope-sql.mjs';
 
 function makeUser() {
   return entity('User', {

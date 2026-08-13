@@ -2,10 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import { authorizeSubscription } from '../src/live-admission.mjs';
-import { registerAnnotatedTextStructuralExtension, scope } from '../src/internal.mjs';
-import { annotatedText, annotation, entity, ephemeral, grant, measurement, read, ref, registerAnnotatedTextContract, subscribe } from '../src/index.mjs';
-import { executeDDL } from '../src/ddl.mjs';
+import { authorizeSubscription } from '../build/live-admission.mjs';
+import { registerAnnotatedTextStructuralExtension, scope } from '../build/internal.mjs';
+import { annotatedText, annotation, entity, ephemeral, grant, measurement, read, ref, registerAnnotatedTextContract, subscribe } from '../build/index.mjs';
+import { executeDDL } from '../build/ddl.mjs';
 
 const caretAdmissionMeasurement = 'caretAdmissionMeasurement';
 registerAnnotatedTextContract(caretAdmissionMeasurement, Object.freeze({ kind: 'measurement' }));

@@ -12,16 +12,16 @@
 // OBJECT, not a string name — `inherit(Doc, { via })`, never `inherit('Doc')`.
 // No registry, no global namespace; the parent must be defined above the child.
 
-import { text, ref, scope, grant, deny, read, write, subscribe, inherit } from '../src/index.mjs';
+import { text, ref, scope, grant, deny, read, write, subscribe, inherit } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
-  entity } from '../src/internal.mjs';
+  entity } from '../build/internal.mjs';
 
-import { bindReadScope } from '../src/scope-sql.mjs';
-import { principal, anonymous } from '../src/principal.mjs';
+import { bindReadScope } from '../build/scope-sql.mjs';
+import { principal, anonymous } from '../build/principal.mjs';
 
 // A minimal owner grant whose .can half is always present.
 const ownerCan = async ({ is }) => (await is.owner()) ? grant(read, write, subscribe) : deny('no');

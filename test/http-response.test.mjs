@@ -8,7 +8,7 @@ import {
   canWriteResponse,
   warnLateResponse,
   projectedCursorHeaders,
-} from '../src/http-response.mjs';
+} from '../build/http-response.mjs';
 
 function makeResponse(overrides = {}) {
   return {

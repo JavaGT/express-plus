@@ -112,7 +112,7 @@ export class LiveConnection {
   }
 
   send(data         )       {
-    if (this.#closed) return;
+    if (this.#closed || this.#closing) return;
     try {
       this.#socket.write(this.#sender.text(JSON.stringify(data)));
     } catch {
@@ -135,7 +135,14 @@ export class LiveConnection {
     const msgs = this.#parser.drainMessages()                 ;
     for (const msg of msgs) {
       if (msg.opcode === 0x8) {
-        try { this.#socket.write(this.#sender.close(msg.closeCode ?? 1000, msg.closeReason)); } catch { /* ignore */ }
+        // 1005 means the peer sent a close frame without a status code. It is
+        // an internal RFC 6455 sentinel, not a code valid on the wire; echo an
+        // empty close frame rather than sending Chromium an illegal 1005 code.
+        const code = msg.closeCode === 1005 ? undefined : (msg.closeCode ?? 1000);
+        // Mark the connection closing before cleanup can fan out a presence
+        // retraction, then acknowledge the peer's close frame.
+        this.#closing = true;
+        try { this.#socket.write(this.#sender.close(code, msg.closeReason)); } catch { /* ignore */ }
         this.#close();
         return;
       }
@@ -418,13 +425,16 @@ export class LiveConnection {
 
   async #performClose()                {
     if (this.#closed) return;
-    this.#closing = true;
     // Remove the connection from the transport registry synchronously. The
     // returned promise still waits for caret retraction and socket cleanup,
     // but callers observing count() during shutdown must not see a closing
-    // connection as live.
+    // connection as live. Do not set #closing until after cleanup: send()
+    // drops frames while #closing, and shutdown must flush the caret remove
+    // before the socket is destroyed. Peer close (opcode 0x8) already sets
+    // #closing first so a departing client is not echoed its own retraction.
     this.#onClose?.();
     await this.#cleanup();
+    this.#closing = true;
     this.#closed = true;
     try { this.#socket.destroy(); } catch { /* ignore */ }
   }

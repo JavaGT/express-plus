@@ -5,7 +5,7 @@ import {
   assertTextOp, assertUtf16Offset, assertUtf16Range, assertWellFormedText,
   canonicalTextOp, compareInsertOrder, compareOpId, frontierDominates, scalarCount,
   createTextState, materializeText, restoreTextCheckpoint, textCheckpoint,
-} from '../src/annotated-text.mjs';
+} from '../build/annotated-text.mjs';
 
 const A = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const B = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';

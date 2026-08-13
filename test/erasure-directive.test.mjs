@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { durableHistory, erasureDirective, erasureDirectivePreparation } from '../src/index.mjs';
-import { generateFrameworkDDL, prepareErasureDirective } from '../src/internal.mjs';
-import { frameworkTableNames } from '../src/server.mjs';
-import { frameworkTableNamesWithoutAuthCompile } from '../src/framework-table-names.mjs';
+import workbench, { durableHistory, erasureDirective, erasureDirectivePreparation } from '../build/index.mjs';
+import { generateFrameworkDDL, prepareErasureDirective } from '../build/internal.mjs';
+import { frameworkTableNames } from '../build/server.mjs';
+import { frameworkTableNamesWithoutAuthCompile } from '../build/framework-table-names.mjs';
 
 const scope = 'Project:project-1';
 const oldData = JSON.stringify({ projectId: 'project-1', id: 'artefact-1', sensitive: 'remove-me' });

@@ -23,8 +23,8 @@ test('quickstart and functionality docs exist and are linked from README', () =>
   assert.match(readme, /examples\/minimal-note\.mjs/);
 });
 
-test('functionality.md documents major public export groups from src/index.mjs', () => {
-  const index = read('src/index.mjs');
+test('functionality.md documents major public export groups from build/index.mjs', () => {
+  const index = read('build/index.mjs');
   const func = read('docs/functionality.md');
   const mustAppear = [
     'entity', 'text', 'grant', 'scope', 'router', 'schedule', 'tick',

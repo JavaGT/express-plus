@@ -16,10 +16,10 @@ import {
   EPHEMERAL_SIDE_TABLE_STRATEGY,
   collectSideTableStrategies,
   sideTableDDL,
-} from '../src/side-table-strategy.mjs';
+} from '../build/side-table-strategy.mjs';
 
-import * as eventHandle from '../src/event-handle.mjs';
-import { membershipTable, membershipOwnerCol, MEMBER_COLUMN } from '../src/scope-sql.mjs';
+import * as eventHandle from '../build/event-handle.mjs';
+import { membershipTable, membershipOwnerCol, MEMBER_COLUMN } from '../build/scope-sql.mjs';
 
 // ---- helpers ----
 

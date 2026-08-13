@@ -4,14 +4,14 @@
 // is computed in pure JS (brute-force, zero runtime dependencies), matching
 // Scope's approach. The .nearest(query, k) predicate returns top-K rows.
 
-import { vector, scope, grant, read, write, subscribe, everyone, text, entity } from '../src/index.mjs';
+import { vector, scope, grant, read, write, subscribe, everyone, text, entity } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench from '../src/app.mjs';
-import { cosineSimilarity } from '../src/internal.mjs';
-import { principal } from '../src/principal.mjs';
+import workbench from '../build/app.mjs';
+import { cosineSimilarity } from '../build/internal.mjs';
+import { principal } from '../build/principal.mjs';
 
 // A test entity with a vector field.
 function vecEntity(dimensions = 3) {
@@ -333,7 +333,7 @@ test('update vector field and re-search', async (t) => {
 
 // ---- vector via scope findOne with nearest AST node ----
 
-import { lowerToSql } from '../src/scope-sql.mjs';
+import { lowerToSql } from '../build/scope-sql.mjs';
 
 test('lowerToSql handles nearest node: no-op SQL, nearest carried on result', () => {
   const Item = entity('TestItemNearest', {

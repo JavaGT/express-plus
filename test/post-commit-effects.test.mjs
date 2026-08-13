@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 
-import workbench, { admin, authorizedRows, entity, everyone, grant, map, membership, postCommitEffect, read, ref, scope, subscribe, text, write } from '../src/index.mjs';
+import workbench, { admin, authorizedRows, entity, everyone, grant, map, membership, postCommitEffect, read, ref, scope, subscribe, text, write } from '../build/index.mjs';
 
 const principal = { type: 'user', id: 'editor', attributes: {} };
 
@@ -562,7 +562,7 @@ test('claim is ordered per key, fenced, lease-recoverable, target-verified, and 
   let now = 100;
   const { app } = await setup(t);
   await app.dispatch(request());
-  const runner = (await import('../src/post-commit-effects.mjs')).createPostCommitEffectRunner({ db: app.db, leaseMs: 10, now: () => now });
+  const runner = (await import('../build/post-commit-effects.mjs')).createPostCommitEffectRunner({ db: app.db, leaseMs: 10, now: () => now });
   const first = runner.claim('w1');
   assert.equal(first.id.ordinal, 0);
   assert.equal(runner.claim('w2'), null, 'same key preserves order while predecessor incomplete');
@@ -583,7 +583,7 @@ test('independent keys claim concurrently; heartbeat extends a lease and fail ho
   const { app, db } = await setup(t);
   await app.dispatch(request());
   db.prepare("UPDATE _PostCommitEffect SET exclusionKey = 'independent' WHERE ordinal = 1").run();
-  const runner = (await import('../src/post-commit-effects.mjs')).createPostCommitEffectRunner({ db, leaseMs: 10, now: () => now });
+  const runner = (await import('../build/post-commit-effects.mjs')).createPostCommitEffectRunner({ db, leaseMs: 10, now: () => now });
 
   const first = runner.claim('w1');
   const second = runner.claim('w2');
@@ -606,7 +606,7 @@ test('expired ownership cannot heartbeat or complete before recovery', async (t)
   let now = 100;
   const { app, db } = await setup(t);
   await app.dispatch(request());
-  const runner = (await import('../src/post-commit-effects.mjs')).createPostCommitEffectRunner({ db, leaseMs: 10, now: () => now });
+  const runner = (await import('../build/post-commit-effects.mjs')).createPostCommitEffectRunner({ db, leaseMs: 10, now: () => now });
   const claimed = runner.claim('expired');
   now = 110;
   assert.equal(runner.heartbeat(claimed.id, 'expired', claimed.fence), false);

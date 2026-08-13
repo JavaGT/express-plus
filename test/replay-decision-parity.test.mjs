@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-import { decideReplay, normalizeSeqSpan } from '../src/replay-decision.mjs';
+import { decideReplay, normalizeSeqSpan } from '../build/replay-decision.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -120,7 +120,7 @@ test('workbench-client embeds a replay-decision that behaves identically to src'
 });
 
 test('createClient is span-aware via decideReplay (shared core)', async () => {
-  const { createClient, event } = await import('../src/pipeline.mjs');
+  const { createClient, event } = await import('../build/pipeline.mjs');
   const e = event('Note.created', (s, ev) => ({ ...s, ...ev.data }));
   const client = createClient({ events: [e] });
   client.bootstrap('Note:1', { id: '1' }, 0);

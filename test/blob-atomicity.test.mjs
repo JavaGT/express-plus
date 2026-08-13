@@ -6,9 +6,9 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 
-import { createServer, durableMutationVariant } from '../src/pipeline.mjs';
-import { createBlobStore } from '../src/blob-store.mjs';
-import { executeFrameworkDDL } from '../src/ddl.mjs';
+import { createServer, durableMutationVariant } from '../build/pipeline.mjs';
+import { createBlobStore } from '../build/blob-store.mjs';
+import { executeFrameworkDDL } from '../build/ddl.mjs';
 
 // A blobAdopter wired to an event's `photo` field — the kernel stays free of
 // field knowledge; the app's wiring (here: a fixture) resolves which blob ids an

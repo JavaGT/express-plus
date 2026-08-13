@@ -9,7 +9,7 @@
 //  - Integration: entity CRUD -> FTS table populated -> .matches() scope filters correctly
 //  - No matches returns empty
 
-import { text, ref, scope, grant, deny, read, write, subscribe, everyone, anyOf } from '../src/index.mjs';
+import { text, ref, scope, grant, deny, read, write, subscribe, everyone, anyOf } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
@@ -17,10 +17,10 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   entity, NonCompilableError, bindReadScope,
   generateDDL,
-} from '../src/internal.mjs';
-import { principal } from '../src/principal.mjs';
-import { FTS_STRATEGY } from '../src/fts-strategy.mjs';
-import { lowerToSql, makeNode } from '../src/scope-sql.mjs';
+} from '../build/internal.mjs';
+import { principal } from '../build/principal.mjs';
+import { FTS_STRATEGY } from '../build/fts-strategy.mjs';
+import { lowerToSql, makeNode } from '../build/scope-sql.mjs';
 
 const ownerCan = async ({ is }) => (await is.owner()) ? grant(read, write, subscribe) : deny('no');
 

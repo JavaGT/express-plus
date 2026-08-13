@@ -14,10 +14,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import workbench from '../src/app.mjs';
+import workbench from '../build/app.mjs';
 import { createLiveStore, LiveChannel, decodeResult } from '../public/workbench-client.mjs';
-import { SESSION_COOKIE } from '../src/auth/session.mjs';
-import { canUndoField, undoableFieldKinds } from '../src/field-laws.mjs';
+import { SESSION_COOKIE } from '../build/auth/session.mjs';
+import { canUndoField, undoableFieldKinds } from '../build/field-laws.mjs';
 import { makeFakeChannel, makeFakeFetch } from './fixtures/fake-transport.mjs';
 
 // ---------------------------------------------------------------------------
@@ -32,7 +32,7 @@ function sidFromSetCookie(header) {
 
 /** Boot a workbench app with auth + an owner-scoped Note entity. */
 async function bootAuthApp(t) {
-  const { entity, text, ref, grant, deny, read, write, subscribe, scope } = await import('../src/index.mjs');
+  const { entity, text, ref, grant, deny, read, write, subscribe, scope } = await import('../build/index.mjs');
   const Note = entity('Note', {
     body: text(),
     owner: ref('User', { role: 'owner', readonly: true }),
@@ -49,7 +49,7 @@ async function bootAuthApp(t) {
 
 /** Boot a workbench app with job queue + a note entity. */
 async function bootJobApp(t) {
-  const { entity, text, grant, read } = await import('../src/index.mjs');
+  const { entity, text, grant, read } = await import('../build/index.mjs');
   const app = workbench({
     db: ':memory:',
     jobs: { sharedSecret: 'test-jobs-secret', leaseMs: 60_000, heartbeatGraceMs: 60_000, reapIntervalMs: 1_000_000 },

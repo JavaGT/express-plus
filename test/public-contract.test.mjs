@@ -71,13 +71,13 @@ export const PUBLIC_API = Object.freeze({
 
 const PRIVATE_ENTRYPOINTS = Object.freeze([
   'workbench/internal',
-  'workbench/src/committed-log.mjs',
-  'workbench/src/history-read.mjs',
-  'workbench/src/post-commit-effects.mjs',
-  'workbench/src/operational-consumer.mjs',
-  'workbench/src/durable-history.mjs',
-  'workbench/src/pipeline.mjs',
-  'workbench/src/driver.mjs',
+  'workbench/build/committed-log.mjs',
+  'workbench/build/history-read.mjs',
+  'workbench/build/post-commit-effects.mjs',
+  'workbench/build/operational-consumer.mjs',
+  'workbench/build/durable-history.mjs',
+  'workbench/build/pipeline.mjs',
+  'workbench/build/driver.mjs',
 ]);
 
 const root = fileURLToPath(new URL('..', import.meta.url));

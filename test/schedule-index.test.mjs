@@ -5,8 +5,8 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   date, entity, everyone, executeFrameworkDDL, generateDDL, grant, read,
   schedule, scope, text, tick,
-} from '../src/internal.mjs';
-import { startClockTriggers } from '../src/schedule.mjs';
+} from '../build/internal.mjs';
+import { startClockTriggers } from '../build/schedule.mjs';
 
 function executeEntity(db, entityDef) {
   executeFrameworkDDL(db);

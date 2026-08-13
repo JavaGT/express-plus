@@ -8,8 +8,8 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 
-import { resolveTemplate, escapeHtml, matchExtension, isSafePath } from '../src/internal.mjs';
-import { stripPrefix, serveStatic } from '../src/views.mjs';
+import { resolveTemplate, escapeHtml, matchExtension, isSafePath } from '../build/internal.mjs';
+import { stripPrefix, serveStatic } from '../build/views.mjs';
 
 function withTemplate(source, run) {
   const dir = path.join(os.tmpdir(), 'express-views-' + randomUUID());

@@ -13,9 +13,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import { txn, begin, commit, rollback, upsert, wrapDriver } from '../src/driver.mjs';
-import { text, ref, scope, grant, read, write, subscribe, everyone, principal } from '../src/index.mjs';
-import workbench, { entity } from '../src/internal.mjs';
+import { txn, begin, commit, rollback, upsert, wrapDriver } from '../build/driver.mjs';
+import { text, ref, scope, grant, read, write, subscribe, everyone, principal } from '../build/index.mjs';
+import workbench, { entity } from '../build/internal.mjs';
 
 // A fresh in-memory db with the framework + driver helpers attached (the same
 // treatment app.db gets from workbench). Used by the unit tests below.

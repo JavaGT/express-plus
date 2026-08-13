@@ -76,14 +76,37 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options = {})
   return document;
 }
 
-// Optimistic absolute-offset text splice (issue #33 blockless). The result is
+// Optimistic document-bound projections (issue #33 blockless). Text edits are
 // DISPOSITION-NEUTRAL: a range the edit collapses to zero width stays collapsed
 // and its annotation stays attached, so the visible placeholder never infers
-// the server's delete-vs-orphan policy. The authoritative v4 fold disposition
-// resolves each emptied annotation exactly once; the client never prunes here.
+// the server's delete-vs-orphan policy. Explicit annotation removal is already
+// a precise delete of a stable annotation id, so its pending projection can
+// remove that id immediately; the authoritative delivery snapshot still owns
+// reconciliation and restores the preimage if the action is rejected.
 export function projectPendingAnnotatedTextDocument(document, action, _ignored) {
   const edit = action?.payload?.version === 9 ? action.payload.edit : null;
-  if (!edit || (edit.kind !== 'text.insert' && edit.kind !== 'text.delete' && edit.kind !== 'text.replace')) return document;
+  if (!edit) return document;
+  if (edit.kind === 'annotation.remove') {
+    const annotationId = edit.annotationId;
+    if (typeof annotationId !== 'string' || annotationId.length === 0 || !Array.isArray(document?.annotations)) return document;
+    const annotations = document.annotations.filter((annotation) => annotation?.id !== annotationId);
+    const ranges = Array.isArray(document.ranges)
+      ? document.ranges.filter((range) => range?.annotationId !== annotationId)
+      : document.ranges;
+    const orphans = Array.isArray(document.orphans)
+      ? document.orphans.filter((orphan) => orphan?.id !== annotationId)
+      : document.orphans;
+    if (annotations.length === document.annotations.length
+      && ranges?.length === document.ranges?.length
+      && orphans?.length === document.orphans?.length) return document;
+    return Object.freeze({
+      ...document,
+      annotations: Object.freeze(annotations),
+      ...(Array.isArray(document.ranges) ? { ranges: Object.freeze(ranges) } : {}),
+      ...(Array.isArray(document.orphans) ? { orphans: Object.freeze(orphans) } : {}),
+    });
+  }
+  if (edit.kind !== 'text.insert' && edit.kind !== 'text.delete' && edit.kind !== 'text.replace') return document;
   const text = document?.text ?? '';
   const start = edit.kind === 'text.insert' ? edit.at.offset : edit.from.offset;
   const end = edit.kind === 'text.insert' ? start : edit.to.offset;

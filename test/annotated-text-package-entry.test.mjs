@@ -9,7 +9,7 @@ import {
   protectingAnnotation as rootProtectingAnnotation,
   read,
   ref,
-} from '../src/index.mjs';
+} from '../build/index.mjs';
 import {
   annotatedText,
   annotation,
@@ -22,7 +22,7 @@ import {
   annotatedTextRetireAction,
   exportAnnotatedText,
   readAnnotatedTextForRecipient,
-} from '../src/annotated-text-public.mjs';
+} from '../build/annotated-text-public.mjs';
 
 const extension = 'packageEntryMeasurement';
 const token = (label) => `${label}${'x'.repeat(43)}`.slice(0, 43);

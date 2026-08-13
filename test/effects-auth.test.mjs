@@ -14,14 +14,14 @@
 //        global validateEffects pass at boot (cycle → app.ready rejects;
 //        missing admitsEffects → app.ready rejects; valid → resolves + fires).
 
-import { text, number, grant, deny, read, write, subscribe, principal, scope, everyone, self, inc } from '../src/index.mjs';
+import { text, number, grant, deny, read, write, subscribe, principal, scope, everyone, self, inc } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  entity, effectSource, buildEffectsRegistry, validateEffects, generateDDL, executeFrameworkDDL, created } from '../src/internal.mjs';
-import { createServer, durableMutationVariant } from '../src/pipeline.mjs';
+  entity, effectSource, buildEffectsRegistry, validateEffects, generateDDL, executeFrameworkDDL, created } from '../build/internal.mjs';
+import { createServer, durableMutationVariant } from '../build/pipeline.mjs';
 
 function setupDb() {
   const db = new DatabaseSync(':memory:');

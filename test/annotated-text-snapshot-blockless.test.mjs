@@ -2,13 +2,13 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { annotatedText, annotation, protectingAnnotation, entity, everyone, grant, read, write, ref, scope, admin, subscribe } from '../src/index.mjs';
-import { executeDDL, executeFrameworkDDL, registerAnnotatedTextStructuralExtension } from '../src/internal.mjs';
-import { registerAnnotatedTextContract } from '../src/index.mjs';
-import { importTextToFamily, textFamilyCheckpoint } from '../src/annotated-text-continuous.mjs';
-import { projectAnnotatedTextSnapshot, exportAnnotatedText } from '../src/annotated-text-snapshot.mjs';
-import { resolveOffsetToEndpoint } from '../src/annotated-text-continuous.mjs';
-import { attachAnnotationRange } from '../src/annotated-text-storage.mjs';
+import workbench, { annotatedText, annotation, protectingAnnotation, entity, everyone, grant, read, write, ref, scope, admin, subscribe } from '../build/index.mjs';
+import { executeDDL, executeFrameworkDDL, registerAnnotatedTextStructuralExtension } from '../build/internal.mjs';
+import { registerAnnotatedTextContract } from '../build/index.mjs';
+import { importTextToFamily, textFamilyCheckpoint } from '../build/annotated-text-continuous.mjs';
+import { projectAnnotatedTextSnapshot, exportAnnotatedText } from '../build/annotated-text-snapshot.mjs';
+import { resolveOffsetToEndpoint } from '../build/annotated-text-continuous.mjs';
+import { attachAnnotationRange } from '../build/annotated-text-storage.mjs';
 
 registerAnnotatedTextContract('m', Object.freeze({ kind: 'measurement' }));
 registerAnnotatedTextStructuralExtension('m', Object.freeze({ version: 1, validate() {}, edit() {}, partition() {}, combine() {} }));

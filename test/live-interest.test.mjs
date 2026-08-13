@@ -13,15 +13,15 @@
 // (see also live-pace.test.mjs, live-fanout.test.mjs). Subscription input
 // validation is exercised through raw WebSocket connections.
 
-import { text, ephemeral, grant, read, write, subscribe, scope, everyone } from '../src/index.mjs';
+import { text, ephemeral, grant, read, write, subscribe, scope, everyone } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { connect as tcpConnect } from 'node:net';
 import { randomBytes } from 'node:crypto';
 
-import workbench, { entity, generateDDL } from '../src/internal.mjs';
-import { createLiveFanout } from '../src/live-fanout.mjs';
+import workbench, { entity, generateDDL } from '../build/internal.mjs';
+import { createLiveFanout } from '../build/live-fanout.mjs';
 
 // --- test entity ---
 

@@ -29,7 +29,7 @@
 //     delivery. The transport is called as a post-commit side effect, never
 //     blocking the calling transaction.
 
-import { consumerCursorMap, upsertConsumerCursor } from './consumer-cursor.mjs';
+import { sweepBehindCursor, upsertConsumerCursor } from './consumer-cursor.mjs';
 import { txn,               } from './driver.mjs';
 
 const CONSUMER = 'email';
@@ -122,26 +122,20 @@ export function emailSeam({ transport = noopTransport }                         
   };
 
   async function reconcileEmailDelivery(db          )                                 {
-    const recoveryByScope = consumerCursorMap(db, CONSUMER);
-    const rows = db.prepare('SELECT * FROM _Log ORDER BY scope, seq').all();
-    const blockedScopes = new Set        ();
     let delivered = 0;
-    for (const row of rows) {
-      if (blockedScopes.has(row.scope          )) continue;
-      const applied = recoveryByScope.get(row.scope          ) ?? 0;
-      if (applied >= (row.seq          )) continue;
+    await sweepBehindCursor(db, CONSUMER, async (row) => {
       let data                         ;
       try { data = JSON.parse(row.eventData          )                           ; } catch { data = {}; }
-      const payload = extractEmailPayload({ type: row.eventType          , data });
+      const payload = extractEmailPayload({ type: row.eventType, data });
       try {
-        await deliverAndAdvance(db, { scope: row.scope          , seq: row.seq           }, payload);
-        recoveryByScope.set(row.scope          , row.seq          );
+        await deliverAndAdvance(db, { scope: row.scope, seq: row.seq }, payload);
         if (payload) delivered += 1;
+        return 'done';
       } catch (err) {
-        blockedScopes.add(row.scope          );
         console.error('[email] delivery recovery failed:', (err         ).message);
+        return 'block';
       }
-    }
+    });
     return { delivered };
   }
 

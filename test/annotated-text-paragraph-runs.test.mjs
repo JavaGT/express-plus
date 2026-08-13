@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { annotatedText, annotation, entity, ref } from '../src/index.mjs';
-import { assertUtf16Range } from '../src/annotated-text.mjs';
+import { annotatedText, annotation, entity, ref } from '../build/index.mjs';
+import { assertUtf16Range } from '../build/annotated-text.mjs';
 import {
   applyTextOperation,
   importTextToFamily,
@@ -11,11 +11,11 @@ import {
   resolveOffsetToEndpoint,
   restoreTextFamily,
   textFamilyCheckpoint,
-} from '../src/annotated-text-continuous.mjs';
+} from '../build/annotated-text-continuous.mjs';
 import {
   planTextOffsetEdit,
   planTextRangeApply,
-} from '../src/annotated-text-plan.mjs';
+} from '../build/annotated-text-plan.mjs';
 import { createAnnotatedTextHttpSession } from '../public/workbench-client.mjs';
 
 const ACTOR = 'a'.repeat(32);
@@ -39,6 +39,15 @@ function input(family, edit, extra = {}) {
     edit,
     ...extra,
   });
+}
+
+function familyAfter(family, plan) {
+  const operations = plan.operation.kind === 'text.replace' ? plan.operation.operations : [plan.operation.operation];
+  return operations.reduce((current, operation) => applyTextOperation(current, operation), family);
+}
+
+function materializePlan(family, plan) {
+  return materializeText(familyAfter(family, plan));
 }
 
 function rangeFor(family, annotationId, startOffset, endOffset) {
@@ -158,21 +167,21 @@ test('deleting a run body leaves both LF boundaries so the empty run stays repre
   const family = familyFromText('a\nXY\nb');
   const plan = input(family, { kind: 'text.delete', from: at(2), to: at(4) });
   assert.equal(plan.operation.kind, 'text.apply');
-  assert.equal(materializeText(plan.facts.family), 'a\n\nb');
+  assert.equal(materializePlan(family, plan), 'a\n\nb');
 });
 
 test('insertion at an LF boundary produces visible text and stays converged', () => {
   const family = familyFromText('a\n\nb');
   const plan = input(family, { kind: 'text.insert', text: 'X', at: at(2) });
   assert.equal(plan.operation.kind, 'text.apply');
-  assert.equal(materializeText(plan.facts.family), 'a\nX\nb');
+  assert.equal(materializePlan(family, plan), 'a\nX\nb');
 });
 
 test('deleting a single LF joins the adjacent runs', () => {
   const family = familyFromText('a\nb');
   const plan = input(family, { kind: 'text.delete', from: at(1), to: at(2) });
   assert.equal(plan.operation.kind, 'text.apply');
-  assert.equal(materializeText(plan.facts.family), 'ab');
+  assert.equal(materializePlan(family, plan), 'ab');
 });
 
 test('surrogate-splitting offsets are rejected even adjacent to an LF boundary', () => {
@@ -216,27 +225,31 @@ test('replace across LF runs materializes ordered runs with the replacement', ()
   const plan = input(family, { kind: 'text.replace', text: 'XYZ\nDELTA', from: at(2), to: at(11) });
   assert.equal(plan.operation.kind, 'text.replace');
   assert.equal(plan.operation.operations.length, 2);
-  assert.equal(materializeText(plan.facts.family), 'alXYZ\nDELTAgamma');
+  assert.equal(materializePlan(family, plan), 'alXYZ\nDELTAgamma');
 });
 
 test('replacement at document start and document end is atomic and ordered', () => {
-  const start = input(familyFromText('abc'), { kind: 'text.replace', text: 'X', from: at(0), to: at(2) });
+  const startFamily = familyFromText('abc');
+  const start = input(startFamily, { kind: 'text.replace', text: 'X', from: at(0), to: at(2) });
   assert.equal(start.operation.kind, 'text.replace');
   assert.equal(start.operation.operations.length, 2, 'a replace is one delete+insert pair');
-  assert.equal(materializeText(start.facts.family), 'Xc');
+  assert.equal(materializePlan(startFamily, start), 'Xc');
 
-  const tail = input(familyFromText('abc'), { kind: 'text.replace', text: 'X', from: at(2), to: at(3) });
+  const tailFamily = familyFromText('abc');
+  const tail = input(tailFamily, { kind: 'text.replace', text: 'X', from: at(2), to: at(3) });
   assert.equal(tail.operation.kind, 'text.replace');
   assert.equal(tail.operation.operations.length, 2);
-  assert.equal(materializeText(tail.facts.family), 'abX');
+  assert.equal(materializePlan(tailFamily, tail), 'abX');
 
-  const insertStart = input(familyFromText('abc'), { kind: 'text.insert', text: 'P', at: at(0) });
+  const insertStartFamily = familyFromText('abc');
+  const insertStart = input(insertStartFamily, { kind: 'text.insert', text: 'P', at: at(0) });
   assert.equal(insertStart.operation.kind, 'text.apply');
-  assert.equal(materializeText(insertStart.facts.family), 'Pabc');
+  assert.equal(materializePlan(insertStartFamily, insertStart), 'Pabc');
 
-  const insertEnd = input(familyFromText('abc'), { kind: 'text.insert', text: 'Q', at: at(3) });
+  const insertEndFamily = familyFromText('abc');
+  const insertEnd = input(insertEndFamily, { kind: 'text.insert', text: 'Q', at: at(3) });
   assert.equal(insertEnd.operation.kind, 'text.apply');
-  assert.equal(materializeText(insertEnd.facts.family), 'abcQ');
+  assert.equal(materializePlan(insertEndFamily, insertEnd), 'abcQ');
 });
 
 test('continuous family checkpoint survives restore and replay across an empty-run document', () => {
@@ -389,10 +402,11 @@ test('a range spanning LF runs anchors once and projects deterministically throu
   assert.equal(projectEndpointToOffset(family, plan.facts.ranges[0].end), 8);
 
   const replaced = input(family, { kind: 'text.replace', text: 'W', from: at(4), to: at(7) });
-  assert.equal(materializeText(replaced.facts.family), 'one\nW\nthree');
+  const replacedFamily = familyAfter(family, replaced);
+  assert.equal(materializeText(replacedFamily), 'one\nW\nthree');
   const range = plan.facts.ranges[0];
-  assert.equal(projectEndpointToOffset(replaced.facts.family, range.start), 3);
-  assert.equal(projectEndpointToOffset(replaced.facts.family, range.end), 6);
+  assert.equal(projectEndpointToOffset(replacedFamily, range.start), 3);
+  assert.equal(projectEndpointToOffset(replacedFamily, range.end), 6);
 });
 
 test('identical, adjacent, crossing, contained, containing, and multiline ranges all coexist', () => {
@@ -437,29 +451,34 @@ test('boundary affinity over LF runs: start, inside, end, before, and after inse
   assert.equal(projectEndpointToOffset(family, range.end), 5);
 
   const atStart = input(family, { kind: 'text.insert', text: 'I', at: at(2) });
-  assert.equal(materializeText(atStart.facts.family), 'a\nIb\nc\nd');
-  assert.equal(projectEndpointToOffset(atStart.facts.family, range.start), 2);
-  assert.equal(projectEndpointToOffset(atStart.facts.family, range.end), 6);
+  const atStartFamily = familyAfter(family, atStart);
+  assert.equal(materializeText(atStartFamily), 'a\nIb\nc\nd');
+  assert.equal(projectEndpointToOffset(atStartFamily, range.start), 2);
+  assert.equal(projectEndpointToOffset(atStartFamily, range.end), 6);
 
   const atEnd = input(family, { kind: 'text.insert', text: 'I', at: at(5) });
-  assert.equal(materializeText(atEnd.facts.family), 'a\nb\ncI\nd');
-  assert.equal(projectEndpointToOffset(atEnd.facts.family, range.start), 2);
-  assert.equal(projectEndpointToOffset(atEnd.facts.family, range.end), 5);
+  const atEndFamily = familyAfter(family, atEnd);
+  assert.equal(materializeText(atEndFamily), 'a\nb\ncI\nd');
+  assert.equal(projectEndpointToOffset(atEndFamily, range.start), 2);
+  assert.equal(projectEndpointToOffset(atEndFamily, range.end), 5);
 
   const inside = input(family, { kind: 'text.insert', text: 'I', at: at(3) });
-  assert.equal(materializeText(inside.facts.family), 'a\nbI\nc\nd');
-  assert.equal(projectEndpointToOffset(inside.facts.family, range.start), 2, 'a strictly-inside insertion keeps the start endpoint');
-  assert.equal(projectEndpointToOffset(inside.facts.family, range.end), 6, 'a strictly-inside insertion is absorbed, tracking the end endpoint');
+  const insideFamily = familyAfter(family, inside);
+  assert.equal(materializeText(insideFamily), 'a\nbI\nc\nd');
+  assert.equal(projectEndpointToOffset(insideFamily, range.start), 2, 'a strictly-inside insertion keeps the start endpoint');
+  assert.equal(projectEndpointToOffset(insideFamily, range.end), 6, 'a strictly-inside insertion is absorbed, tracking the end endpoint');
 
   const before = input(family, { kind: 'text.insert', text: 'I', at: at(0) });
-  assert.equal(materializeText(before.facts.family), 'Ia\nb\nc\nd');
-  assert.equal(projectEndpointToOffset(before.facts.family, range.start), 3, 'an insertion before the range stays excluded');
-  assert.equal(projectEndpointToOffset(before.facts.family, range.end), 6);
+  const beforeFamily = familyAfter(family, before);
+  assert.equal(materializeText(beforeFamily), 'Ia\nb\nc\nd');
+  assert.equal(projectEndpointToOffset(beforeFamily, range.start), 3, 'an insertion before the range stays excluded');
+  assert.equal(projectEndpointToOffset(beforeFamily, range.end), 6);
 
   const after = input(family, { kind: 'text.insert', text: 'I', at: at(7) });
-  assert.equal(materializeText(after.facts.family), 'a\nb\nc\ndI');
-  assert.equal(projectEndpointToOffset(after.facts.family, range.start), 2, 'an insertion after the range stays excluded');
-  assert.equal(projectEndpointToOffset(after.facts.family, range.end), 5);
+  const afterFamily = familyAfter(family, after);
+  assert.equal(materializeText(afterFamily), 'a\nb\nc\ndI');
+  assert.equal(projectEndpointToOffset(afterFamily, range.start), 2, 'an insertion after the range stays excluded');
+  assert.equal(projectEndpointToOffset(afterFamily, range.end), 5);
 });
 
 test('a covering delete follows each annotation empty policy', () => {
@@ -468,7 +487,7 @@ test('a covering delete follows each annotation empty policy', () => {
     annotations: [{ id: 'o1', family: 'comment', empty: 'orphan', protectedTargetIds: [] }],
     ranges: [rangeFor(family, 'o1', 1, 3)],
   });
-  assert.equal(materializeText(orphaned.facts.family), 'ad');
+  assert.equal(materializePlan(family, orphaned), 'ad');
   assert.equal(orphaned.facts.emptiedAnnotations.length, 1);
   assert.equal(orphaned.facts.emptiedAnnotations[0].annotationId, 'o1');
   assert.equal(orphaned.facts.emptiedAnnotations[0].empty, 'orphan');
@@ -482,7 +501,7 @@ test('a covering delete follows each annotation empty policy', () => {
     annotations: [{ id: 'd1', family: 'comment', empty: 'delete', protectedTargetIds: [] }],
     ranges: [rangeFor(family, 'd1', 1, 3)],
   });
-  assert.equal(materializeText(deleted.facts.family), 'ad');
+  assert.equal(materializePlan(family, deleted), 'ad');
   assert.equal(deleted.facts.emptiedAnnotations.length, 1);
   assert.equal(deleted.facts.emptiedAnnotations[0].annotationId, 'd1');
   assert.equal(deleted.facts.emptiedAnnotations[0].empty, 'delete');
@@ -500,12 +519,13 @@ test('a replace overlapping two annotations transforms every overlapping range d
   const ranges = [rangeFor(family, 'r1', 1, 3), rangeFor(family, 'r2', 2, 4)];
   const plan = input(family, { kind: 'text.replace', text: 'X', from: at(1), to: at(4) }, { annotations, ranges });
   assert.equal(plan.operation.kind, 'text.replace');
-  assert.equal(materializeText(plan.facts.family), 'aXe');
+  const nextFamily = familyAfter(family, plan);
+  assert.equal(materializeText(nextFamily), 'aXe');
   // Both ranges are fully covered by [1,4); each collapses to the same
   // zero-width point at the replacement offset, projecting identically.
   for (const range of ranges) {
-    assert.equal(projectEndpointToOffset(plan.facts.family, range.start), 2);
-    assert.equal(projectEndpointToOffset(plan.facts.family, range.end), 2);
+    assert.equal(projectEndpointToOffset(nextFamily, range.start), 2);
+    assert.equal(projectEndpointToOffset(nextFamily, range.end), 2);
   }
   assert.deepEqual(plan.facts.emptiedAnnotations.map((entry) => entry.annotationId), ['r1', 'r2']);
   assert.equal(plan.facts.emptiedAnnotations[0].disposition.kind, 'deleted');

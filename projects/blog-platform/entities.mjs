@@ -26,8 +26,8 @@
 // The queue surface used is exactly kind + payload + scope — no media-shaped
 // concept (inputFileId, profile, transcript, ...) rides on this path.
 
-import { entity, text, boolean, date, ref, scope, grant, read, write, subscribe, everyone, anyOf, inherit, allowAnonymous } from '../../src/index.mjs';
-import { tryParseScopeKey } from '../../src/internal.mjs';
+import { entity, text, boolean, date, ref, scope, grant, read, write, subscribe, everyone, anyOf, inherit, allowAnonymous } from '../../build/index.mjs';
+import { tryParseScopeKey } from '../../build/internal.mjs';
 import { randomUUID } from 'node:crypto';
 
 // --- the spine: Blog / Post / Comment ---

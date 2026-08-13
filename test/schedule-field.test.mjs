@@ -1,8 +1,8 @@
-import { schedule, date, scope, everyone, grant, read, text } from '../src/index.mjs';
+import { schedule, date, scope, everyone, grant, read, text } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { entity } from '../src/internal.mjs';
-import { schedulerSource } from '../src/schedule.mjs';
+import { entity } from '../build/internal.mjs';
+import { schedulerSource } from '../build/schedule.mjs';
 
 // P6d Spine A step 1: time-driven sources (ADR #10). Import-surface only —
 // constructuring + entity-slot acceptance. Firing/dispatch/reaper wiring

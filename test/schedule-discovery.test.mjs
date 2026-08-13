@@ -1,14 +1,14 @@
 // Schedule constructor grammar + fire-path deadline dispatch via startClockTriggers.
 // Discovery is private; tests assert dispatch calls from the immediate scan.
 
-import { boolean, date, json, link, text, scope, everyone, grant, read } from '../src/index.mjs';
+import { boolean, date, json, link, text, scope, everyone, grant, read } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
-  entity, generateDDL, executeFrameworkDDL } from '../src/internal.mjs';
-import { admitSystemMutation, schedule, startClockTriggers, schedulerSource } from '../src/schedule.mjs';
+  entity, generateDDL, executeFrameworkDDL } from '../build/internal.mjs';
+import { admitSystemMutation, schedule, startClockTriggers, schedulerSource } from '../build/schedule.mjs';
 
 function setupDb() {
   const db = new DatabaseSync(':memory:');

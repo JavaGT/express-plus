@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { text, grant, read, write, subscribe, principal } from '../src/index.mjs';
+import workbench, { text, grant, read, write, subscribe, principal } from '../build/index.mjs';
 import {
   entity,
   generateDDL,
@@ -12,8 +12,8 @@ import {
   buildDurableEffectsRegistry,
   createDurableEffectsConsumer,
   reconcileDurableEffects,
-} from '../src/internal.mjs';
-import { createJobQueue } from '../src/job-queue.mjs';
+} from '../build/internal.mjs';
+import { createJobQueue } from '../build/job-queue.mjs';
 
 const SECRET = 'durable-effects-test-secret';
 

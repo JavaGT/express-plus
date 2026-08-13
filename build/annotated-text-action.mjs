@@ -1,6 +1,6 @@
 import { assertUtf16Offset, assertWellFormedText } from './annotated-text.mjs';
 import { resolveDeclarationMeasurementExtension } from './annotated-text-field.mjs';
-import { frozenJsonSnapshot } from './annotated-text-r2.mjs';
+import { frozenJsonSnapshot } from './frozen-json.mjs';
 import { annotatedTextAction as buildAnnotatedTextAction } from './annotated-text-action-builder.mjs';
 
                                

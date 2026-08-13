@@ -1,11 +1,11 @@
 // Priority 4 SLICE C — Ops bundle (CSP/HSTS/CORS/logging/metrics/health/envGate/onShutdown).
 
-import { text, ref, scope, grant, read, write } from '../src/index.mjs';
+import { text, ref, scope, grant, read, write } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { entity } from '../src/internal.mjs';
+import workbench, { entity } from '../build/internal.mjs';
 
 function ownedNote() {
   return entity('Note', {

@@ -21,17 +21,17 @@
 // for owner AND for collaborator. We assert that agreement directly, against a
 // real :memory: db with real membership rows written through the row handle.
 
-import { ref, text, map, scope, grant, read, write, subscribe, deny, anyOf, never } from '../src/index.mjs';
+import { ref, text, map, scope, grant, read, write, subscribe, deny, anyOf, never } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import { randomUUID } from 'node:crypto';
-import { bindReadScope } from '../src/scope-sql.mjs';
-import { mayVerb } from '../src/row-grant.mjs';
+import { bindReadScope } from '../build/scope-sql.mjs';
+import { mayVerb } from '../build/row-grant.mjs';
 import workbench, {
-  entity, createServer, durableMutationVariant, executeFrameworkDDL } from '../src/internal.mjs';
-import { principal } from '../src/principal.mjs';
+  entity, createServer, durableMutationVariant, executeFrameworkDDL } from '../build/internal.mjs';
+import { principal } from '../build/principal.mjs';
 
 // Build the exemplar entity once. This mirrors todo.mjs's TodoList shape: an
 // owner ref-role, a collaborators map, a declared `collaborator` membership

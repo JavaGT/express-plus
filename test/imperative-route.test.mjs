@@ -17,11 +17,11 @@
 // Fail-closed default: an imperative route with no leading gate inherits
 // requireUser(), so anonymous is denied 401. `allowAnonymous()` is the explicit opt-out.
 
-import { allowAnonymous } from '../src/index.mjs';
+import { allowAnonymous } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import workbench, { router } from '../src/internal.mjs';
+import workbench, { router } from '../build/internal.mjs';
 
 // Start a server on an ephemeral port and return { origin, close }.
 async function listen(app) {

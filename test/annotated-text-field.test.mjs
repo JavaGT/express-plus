@@ -2,9 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import { annotatedText, annotatedTextClientHandle, text, number, ref, annotation, protectingAnnotation, measurement, annotationAction, grant, read } from '../src/index.mjs';
-import { entity, generateDDL } from '../src/internal.mjs';
-import { validateAnnotatedTextDeclaration, annotatedTextDDL, getAnnotatedTextCompiledMetadata, registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension, resolveDeclarationMeasurementExtension } from '../src/annotated-text-field.mjs';
+import { annotatedText, annotatedTextClientHandle, text, number, ref, annotation, protectingAnnotation, measurement, annotationAction, grant, read } from '../build/index.mjs';
+import { entity, generateDDL } from '../build/internal.mjs';
+import { validateAnnotatedTextDeclaration, annotatedTextDDL, getAnnotatedTextCompiledMetadata, registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension, resolveDeclarationMeasurementExtension } from '../build/annotated-text-field.mjs';
 
 // Register test contracts and structural adapters for T8 measurement adapter validation
 registerAnnotatedTextContract('testFieldExt', Object.freeze({ kind: 'measurement' }));

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import workbench, { annotatedText, annotation, entity, everyone, grant, inherit, measurement, protectingAnnotation, read, ref, registerAnnotatedTextContract, scope, text, write } from '../src/index.mjs';
-import { executeDDL, executeFrameworkDDL, getAnnotatedTextCompiledMetadata, protectingAnnotationCapabilities, registerAnnotatedTextStructuralExtension } from '../src/internal.mjs';
+import workbench, { annotatedText, annotation, entity, everyone, grant, inherit, measurement, protectingAnnotation, read, ref, registerAnnotatedTextContract, scope, text, write } from '../build/index.mjs';
+import { executeDDL, executeFrameworkDDL, getAnnotatedTextCompiledMetadata, protectingAnnotationCapabilities, registerAnnotatedTextStructuralExtension } from '../build/internal.mjs';
 
 const extension = 'protectingAccessMeasurement';
 registerAnnotatedTextContract(extension, Object.freeze({ kind: 'measurement' }));

@@ -15,9 +15,9 @@ import { fileURLToPath } from 'node:url';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
-import workbench, { text, ref, blob, scope, grant, read, write, subscribe } from '../src/index.mjs';
-import { entity, POST_COMMIT_CONSUMER_KINDS } from '../src/internal.mjs';
-import { emailSeam } from '../src/email-seam.mjs';
+import workbench, { text, ref, blob, scope, grant, read, write, subscribe } from '../build/index.mjs';
+import { entity, POST_COMMIT_CONSUMER_KINDS } from '../build/internal.mjs';
+import { emailSeam } from '../build/email-seam.mjs';
 
 // ---- Helpers ----
 
@@ -103,7 +103,7 @@ test('postCommitConsumerDescriptors: every kind is a known value, expected consu
 test('engagedPostCommitConsumerDescriptors does not branch on kind field', () => {
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = path.dirname(__filename);
-  const kernelPath = path.join(__dirname, '..', 'src', 'kernel.mjs');
+  const kernelPath = path.join(__dirname, '..', 'build', 'kernel.mjs');
   const source = readFileSync(kernelPath, 'utf8');
 
   // Extract the function body via a balanced-brace scan starting at the

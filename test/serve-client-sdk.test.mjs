@@ -7,11 +7,11 @@
 // present (the live kernel is running) — a db-less app has no live protocol to
 // wire up and the endpoint falls through to 404.
 
-import { entity, text, ref, scope, grant, read, write, subscribe } from '../src/index.mjs';
+import { entity, text, ref, scope, grant, read, write, subscribe } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import workbench from '../src/app.mjs';
+import workbench from '../build/app.mjs';
 
 function ownedNote() {
   return entity('Note', {

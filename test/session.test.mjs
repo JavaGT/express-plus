@@ -10,17 +10,17 @@
 // default-on route gate then denies it. This is the SAME admission path as the
 // `principalOf` default it replaces, never a second auth path.
 
-import { text, ref, scope, grant, deny, read, write, subscribe } from '../src/index.mjs';
+import { text, ref, scope, grant, deny, read, write, subscribe } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  entity } from '../src/internal.mjs';
+  entity } from '../build/internal.mjs';
 import {
   parseCookies, sessionCookie, sessionPrincipalOf, SESSION_COOKIE,
-} from '../src/auth/session.mjs';
-import { anonymous } from '../src/principal.mjs';
+} from '../build/auth/session.mjs';
+import { anonymous } from '../build/principal.mjs';
 
 // An owner-scoped Note (default-on route gate + owner row grant). Used to prove
 // that a hydrated principal reaches dispatch and is filtered by the row scope.

@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { createClock } from '../src/internal.mjs';
+import { createClock } from '../build/internal.mjs';
 
 describe('createClock', () => {
   it('add returns a watcher with remove()', () => {

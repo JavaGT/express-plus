@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 async function createLimiter(ip, session, nowFn) {
-  const { createRateLimiter } = await import('../src/rate-limit.mjs');
+  const { createRateLimiter } = await import('../build/rate-limit.mjs');
   return createRateLimiter({ ip, session, now: nowFn });
 }
 

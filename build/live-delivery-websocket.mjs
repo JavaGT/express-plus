@@ -5,7 +5,7 @@
 // dependencies the HTTP skin uses (resolveEntity / mayVerb / db). The seam owns
 // only socket I/O, connection lifecycle, the ephemeral fan-out, and caret
 // presence — never the committed authority itself, which the caller
-// (createLiveDelivery or an application-integrated delivery) owns and closes.
+// (createWebSocketLiveDelivery or an application-integrated delivery) owns and closes.
 //
 // One authority rule: SSE (live-delivery-http) and WebSocket both present the
 // SAME injected core, so a subscribed client receives committed events through

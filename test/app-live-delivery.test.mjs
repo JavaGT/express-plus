@@ -6,9 +6,9 @@ import workbench, {
   annotatedText, annotatedTextCreateAction, annotatedTextRetireAction, annotation,
   deny, entity, everyone, exportAnnotatedText, inherit,
   admin, grant, keyed, map, measurement, membership, object, read, ref, registerAnnotatedTextContract, scope, select, snapshot, subscribe, text, write, principalSnapshot, projectionSource,
-} from '../src/index.mjs';
-import { executeDDL, executeFrameworkDDL, registerAnnotatedTextStructuralExtension } from '../src/internal.mjs';
-import { defineSqliteSchema } from '../src/sqlite-schema.mjs';
+} from '../build/index.mjs';
+import { executeDDL, executeFrameworkDDL, registerAnnotatedTextStructuralExtension } from '../build/internal.mjs';
+import { defineSqliteSchema } from '../build/sqlite-schema.mjs';
 import { createAnnotatedTextHttpSession, createLiveDeliveryHttpSession } from '../public/workbench-client.mjs';
 
 const user = { type: 'user', id: 'u1', attributes: {} };
@@ -416,7 +416,7 @@ test('declared annotated text owns generated HTTP admission and package delivery
     owner: ref('User', { role: 'owner' }),
     grant: [scope(() => everyone()).can(async ({ is }) => (await is.owner()) ? grant(read, write, subscribe, admin) : deny('not project owner'))],
   });
-  const history = (await import('../src/index.mjs')).durableHistory({ authorize: () => true });
+  const history = (await import('../build/index.mjs')).durableHistory({ authorize: () => true });
   const app = workbench({ db, entities: [Project, Document], history });
   app.attachLiveDelivery({ principalOf });
   app.listen(0, { principalOf });
@@ -517,7 +517,7 @@ test('annotated text text-insert is delivered as a fold envelope over the live S
     owner: ref('User', { role: 'owner' }),
     grant: [scope(() => everyone()).can(async ({ is }) => (await is.owner()) ? grant(read, write, subscribe, admin) : deny('not project owner'))],
   });
-  const app = workbench({ db, entities: [Project, Document], history: (await import('../src/index.mjs')).durableHistory({ authorize: () => true }) });
+  const app = workbench({ db, entities: [Project, Document], history: (await import('../build/index.mjs')).durableHistory({ authorize: () => true }) });
   app.attachLiveDelivery({ principalOf: () => user });
   app.listen(0, { principalOf: () => user });
   await app.ready;
@@ -628,7 +628,7 @@ test('package history transport uses durable authorization, wakes delivery, and 
     body: annotatedText({ project: 'project', owner: 'owner' }),
     grant: [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
-  const history = (await import('../src/index.mjs')).durableHistory({ authorize: () => true, actions: {
+  const history = (await import('../build/index.mjs')).durableHistory({ authorize: () => true, actions: {
     'project.write': {
       inverse: ({ fact }) => ({ type: 'project.write', payload: { ...fact.before, authorized: true, exists: true } }),
       redo: ({ fact }) => ({ type: 'project.write', payload: { ...fact.after, authorized: true, exists: true } }),
@@ -738,10 +738,10 @@ test('composite snapshot resync gate: member events resync only when they touch 
   });
   t.after(async () => { await app.shutdown(); db.close(); });
 
-  const { buildSnapshotResyncRelevance, snapshotEventTouchesComposite } = await import('../src/live-delivery-public.mjs');
+  const { buildSnapshotResyncRelevance, snapshotEventTouchesComposite } = await import('../build/live-delivery-public.mjs');
   const { tryParseScopeKey } = await import('../src/scope-handle.ts');
   const compiled = await (async () => {
-    const { compileSnapshots } = await import('../src/snapshot-projection.mjs');
+    const { compileSnapshots } = await import('../build/snapshot-projection.mjs');
     const resolveEntity = (name) => name === 'Project' ? app.entities.get('Project') : name === 'Codebook' ? app.entities.get('Codebook') : undefined;
     return compileSnapshots([snapshot(Project, {
       output: object({
@@ -791,7 +791,7 @@ test('composite shell subscriber does not resync for annotated-text body edits o
     applicationHttpActions: ['create'],
   });
   executeDDL(Codebook, db);
-  const app = workbench({ db, entities: [Project, ShellDoc, Codebook], history: (await import('../src/index.mjs')).durableHistory({ authorize: () => true }) });
+  const app = workbench({ db, entities: [Project, ShellDoc, Codebook], history: (await import('../build/index.mjs')).durableHistory({ authorize: () => true }) });
   app.attachLiveDelivery({
     principalOf: () => user,
     snapshots: [snapshot(Project, {

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { consumerCursorMap, upsertConsumerCursor } from './consumer-cursor.mjs';
+import { sweepBehindCursor, upsertConsumerCursor } from './consumer-cursor.mjs';
                                             
 import { txn } from './driver.mjs';
                                                  
@@ -261,23 +261,10 @@ export function createOperationalConsumers(consumers                     = [], {
     engage(db);
     try {
       for (const consumer of declared) {
-        const cursors = consumerCursorMap(db, cursorName(consumer.name));
-        const blockedScopes = new Set        ();
-        const rows = db.prepare('SELECT * FROM _Log ORDER BY scope, seq').all();
-        for (const row of rows) {
-          if (blockedScopes.has(row.scope          )) continue;
-          if ((cursors.get(row.scope          ) ?? 0) >= (row.seq          )) continue;
-          if (row.eventType !== consumer.event.eventType) {
-            upsertConsumerCursor(db, { consumer: cursorName(consumer.name), scope: row.scope          , lastSeq: row.seq           });
-            cursors.set(row.scope          , row.seq          );
-            continue;
-          }
-          if (!await deliver(db, consumer, row                     )) {
-            blockedScopes.add(row.scope          );
-            continue;
-          }
-          cursors.set(row.scope          , row.seq          );
-        }
+        await sweepBehindCursor(db, cursorName(consumer.name), async (row) => {
+          if (row.eventType !== consumer.event.eventType) return 'skip';
+          return (await deliver(db, consumer, row)) ? 'done' : 'block';
+        });
       }
     } finally {
       armRetryScheduler(db);

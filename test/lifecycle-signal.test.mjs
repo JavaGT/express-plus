@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 
 function signalChild(shutdownSource) {
   const source = `
-    import { installGracefulShutdown } from './src/lifecycle.mjs';
+    import { installGracefulShutdown } from './build/lifecycle.mjs';
     const app = { shutdown: ${shutdownSource} };
     installGracefulShutdown(app);
     process.stdout.write('ready\\n');
@@ -69,7 +69,7 @@ test('a second termination signal force-exits a stuck graceful drain', async () 
 
 test('a direct shutdown keeps its hook deadline alive until a hung hook is abandoned', async () => {
   const source = `
-    import { prepareGracefulShutdown } from './src/lifecycle.mjs';
+    import { prepareGracefulShutdown } from './build/lifecycle.mjs';
     const app = {};
     prepareGracefulShutdown(app);
     app.onShutdown('hung', () => new Promise(() => {}), { timeoutMs: 25 });

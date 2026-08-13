@@ -2,11 +2,11 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 
-import { createLiveDelivery } from '../src/server.mjs';
-import { snapshot } from '../src/index.mjs';
-import { executeFrameworkDDL } from '../src/ddl.mjs';
-import { grant, subscribe } from '../src/grant.mjs';
-import { scope } from '../src/scope.mjs';
+import { createLiveDelivery } from '../build/server.mjs';
+import { snapshot } from '../build/index.mjs';
+import { executeFrameworkDDL } from '../build/ddl.mjs';
+import { grant, subscribe } from '../build/grant.mjs';
+import { scope } from '../build/scope.mjs';
 
 function setup(mayVerb) {
   const db = new DatabaseSync(':memory:');

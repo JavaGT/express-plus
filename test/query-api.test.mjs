@@ -10,12 +10,12 @@
 // The db handle is application-scoped: workbench({ db }) binds it to this app so a
 // standalone entity (declared before any app) can run queries with no db arg.
 
-import { text, date, scope, grant, read, everyone } from '../src/index.mjs';
+import { text, date, scope, grant, read, everyone } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import workbench, { entity } from '../src/internal.mjs';
-import { lowerToSql } from '../src/scope-sql.mjs';
+import workbench, { entity } from '../build/internal.mjs';
+import { lowerToSql } from '../build/scope-sql.mjs';
 
 function bindUser(db) {
   const decl = entity('User', { username: text(), password: text(), grant: () => [scope(() => everyone()).can(() => grant(read))], });

@@ -2,7 +2,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { LiveList } from '../public/workbench-client.mjs';
-import { applyTextOp, createTextState, textCheckpoint } from '../src/annotated-text.mjs';
+import { applyTextOp, createTextState, textCheckpoint } from '../build/annotated-text.mjs';
 import { makeFakeChannel, makeFakeFetch } from './fixtures/fake-transport.mjs';
 
 const TEXT_ACTOR = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';

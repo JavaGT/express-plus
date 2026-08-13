@@ -14,7 +14,7 @@ import { randomBytes } from 'node:crypto';
 
 import workbench, {
   annotatedText, annotation, deny, entity, ephemeral, everyone, grant, read, ref, scope, subscribe, text, write, admin,
-} from '../src/index.mjs';
+} from '../build/index.mjs';
 import { createAnnotatedDocApp } from '../projects/annotated-doc/server.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -240,6 +240,14 @@ test('shutdown retracts caret presence over the app-integrated WebSocket', async
     // outside its canonical text and is correctly rejected by caret projection;
     // use the only valid offset to prove the app-integrated fan-out path.
     ws.send(JSON.stringify({ type: 'caret.update', entity: 'Doc', id, field: 'body', offset: 0 }));
+    // Slot creation reveals the source connection its OWN presence token first;
+    // the upsert fanout (including this connection) follows.
+    const own = await ws.nextMessage();
+    assert.ok(own, 'caret own frame received');
+    assert.equal(own.type, 'annotated-text-caret');
+    assert.equal(own.change.op, 'own');
+    assert.equal(typeof own.change.presence, 'string');
+    assert.notEqual(own.change.presence, '');
     const upsert = await ws.nextMessage();
     assert.ok(upsert, 'caret upsert received');
     assert.equal(upsert.type, 'annotated-text-caret');
@@ -248,6 +256,7 @@ test('shutdown retracts caret presence over the app-integrated WebSocket', async
     assert.equal(upsert.change.value.offset, 0);
     presence = upsert.change.value.presence;
     assert.equal(typeof presence, 'string');
+    assert.equal(presence, own.change.presence, 'own and upsert share the slot presence');
 
     // Deliberately no client abort: shutdown alone must close the WS and
     // retract presence with a remove frame for the same token.

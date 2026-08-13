@@ -19,7 +19,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { event, createClient } from '../src/internal.mjs';
+import { event, createClient } from '../build/internal.mjs';
 
 // A tiny event registry: a post's published-count fold, keyed by scope.
 const postPublished = event('post.published', (state, e) => ({

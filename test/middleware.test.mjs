@@ -16,12 +16,12 @@
 // `config` is the env-sourced override surface (port, env); the app reads it and
 // never re-implements the knobs.
 
-import { entity, text, ref, grant, read, write, subscribe, scope, allowAnonymous } from '../src/index.mjs';
+import { entity, text, ref, grant, read, write, subscribe, scope, allowAnonymous } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import workbench, {
-  config } from '../src/internal.mjs';
+  config } from '../build/internal.mjs';
 
 // An owned entity whose list verb is public, so a request can reach dispatch
 // (where, without a db, it fails closed at 500 — useful to exercise the error

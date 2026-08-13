@@ -1,12 +1,12 @@
 // Canonical HTTP failure contract: {ok:false, failure:{category,message,details?}}.
 
-import { allowAnonymous, text } from '../src/index.mjs';
+import { allowAnonymous, text } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { entity, router } from '../src/internal.mjs';
-import { failureForHttpError } from '../src/http-failure.mjs';
+import workbench, { entity, router } from '../build/internal.mjs';
+import { failureForHttpError } from '../build/http-failure.mjs';
 
 // --- helpers ----------------------------------------------------------------
 

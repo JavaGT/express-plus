@@ -17,13 +17,13 @@
 // request reaches a stub that echoes its matched verb so we can assert the route
 // resolved and the gate let it through.
 
-import { text, ref, grant, read, write, subscribe, scope, allowAnonymous } from '../src/index.mjs';
+import { text, ref, grant, read, write, subscribe, scope, allowAnonymous } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import workbench, {
-  entity } from '../src/internal.mjs';
-import { principal } from '../src/principal.mjs';
+  entity } from '../build/internal.mjs';
+import { principal } from '../build/principal.mjs';
 
 // An owned entity, routes omitted → auto-CRUD, every verb default-on.
 function makeNote() {

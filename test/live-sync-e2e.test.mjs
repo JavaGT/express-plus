@@ -5,14 +5,14 @@
 // send the RFC 6455 handshake, exchange masked frames, and verify CRUD
 // operations produce live events with monotonic sequence numbers.
 
-import { text, ref, grant, read, write, subscribe, scope } from '../src/index.mjs';
+import { text, ref, grant, read, write, subscribe, scope } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { connect as tcpConnect } from 'node:net';
 import { randomBytes, createHash } from 'node:crypto';
 
-import workbench, { entity, generateDDL } from '../src/internal.mjs';
+import workbench, { entity, generateDDL } from '../build/internal.mjs';
 
 function makeNote() {
   return entity('Note', {

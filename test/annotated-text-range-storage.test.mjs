@@ -12,10 +12,10 @@ import { DatabaseSync } from 'node:sqlite';
 import workbench, {
   annotatedText, annotation, entity, everyone, executeDDL, executeFrameworkDDL,
   grant, number as numberField, parseEventType, read, ref, scope, write,
-} from '../src/internal.mjs';
-import { rowToEvent } from '../src/committed-log.mjs';
-import { projectEndpointToOffset, restoreTextFamily } from '../src/annotated-text-continuous.mjs';
-import { projectAnnotatedTextSnapshot } from '../src/annotated-text-snapshot.mjs';
+} from '../build/internal.mjs';
+import { rowToEvent } from '../build/committed-log.mjs';
+import { projectEndpointToOffset, restoreTextFamily } from '../build/annotated-text-continuous.mjs';
+import { projectAnnotatedTextSnapshot } from '../build/annotated-text-snapshot.mjs';
 import { withAuthoringBinding } from './annotated-text-authoring-fixture.mjs';
 
 function docDecl() {

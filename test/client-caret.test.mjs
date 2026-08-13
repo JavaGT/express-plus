@@ -128,7 +128,7 @@ test('scope carets interest and callback are retained and resent on reconnect', 
   assert.deepEqual(second.interest.carets, ['body']);
   sockets[1].emit('message', {
     type: 'annotated-text-caret', version: 1, entity: 'Doc', id: 'd1', field: 'body',
-    change: { op: 'upsert', value: { kind: 'caret', presence: 'p1', offset: 0, name: '' } },
+    change: { op: 'upsert', value: { kind: 'caret', presence: 'p1', offset: 0, name: '', sourceId: 'demo' } },
   });
   assert.equal(seen.length, 1);
   channel.close();
@@ -146,7 +146,11 @@ test('updateCaret rejects unknown keys', () => {
   const { channel } = harness();
   assert.throws(
     () => channel.updateCaret({ entity: 'Doc', id: 'a', field: 'body', offset: 5, extra: 'x' }),
-    /updateCaret requires exactly/,
+    /updateCaret requires type\/entity\/id\/field\/offset/,
+  );
+  assert.throws(
+    () => channel.updateCaret({ entity: 'Doc', id: 'a', field: 'body', offset: 5, selection: { from: 0 } }),
+    /updateCaret selection must be a \{ from, to \} range/,
   );
 });
 
@@ -269,7 +273,7 @@ test('inbound annotated-text-caret upsert caret routes to matching onCaret', asy
   const frame = {
     type: 'annotated-text-caret', version: 1,
     entity: 'Doc', id: 'a', field: 'body',
-    change: { op: 'upsert', value: { kind: 'caret', presence: 'p1', offset: 3, name: '' } },
+    change: { op: 'upsert', value: { kind: 'caret', presence: 'p1', offset: 3, name: '', sourceId: 'demo' } },
   };
   sockets[0].emit('message', frame);
   await tick();
@@ -292,7 +296,7 @@ test('inbound annotated-text-caret upsert carries the source display name throug
   const frame = {
     type: 'annotated-text-caret', version: 1,
     entity: 'Doc', id: 'a', field: 'body',
-    change: { op: 'upsert', value: { kind: 'caret', presence: 'p1', offset: 3, name: 'Aroha' } },
+    change: { op: 'upsert', value: { kind: 'caret', presence: 'p1', offset: 3, name: 'Aroha', sourceId: 'demo' } },
   };
   sockets[0].emit('message', frame);
   await tick();
@@ -315,7 +319,7 @@ test('inbound annotated-text-caret upsert edge routes to matching onCaret', asyn
   const frame = {
     type: 'annotated-text-caret', version: 1,
     entity: 'Doc', id: 'a', field: 'body',
-    change: { op: 'upsert', value: { kind: 'edge', presence: 'p1', edge: 'start', name: '' } },
+    change: { op: 'upsert', value: { kind: 'edge', presence: 'p1', edge: 'start', name: '', sourceId: 'demo' } },
   };
   sockets[0].emit('message', frame);
   await tick();
@@ -339,6 +343,58 @@ test('inbound annotated-text-caret remove routes to matching onCaret', async () 
     type: 'annotated-text-caret', version: 1,
     entity: 'Doc', id: 'a', field: 'body',
     change: { op: 'remove', presence: 'p1' },
+  };
+  sockets[0].emit('message', frame);
+  await tick();
+  assert.equal(onCaretCalls.length, 1);
+  assert.deepEqual(onCaretCalls[0], frame);
+  channel.close();
+});
+
+test('inbound annotated-text-caret own routes to matching onCaret; malformed own is dropped', async () => {
+  const { channel, sockets } = harness();
+  const carets = ['body'];
+  const onCaretCalls = [];
+  const pending = channel.subscribe('Doc', 'a', { carets, onCaret: (f) => onCaretCalls.push(f) });
+  await tick();
+  sockets[0].open();
+  await tick();
+  sockets[0].emit('message', { type: 'subscribed', entity: 'Doc', id: 'a', currentSeq: 1 });
+  await pending;
+
+  const frame = {
+    type: 'annotated-text-caret', version: 1,
+    entity: 'Doc', id: 'a', field: 'body',
+    change: { op: 'own', presence: 'pX' },
+  };
+  sockets[0].emit('message', frame);
+  await tick();
+  assert.equal(onCaretCalls.length, 1);
+  assert.deepEqual(onCaretCalls[0], frame);
+  // Malformed own frames (missing presence / extra key) are dropped.
+  sockets[0].emit('message', { type: 'annotated-text-caret', version: 1, entity: 'Doc', id: 'a', field: 'body', change: { op: 'own' } });
+  sockets[0].emit('message', { type: 'annotated-text-caret', version: 1, entity: 'Doc', id: 'a', field: 'body', change: { op: 'own', presence: 'pX', extra: 'x' } });
+  sockets[0].emit('message', { type: 'annotated-text-caret', version: 1, entity: 'Doc', id: 'a', field: 'body', change: { op: 'own', presence: '' } });
+  await tick();
+  assert.equal(onCaretCalls.length, 1);
+  channel.close();
+});
+
+test('inbound caret upsert with an empty sourceId is accepted (attribution optional)', async () => {
+  const { channel, sockets } = harness();
+  const carets = ['body'];
+  const onCaretCalls = [];
+  const pending = channel.subscribe('Doc', 'a', { carets, onCaret: (f) => onCaretCalls.push(f) });
+  await tick();
+  sockets[0].open();
+  await tick();
+  sockets[0].emit('message', { type: 'subscribed', entity: 'Doc', id: 'a', currentSeq: 1 });
+  await pending;
+
+  const frame = {
+    type: 'annotated-text-caret', version: 1,
+    entity: 'Doc', id: 'a', field: 'body',
+    change: { op: 'upsert', value: { kind: 'caret', presence: 'p1', offset: 3, name: '', sourceId: '' } },
   };
   sockets[0].emit('message', frame);
   await tick();

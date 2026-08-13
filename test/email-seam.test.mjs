@@ -5,9 +5,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import { emailSeam, noopTransport } from '../src/email-seam.mjs';
-import { createJobQueue } from '../src/job-queue.mjs';
-import { executeFrameworkDDL } from '../src/ddl.mjs';
+import { emailSeam, noopTransport } from '../build/email-seam.mjs';
+import { createJobQueue } from '../build/job-queue.mjs';
+import { executeFrameworkDDL } from '../build/ddl.mjs';
 
 test('noopTransport is a function and resolves without throwing', async () => {
   assert.equal(typeof noopTransport, 'function');

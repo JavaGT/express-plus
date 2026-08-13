@@ -1,9 +1,9 @@
-import { text, ref, scope, grant, deny, read, write, subscribe, inherit } from '../src/index.mjs';
+import { text, ref, scope, grant, deny, read, write, subscribe, inherit } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { entity, explain } from '../src/internal.mjs';
-import { principal } from '../src/principal.mjs';
+import { entity, explain } from '../build/internal.mjs';
+import { principal } from '../build/principal.mjs';
 
 const alice = principal({ type: 'user', id: 'alice' });
 const bob = principal({ type: 'user', id: 'bob' });

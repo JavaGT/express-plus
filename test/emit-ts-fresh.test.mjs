@@ -2,18 +2,34 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stripTypeScriptTypes } from 'node:module';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const srcRoot = join(root, 'src');
+const buildRoot = join(root, 'build');
 
-function walk(dir, out = []) {
+// Mirrors the emit script's source walk: every .ts except hand-written .d.ts / .d.mts.
+function walkSources(dir, out = []) {
   for (const name of readdirSync(dir)) {
     const path = join(dir, name);
-    if (statSync(path).isDirectory()) walk(path, out);
-    else if (name.endsWith('.ts') && !name.endsWith('.d.ts')) out.push(path);
+    if (statSync(path).isDirectory()) walkSources(path, out);
+    else if (
+      name.endsWith('.ts')
+      && !name.endsWith('.d.ts')
+      && !name.endsWith('.d.mts')
+    ) out.push(path);
+  }
+  return out;
+}
+
+// Every emitted .mjs in build/ (nothing else lives there).
+function walkEmitted(dir, out = []) {
+  for (const name of readdirSync(dir)) {
+    const path = join(dir, name);
+    if (statSync(path).isDirectory()) walkEmitted(path, out);
+    else if (name.endsWith('.mjs')) out.push(path);
   }
   return out;
 }
@@ -25,14 +41,35 @@ function expectedRuntime(source) {
     .replaceAll(/import\s*\(\s*(['"])(\.\.?\/[^'"]+)\.ts\1\s*\)/g, 'import($1$2.mjs$1)');
 }
 
-test('emitted .mjs siblings match typed sources', () => {
-  const sources = walk(srcRoot);
+test('no emitted src/**/*.mjs siblings remain (src is source-only)', () => {
+  const strays = walkEmitted(srcRoot);
+  assert.deepEqual(
+    strays,
+    [],
+    'src/ must contain only .ts sources; found emitted .mjs (edit src/**/*.ts, never the emitted copy)',
+  );
+});
+
+test('build/ is current against src/ (exact image)', () => {
+  const sources = walkSources(srcRoot);
   assert.ok(sources.length > 0, 'expected at least one src/**/*.ts module');
-  for (const tsPath of sources) {
-    const mjsPath = tsPath.replace(/\.ts$/, '.mjs');
-    const actual = readFileSync(mjsPath, 'utf8');
-    const expected = expectedRuntime(readFileSync(tsPath, 'utf8'));
-    assert.equal(actual, expected, `${mjsPath} is stale; run pnpm emit:ts`);
+  const expected = new Map(sources.map((p) => [
+    relative(srcRoot, p).replace(/\.ts$/, '.mjs'),
+    expectedRuntime(readFileSync(p, 'utf8')),
+  ]));
+  const built = walkEmitted(buildRoot);
+  const builtRelative = built.map((p) => relative(buildRoot, p));
+  assert.deepEqual(
+    [...builtRelative].sort(),
+    [...expected.keys()].sort(),
+    'build/ must mirror src/ exactly (run pnpm emit:ts)',
+  );
+  for (const [rel, want] of expected) {
+    assert.equal(
+      readFileSync(join(buildRoot, rel), 'utf8'),
+      want,
+      `build/${rel} is stale; run pnpm emit:ts`,
+    );
   }
 });
 

@@ -9,14 +9,14 @@ import { tmpdir } from 'node:os';
 import { rmSync, existsSync, openSync, closeSync } from 'node:fs';
 import path from 'node:path';
 
-import { generateFrameworkDDL } from '../src/ddl.mjs';
+import { generateFrameworkDDL } from '../build/ddl.mjs';
 
 async function setupBlobStore() {
   const root = path.join(tmpdir(), 'express-blob-' + randomUUID());
   const db = new DatabaseSync(':memory:');
   for (const sql of generateFrameworkDDL()) db.exec(sql);
   
-  const { createBlobStore } = await import('../src/blob-store.mjs');
+  const { createBlobStore } = await import('../build/blob-store.mjs');
   const store = createBlobStore({ root, db });
   
   return { root, db, store };

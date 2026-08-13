@@ -1,5 +1,5 @@
 import { parseEventType } from './event-handle.mjs';
-import { consumerCursorMap, upsertConsumerCursor } from './consumer-cursor.mjs';
+import { sweepBehindCursor, upsertConsumerCursor } from './consumer-cursor.mjs';
 import { txn,               } from './driver.mjs';
 import { getLog } from './log.mjs';
                                                  
@@ -146,36 +146,21 @@ export function createBlobLifecycle({ blobs, entities }                         
   };
 
   async function reconcileBlobFinalize(db          )                                 {
-    const recoveryByScope = consumerCursorMap(db, CONSUMER);
-    const rows = db.prepare('SELECT * FROM _Log ORDER BY scope, seq').all()                                                                               ;
-    // Same per-scope blocking as the consumer above, for the same reason:
-    // rows are ordered scope-then-seq, so a later same-scope row succeeding
-    // after an earlier one failed must not advance the cursor past the
-    // failure — that would permanently hide the earlier miss from every
-    // future reconcile run, not just this one.
-    const blockedScopes = new Set        ();
     let finalized = 0;
-    for (const row of rows) {
-      if (blockedScopes.has(row.scope)) continue;
-      const applied = recoveryByScope.get(row.scope) ?? 0;
-      if (applied >= row.seq) continue;
+    await sweepBehindCursor(db, CONSUMER, async (row) => {
       let data                         ;
       try { data = JSON.parse(row.eventData); } catch { data = {}; }
       const ids = resolveBlobIds({ type: row.eventType, data });
-      if (ids.length === 0) {
-        upsertConsumerCursor(db, { consumer: CONSUMER, scope: row.scope, lastSeq: row.seq });
-        recoveryByScope.set(row.scope, row.seq);
-        continue;
-      }
+      if (ids.length === 0) return 'skip';
       try {
         await finalizeAndAdvance(db, { scope: row.scope, seq: row.seq }, ids);
-        recoveryByScope.set(row.scope, row.seq);
         finalized += ids.length;
+        return 'done';
       } catch (err) {
-        blockedScopes.add(row.scope);
         getLog().warn('system', 'blob finalize recovery failed', { err, scope: row.scope, seq: row.seq });
+        return 'block';
       }
-    }
+    });
     return { finalized };
   }
 

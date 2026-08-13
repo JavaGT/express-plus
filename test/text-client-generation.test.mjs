@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createLiveStore } from '../public/workbench-client.mjs';
-import { applyTextOp, createTextState, textCheckpoint } from '../src/annotated-text.mjs';
+import { applyTextOp, createTextState, textCheckpoint } from '../build/annotated-text.mjs';
 import { deleteText, insertText } from '../public/workbench-text-edit.mjs';
 
 const ACTOR = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';

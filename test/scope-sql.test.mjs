@@ -9,14 +9,14 @@
 // Source of truth: SPEC §6.1 (grant's two halves), §11 (predicate ops), §13
 // (queryScope derived from grant). Design adopted from the architect consult.
 
-import { text, ref, boolean, date, scope, grant, deny, read, write, subscribe, everyone, never, anyOf } from '../src/index.mjs';
+import { text, ref, boolean, date, scope, grant, deny, read, write, subscribe, everyone, never, anyOf } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
-  entity, NonCompilableError, bindReadScope } from '../src/internal.mjs';
-import { principal, anonymous } from '../src/principal.mjs';
+  entity, NonCompilableError, bindReadScope } from '../build/internal.mjs';
+import { principal, anonymous } from '../build/principal.mjs';
 
 // A minimal owner grant whose .can half is always present (the read half is
 // what these tests exercise).

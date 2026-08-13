@@ -2,13 +2,13 @@
 // Tests for: CRUD-trigger effects, field operators, when guards, admission handshake,
 // cycle detection, and runtime depth cap.
 
-import { text, ref, map, number, grant, read, write, subscribe, principal, inc, dec, self, many, effect } from '../src/index.mjs';
+import { text, ref, map, number, grant, read, write, subscribe, principal, inc, dec, self, many, effect } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  entity, generateDDL, executeFrameworkDDL, createServer, durableMutationVariant, buildEffectsRegistry, detectCrossEntityCycles, validateEffects, created, updated } from '../src/internal.mjs';
+  entity, generateDDL, executeFrameworkDDL, createServer, durableMutationVariant, buildEffectsRegistry, detectCrossEntityCycles, validateEffects, created, updated } from '../build/internal.mjs';
 
 // Helper to set up a fresh in-memory db with framework tables
 function setupDb() {

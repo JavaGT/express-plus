@@ -114,6 +114,7 @@ export interface LiveFanoutHandle {
   recipients(scope: string, field: string): Array<[LiveConn, LiveSubscriptionSpec]>;
   hasCaretInterest(conn: LiveConn, scope: string, field: string): boolean;
   setOnCaretInterestChange(callback: ((conn: LiveConn, scope: string, removedFields: string[]) => void) | null): void;
+  setOnCaretInterestAdded(callback: ((conn: LiveConn, scope: string, addedFields: string[]) => void) | null): void;
   emit(entityRecord: LiveEntityRecord, id: unknown, row: Record<string, unknown> | undefined, committedEvent: FanoutCommittedEvent, options?: { hydrated?: boolean }): Promise<void>;
   close(): void;
 }
@@ -129,6 +130,7 @@ export function createLiveFanout({ mayVerb = null }: { mayVerb?: MayVerb | null 
   const connSubs = new Map<LiveConn, Set<string>>();  // Map<conn, Set<scopeKey>>
   const paceBuffers = new Map<string, PaceBufferEntry>();
   let onCaretInterestChange: ((conn: LiveConn, scope: string, removedFields: string[]) => void) | null = null;
+  let onCaretInterestAdded: ((conn: LiveConn, scope: string, addedFields: string[]) => void) | null = null;
 
   const deltaProjector = createDeltaProjector();
 
@@ -169,9 +171,14 @@ export function createLiveFanout({ mayVerb = null }: { mayVerb?: MayVerb | null 
     if (!byScope.has(scope)) byScope.set(scope, new Map());
     const previous = byScope.get(scope)!.get(conn);
     const nextCarets = (interest.carets as string[] | undefined) ?? [];
-    const removedCarets = ((previous?.interest?.carets as string[] | undefined) ?? []).filter((field) => !nextCarets.includes(field));
+    const previousCarets = (previous?.interest?.carets as string[] | undefined) ?? [];
+    const removedCarets = previousCarets.filter((field) => !nextCarets.includes(field));
     if (removedCarets.length > 0) onCaretInterestChange?.(conn, scope, removedCarets);
     byScope.get(scope)!.set(conn, { fields, latch: true, pace, interest });
+    // A late-joining caret subscriber must learn the CURRENT presence state for
+    // the fields it now cares about; the caret module replays existing slots.
+    const addedCarets = nextCarets.filter((field) => !previousCarets.includes(field));
+    if (addedCarets.length > 0) onCaretInterestAdded?.(conn, scope, addedCarets);
     let mine = connSubs.get(conn);
     if (!mine) { mine = new Set(); connSubs.set(conn, mine); }
     mine.add(scope);
@@ -247,6 +254,10 @@ export function createLiveFanout({ mayVerb = null }: { mayVerb?: MayVerb | null 
 
   function setOnCaretInterestChange(callback: ((conn: LiveConn, scope: string, removedFields: string[]) => void) | null): void {
     onCaretInterestChange = callback;
+  }
+
+  function setOnCaretInterestAdded(callback: ((conn: LiveConn, scope: string, addedFields: string[]) => void) | null): void {
+    onCaretInterestAdded = callback;
   }
 
   async function flushPacedBuffer(key: string): Promise<void> {
@@ -431,6 +442,7 @@ export function createLiveFanout({ mayVerb = null }: { mayVerb?: MayVerb | null 
     recipients,
     hasCaretInterest,
     setOnCaretInterestChange,
+    setOnCaretInterestAdded,
     emit,
     close,
   };

@@ -18,12 +18,12 @@
 // `<field>__<cell>`, e.g. `linkShare__token`. The structured field's OWN `.is()`
 // throws — you compare a sub-cell, never the whole struct.
 
-import { text, link, scope, grant, read, everyone } from '../src/index.mjs';
+import { text, link, scope, grant, read, everyone } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import workbench, { entity } from '../src/internal.mjs';
-import { lowerToSql, fieldHandle, NonCompilableError } from '../src/scope-sql.mjs';
+import workbench, { entity } from '../build/internal.mjs';
+import { lowerToSql, fieldHandle, NonCompilableError } from '../build/scope-sql.mjs';
 
 // --- descriptor shape --------------------------------------------------------
 

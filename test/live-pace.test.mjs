@@ -2,15 +2,15 @@
 // covered by live-delivery tests through the committed log and never uses this
 // test seam.
 
-import { text, ephemeral, grant, read, write, subscribe, scope, everyone } from '../src/index.mjs';
+import { text, ephemeral, grant, read, write, subscribe, scope, everyone } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { connect as tcpConnect } from 'node:net';
 import { randomBytes } from 'node:crypto';
 
-import workbench, { entity, generateDDL } from '../src/internal.mjs';
-import { createLiveFanout } from '../src/live-fanout.mjs';
+import workbench, { entity, generateDDL } from '../build/internal.mjs';
+import { createLiveFanout } from '../build/live-fanout.mjs';
 
 const Canvas = entity('Canvas', {
   title: text(),

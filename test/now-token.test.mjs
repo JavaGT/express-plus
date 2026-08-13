@@ -4,11 +4,11 @@
 // occurrence (deep walk of event data) before the row hits _Log. The token
 // itself never reaches the log — handlers stay pure of the clock (consult #24).
 
-import { principal } from '../src/index.mjs';
+import { principal } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { createServer, durableMutationVariant, NOW, executeFrameworkDDL } from '../src/internal.mjs';
+import { createServer, durableMutationVariant, NOW, executeFrameworkDDL } from '../build/internal.mjs';
 
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 

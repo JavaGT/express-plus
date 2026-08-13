@@ -22,6 +22,7 @@ import { getAnnotatedTextCompiledMetadata } from './annotated-text-field.mjs';
                                                                                  
                                                                                  
                                                                                                                          
+                                                                                                                      
  
 
                      
@@ -32,6 +33,13 @@ import { getAnnotatedTextCompiledMetadata } from './annotated-text-field.mjs';
                    
                      
                                    
+                                                                                   
+                                                                                 
+ 
+
+                          
+               
+             
  
 
                               
@@ -40,6 +48,7 @@ import { getAnnotatedTextCompiledMetadata } from './annotated-text-field.mjs';
              
                 
                  
+                             
  
 
                              
@@ -57,11 +66,22 @@ function parse(message         )                     {
   if (!message || typeof message !== 'object' || Array.isArray(message)) invalid('Invalid caret message.');
   const record = message                           ;
   const keys = Object.keys(record).sort();
-  const required = ['entity', 'field', 'id', 'offset', 'type'];
-  if (keys.length !== required.length || keys.some((key, index) => key !== required[index]) ||
-    record.type !== 'caret.update' || typeof record.entity !== 'string' || typeof record.id !== 'string' ||
-    typeof record.field !== 'string' || !Number.isSafeInteger(record.offset) || (record.offset          ) < 0) {
+  const base = ['entity', 'field', 'id', 'offset', 'type'];
+  const withSelection = ['entity', 'field', 'id', 'offset', 'selection', 'type'];
+  if ((keys.length !== base.length && keys.length !== withSelection.length)
+    || keys.some((key, index) => key !== (keys.length === withSelection.length ? withSelection[index] : base[index]))
+    || record.type !== 'caret.update' || typeof record.entity !== 'string' || typeof record.id !== 'string'
+    || typeof record.field !== 'string' || !Number.isSafeInteger(record.offset) || (record.offset          ) < 0) {
     invalid('Invalid caret message.');
+  }
+  if (record.selection !== undefined) {
+    const selection = record.selection                           ;
+    if (!selection || typeof selection !== 'object' || Array.isArray(selection)
+      || Object.keys(selection).length !== 2 || !Object.hasOwn(selection, 'from') || !Object.hasOwn(selection, 'to')
+      || !Number.isSafeInteger(selection.from) || !Number.isSafeInteger(selection.to)
+      || (selection.from          ) < 0 || (selection.to          ) < 0) {
+      invalid('Invalid caret message.');
+    }
   }
   return message                      ;
 }
@@ -108,9 +128,11 @@ export function createAnnotatedTextCaretLive({ db, resolveEntity, mayVerb, fanou
     // Allocate/fence the slot generation BEFORE any async rowFor / projection.
     // A clear, disconnect, or newer update during the async gap bumps the
     // generation, so this batch's results cannot be delivered as stale.
-    const slot = slots.get(slotKey) ?? { connection: conn, entity: entity.name, id: input.id, field: input.field, presence: randomUUID(), generation: 0, recipients: new Set                 () };
+    const isNewSlot = !slots.has(slotKey);
+    const slot = slots.get(slotKey) ?? { connection: conn, entity: entity.name, id: input.id, field: input.field, presence: randomUUID(), generation: 0, recipients: new Set                 (), lastValue: null };
     slots.set(slotKey, slot);
     const generation = ++slot.generation;
+    slot.lastValue = { offset: input.offset, ...(input.selection === undefined ? {} : { selection: input.selection }) };
 
     const source = await rowFor(entity, input.id, conn.principal);
     if (slots.get(slotKey) !== slot || slot.generation !== generation) {
@@ -130,7 +152,7 @@ export function createAnnotatedTextCaretLive({ db, resolveEntity, mayVerb, fanou
     // The source's public display label is carried on every upsert so a
     // recipient can attribute the caret without re-resolving the opaque
     // presence token. Empty when the app does not supply one on the principal.
-    const sourcePrincipal = conn.principal                                                               ;
+    const sourcePrincipal = conn.principal                                                                             ;
     const sourceName = typeof sourcePrincipal?.attributes?.displayName === 'string' ? sourcePrincipal.attributes.displayName : '';
 
     // Test-only seam: inject a delay at this point so overlapping async
@@ -143,6 +165,19 @@ export function createAnnotatedTextCaretLive({ db, resolveEntity, mayVerb, fanou
       }
     }
 
+    // Reveal the source connection's OWN presence once per slot so the client
+    // can decide "self" by presence match. Two tabs of the same principal share
+    // sourceId but never the connection-scoped presence token, so each marks
+    // only its own marker as self.
+    if (isNewSlot && !conn.closed && slots.get(slotKey) === slot && slot.generation === generation && fanout.hasCaretInterest(conn, scope, input.field)) {
+      try {
+        conn.send({ type: 'annotated-text-caret', version: 1, entity: entity.name, id: input.id, field: input.field, change: { op: 'own', presence: slot.presence } });
+      } catch {
+        // A closed source socket must not fail the update; fanout below already
+        // skips closed recipients.
+      }
+    }
+
     for (const [recipient] of fanout.recipients(scope, input.field)) {
       const recipientState = await rowFor(entity, input.id, recipient.principal);
       if (!recipientState) {
@@ -152,10 +187,16 @@ export function createAnnotatedTextCaretLive({ db, resolveEntity, mayVerb, fanou
         continue;
       }
       try {
-        const value = Object.freeze({
-          ...(await projectAnnotatedTextCaretSnapshot({ db, entity, row: recipientState.row, principal: recipient.principal, fieldName: input.field, descriptor, caret: { offset: input.offset }, presence: slot.presence })),
-          name: sourceName,
-        });
+         const projected = await projectAnnotatedTextCaretSnapshot({ db, entity, row: recipientState.row, principal: recipient.principal, fieldName: input.field, descriptor, caret: { offset: input.offset, ...(input.selection === undefined ? {} : { selection: input.selection }) }, presence: slot.presence });
+         const value = Object.freeze({
+           ...projected,
+           name: sourceName,
+           // Attribution only: the source principal's stable id, carried on every
+           // frame so a recipient can attribute the marker to its author. "Self"
+           // is decided by the connection-scoped presence token (`own`), never by
+           // comparing sourceId — two tabs of one principal share the id.
+           sourceId: typeof sourcePrincipal?.id === 'string' ? sourcePrincipal.id : '',
+         });
         if (slots.get(slotKey) !== slot || slot.generation !== generation || recipient.closed || !fanout.hasCaretInterest(recipient, scope, input.field)) continue;
         // Re-authorize immediately before delivery: a subscription/row revoke
         // that landed during the projection window must not deliver on stale
@@ -178,10 +219,53 @@ export function createAnnotatedTextCaretLive({ db, resolveEntity, mayVerb, fanou
     }
   }
 
+  /** Re-project an existing slot's last value for a late-joining recipient
+   *  (same authorization + projection path as a live update). */
+  async function replayCaretTo(slot           , recipient                 )                {
+    const entity = resolveEntity(slot.entity);
+    const descriptor = entity?.fields?.[slot.field];
+    if (!entity || !descriptor || descriptor.kind !== 'annotatedText' || !getAnnotatedTextCompiledMetadata(descriptor)?.caret) return;
+    const replaySlotKey = key(slot.connection, slot.entity, slot.id, slot.field);
+    const recipientState = await rowFor(entity, slot.id, recipient.principal);
+    if (!recipientState || recipient.closed) return;
+    const sourcePrincipal = slot.connection.principal                                                                             ;
+    const sourceName = typeof sourcePrincipal?.attributes?.displayName === 'string' ? sourcePrincipal.attributes.displayName : '';
+    let value;
+    try {
+      const projected = await projectAnnotatedTextCaretSnapshot({ db, entity, row: recipientState.row, principal: recipient.principal, fieldName: slot.field, descriptor, caret: { offset: slot.lastValue .offset, ...(slot.lastValue .selection === undefined ? {} : { selection: slot.lastValue .selection }) }, presence: slot.presence });
+      value = Object.freeze({
+        ...projected,
+        name: sourceName,
+        sourceId: typeof sourcePrincipal?.id === 'string' ? sourcePrincipal.id : '',
+      });
+    } catch {
+      return;
+    }
+    try {
+      // Re-validate immediately before delivery, mirroring the live update path:
+      // the slot must still be live, the recipient still interested, and its row
+      // access must still grant subscribe. A revocation that landed during the
+      // projection window must not deliver on stale access.
+      if (slots.get(replaySlotKey) !== slot || recipient.closed || !fanout.hasCaretInterest(recipient, scopeOf(slot.entity, slot.id).key, slot.field)) return;
+      if (!(await rowFor(entity, slot.id, recipient.principal))) {
+        if (!recipient.closed) {
+          recipient.send({ type: 'annotated-text-caret', version: 1, entity: slot.entity, id: slot.id, field: slot.field, change: { op: 'remove', presence: slot.presence } });
+        }
+        slot.recipients.delete(recipient);
+        return;
+      }
+      recipient.send({ type: 'annotated-text-caret', version: 1, entity: slot.entity, id: slot.id, field: slot.field, change: { op: 'upsert', value } });
+      slot.recipients.add(recipient);
+    } catch {
+      return;
+    }
+  }
+
   function retract(slotKey        )       {
     const slot = slots.get(slotKey);
     if (!slot) return;
     slots.delete(slotKey);
+    slot.lastValue = null;
     ++slot.generation;
     // Fix 4: deliver remove to every previously tracked recipient regardless
     // of current authorization. A remove has only opaque presence; it must
@@ -209,7 +293,7 @@ export function createAnnotatedTextCaretLive({ db, resolveEntity, mayVerb, fanou
     // throwaway slot with a new generation still prevents delayed updates.
     const slotKey = key(conn, input.entity, input.id, input.field);
     if (!slots.has(slotKey)) {
-      const slot = { connection: conn, entity: input.entity, id: input.id, field: input.field, presence: randomUUID(), generation: 0, recipients: new Set                 () };
+      const slot = { connection: conn, entity: input.entity, id: input.id, field: input.field, presence: randomUUID(), generation: 0, recipients: new Set                 (), lastValue: null };
       ++slot.generation;
       slots.set(slotKey, slot);
     }
@@ -259,6 +343,18 @@ export function createAnnotatedTextCaretLive({ db, resolveEntity, mayVerb, fanou
         conn.send({ type: 'annotated-text-caret', version: 1, entity: slot.entity, id: slot.id, field: slot.field, change: { op: 'remove', presence: slot.presence } });
       }
       slot.recipients.delete(conn);
+    }
+  });
+
+  // A late-joining caret subscriber learns the CURRENT presence state for the
+  // fields it now cares about: re-project each existing slot's last value for
+  // the new connection (same authorization + projection path as a live update).
+  fanout.setOnCaretInterestAdded?.((conn, scope, addedFields) => {
+    for (const [, slot] of [...slots]) {
+      try { if (scope !== scopeOf(slot.entity, slot.id).key) continue; } catch { continue; }
+      if (!addedFields.includes(slot.field)) continue;
+      if (slot.connection === conn || conn.closed || !slot.lastValue) continue;
+      void replayCaretTo(slot, conn).catch(() => {});
     }
   });
 

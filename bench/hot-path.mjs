@@ -20,23 +20,23 @@ import inspector from 'node:inspector';
 import { dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-import workbench, { entity } from '../src/internal.mjs';
+import workbench, { entity } from '../build/internal.mjs';
 import {
   text, number, boolean, ref, scope, grant, read, write, subscribe, everyone, principal,
   annotatedText, annotation, annotationAction,
-} from '../src/index.mjs';
-import { createServer, durableMutationVariant } from '../src/pipeline.mjs';
-import { executeDDL, executeFrameworkDDL } from '../src/ddl.mjs';
-import { createLiveDeliveryCore } from '../src/live-delivery-core.mjs';
+} from '../build/index.mjs';
+import { createServer, durableMutationVariant } from '../build/pipeline.mjs';
+import { executeDDL, executeFrameworkDDL } from '../build/ddl.mjs';
+import { createLiveDeliveryCore } from '../build/live-delivery-core.mjs';
 import {
   applyTextOperation,
   importTextToFamily,
   materializeText,
   restoreTextFamily,
   textFamilyCheckpoint,
-} from '../src/annotated-text-continuous.mjs';
-import { projectAnnotatedTextSnapshot } from '../src/annotated-text-snapshot.mjs';
-import { ensureStream, ensureLease, hashClientNonce } from '../src/annotated-text-authoring-stream.mjs';
+} from '../build/annotated-text-continuous.mjs';
+import { projectAnnotatedTextSnapshot } from '../build/annotated-text-snapshot.mjs';
+import { ensureStream, ensureLease, hashClientNonce } from '../build/annotated-text-authoring-stream.mjs';
 import { materializeAnnotatedTextSnapshot } from '../public/workbench-client.mjs';
 
 const SCHEMA_VERSION = 2;

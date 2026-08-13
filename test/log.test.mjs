@@ -2,12 +2,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import workbench from '../src/app.mjs';
-import { entity } from '../src/entity/compile.mjs';
-import { text } from '../src/field.mjs';
-import { grant, read, write } from '../src/grant.mjs';
-import { allowAnonymous } from '../src/route-gate.mjs';
-import { createLog, getLog } from '../src/log.mjs';
+import workbench from '../build/app.mjs';
+import { entity } from '../build/entity/compile.mjs';
+import { text } from '../build/field.mjs';
+import { grant, read, write } from '../build/grant.mjs';
+import { allowAnonymous } from '../build/route-gate.mjs';
+import { createLog, getLog } from '../build/log.mjs';
 
 test('constructing another application does not replace the first application logger', () => {
   const messagesA = [];

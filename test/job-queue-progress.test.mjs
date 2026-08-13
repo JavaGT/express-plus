@@ -5,10 +5,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { executeFrameworkDDL } from '../src/ddl.mjs';
-import { createJobQueue } from '../src/job-queue.mjs';
-import { text, grant, read } from '../src/index.mjs';
-import workbench, { entity } from '../src/internal.mjs';
+import { executeFrameworkDDL } from '../build/ddl.mjs';
+import { createJobQueue } from '../build/job-queue.mjs';
+import { text, grant, read } from '../build/index.mjs';
+import workbench, { entity } from '../build/internal.mjs';
 
 const SECRET = 's3cret-shared-deployment-key';
 

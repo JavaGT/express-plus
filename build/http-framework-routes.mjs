@@ -9,7 +9,7 @@
 // handleClientSdkRoute.
 
 import { readFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { sendJson,                       } from './http-response.mjs';
@@ -540,19 +540,23 @@ export async function handleJobRoute(
 }
 
 // Framework-owned browser SDK endpoint: `GET /workbench.mjs` serves the client
-// side of the /events live protocol. Resolved relative to THIS file via
-// import.meta.url, never process.cwd(). Only engaged when a db is present (the
-// live kernel is running); a db-less app has no live protocol and falls through.
-// Returns true when handled; false to fall through.
-const CLIENT_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-client.mjs';
-const ANNOTATED_TEXT_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/src') + '/annotated-text.mjs';
-const TEXT_EDIT_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-text-edit.mjs';
-const ANNOTATED_TEXT_SNAPSHOT_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-annotated-text-snapshot.mjs';
-const ANNOTATED_TEXT_SNAPSHOT_INTERNAL_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-annotated-text-snapshot-internal.mjs';
-const ANNOTATED_TEXT_REDACTION_COORDS_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-annotated-text-redaction-coords.mjs';
-const ANNOTATED_TEXT_ACTION_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/src') + '/annotated-text-action-builder.mjs';
-const ANNOTATED_TEXT_EDITOR_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-annotated-text-editor.mjs';
-const ANNOTATED_TEXT_CONTINUOUS_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-annotated-text-continuous.mjs';
+// side of the /events live protocol. Resolved relative to the repo root (this
+// module sits one directory deep in both src/ and build/, and import.meta.url
+// resolves to the emitted copy in build/), never process.cwd(). Only engaged
+// when a db is present (the live kernel is running); a db-less app has no live
+// protocol and falls through. Returns true when handled; false to fall through.
+// The two emitted annotated-text leaves are served from build/; the browser
+// SDK surface is hand-maintained under public/.
+const root = dirname(dirname(fileURLToPath(import.meta.url)));
+const CLIENT_SDK_PATH = join(root, 'public', 'workbench-client.mjs');
+const ANNOTATED_TEXT_SDK_PATH = join(root, 'build', 'annotated-text.mjs');
+const TEXT_EDIT_SDK_PATH = join(root, 'public', 'workbench-text-edit.mjs');
+const ANNOTATED_TEXT_SNAPSHOT_SDK_PATH = join(root, 'public', 'workbench-annotated-text-snapshot.mjs');
+const ANNOTATED_TEXT_SNAPSHOT_INTERNAL_SDK_PATH = join(root, 'public', 'workbench-annotated-text-snapshot-internal.mjs');
+const ANNOTATED_TEXT_REDACTION_COORDS_SDK_PATH = join(root, 'public', 'workbench-annotated-text-redaction-coords.mjs');
+const ANNOTATED_TEXT_ACTION_SDK_PATH = join(root, 'build', 'annotated-text-action-builder.mjs');
+const ANNOTATED_TEXT_EDITOR_SDK_PATH = join(root, 'public', 'workbench-annotated-text-editor.mjs');
+const ANNOTATED_TEXT_CONTINUOUS_SDK_PATH = join(root, 'public', 'workbench-annotated-text-continuous.mjs');
 
 export function handleClientSdkRoute(
   app                                 ,

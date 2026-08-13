@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createLiveFanout } from '../src/live-fanout.mjs';
-import { anonymous } from '../src/principal.mjs';
-import { entity, text, ref, scope, grant, read, write, subscribe } from '../src/index.mjs';
+import { createLiveFanout } from '../build/live-fanout.mjs';
+import { anonymous } from '../build/principal.mjs';
+import { entity, text, ref, scope, grant, read, write, subscribe } from '../build/index.mjs';
 
 function makeStubConn(id, principalId) {
   const messages = [];

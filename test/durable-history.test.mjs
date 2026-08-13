@@ -5,9 +5,9 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import { durableHistory } from '../src/index.mjs';
-import workbench, { createServer, durableMutationVariant, executeFrameworkDDL } from '../src/internal.mjs';
-import { retentionPrune } from '../src/committed-log.mjs';
+import { durableHistory } from '../build/index.mjs';
+import workbench, { createServer, durableMutationVariant, executeFrameworkDDL } from '../build/internal.mjs';
+import { retentionPrune } from '../build/committed-log.mjs';
 
 const principal = Object.freeze({ type: 'user', id: 'u1', attributes: {} });
 const scope = 'Document:1';

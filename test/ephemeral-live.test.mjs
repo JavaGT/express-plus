@@ -7,13 +7,13 @@
 // P6e-1b's pace/coalescer will RETIRE this raw verbatim delivery into the paced
 // pipeline — one mechanism, not a parallel permanent path (AGENTS: the general
 // mechanism retires the special-case in the same change).
-import { text, ephemeral, scope, everyone, grant, read, write, subscribe, principal as makePrincipal } from '../src/index.mjs';
+import { text, ephemeral, scope, everyone, grant, read, write, subscribe, principal as makePrincipal } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  entity, generateDDL, createServer, durableMutationVariant, executeFrameworkDDL } from '../src/internal.mjs';
+  entity, generateDDL, createServer, durableMutationVariant, executeFrameworkDDL } from '../build/internal.mjs';
 
 const Canvas = entity('Canvas', {
     title: text(),

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { once } from 'node:events';
 
-import { createLiveDeliveryHttpHandler } from '../src/server.mjs';
+import { createLiveDeliveryHttpHandler } from '../build/server.mjs';
 import { createLiveDeliveryHttpSession } from '../public/workbench-client.mjs';
 
 async function serve(handler) {

@@ -2,11 +2,11 @@
 //
 // Tests the pure delta-computation core: no I/O, no DB, no live.mjs change.
 
-import { text, ref, hash, link, map, list, state, raster, polyline, everyone, grant, scope, read } from '../src/index.mjs';
+import { text, ref, hash, link, map, list, state, raster, polyline, everyone, grant, scope, read } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { entity, computeDelta, createDeltaProjector, created, updated, removed, native } from '../src/internal.mjs';
+import { entity, computeDelta, createDeltaProjector, created, updated, removed, native } from '../build/internal.mjs';
 
 // --- test entity with one field of each diff-eligible kind plus excluded kinds ---
 

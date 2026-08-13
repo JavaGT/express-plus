@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import workbench from '../src/index.mjs';
+import workbench from '../build/index.mjs';
 
 const invalidOptions = [
   ['blobReapIntervalMs', 0],

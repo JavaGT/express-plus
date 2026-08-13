@@ -7,10 +7,10 @@ import workbench, {
   annotatedText, annotation, text, entity, everyone, executeDDL, executeFrameworkDDL, measurement, protectingAnnotation,
   admin, deny, grant, read, ref, scope, write,
   registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension,
-} from '../src/internal.mjs';
-import { exportAnnotatedText } from '../src/index.mjs';
-import { materializeText, restoreTextFamily } from '../src/annotated-text-continuous.mjs';
-import { projectAnnotatedTextForRecipient } from '../src/annotated-text-recipient-projection.mjs';
+} from '../build/internal.mjs';
+import { exportAnnotatedText } from '../build/index.mjs';
+import { materializeText, restoreTextFamily } from '../build/annotated-text-continuous.mjs';
+import { projectAnnotatedTextForRecipient } from '../build/annotated-text-recipient-projection.mjs';
 import { withAuthoringBinding } from './annotated-text-authoring-fixture.mjs';
 
 registerAnnotatedTextContract('sourceInit', Object.freeze({ kind: 'measurement' }));

@@ -4,13 +4,13 @@
 // events into entity rows. A re-bootstrap (row read) and a resync (log fold via
 // reducer) MUST agree — because the row IS the reducer fold materialized.
 
-import { text, ref, link, grant, read, write, scope, everyone } from '../src/index.mjs';
+import { text, ref, link, grant, read, write, scope, everyone } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 
-import workbench, { entity, generateFrameworkDDL } from '../src/internal.mjs';
+import workbench, { entity, generateFrameworkDDL } from '../build/internal.mjs';
 
 test('entity-projection: create — handler emits event — entity.projection writes row', async () => {
   const db = new DatabaseSync(':memory:');
@@ -30,7 +30,7 @@ test('entity-projection: create — handler emits event — entity.projection wr
   const app = workbench({ db, entities: [Note] });
   const Note_b = app.entity(Note);
 
-  const { createServer, durableMutationVariant } = await import('../src/pipeline.mjs');
+  const { createServer, durableMutationVariant } = await import('../build/pipeline.mjs');
 
   const server = createServer({
     handlers: {
@@ -85,7 +85,7 @@ test('entity-projection: create — round-trip: row == reducer fold', async () =
   const app = workbench({ db, entities: [Note] });
   const Note_b = app.entity(Note);
 
-  const { createServer, durableMutationVariant } = await import('../src/pipeline.mjs');
+  const { createServer, durableMutationVariant } = await import('../build/pipeline.mjs');
 
   const server = createServer({
     handlers: {
@@ -144,7 +144,7 @@ test('entity-projection: update — projection updates row', async () => {
 
   const row = Note_b.create({ body: 'original' });
 
-  const { createServer, durableMutationVariant } = await import('../src/pipeline.mjs');
+  const { createServer, durableMutationVariant } = await import('../build/pipeline.mjs');
 
   const server = createServer({
     handlers: {
@@ -205,7 +205,7 @@ test('entity-projection: update — struct (link) cells persist to the row', asy
   const row = Doc_b.create({ title: 'memo', linkShare: { token: 'tok-1', tier: 'view' } });
   assert.equal(row.linkShare.tier, 'view');
 
-  const { createServer, durableMutationVariant } = await import('../src/pipeline.mjs');
+  const { createServer, durableMutationVariant } = await import('../build/pipeline.mjs');
 
   const server = createServer({
     handlers: {
@@ -256,7 +256,7 @@ test('entity-projection: remove — projection deletes row', async () => {
 
   const row = Note_b.create({ body: 'delete me' });
 
-  const { createServer, durableMutationVariant } = await import('../src/pipeline.mjs');
+  const { createServer, durableMutationVariant } = await import('../build/pipeline.mjs');
 
   const server = createServer({
     handlers: {
@@ -300,7 +300,7 @@ test('entity-projection: projection failure rolls back the whole txn', async () 
   for (const sql of Note.generateDDL()) db.exec(sql);
   workbench({ db, entities: [Note] }).entity(Note);
 
-  const { createServer, durableMutationVariant } = await import('../src/pipeline.mjs');
+  const { createServer, durableMutationVariant } = await import('../build/pipeline.mjs');
 
   const server = createServer({
     handlers: {

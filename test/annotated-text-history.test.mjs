@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import workbench, { annotatedText, durableHistory, entity, executeDDL, executeFrameworkDDL, grant, ref, read, scope, write, everyone } from '../src/internal.mjs';
-import { materializeText, restoreTextFamily } from '../src/annotated-text-continuous.mjs';
+import workbench, { annotatedText, durableHistory, entity, executeDDL, executeFrameworkDDL, grant, ref, read, scope, write, everyone } from '../build/internal.mjs';
+import { materializeText, restoreTextFamily } from '../build/annotated-text-continuous.mjs';
 import { withAuthoringBinding } from './annotated-text-authoring-fixture.mjs';
 
 function declaration(fieldAccess = () => grant(read, write)) {

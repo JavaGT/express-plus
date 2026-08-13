@@ -96,7 +96,7 @@ export interface CaretClear {
   field: string;
 }
 
-export type AnnotatedTextCaretFrame = AnnotatedTextCaretUpsert | AnnotatedTextCaretRemove;
+export type AnnotatedTextCaretFrame = AnnotatedTextCaretUpsert | AnnotatedTextCaretRemove | AnnotatedTextCaretOwn;
 
 export interface AnnotatedTextCaretUpsert {
   type: 'annotated-text-caret';
@@ -104,7 +104,7 @@ export interface AnnotatedTextCaretUpsert {
   entity: string;
   id: string;
   field: string;
-  change: { op: 'upsert'; value: AnnotatedTextVisibleCaret | AnnotatedTextRestrictedCaret };
+  change: { op: 'upsert'; value: AnnotatedTextVisibleCaret | AnnotatedTextRestrictedCaret | AnnotatedTextSelectionCaret };
 }
 
 export interface AnnotatedTextCaretRemove {
@@ -116,6 +116,15 @@ export interface AnnotatedTextCaretRemove {
   change: { op: 'remove'; presence: string };
 }
 
+export interface AnnotatedTextCaretOwn {
+  type: 'annotated-text-caret';
+  version: 1;
+  entity: string;
+  id: string;
+  field: string;
+  change: { op: 'own'; presence: string };
+}
+
 export interface AnnotatedTextVisibleCaret {
   kind: 'caret';
   presence: string;
@@ -123,6 +132,8 @@ export interface AnnotatedTextVisibleCaret {
   offset: number;
   /** The source user's public display label, or '' when the app supplies none. */
   name: string;
+  /** The source principal's stable id, for attribution only (may be ''). */
+  sourceId: string;
 }
 
 export interface AnnotatedTextRestrictedCaret {
@@ -131,6 +142,19 @@ export interface AnnotatedTextRestrictedCaret {
   edge: 'start';
   /** The source user's public display label, or '' when the app supplies none. */
   name: string;
+  /** The source principal's stable id, for attribution only (may be ''). */
+  sourceId: string;
+}
+
+export interface AnnotatedTextSelectionCaret {
+  kind: 'selection';
+  presence: string;
+  /** The source user's public display label, or '' when the app supplies none. */
+  name: string;
+  /** The source principal's stable id, for attribution only (may be ''). */
+  sourceId: string;
+  from: number;
+  to: number;
 }
 
 // ---------------------------------------------------------------------------

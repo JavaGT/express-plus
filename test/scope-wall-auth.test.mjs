@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { entity, grant, read, ref, scope, subscribe, text, write } from '../src/internal.mjs';
+import workbench, { entity, grant, read, ref, scope, subscribe, text, write } from '../build/internal.mjs';
 
 function privateNote() {
   return entity('PrivateNote', {

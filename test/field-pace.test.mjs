@@ -13,8 +13,8 @@ import {
   PACE_STRATEGIES,
   resolvePace,
   validatePaceSelection,
-} from '../src/field-pace.mjs';
-import { resolveStrategy } from '../src/field-strategy.mjs';
+} from '../build/field-pace.mjs';
+import { resolveStrategy } from '../build/field-strategy.mjs';
 
 // --- the pace registry is keyed by field-kind, framework-owned ---
 

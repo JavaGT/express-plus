@@ -7,7 +7,7 @@
 // (eng-review §3.2, Walk 1b; spec #2 atomicity). One BlobStore, reached by the
 // upload route AND the kernel's blob adopter — not a second persistence path.
 
-import { text, ref, blob, scope, grant, read, write, subscribe } from '../src/index.mjs';
+import { text, ref, blob, scope, grant, read, write, subscribe } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import workbench, {
-  entity, createBlobLifecycle } from '../src/internal.mjs';
+  entity, createBlobLifecycle } from '../build/internal.mjs';
 
 function photoNote() {
   return entity('Note', {

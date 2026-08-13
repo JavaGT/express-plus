@@ -99,7 +99,6 @@ import { annotationRangeRows } from './annotated-text-storage.mjs';
                 
                                           
                    
-                     
  
 
                                             
@@ -458,7 +457,7 @@ function edit_annotationId(command           )                     {
 /**
  * Admit a validated v9 annotated-text command. Structure edits (block.split,
  * block.merge, block.continue, block-group.assignment) are gone in the
- * blockless model and are rejected. `handlers` from the block era are ignored.
+ * blockless model and are rejected.
  */
 export async function admitV9AnnotatedTextEdit(ctx                )                     {
   const prelude = await assertV9AuthoringPrelude(ctx);

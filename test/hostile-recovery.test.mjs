@@ -3,13 +3,13 @@
 // test.todo when a known production gap exists (the assertion body genuinely
 // runs and fails, not a skipped placeholder).
 
-import { text, ref, scope, grant, read, write, subscribe } from '../src/index.mjs';
+import { text, ref, scope, grant, read, write, subscribe } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  entity } from '../src/internal.mjs';
+  entity } from '../build/internal.mjs';
 import { LiveList } from '../public/workbench-client.mjs';
 import { makeFakeChannel, makeFakeFetch } from './fixtures/fake-transport.mjs';
 

@@ -19,11 +19,11 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
-import { fsBlobs } from '../src/fs-blobs.mjs';
-import { generateFrameworkDDL } from '../src/ddl.mjs';
-import { createBlobStore } from '../src/blob-store.mjs';
-import { text, ref, blob, scope, grant, read, write, subscribe } from '../src/index.mjs';
-import workbench, { entity } from '../src/internal.mjs';
+import { fsBlobs } from '../build/fs-blobs.mjs';
+import { generateFrameworkDDL } from '../build/ddl.mjs';
+import { createBlobStore } from '../build/blob-store.mjs';
+import { text, ref, blob, scope, grant, read, write, subscribe } from '../build/index.mjs';
+import workbench, { entity } from '../build/internal.mjs';
 
 // ─── 1. fsBlobs interface contract ──────────────────────────────────────────
 

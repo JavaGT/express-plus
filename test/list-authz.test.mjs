@@ -13,12 +13,12 @@
 // NOT filtered — their scope already decided visibility, and mayVerb returns
 // denied for them (no clause to run), which would wrongly empty the list.
 
-import { text, grant, deny, read, scope, everyone } from '../src/index.mjs';
+import { text, grant, deny, read, scope, everyone } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { entity, generateDDL } from '../src/internal.mjs';
+import workbench, { entity, generateDDL } from '../build/internal.mjs';
 
 // A Secret visible to everyone (scope = everyone) but readable only by `vip`
 // (the .can body denies read to non-vip). This is the admits-then-denies-read

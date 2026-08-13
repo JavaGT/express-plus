@@ -12,16 +12,16 @@
 // must agree. This file tests the registry directly (unit) and via entity()
 // (integration for load-time guards).
 
-import { ref, text, map, scope, grant, read, write, subscribe, deny, anyOf, never } from '../src/index.mjs';
+import { ref, text, map, scope, grant, read, write, subscribe, deny, anyOf, never } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import { buildCheckRegistry } from '../src/registry.mjs';
-import workbench from '../src/app.mjs';
+import { buildCheckRegistry } from '../build/registry.mjs';
+import workbench from '../build/app.mjs';
 import {
-  entity, mayVerb, NonCompilableError } from '../src/internal.mjs';
-import { principal, anonymous } from '../src/principal.mjs';
+  entity, mayVerb, NonCompilableError } from '../build/internal.mjs';
+import { principal, anonymous } from '../build/principal.mjs';
 
 const norm = (sql) => sql.replace(/\s+/g, ' ').trim();
 

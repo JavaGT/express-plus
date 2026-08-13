@@ -75,6 +75,47 @@ the durable transaction, and may provide synchronous `projections` that commit
 atomically with the log, cursor, and action receipt. Handlers return events only;
 direct row writes belong in projection consumers.
 
+#### Protected artefact store
+
+A registered action may additionally declare a bounded protected-artefact store:
+
+```js
+{
+  type: 'observation.commit',
+  authorize,
+  protectedArtefacts: { tables: ['SpeakerObservation'] },
+  handler({ payload, protectedArtefact, now }) {
+    protectedArtefact.write('SpeakerObservation', {
+      id: payload.observationId, profileId: payload.profileId,
+      vector: payload.vector, createdAt: now,
+    });
+    return {
+      events: [{
+        type: 'observation.committed', scope,
+        data: { observationId: payload.observationId, profileId: payload.profileId },
+      }],
+      // REQUIRED: the receipt stores this, never the request payload.
+      canonicalPayload: { observationId: payload.observationId, profileId: payload.profileId },
+    };
+  },
+}
+```
+
+The handler receives a transaction-bound `protectedArtefact` capability
+(`write` / `erase`) restricted to exactly the declared application-owned tables.
+Protected writes and erasures join the action's own commit: any failure rolls
+back the store row together with the log, cursor, projection, and receipt, and a
+deduped retry never reruns them. Erasure is a permanent hard `DELETE`; the
+payloads never enter `_Log`, receipts, snapshots, live delivery, undo history,
+or exports — the event data and the returned `canonicalPayload` (required, so
+the receipt's `actionData` cannot carry the request payload) carry only the
+non-sensitive IDs and provenance needed to reference each artefact. The
+capability cannot reach Workbench package tables or undeclared application
+tables (no triggers, foreign keys, views, or temp shadows), closes when the
+handler returns, and requires single dispatch plus a durable database. Protected
+store tables are ordinary app-declared tables the app keeps out of its snapshot
+and export declarations.
+
 Generated `Entity.create` actions accept an optional non-empty text `id`. When
 present, that caller-owned id is preserved in the committed event and projected
 row; when absent, Workbench generates a UUID. This lets optimistic clients keep
@@ -374,8 +415,8 @@ client store remains the headless surface.
 
 | Surface | Status |
 | --- | --- |
-| Unexported `src/*` modules | Framework implementation details |
-| `src/kernel.mjs`, `pipeline.mjs`, raw DDL helpers | Framework assembly |
+| Unexported `build/*` modules | Framework implementation details |
+| `build/kernel.mjs`, `build/pipeline.mjs`, raw DDL helpers | Framework assembly |
 | PLANS / DECISIONLOG history | Execution history, not API |
 | Sample apps under `projects/*` | Examples, not package exports |
 

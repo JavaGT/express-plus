@@ -12,9 +12,9 @@ import workbench, {
   subscribe,
   text,
   write,
-} from '../src/index.mjs';
+} from '../build/index.mjs';
 import { LiveChannel } from '../public/workbench-client.mjs';
-import { executeDDL, executeFrameworkDDL } from '../src/ddl.mjs';
+import { executeDDL, executeFrameworkDDL } from '../build/ddl.mjs';
 
 function startNote() {
   return entity('StartNote', {

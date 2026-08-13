@@ -4,11 +4,11 @@
 // X-Accel-Buffering: no default (the nginx SSE footgun). No res.raw casts, no
 // hand-rolled `while (reader.read())` loops in app code.
 
-import { allowAnonymous } from '../src/index.mjs';
+import { allowAnonymous } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import workbench, { router } from '../src/internal.mjs';
+import workbench, { router } from '../build/internal.mjs';
 
 async function listen(app) {
   const server = app.listen(0);

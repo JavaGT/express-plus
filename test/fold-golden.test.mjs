@@ -5,7 +5,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createClient } from '../src/pipeline.mjs';
+import { createClient } from '../build/pipeline.mjs';
 import { LiveList } from '../public/workbench-client.mjs';
 import { makeFakeChannel, makeFakeFetch } from './fixtures/fake-transport.mjs';
 import {

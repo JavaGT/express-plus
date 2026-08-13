@@ -10,11 +10,11 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-import { text, ref, blob, scope, grant, read, write, subscribe, principal } from '../src/index.mjs';
-import workbench, { entity } from '../src/internal.mjs';
-import { createBlobLifecycle } from '../src/blob-lifecycle.mjs';
-import { createBlobStore } from '../src/blob-store.mjs';
-import { generateDDL, generateFrameworkDDL, executeFrameworkDDL } from '../src/ddl.mjs';
+import { text, ref, blob, scope, grant, read, write, subscribe, principal } from '../build/index.mjs';
+import workbench, { entity } from '../build/internal.mjs';
+import { createBlobLifecycle } from '../build/blob-lifecycle.mjs';
+import { createBlobStore } from '../build/blob-store.mjs';
+import { generateDDL, generateFrameworkDDL, executeFrameworkDDL } from '../build/ddl.mjs';
 
 function photoNote() {
   return entity('Note', {

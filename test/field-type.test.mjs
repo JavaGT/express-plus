@@ -11,11 +11,11 @@
 // on. Source of truth: SPEC §5.1 (field types), §5.4 (field access), §13
 // Phase 1. Grounded against note.mjs and comment.mjs.
 
-import { ref, boolean, date, json, read, write, subscribe, grant } from '../src/index.mjs';
+import { ref, boolean, date, json, read, write, subscribe, grant } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { text } from '../src/internal.mjs';
+import { text } from '../build/internal.mjs';
 
 test('text() returns a value-kind field descriptor', () => {
   const f = text();

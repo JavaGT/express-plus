@@ -1,12 +1,12 @@
 // Priority 4 SLICE C — Session security fixes (cso M1, M2).
 
-import { text, ref, scope, grant, read, write, subscribe } from '../src/index.mjs';
+import { text, ref, scope, grant, read, write, subscribe } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { entity } from '../src/internal.mjs';
-import { parseCookies, sessionCookie } from '../src/auth/session.mjs';
+import workbench, { entity } from '../build/internal.mjs';
+import { parseCookies, sessionCookie } from '../build/auth/session.mjs';
 
 // M1: Malformed cookie does not throw → anonymous principal, not 500
 test('parseCookies: malformed % escape does not throw', () => {

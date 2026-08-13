@@ -2,7 +2,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert';
-import { createWriteQueue } from '../src/write-queue.mjs';
+import { createWriteQueue } from '../build/write-queue.mjs';
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 

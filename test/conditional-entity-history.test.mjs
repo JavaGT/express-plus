@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { computed, date, deny, durableHistory, entity, everyone, grant, hash, principal, read, ref, scope, subscribe, text, write } from '../src/index.mjs';
+import workbench, { computed, date, deny, durableHistory, entity, everyone, grant, hash, principal, read, ref, scope, subscribe, text, write } from '../build/index.mjs';
 
 const user = principal({ type: 'user', id: 'conditional-user' });
 const session = 'conditional-tab';

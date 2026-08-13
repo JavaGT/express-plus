@@ -9,10 +9,10 @@ import {
   declaredTableNames,
   frameworkTableNames,
   readCommittedCursor,
-} from '../src/server.mjs';
-import { entity, grant, read, subscribe, text, snapshot } from '../src/index.mjs';
-import { executeFrameworkDDL } from '../src/ddl.mjs';
-import { scope } from '../src/scope.mjs';
+} from '../build/server.mjs';
+import { entity, grant, read, subscribe, text, snapshot } from '../build/index.mjs';
+import { executeFrameworkDDL } from '../build/ddl.mjs';
+import { scope } from '../build/scope.mjs';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 

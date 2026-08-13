@@ -15,8 +15,8 @@ import workbench, {
   text,
   subscribe,
   write,
-} from '../src/index.mjs';
-import { mayRow } from '../src/row-grant.mjs';
+} from '../build/index.mjs';
+import { mayRow } from '../build/row-grant.mjs';
 
 function noteDeclaration() {
   return entity('IsolatedNote', {

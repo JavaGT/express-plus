@@ -9,7 +9,7 @@ import workbench, {
   read,
   text,
   write,
-} from '../src/index.mjs';
+} from '../build/index.mjs';
 
 const RetainedNote = entity('RetainedNote', {
   body: text(),

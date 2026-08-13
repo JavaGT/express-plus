@@ -5,8 +5,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { executeFrameworkDDL } from '../src/ddl.mjs';
-import { createJobQueue } from '../src/job-queue.mjs';
+import { executeFrameworkDDL } from '../build/ddl.mjs';
+import { createJobQueue } from '../build/job-queue.mjs';
 
 const SECRET = 's3cret-shared-deployment-key';
 

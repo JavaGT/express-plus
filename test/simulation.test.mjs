@@ -1,11 +1,11 @@
-import { scope, everyone, grant, read, text, simulate, tick } from '../src/index.mjs';
-import workbench from '../src/app.mjs';
+import { scope, everyone, grant, read, text, simulate, tick } from '../build/index.mjs';
+import workbench from '../build/app.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { entity } from '../src/internal.mjs';
-import { generateDDL } from '../src/ddl.mjs';
-import { startSimulation } from '../src/simulate.mjs';
+import { entity } from '../build/internal.mjs';
+import { generateDDL } from '../build/ddl.mjs';
+import { startSimulation } from '../build/simulate.mjs';
 
 // Simulates a counter entity that increments every step. step reads
 // the ephemeral state, increments it, and optionally returns events

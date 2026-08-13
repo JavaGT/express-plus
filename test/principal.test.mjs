@@ -17,8 +17,8 @@ import { anonymous, entity, text, ref, scope, grant, deny, read, write, subscrib
 import { DatabaseSync } from 'node:sqlite';
 
 import { principal } from 'workbench';
-import { UnknownPrincipalTypeError } from '../src/principal.mjs';
-import { bindReadScope } from '../src/scope-sql.mjs';
+import { UnknownPrincipalTypeError } from '../build/principal.mjs';
+import { bindReadScope } from '../build/scope-sql.mjs';
 
 const ownerCan = async ({ is }) =>
   (await is.owner()) ? grant(read, write, subscribe) : deny('not the owner');

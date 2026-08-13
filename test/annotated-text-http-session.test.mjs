@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { annotatedText, annotation, entity, measurement, ref, registerAnnotatedTextContract } from '../src/index.mjs';
-import { registerAnnotatedTextStructuralExtension } from '../src/internal.mjs';
+import { annotatedText, annotation, entity, measurement, ref, registerAnnotatedTextContract } from '../build/index.mjs';
+import { registerAnnotatedTextStructuralExtension } from '../build/internal.mjs';
 import { createAnnotatedTextHttpSession, materializeAnnotatedTextSnapshot } from '../public/workbench-client.mjs';
 
 registerAnnotatedTextContract('liveSessionMeasurement', Object.freeze({ kind: 'measurement' }));
@@ -352,6 +352,62 @@ test('positive receipt without fold echo falls back to covering snapshot and aut
   session.close();
 });
 
+test('annotation removal is visible before its receipt and authoritative snapshot settle', async () => {
+  const actionRequests = [];
+  const snapshotRequests = [];
+  const sources = [];
+  let cursor = 0;
+  let removed = false;
+  let releaseReceipt;
+  const receiptGate = new Promise((resolve) => { releaseReceipt = resolve; });
+  const session = createAnnotatedTextHttpSession({
+    typingBurstIdleMs: 0,
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: Document, field: Document.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => 'remove-action',
+    fetchImpl: async (url, options) => {
+      if (options?.method === 'POST') {
+        if (url.includes('/authoring/ack')) return { ok: true, status: 200, json: async () => ({ ok: true, acknowledgedThrough: cursor }) };
+        actionRequests.push(JSON.parse(options.body));
+        await receiptGate;
+        removed = true;
+        return { ok: true, status: 200, json: async () => ({ ok: true, actionId: 'remove-action', confirmedThrough: cursor + 1 }) };
+      }
+      cursor += 1;
+      snapshotRequests.push(cursor);
+      const body = {
+        ...snapshot().body,
+        ...(removed ? { ranges: [], annotations: [] } : {
+          ranges: [{ annotationId: 'a1', start: 0, end: 5 }],
+          annotations: [{ id: 'a1', family: 'note', fields: {} }],
+        }),
+      };
+      return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { body }, cursor, authoring: authoringEnvelope(cursor) }) };
+    },
+    eventSourceFactory: () => {
+      const source = { close() {}, onmessage: null, onerror: null };
+      sources.push(source);
+      return source;
+    },
+  });
+  await session.ready;
+  assert.deepEqual(session.document.ranges, [{ annotationId: 'a1', start: 0, end: 5 }]);
+
+  const pending = session.removeAnnotation({ mutationId: 'remove-1', annotationId: 'a1' });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(actionRequests.length, 1);
+  assert.deepEqual(session.document.ranges, [], 'the pending removal must clear its visible range immediately');
+  assert.deepEqual(session.document.annotations, [], 'the pending removal must clear its visible chip immediately');
+
+  releaseReceipt();
+  const result = await pending;
+  assert.equal(result.ok, true);
+  assert.deepEqual(session.document.ranges, []);
+  assert.deepEqual(session.document.annotations, []);
+  assert.equal(snapshotRequests.length, 2, 'the non-foldable annotation action still settles through an authoritative snapshot');
+  session.close();
+});
+
 test('dependent text waits for settlement and reports a local conflict when its captured basis is not recovered', async () => {
   const actionRequests = [];
   const pendingResponses = [];
@@ -488,6 +544,49 @@ test('rapid dependent inserts project immediately and commit as one bounded typi
   for (const result of await Promise.all([x, a, b])) assert.equal(result.ok, true, result.failure?.message);
   assert.equal(session.document.text, 'HelloXAB');
   session.close();
+});
+
+test('rapid queued text projects annotation ranges over the same optimistic document', async () => {
+  const pendingResponses = [];
+  let cursor = 0;
+  const session = createAnnotatedTextHttpSession({
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: Document, field: Document.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => 'range-burst',
+    fetchImpl: async (url, options) => {
+      if (options?.method === 'POST') {
+        if (url.includes('/authoring/ack')) return { ok: true, status: 200, json: async () => ({ ok: true, acknowledgedThrough: cursor }) };
+        return new Promise((resolve) => pendingResponses.push(resolve));
+      }
+      cursor += 1;
+      const body = {
+        ...snapshot().body,
+        ranges: [
+          { annotationId: 'speaker-1', start: 0, end: 2 },
+          { annotationId: 'speaker-2', start: 2, end: 5 },
+        ],
+        annotations: [
+          { id: 'speaker-1', family: 'note', fields: {} },
+          { id: 'speaker-2', family: 'note', fields: {} },
+        ],
+      };
+      return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { body }, cursor, authoring: authoringEnvelope(cursor) }) };
+    },
+    eventSourceFactory: () => ({ close() {}, onmessage: null, onerror: null }),
+  });
+  await session.ready;
+
+  const x = session.insert({ at: { offset: 1, affinity: 'right' }, text: 'X' });
+  const a = session.insert({ at: { offset: 2, affinity: 'right' }, text: 'A' });
+  const b = session.insert({ at: { offset: 3, affinity: 'right' }, text: 'B' });
+  assert.equal(session.document.text, 'HXABello');
+  assert.deepEqual(session.document.ranges, [
+    { annotationId: 'speaker-1', start: 0, end: 5 },
+    { annotationId: 'speaker-2', start: 5, end: 8 },
+  ]);
+
+  session.close();
+  for (const result of await Promise.all([x, a, b])) assert.equal(result.ok, false);
 });
 
 test('close settles and cancels an unsent typing burst', async () => {
@@ -639,8 +738,8 @@ test('dispatch fails closed after revoke and close', async () => {
 });
 
 test('own-echo fold installs text without a second bootstrap snapshot', async () => {
-  const { createTextState, applyTextOp, textCheckpoint } = await import('../src/annotated-text.mjs');
-  const { createTextFamily, applyTextOperation, textFamilyCheckpoint, materializeText } = await import('../src/annotated-text-continuous.mjs');
+  const { createTextState, applyTextOp, textCheckpoint } = await import('../build/annotated-text.mjs');
+  const { createTextFamily, applyTextOperation, textFamilyCheckpoint, materializeText } = await import('../build/annotated-text-continuous.mjs');
   const A = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
   const insertOp = ['workbench.text', 1, [A, 1], 1, [], ['insert', ['root'], 'Hello']];
   const baseFamily = createTextFamily('d1', textCheckpoint(applyTextOp(createTextState(), insertOp)));
@@ -721,6 +820,109 @@ test('own-echo fold installs text without a second bootstrap snapshot', async ()
   assert.equal(foldTimings.length, 1, 'onFoldApplied must fire once for the folded edit');
   assert.equal(foldTimings[0].kind, 'annotatedText');
   assert.ok(Number.isFinite(foldTimings[0].elapsedMs) && foldTimings[0].elapsedMs >= 0);
+  session.close();
+});
+
+test('own-echo fold does not double-apply a pending insert or reject a queued successor', async () => {
+  const { createTextState, applyTextOp, textCheckpoint } = await import('../build/annotated-text.mjs');
+  const { createTextFamily, applyTextOperation, textFamilyCheckpoint, materializeText, textOperationForOffsetEdit } = await import('../build/annotated-text-continuous.mjs');
+  const A = 'a'.repeat(32);
+  const actorA = 'b'.repeat(32);
+  const actorB = 'c'.repeat(32);
+  const insertOp = ['workbench.text', 1, [A, 1], 1, [], ['insert', ['root'], 'Hello']];
+  const baseFamily = createTextFamily('d1', textCheckpoint(applyTextOp(createTextState(), insertOp)));
+  const insertA = textOperationForOffsetEdit(baseFamily, { kind: 'text.insert', at: { offset: 5 }, text: 'A' }, actorA, 2);
+  const familyA = applyTextOperation(baseFamily, insertA);
+  const textA = materializeText(familyA);
+  assert.equal(textA, 'HelloA');
+  const insertB = textOperationForOffsetEdit(familyA, { kind: 'text.insert', at: { offset: 6 }, text: 'B' }, actorB, 3);
+  const familyAB = applyTextOperation(familyA, insertB);
+  const textAB = materializeText(familyAB);
+  assert.equal(textAB, 'HelloAB');
+
+  const actionRequests = [];
+  const pendingResponses = [];
+  const sources = [];
+  let number = 0;
+  let actionNumber = 0;
+  const session = createAnnotatedTextHttpSession({
+    typingBurstIdleMs: 0,
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: Document, field: Document.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => `action-${++actionNumber}`,
+    fetchImpl: async (url, options) => {
+      if (options?.method === 'POST') {
+        if (url.includes('/authoring/ack')) return { ok: true, status: 200, json: async () => ({ ok: true, acknowledgedThrough: number }) };
+        const request = JSON.parse(options.body);
+        actionRequests.push(request);
+        return new Promise((resolve) => pendingResponses.push(resolve));
+      }
+      const cursor = ++number;
+      const body = { ...snapshot().body, text: cursor === 1 ? 'Hello' : textAB };
+      const seed = cursor === 1 ? textFamilyCheckpoint(baseFamily) : textFamilyCheckpoint(familyAB);
+      return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { body }, cursor, authoring: authoringEnvelope(cursor, seed) }) };
+    },
+    eventSourceFactory: () => {
+      const source = { close() {}, onmessage: null, onerror: null };
+      sources.push(source);
+      return source;
+    },
+  });
+  await session.ready;
+
+  const first = session.insert({ mutationId: 'a', at: { offset: 5, affinity: 'right' }, text: 'A' });
+  const second = session.insert({ mutationId: 'b', at: { offset: 6, affinity: 'right' }, text: 'B' });
+  assert.equal(session.document.text, 'HelloAB');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(actionRequests.length, 1, 'B waits for A to submit');
+
+  sources[0].onmessage({ data: JSON.stringify([{
+    type: 'event', entity: 'Project', id: 'p1', seq: 2, seqSpan: [2, 2],
+    event: { type: 'LiveDocument.body.operated', scope: 'Project:p1', seq: 2, actionId: 'action-1' },
+    fold: {
+      kind: 'annotatedText', version: 4, field: 'body', baseCursor: 1, fence: 2,
+      text: { reducer: 'workbench.text', operations: [insertA] },
+      projection: { text: textA },
+      dispositions: [],
+      familyElementCount: Object.keys(textFamilyCheckpoint(familyA).checkpoint.elements).length,
+      authoring: {
+        acknowledgementFence: 2,
+        stream: token('stream'), lease: token('lease'), snapshot: token('snapshot2'),
+        positionFrames: [{ positionToken: token('position2') }],
+      },
+    },
+  }]) });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(session.document.text, 'HelloAB', 'own-echo fold must not splice A twice on top of the queued B');
+
+  pendingResponses.shift()({ ok: true, status: 200, json: async () => ({ ok: true, actionId: 'action-1', confirmedThrough: 2 }) });
+  const firstResult = await first;
+  assert.equal(firstResult.ok, true, firstResult.failure?.message);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(actionRequests.length, 2, 'B must still submit after A settles through its fold');
+  assert.equal(actionRequests[1].payload.authoring.mutationId, 'b');
+
+  sources[0].onmessage({ data: JSON.stringify([{
+    type: 'event', entity: 'Project', id: 'p1', seq: 3, seqSpan: [3, 3],
+    event: { type: 'LiveDocument.body.operated', scope: 'Project:p1', seq: 3, actionId: 'action-2' },
+    fold: {
+      kind: 'annotatedText', version: 4, field: 'body', baseCursor: 2, fence: 3,
+      text: { reducer: 'workbench.text', operations: [insertB] },
+      projection: { text: textAB },
+      dispositions: [],
+      familyElementCount: Object.keys(textFamilyCheckpoint(familyAB).checkpoint.elements).length,
+      authoring: {
+        acknowledgementFence: 3,
+        stream: token('stream'), lease: token('lease'), snapshot: token('snapshot3'),
+        positionFrames: [{ positionToken: token('position3') }],
+      },
+    },
+  }]) });
+  pendingResponses.shift()({ ok: true, status: 200, json: async () => ({ ok: true, actionId: 'action-2', confirmedThrough: 3 }) });
+  const secondResult = await second;
+  assert.equal(secondResult.ok, true, secondResult.failure?.message);
+  assert.notEqual(secondResult.failure?.message, 'annotated text changed before queued operation could be submitted');
+  assert.equal(session.document.text, 'HelloAB');
   session.close();
 });
 
@@ -848,8 +1050,8 @@ test('a v4 fold missing or malformed dispositions recovers by snapshot instead o
 });
 
 test('a collapsed range without a matching disposition recovers by snapshot instead of silently pruning', async () => {
-  const { createTextState, applyTextOp, textCheckpoint } = await import('../src/annotated-text.mjs');
-  const { createTextFamily, applyTextOperation, textFamilyCheckpoint, materializeText, textOperationForOffsetEdit } = await import('../src/annotated-text-continuous.mjs');
+  const { createTextState, applyTextOp, textCheckpoint } = await import('../build/annotated-text.mjs');
+  const { createTextFamily, applyTextOperation, textFamilyCheckpoint, materializeText, textOperationForOffsetEdit } = await import('../build/annotated-text-continuous.mjs');
   const A = 'a'.repeat(32);
   const B = 'b'.repeat(32);
   const insertOp = ['workbench.text', 1, [A, 1], 1, [], ['insert', ['root'], 'hello world']];
@@ -942,8 +1144,8 @@ test('a collapsed range without a matching disposition recovers by snapshot inst
 });
 
 test('a v4 fold disposition reproduces the fresh authorized snapshot for emptied annotations', async () => {
-  const { createTextState, applyTextOp, textCheckpoint } = await import('../src/annotated-text.mjs');
-  const { createTextFamily, applyTextOperation, textFamilyCheckpoint, materializeText, textOperationForOffsetEdit } = await import('../src/annotated-text-continuous.mjs');
+  const { createTextState, applyTextOp, textCheckpoint } = await import('../build/annotated-text.mjs');
+  const { createTextFamily, applyTextOperation, textFamilyCheckpoint, materializeText, textOperationForOffsetEdit } = await import('../build/annotated-text-continuous.mjs');
   const A = 'a'.repeat(32);
   const B = 'b'.repeat(32);
   const insertOp = ['workbench.text', 1, [A, 1], 1, [], ['insert', ['root'], 'hello world']];

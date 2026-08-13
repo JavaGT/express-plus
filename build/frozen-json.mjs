@@ -1,5 +1,3 @@
-import { ValidationError } from './field-strategy.mjs';
-
 function validateJsonInput(value     , seen = new WeakSet     ()) {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
   if (typeof value === 'number') {
@@ -57,39 +55,4 @@ export function frozenJsonSnapshot(value     ) {
     throw new Error('value is not JSON');
   }
   return freezeJson(snapshot);
-}
-
-export function assertR2BlockSplitPayload(name        , fieldName        , payload     ) {
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
-      Object.keys(payload).length !== 4 ||
-      !Object.hasOwn(payload, 'version') || !Object.hasOwn(payload, 'id') ||
-      !Object.hasOwn(payload, 'expected') || !Object.hasOwn(payload, 'operation')) {
-    throw new ValidationError(`${name}.${fieldName}.operation requires exactly { version, id, expected, operation }`);
-  }
-  if (payload.version !== 2 || typeof payload.id !== 'string' || payload.id.length === 0) {
-    throw new ValidationError(`${name}.${fieldName}.operation requires version 2 and a non-empty id`);
-  }
-  const expected = payload.expected;
-  if (!expected || typeof expected !== 'object' || Array.isArray(expected) ||
-      Object.keys(expected).length !== 2 || !Object.hasOwn(expected, 'structuralRevision') || !Object.hasOwn(expected, 'frontier') ||
-      !Number.isSafeInteger(expected.structuralRevision) || expected.structuralRevision < 1 || !Array.isArray(expected.frontier)) {
-    throw new ValidationError(`${name}.${fieldName}.operation expected requires structuralRevision and frontier`);
-  }
-  const operation = payload.operation;
-  if (!operation || typeof operation !== 'object' || Array.isArray(operation) ||
-      Object.keys(operation).length !== 3 || operation.kind !== 'block.split' ||
-      typeof operation.blockId !== 'string' || operation.blockId.length === 0 ||
-      !Number.isInteger(operation.utf16Offset) || operation.utf16Offset < 0) {
-    throw new ValidationError(`${name}.${fieldName}.operation requires a block.split operation with blockId and utf16Offset`);
-  }
-  return Object.freeze({
-    version: 2,
-    id: payload.id,
-    expected: Object.freeze({ structuralRevision: expected.structuralRevision, frontier: expected.frontier }),
-    operation: Object.freeze({ kind: 'block.split', blockId: operation.blockId, utf16Offset: operation.utf16Offset }),
-  });
-}
-
-export function deriveBlockPosition(index        ) {
-  return index.toString(36).toLowerCase().padStart(13, '0');
 }

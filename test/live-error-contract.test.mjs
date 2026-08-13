@@ -10,15 +10,15 @@
 // These tests expect the NEW contract shape and WILL FAIL until the
 // server's error() and #handleMessage error paths are updated.
 
-import { text, ref, grant, read, write, subscribe, scope, everyone } from '../src/index.mjs';
+import { text, ref, grant, read, write, subscribe, scope, everyone } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { connect as tcpConnect } from 'node:net';
 import { randomBytes } from 'node:crypto';
 
-import workbench, { entity, generateDDL } from '../src/internal.mjs';
-import { isWorkbenchFailure, FAILURE_CATEGORIES } from '../src/outcome.mjs';
+import workbench, { entity, generateDDL } from '../build/internal.mjs';
+import { isWorkbenchFailure, FAILURE_CATEGORIES } from '../build/outcome.mjs';
 
 // --- test entity ---
 

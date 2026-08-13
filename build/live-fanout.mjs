@@ -114,6 +114,7 @@ import { publicEvent } from './event-delivery.mjs';
                                                                                     
                                                                           
                                                                                                                       
+                                                                                                                   
                                                                                                                                                                                      
                 
  
@@ -129,6 +130,7 @@ export function createLiveFanout({ mayVerb = null }                             
   const connSubs = new Map                       ();  // Map<conn, Set<scopeKey>>
   const paceBuffers = new Map                         ();
   let onCaretInterestChange                                                                            = null;
+  let onCaretInterestAdded                                                                          = null;
 
   const deltaProjector = createDeltaProjector();
 
@@ -169,9 +171,14 @@ export function createLiveFanout({ mayVerb = null }                             
     if (!byScope.has(scope)) byScope.set(scope, new Map());
     const previous = byScope.get(scope) .get(conn);
     const nextCarets = (interest.carets                        ) ?? [];
-    const removedCarets = ((previous?.interest?.carets                        ) ?? []).filter((field) => !nextCarets.includes(field));
+    const previousCarets = (previous?.interest?.carets                        ) ?? [];
+    const removedCarets = previousCarets.filter((field) => !nextCarets.includes(field));
     if (removedCarets.length > 0) onCaretInterestChange?.(conn, scope, removedCarets);
     byScope.get(scope) .set(conn, { fields, latch: true, pace, interest });
+    // A late-joining caret subscriber must learn the CURRENT presence state for
+    // the fields it now cares about; the caret module replays existing slots.
+    const addedCarets = nextCarets.filter((field) => !previousCarets.includes(field));
+    if (addedCarets.length > 0) onCaretInterestAdded?.(conn, scope, addedCarets);
     let mine = connSubs.get(conn);
     if (!mine) { mine = new Set(); connSubs.set(conn, mine); }
     mine.add(scope);
@@ -247,6 +254,10 @@ export function createLiveFanout({ mayVerb = null }                             
 
   function setOnCaretInterestChange(callback                                                                           )       {
     onCaretInterestChange = callback;
+  }
+
+  function setOnCaretInterestAdded(callback                                                                         )       {
+    onCaretInterestAdded = callback;
   }
 
   async function flushPacedBuffer(key        )                {
@@ -431,6 +442,7 @@ export function createLiveFanout({ mayVerb = null }                             
     recipients,
     hasCaretInterest,
     setOnCaretInterestChange,
+    setOnCaretInterestAdded,
     emit,
     close,
   };

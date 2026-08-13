@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { createTextState, applyTextOp, textCheckpoint, materializeText as materializeCheckpointText } from '../src/annotated-text.mjs';
+import { createTextState, applyTextOp, textCheckpoint, materializeText as materializeCheckpointText } from '../build/annotated-text.mjs';
 import {
   createTextFamily,
   materializeText,
@@ -10,7 +10,7 @@ import {
   applyTextOperation,
   compareStructuralEndpoints,
   projectEndpointToOffset,
-} from '../src/annotated-text-continuous.mjs';
+} from '../build/annotated-text-continuous.mjs';
 
 const A1 = 'ffffffffffffffffffffffffffffffff';
 const A2 = '00000000000000000000000000000001';

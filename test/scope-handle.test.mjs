@@ -6,7 +6,7 @@ import {
   parseScopeKey,
   tryParseScopeKey,
   isScopeHandle,
-} from '../src/scope-handle.mjs';
+} from '../build/scope-handle.mjs';
 
 test('scopeOf builds a frozen Scope handle with stable key', () => {
   const h = scopeOf('Note', 'abc-123');

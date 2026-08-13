@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
-import { ensureStream, ensureLease, hashClientNonce } from '../src/annotated-text-authoring-stream.mjs';
-import { projectAnnotatedTextSnapshot } from '../src/annotated-text-snapshot.mjs';
+import { ensureStream, ensureLease, hashClientNonce } from '../build/annotated-text-authoring-stream.mjs';
+import { projectAnnotatedTextSnapshot } from '../build/annotated-text-snapshot.mjs';
 
 const TOKEN_BYTES = 32;
 function base64url(bytes) {

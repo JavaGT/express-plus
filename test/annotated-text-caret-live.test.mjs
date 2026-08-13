@@ -2,12 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 
-import { annotatedText, annotation, ephemeral, entity, ref, measurement, registerAnnotatedTextContract, grant, read, subscribe } from '../src/index.mjs';
-import { createAnnotatedTextCaretLive } from '../src/annotated-text-caret-live.mjs';
-import { createLiveFanout } from '../src/live-fanout.mjs';
-import { registerAnnotatedTextStructuralExtension } from '../src/internal.mjs';
-import { executeDDL } from '../src/ddl.mjs';
-import { importTextToFamily, textFamilyCheckpoint } from '../src/annotated-text-continuous.mjs';
+import { annotatedText, annotation, ephemeral, entity, ref, measurement, registerAnnotatedTextContract, grant, read, subscribe } from '../build/index.mjs';
+import { createAnnotatedTextCaretLive } from '../build/annotated-text-caret-live.mjs';
+import { createLiveFanout } from '../build/live-fanout.mjs';
+import { registerAnnotatedTextStructuralExtension } from '../build/internal.mjs';
+import { executeDDL } from '../build/ddl.mjs';
+import { importTextToFamily, textFamilyCheckpoint } from '../build/annotated-text-continuous.mjs';
 
 const ext = 'caretLiveT5';
 registerAnnotatedTextContract(ext, Object.freeze({ kind: 'measurement' }));
@@ -107,8 +107,13 @@ test('successful visible upsert projects and delivers to all recipients', async 
       assert.ok(typeof frame.change.value.presence === 'string');
       // The writer's principal carries no display name in this fixture.
       assert.equal(frame.change.value.name, '');
+      assert.equal(frame.change.value.sourceId, 'u1', 'attribution carries the source principal id');
     }
-    assert.equal(sent.filter((f) => f.type === 'annotated-text-caret').length, 2);
+    // The source connection is also told its OWN presence token once per slot.
+    const own = sent.filter((f) => f.type === 'annotated-text-caret' && f.change?.op === 'own');
+    assert.equal(own.length, 1, 'exactly one own frame for the slot creation');
+    assert.equal(own[0].change.presence, upserts[0].change.value.presence, 'own reveals the slot presence');
+    assert.equal(sent.filter((f) => f.type === 'annotated-text-caret').length, 3);
   } finally { db.close(); }
 });
 
@@ -122,6 +127,36 @@ test('upsert carries the writer display name to recipients', async () => {
     assert.equal(upserts.length, 2, 'both recipients should receive upsert');
     for (const frame of upserts) {
       assert.equal(frame.change.value.name, 'Aroha');
+    }
+  } finally { db.close(); }
+});
+
+test('delivered upserts attribute the source principal id in live fanout and late-join replay', async () => {
+  const { db, writer, sent, recipientA } = setup();
+  try {
+    const fanout = createLiveFanout({ mayVerb: async () => true });
+    const live = createAnnotatedTextCaretLive({
+      db, resolveEntity: (name) => name === 'CaretDoc' ? makeEntity() : null,
+      mayVerb: async () => true, fanout,
+    });
+    fanout.addSubscription('CaretDoc:d1', writer, null, null, { entity: 'CaretDoc', id: 'd1', carets: ['body'] });
+    sent.length = 0;
+    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 });
+    // Normal publish fanout: every delivered value attributes the source principal id.
+    const fanoutUpserts = sent.filter(isCaretUpsert);
+    assert.equal(fanoutUpserts.length, 1, 'the writer is the only caret subscriber at publish time');
+    for (const frame of fanoutUpserts) {
+      assert.equal(frame.change.value.sourceId, 'u1');
+    }
+    // Late-join replay: a subscriber added after the publish re-projects the
+    // slot through replayCaretTo and carries the same attribution.
+    sent.length = 0;
+    fanout.addSubscription('CaretDoc:d1', recipientA, null, null, { entity: 'CaretDoc', id: 'd1', carets: ['body'] });
+    await new Promise((resolve) => setImmediate(resolve));
+    const replayUpserts = sent.filter(isCaretUpsert);
+    assert.equal(replayUpserts.length, 1, 'late-joining subscriber receives a replayed upsert');
+    for (const frame of replayUpserts) {
+      assert.equal(frame.change.value.sourceId, 'u1');
     }
   } finally { db.close(); }
 });

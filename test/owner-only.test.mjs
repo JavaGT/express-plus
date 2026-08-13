@@ -20,15 +20,15 @@
 // half already accepted the array. That compile/runtime inconsistency is the
 // seam this test pins down (AGENTS: one reconciliation path).
 
-import { text, ref, owner, scope, grant, deny, read, write, subscribe, admin } from '../src/index.mjs';
+import { text, ref, owner, scope, grant, deny, read, write, subscribe, admin } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import { entity } from '../src/internal.mjs';
-import { rowCapabilities, mayVerb } from '../src/row-grant.mjs';
-import workbench, { executeDDL, executeFrameworkDDL } from '../src/internal.mjs';
-import { User } from '../src/index.mjs';
+import { entity } from '../build/internal.mjs';
+import { rowCapabilities, mayVerb } from '../build/row-grant.mjs';
+import workbench, { executeDDL, executeFrameworkDDL } from '../build/internal.mjs';
+import { User } from '../build/index.mjs';
 
 // The handwritten expansion D4 says owner.only() must be identical to. Reused
 // verbatim by the runtime/HTTP comparisons so equivalence is literal, not

@@ -9,8 +9,8 @@ import crypto from 'node:crypto';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import workbench from '../src/app.mjs';
-import { SESSION_COOKIE } from '../src/auth/session.mjs';
+import workbench from '../build/app.mjs';
+import { SESSION_COOKIE } from '../build/auth/session.mjs';
 import {
   generateChallenge,
   createChallengeStore,
@@ -26,7 +26,7 @@ import {
   verifyAuthentication,
   rpConfig,
   challengeStore,
-} from '../src/auth/passkey.mjs';
+} from '../build/auth/passkey.mjs';
 
 // ---- helpers -----------------------------------------------------------------
 

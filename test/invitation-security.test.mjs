@@ -15,9 +15,9 @@ import workbench, {
   ref,
   scope,
   text,
-} from '../src/index.mjs';
-import { createInvitationApi } from '../src/auth/invitation.mjs';
-import { principal } from '../src/principal.mjs';
+} from '../build/index.mjs';
+import { createInvitationApi } from '../build/auth/invitation.mjs';
+import { principal } from '../build/principal.mjs';
 
 async function fixture() {
   const Project = entity('InvitationSecurityProject', {

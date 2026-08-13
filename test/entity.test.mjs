@@ -16,13 +16,13 @@
 //
 // Source of truth: SPEC §5–§6, §13 Phase 1. Grounded against note.mjs.
 
-import { text, ref, scope, grant, deny, read, write, subscribe, admin, owner } from '../src/index.mjs';
+import { text, ref, scope, grant, deny, read, write, subscribe, admin, owner } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  entity } from '../src/internal.mjs';
-import { rowCapabilities } from '../src/row-grant.mjs';
+  entity } from '../build/internal.mjs';
+import { rowCapabilities } from '../build/row-grant.mjs';
 
 const ownerGrant = () => [
   scope(({ is }) => is.owner()).can(

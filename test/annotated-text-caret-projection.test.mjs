@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { annotatedText, annotation, ephemeral, entity, measurement, protectingAnnotation, ref, registerAnnotatedTextContract } from '../src/index.mjs';
-import { projectAnnotatedTextCaretForRecipient, registerAnnotatedTextStructuralExtension } from '../src/internal.mjs';
+import { annotatedText, annotation, ephemeral, entity, measurement, protectingAnnotation, ref, registerAnnotatedTextContract } from '../build/index.mjs';
+import { projectAnnotatedTextCaretForRecipient, registerAnnotatedTextStructuralExtension } from '../build/internal.mjs';
 
 const extension = 'caretProjectionMeasurement';
 registerAnnotatedTextContract(extension, Object.freeze({ kind: 'measurement' }));
@@ -82,8 +82,25 @@ test('restricted caret exposes only a deterministic edge and opaque presence ide
 test('caret projection rejects malformed, stale, and surrogate-splitting locations', () => {
   const body = descriptor();
   const decisions = { version: 1, protectors: [{ protectorId: 'p1', outcome: 'allow' }], capabilityHints: [] };
-  assert.throws(() => projectAnnotatedTextCaretForRecipient(canonical(), body, decisions, { blockId: 'b1', offset: 0 }, 'session-1'), /caret has invalid shape/);
+  assert.throws(() => projectAnnotatedTextCaretForRecipient(canonical(), body, decisions, { blockId: 'b1', offset: 0 }, 'session-1'), /caret location is invalid/);
   assert.throws(() => projectAnnotatedTextCaretForRecipient(canonical(), body, decisions, { offset: 99 }, 'session-1'), /outside the canonical text/);
   assert.throws(() => projectAnnotatedTextCaretForRecipient(canonical('a😀b'), body, decisions, { offset: 2 }, 'session-1'), /outside the canonical text/);
+  assert.throws(() => projectAnnotatedTextCaretForRecipient(canonical(), body, decisions, { offset: 0, selection: { from: 3, to: 1 } }, 'session-1'), /outside the canonical text/);
+  assert.throws(() => projectAnnotatedTextCaretForRecipient(canonical(), body, decisions, { offset: 0, selection: { from: 0, to: 99 } }, 'session-1'), /outside the canonical text/);
+  assert.throws(() => projectAnnotatedTextCaretForRecipient(canonical(), body, decisions, { offset: 0, selection: { from: 0 } }, 'session-1'), /caret selection has invalid shape/);
   assert.throws(() => projectAnnotatedTextCaretForRecipient(canonical(), body, { version: 1, protectors: [], capabilityHints: [] }, { offset: 0 }, 'session-1'), /exactly match/);
+});
+
+test('selection caret projects to a visible range and degrades to an edge when redacted', () => {
+  const body = descriptor();
+  const decisions = { version: 1, protectors: [{ protectorId: 'p1', outcome: 'allow' }], capabilityHints: [] };
+  const visible = projectAnnotatedTextCaretForRecipient(canonical('secret'), body, decisions,
+    { offset: 4, selection: { from: 1, to: 4 } }, 'session-1');
+  assert.deepEqual(visible, { kind: 'selection', presence: 'session-1', from: 1, to: 4 });
+  // A redacted recipient gets only the opaque edge, never selection offsets.
+  const redacted = projectAnnotatedTextCaretForRecipient(canonical('secret'), body,
+    { version: 1, protectors: [{ protectorId: 'p1', outcome: 'deny' }], capabilityHints: [] },
+    { offset: 4, selection: { from: 1, to: 4 } }, 'session-1');
+  assert.deepEqual(redacted, { kind: 'edge', presence: 'session-1', edge: 'start' });
+  assert.equal(JSON.stringify(redacted).includes('from'), false);
 });

@@ -1259,8 +1259,8 @@ function caretHarness(text = 'Hello', document = visible(text)) {
 
 function caretFrame(presence, kind = 'caret', offset) {
   const value = kind === 'edge'
-    ? { kind: 'edge', presence, edge: 'start' }
-    : { kind: 'caret', presence, offset };
+    ? { kind: 'edge', presence, edge: 'start', sourceId: 'demo' }
+    : { kind: 'caret', presence, offset, sourceId: 'demo' };
   return {
     type: 'annotated-text-caret', version: 1,
     entity: 'Doc', id: 'd1', field: 'body',

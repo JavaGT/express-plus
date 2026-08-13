@@ -24,8 +24,8 @@ import crypto from 'node:crypto';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import workbench from '../src/app.mjs';
-import { SESSION_COOKIE } from '../src/auth/session.mjs';
+import workbench from '../build/app.mjs';
+import { SESSION_COOKIE } from '../build/auth/session.mjs';
 import {
   generateSecret,
   hotp,
@@ -34,11 +34,11 @@ import {
   verifyBackupCode,
   base32Encode,
   base32Decode,
-} from '../src/auth/totp.mjs';
+} from '../build/auth/totp.mjs';
 import {
   createLoginChallengeStore,
   loginChallengeStore,
-} from '../src/auth/login-challenge.mjs';
+} from '../build/auth/login-challenge.mjs';
 
 // ---- helpers -----------------------------------------------------------------
 

@@ -11,15 +11,15 @@
 //   projected.async render pipeline,
 //   raster.crdt and blob field constructors (slice 14).
 
-import { text, number, date, ref, map, boolean, blob, raster, projected, scope, grant, deny, read, write, subscribe, anyOf, never, inherit } from '../src/index.mjs';
+import { text, number, date, ref, map, boolean, blob, raster, projected, scope, grant, deny, read, write, subscribe, anyOf, never, inherit } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  entity, bindReadScope, mayVerb } from '../src/internal.mjs';
-import { principal } from '../src/principal.mjs';
+  entity, bindReadScope, mayVerb } from '../build/internal.mjs';
+import { principal } from '../build/principal.mjs';
 
 // ---- helpers ----
 
@@ -255,7 +255,7 @@ test('visible field .can admits editors/owners for hidden layers via mayFieldOp'
   const l2 = RasterLayer_b.getOrFail('l2');
   assert.equal(l2.visible, false, 'l2 is hidden');
 
-  const { mayFieldOp } = await import('../src/row-grant.mjs');
+  const { mayFieldOp } = await import('../build/row-grant.mjs');
 
   // Alice (owner) can read hidden layer
   assert.equal(await mayFieldOp(RasterLayer_b, 'visible', read, l2, alice), true);
@@ -281,7 +281,7 @@ test('visible field .can passes for visible layers to all scoped members', async
   const l1 = RasterLayer_b.getOrFail('l1');
   assert.equal(l1.visible, true, 'l1 is visible');
 
-  const { mayFieldOp } = await import('../src/row-grant.mjs');
+  const { mayFieldOp } = await import('../build/row-grant.mjs');
 
   assert.equal(await mayFieldOp(RasterLayer_b, 'visible', read, l1, alice), true);
   assert.equal(await mayFieldOp(RasterLayer_b, 'visible', read, l1, bob), true);
@@ -319,7 +319,7 @@ test('removing a collaborator revokes SQL scope AND field read', async () => {
   const app = workbench({ db, entities: [Canvas, RasterLayer] });
   const RasterLayer_b = app.entity(RasterLayer);
 
-  const { mayFieldOp } = await import('../src/row-grant.mjs');
+  const { mayFieldOp } = await import('../build/row-grant.mjs');
   const l1 = RasterLayer_b.getOrFail('l1');
   assert.equal(await mayFieldOp(RasterLayer_b, 'visible', read, l1, carol), true);
 
@@ -345,7 +345,7 @@ test('inherit-child field without explicit .can strong-inherits the resolved row
   const app = workbench({ db, entities: [Canvas, RasterLayer] });
   const RasterLayer_b = app.entity(RasterLayer);
 
-  const { mayFieldOp } = await import('../src/row-grant.mjs');
+  const { mayFieldOp } = await import('../build/row-grant.mjs');
   const l1 = RasterLayer_b.getOrFail('l1'); // canvas c-shared
 
   // owner (alice) and editor (bob) get read+write on Canvas; viewer (carol) gets read.

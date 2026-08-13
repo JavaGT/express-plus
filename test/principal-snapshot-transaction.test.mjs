@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { createPrincipalSnapshotTransaction } from '../src/principal-snapshot-transaction.mjs';
-import { principalSnapshot, projectionSource } from '../src/principal-snapshot-declaration.mjs';
-import { executeFrameworkDDL } from '../src/ddl.mjs';
-import { createWriteQueue } from '../src/write-queue.mjs';
+import { createPrincipalSnapshotTransaction } from '../build/principal-snapshot-transaction.mjs';
+import { principalSnapshot, projectionSource } from '../build/principal-snapshot-declaration.mjs';
+import { executeFrameworkDDL } from '../build/ddl.mjs';
+import { createWriteQueue } from '../build/write-queue.mjs';
 
 function schema() {
   return Object.freeze({ tables: [] });

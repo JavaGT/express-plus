@@ -7,7 +7,7 @@ import {
   createServer,
   durableMutationVariant,
   generateFrameworkDDL,
-} from '../src/internal.mjs';
+} from '../build/internal.mjs';
 
 const request = (type = 'note.create') => ({
   actionId: 'action-1',

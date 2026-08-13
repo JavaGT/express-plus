@@ -21,8 +21,8 @@ import {
   isGate,
   resolveRouteGate,
   routeGateFor,
-} from '../src/route-gate.mjs';
-import { principal, anonymous } from '../src/principal.mjs';
+} from '../build/route-gate.mjs';
+import { principal, anonymous } from '../build/principal.mjs';
 
 const user = principal({ type: 'user', id: 'user-1' });
 const link = principal({ type: 'link', id: 'link-1' });

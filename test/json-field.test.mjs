@@ -1,10 +1,10 @@
-import { json, scope, grant, read, write, subscribe } from '../src/index.mjs';
+import { json, scope, grant, read, write, subscribe } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { entity } from '../src/internal.mjs';
-import { principal } from '../src/principal.mjs';
+import workbench, { entity } from '../build/internal.mjs';
+import { principal } from '../build/principal.mjs';
 
 function documentEntity() {
   return entity('JsonDocument', {

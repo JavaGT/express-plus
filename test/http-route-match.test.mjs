@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { matchRoute } from '../src/http-route-match.mjs';
+import { matchRoute } from '../build/http-route-match.mjs';
 
 const routes = [
   { method: 'GET', path: '/docs/:id', name: 'read' },

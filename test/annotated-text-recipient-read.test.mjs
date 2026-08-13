@@ -6,8 +6,8 @@ import workbench, {
   annotatedText, annotatedTextAction, annotatedTextCreateAction, annotatedTextRetireAction,
   annotation, entity, everyone, grant, measurement, read, readAnnotatedTextForRecipient, ref,
   registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension, scope, write,
-} from '../src/index.mjs';
-import { executeDDL, executeFrameworkDDL } from '../src/internal.mjs';
+} from '../build/index.mjs';
+import { executeDDL, executeFrameworkDDL } from '../build/internal.mjs';
 import { withAuthoringBinding } from './annotated-text-authoring-fixture.mjs';
 
 const principal = { type: 'user', id: 'viewer', attributes: {} };

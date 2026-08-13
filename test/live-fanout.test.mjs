@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createLiveFanout } from '../src/live-fanout.mjs';
-import { scope } from '../src/internal.mjs';
+import { createLiveFanout } from '../build/live-fanout.mjs';
+import { scope } from '../build/internal.mjs';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 

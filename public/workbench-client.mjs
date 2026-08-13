@@ -178,6 +178,10 @@ class LiveSyncSession {
     this._backoffBase = options.backoffBase ?? 200;
     this._watchdog = null;
     this._connCallbacks = new Set();
+    // The latest volatile caret position (if any) while the socket is offline.
+    // Replays after a reconnect so a caret move during a reconnect window is
+    // not silently dropped; a clear supersedes it.
+    this._pendingCaret = null;
   }
 
   // Subscribe to an (entity, id). Opens the WebSocket lazily on first call.
@@ -333,6 +337,7 @@ class LiveSyncSession {
     }
     this._subs.clear();
     this._subRequests.clear();
+    this._pendingCaret = null;
     for (const [, pending] of this._pendingSubs) {
       pending.reject(new ClientClosedError());
     }
@@ -348,16 +353,17 @@ class LiveSyncSession {
     this._connCallbacks.clear();
   }
 
-  // Send a volatile caret update. Returns false when offline (no queue/replay).
-  updateCaret({ entity, id, field, offset }) {
+  // Send a volatile caret update (optionally carrying a text selection).
+  // Returns false when offline (no queue/replay).
+  updateCaret({ entity, id, field, offset, selection }) {
     if (this._closed) throw new ClientClosedError();
     const arg = arguments[0];
     if (!arg || typeof arg !== 'object' || Array.isArray(arg)) {
-      throw new TypeError('updateCaret requires exactly type/entity/id/field/offset');
+      throw new TypeError('updateCaret requires type/entity/id/field/offset');
     }
     const argKeys = Object.keys(arg);
-    if (argKeys.length !== 4 || argKeys.some((k) => !['entity','id','field','offset'].includes(k))) {
-      throw new TypeError('updateCaret requires exactly type/entity/id/field/offset');
+    if (argKeys.length < 4 || argKeys.length > 5 || argKeys.some((k) => !['entity','id','field','offset','selection'].includes(k))) {
+      throw new TypeError('updateCaret requires type/entity/id/field/offset');
     }
     if (typeof entity !== 'string' || entity.length === 0 ||
         typeof id !== 'string' || id.length === 0 ||
@@ -367,7 +373,22 @@ class LiveSyncSession {
     if (!Number.isSafeInteger(offset) || offset < 0) {
       throw new TypeError('updateCaret requires a non-negative safe integer offset');
     }
-    const msg = { type: 'caret.update', entity, id, field, offset };
+    if (selection !== undefined) {
+      if (!selection || typeof selection !== 'object' || Array.isArray(selection)
+        || Object.keys(selection).length !== 2
+        || !Number.isSafeInteger(selection.from) || !Number.isSafeInteger(selection.to)
+        || selection.from < 0 || selection.to < 0) {
+        throw new TypeError('updateCaret selection must be a { from, to } range of non-negative offsets');
+      }
+    }
+    const msg = selection === undefined
+      ? { type: 'caret.update', entity, id, field, offset }
+      : { type: 'caret.update', entity, id, field, offset, selection };
+    // Remember the latest caret unconditionally: if the socket drops after a
+    // successful send, the server retracts this presence and the reconnect
+    // must restore it (replayed after the next `subscribed` ack). A clear
+    // supersedes it.
+    this._pendingCaret = msg;
     return this._send(msg);
   }
 
@@ -388,6 +409,7 @@ class LiveSyncSession {
       throw new TypeError('clearCaret requires non-empty strings for entity, id, field');
     }
     const msg = { type: 'caret.clear', entity, id, field };
+    this._pendingCaret = null;
     return this._send(msg);
   }
 
@@ -592,6 +614,11 @@ class LiveSyncSession {
         this._pendingSubs.delete(scopeKey);
         pending.resolve({ currentSeq: envelope.currentSeq });
       }
+      // The caret subscription is installed server-side once `subscribed` is
+      // acknowledged. Replay the latest caret only then — sending it earlier
+      // races subscription installation and gets rejected. Keep it until a
+      // clear supersedes it (a clear also clears `_pendingCaret`).
+      if (this._pendingCaret && this._send(this._pendingCaret)) this._pendingCaret = null;
     } else if (envelope.type === 'unsubscribed') {
       if (scopeKey) {
         const pending = this._pendingUnsubs.get(scopeKey);
@@ -657,6 +684,10 @@ class LiveSyncSession {
       const changeKeys = Object.keys(envelope.change).sort();
       if (changeKeys.length !== 2 || changeKeys[0] !== 'op' || changeKeys[1] !== 'presence') return;
       if (typeof envelope.change.presence !== 'string' || envelope.change.presence.length === 0) return;
+    } else if (envelope.change.op === 'own') {
+      const changeKeys = Object.keys(envelope.change).sort();
+      if (changeKeys.length !== 2 || changeKeys[0] !== 'op' || changeKeys[1] !== 'presence') return;
+      if (typeof envelope.change.presence !== 'string' || envelope.change.presence.length === 0) return;
     } else if (envelope.change.op === 'upsert') {
       const changeKeys = Object.keys(envelope.change).sort();
       if (changeKeys.length !== 2 || changeKeys[0] !== 'op' || changeKeys[1] !== 'value') return;
@@ -664,15 +695,24 @@ class LiveSyncSession {
       if (!isPlainJsonObject(value)) return;
       const valueKeys = Object.keys(value).sort();
       if (value.kind === 'caret') {
-        if (valueKeys.length !== 4 || valueKeys[0] !== 'kind' || valueKeys[1] !== 'name' || valueKeys[2] !== 'offset' || valueKeys[3] !== 'presence') return;
+        if (valueKeys.length !== 5 || valueKeys[0] !== 'kind' || valueKeys[1] !== 'name' || valueKeys[2] !== 'offset' || valueKeys[3] !== 'presence' || valueKeys[4] !== 'sourceId') return;
         if (typeof value.name !== 'string' ||
             typeof value.presence !== 'string' || value.presence.length === 0 ||
+            typeof value.sourceId !== 'string' ||
             !Number.isSafeInteger(value.offset) || value.offset < 0) return;
       } else if (value.kind === 'edge') {
-        if (valueKeys.length !== 4 || valueKeys[0] !== 'edge' || valueKeys[1] !== 'kind' || valueKeys[2] !== 'name' || valueKeys[3] !== 'presence') return;
+        if (valueKeys.length !== 5 || valueKeys[0] !== 'edge' || valueKeys[1] !== 'kind' || valueKeys[2] !== 'name' || valueKeys[3] !== 'presence' || valueKeys[4] !== 'sourceId') return;
         if (typeof value.name !== 'string' ||
             typeof value.presence !== 'string' || value.presence.length === 0 ||
+            typeof value.sourceId !== 'string' ||
             value.edge !== 'start') return;
+      } else if (value.kind === 'selection') {
+        if (valueKeys.length !== 6 || valueKeys[0] !== 'from' || valueKeys[1] !== 'kind' || valueKeys[2] !== 'name' || valueKeys[3] !== 'presence' || valueKeys[4] !== 'sourceId' || valueKeys[5] !== 'to') return;
+        if (typeof value.name !== 'string' ||
+            typeof value.presence !== 'string' || value.presence.length === 0 ||
+            typeof value.sourceId !== 'string' ||
+            !Number.isSafeInteger(value.from) || !Number.isSafeInteger(value.to) ||
+            value.from < 0 || value.to < 0) return;
       } else {
         return;
       }
@@ -2416,7 +2456,11 @@ export function createLiveDeliverySession({
     if (closed || baseSnapshot === null) return;
     let projected = baseSnapshot;
     for (const operation of operations.values()) {
-      if (operation.status === 'pending') {
+      // A fold echo already splices the op into the base. Re-applying the
+      // pending optimistic reducer on top of that echo doubles the edit until
+      // the sender receipt deletes the operation, and any queued successor
+      // captured against the single application then fail-closes as stale.
+      if (operation.status === 'pending' && operation.echoCursor == null) {
         for (const action of operation.actions ?? [operation.action]) projected = optimistic(projected, action);
       }
       // Application callbacks may synchronously trigger terminal revocation.
@@ -3617,6 +3661,13 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     return Object.freeze({
       ...view,
       text: queuedDocumentText,
+      // The queued text is one optimistic placeholder, so its document-wide
+      // annotation ranges must be projected over the same transition. Mixing
+      // the queued text with authoritative offsets makes range-backed chrome
+      // walk between turns while a rapid typing burst settles one fold at a
+      // time. The next authoritative fold remains the sole reconciliation
+      // path and replaces this approximation.
+      ranges: projectRangesOverText(view.ranges, view.text, queuedDocumentText),
     });
   }
   function publishAnnotatedDocument() {
@@ -3909,12 +3960,18 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     },
   };
   if (caretsOption != null) {
-    annotatedSurface.publishCaret = function publishCaret({ offset } = {}) {
+    annotatedSurface.publishCaret = function publishCaret({ offset, selection } = {}) {
       if (!Number.isSafeInteger(offset) || offset < 0) {
         throw new TypeError('annotated text caret offset must be a non-negative safe integer');
       }
+      if (selection !== undefined && (typeof selection !== 'object' || selection === null || Array.isArray(selection))) {
+        throw new TypeError('annotated text caret selection must be a { from, to } range');
+      }
       if (!caretChannel) return false;
-      return caretChannel.updateCaret({ entity: entity.name, id: documentId, field: field.fieldName, offset });
+      return caretChannel.updateCaret({
+        entity: entity.name, id: documentId, field: field.fieldName, offset,
+        ...(selection === undefined ? {} : { selection }),
+      });
     };
     annotatedSurface.clearCaret = function clearCaret() {
       if (!caretChannel) return false;
@@ -4004,7 +4061,7 @@ export function createScopeLiveStore({
     if (closed || baseSnapshot === null) return;
     let projected = baseSnapshot;
     for (const operation of operations.values()) {
-      if (operation.status === 'pending') projected = optimistic(projected, operation.action);
+      if (operation.status === 'pending' && operation.echoCursor == null) projected = optimistic(projected, operation.action);
     }
     visibleSnapshot = projected;
     for (const listener of listeners) {

@@ -5,9 +5,9 @@ import { DatabaseSync } from 'node:sqlite';
 import workbench, {
   admin, annotatedText, annotation, annotationAction, entity, everyone, executeDDL, executeFrameworkDDL,
   grant, number as numberField, protectingAnnotation, read, ref, scope, subscribe, write,
-} from '../src/internal.mjs';
-import { annotatedTextCreateAction } from '../src/annotated-text-action.mjs';
-import { projectAnnotatedTextSnapshot } from '../src/annotated-text-snapshot.mjs';
+} from '../build/internal.mjs';
+import { annotatedTextCreateAction } from '../build/annotated-text-action.mjs';
+import { projectAnnotatedTextSnapshot } from '../build/annotated-text-snapshot.mjs';
 import { withAuthoringBinding } from './annotated-text-authoring-fixture.mjs';
 import { createAnnotatedTextHttpSession, materializeAnnotatedTextSnapshot } from '../public/workbench-client.mjs';
 

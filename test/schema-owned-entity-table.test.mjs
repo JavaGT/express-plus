@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 
-import workbench, { entity, number, text } from '../src/index.mjs';
-import { defineSqliteSchema } from '../src/server.mjs';
+import workbench, { entity, number, text } from '../build/index.mjs';
+import { defineSqliteSchema } from '../build/server.mjs';
 
 const Note = entity('SchemaNote', { title: text(), score: number({ optional: true }) });
 

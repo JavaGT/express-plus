@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { deny, entity, grant, principal, read, ref, scope, text, write } from '../src/index.mjs';
+import workbench, { deny, entity, grant, principal, read, ref, scope, text, write } from '../build/index.mjs';
 
 const user = principal({ type: 'user', id: 'cascade-user' });
 const grants = () => grant(read, write);

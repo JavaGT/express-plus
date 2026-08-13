@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { principalSnapshot, projectionSource } from '../src/principal-snapshot-declaration.mjs';
-import { entity } from '../src/entity/compile.mjs';
+import { principalSnapshot, projectionSource } from '../build/principal-snapshot-declaration.mjs';
+import { entity } from '../build/entity/compile.mjs';
 
 const schema = Object.freeze({ tables: [] });
 

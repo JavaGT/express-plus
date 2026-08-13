@@ -1,14 +1,14 @@
 // projected.async — stored computed fields updated by post-commit projection
 // (ADR #12, SPEC §5.3).
 
-import { text, number, computed, projected, raster, polyline, ref, scope, grant, read, write, subscribe, never, everyone } from '../src/index.mjs';
+import { text, number, computed, projected, raster, polyline, ref, scope, grant, read, write, subscribe, never, everyone } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  entity, resolveStrategy, validateMutation, ValidationError, createProjectedAsyncConsumer, resolveProjectedAsyncTriggerTypes, reconcileProjectedRecovery } from '../src/internal.mjs';
-import { principal } from '../src/principal.mjs';
+  entity, resolveStrategy, validateMutation, ValidationError, createProjectedAsyncConsumer, resolveProjectedAsyncTriggerTypes, reconcileProjectedRecovery } from '../build/internal.mjs';
+import { principal } from '../build/principal.mjs';
 
 // --- Slice 1: declaration + DDL ---
 
@@ -88,7 +88,7 @@ test('projected.async consumer owns trigger selection, compute, write-back, and 
 
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
-  const { executeFrameworkDDL } = await import('../src/ddl.mjs');
+  const { executeFrameworkDDL } = await import('../build/ddl.mjs');
   executeFrameworkDDL(db);
   const consumer = createProjectedAsyncConsumer({ entities: new Map([[PostDirect.name, PostDirect]]) });
 
@@ -648,7 +648,7 @@ test('projected.async without from recomputes on both create and update (default
 
 test('compute counter advances with each successful compute, survives across events', async (t) => {
   const db = new DatabaseSync(':memory:');
-  const { executeFrameworkDDL } = await import('../src/ddl.mjs');
+  const { executeFrameworkDDL } = await import('../build/ddl.mjs');
   executeFrameworkDDL(db);
   db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');
 
@@ -975,7 +975,7 @@ test('read response includes projected cursor headers for staleness detection', 
 // scope's log head — closing the crash gap the design identifies.
 test('reconcileProjectedRecovery recomputes lagging scopes and advances to head', async () => {
   const db = new DatabaseSync(':memory:');
-  const { executeFrameworkDDL } = await import('../src/ddl.mjs');
+  const { executeFrameworkDDL } = await import('../build/ddl.mjs');
   executeFrameworkDDL(db);
   db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');
 
@@ -1021,7 +1021,7 @@ test('reconcileProjectedRecovery recomputes lagging scopes and advances to head'
 
 test('reconcileProjectedRecovery cleans up recovery cursors for removed rows', async () => {
   const db = new DatabaseSync(':memory:');
-  const { executeFrameworkDDL } = await import('../src/ddl.mjs');
+  const { executeFrameworkDDL } = await import('../build/ddl.mjs');
   executeFrameworkDDL(db);
   db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');
 
@@ -1049,7 +1049,7 @@ test('reconcileProjectedRecovery cleans up recovery cursors for removed rows', a
 
 test('reconcileProjectedRecovery leaves current scopes untouched', async () => {
   const db = new DatabaseSync(':memory:');
-  const { executeFrameworkDDL } = await import('../src/ddl.mjs');
+  const { executeFrameworkDDL } = await import('../build/ddl.mjs');
   executeFrameworkDDL(db);
   db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');
 
@@ -1084,7 +1084,7 @@ test('reconcileProjectedRecovery leaves current scopes untouched', async () => {
 // fills any projected fields left stale by a prior crash before serving traffic.
 test('app.ready runs the projected recovery sweep (backfill before serving)', async (t) => {
   const db = new DatabaseSync(':memory:');
-  const { executeFrameworkDDL } = await import('../src/ddl.mjs');
+  const { executeFrameworkDDL } = await import('../build/ddl.mjs');
   executeFrameworkDDL(db);
   db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');
 
@@ -1116,7 +1116,7 @@ test('app.ready runs the projected recovery sweep (backfill before serving)', as
 
 test('reconcileProjectedRecovery skips scopes for entities with no projected.async fields', async () => {
   const db = new DatabaseSync(':memory:');
-  const { executeFrameworkDDL } = await import('../src/ddl.mjs');
+  const { executeFrameworkDDL } = await import('../build/ddl.mjs');
   executeFrameworkDDL(db);
   db.exec('CREATE TABLE Plain (id TEXT, title TEXT)');
 

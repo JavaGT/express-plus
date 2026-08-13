@@ -1,9 +1,9 @@
-import { state, text, date, schedule, scope, everyone, grant, read } from '../src/index.mjs';
+import { state, text, date, schedule, scope, everyone, grant, read } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
-import workbench, { entity } from '../src/internal.mjs';
+import workbench, { entity } from '../build/internal.mjs';
 
 // `state({ values, transitions, effects, auto })` — a finite-state-machine field.
 // It is its own KIND (`state`): a closed value domain plus a declared legal-
@@ -158,9 +158,9 @@ test('a state handle cannot be compared in scope (fail closed)', () => {
 
 // ---- RUNTIME tests (Spine C8: strategy + DDL + transition guard) ----
 
-import { resolveStrategy, ValidationError } from '../src/field-strategy.mjs';
-import { generateDDL } from '../src/ddl.mjs';
-import { executeFrameworkDDL, createServer, durableMutationVariant, buildEffectsRegistry } from '../src/internal.mjs';
+import { resolveStrategy, ValidationError } from '../build/field-strategy.mjs';
+import { generateDDL } from '../build/ddl.mjs';
+import { executeFrameworkDDL, createServer, durableMutationVariant, buildEffectsRegistry } from '../build/internal.mjs';
 
 function setupDoc() {
   const Doc = entity('DocState', {

@@ -10,11 +10,11 @@ import {
   issueAuthoringSnapshot,
   issuePositionFrame,
   resolvePosition,
-} from '../src/annotated-text-authoring-stream.mjs';
-import { annotatedTextAuthoringStreamDDL } from '../src/annotated-text-field.mjs';
-import { runWorkbenchMigrations, appliedWorkbenchVersion, ensureWorkbenchMigrationTable } from '../src/workbench-migrations.mjs';
-import { applyTextOp, createTextState, textCheckpoint } from '../src/annotated-text.mjs';
-import { createTextFamily, materializeText, restoreTextFamily, textFamilyCheckpoint } from '../src/annotated-text-continuous.mjs';
+} from '../build/annotated-text-authoring-stream.mjs';
+import { annotatedTextAuthoringStreamDDL } from '../build/annotated-text-field.mjs';
+import { runWorkbenchMigrations, appliedWorkbenchVersion, ensureWorkbenchMigrationTable } from '../build/workbench-migrations.mjs';
+import { applyTextOp, createTextState, textCheckpoint } from '../build/annotated-text.mjs';
+import { createTextFamily, materializeText, restoreTextFamily, textFamilyCheckpoint } from '../build/annotated-text-continuous.mjs';
 
 const prefix = 'Doc_body';
 
@@ -515,7 +515,7 @@ test('A9: contract parity — envelope/token fixtures unchanged', () => {
 });
 
 test('A10: app.prepareSchema upgrades a legacy authoring schema via the built-in lane', async () => {
-  const internal = await import('../src/internal.mjs');
+  const internal = await import('../build/internal.mjs');
   const {
     annotation,
     annotatedText,

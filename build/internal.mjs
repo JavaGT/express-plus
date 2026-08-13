@@ -30,7 +30,7 @@ export { createBlobLifecycle } from './blob-lifecycle.mjs';
 export { EventKind, created, updated, removed, fieldSet, native, parseEventType, lifecycleVerb } from './event-handle.mjs';
 export { scopeOf, parseScopeKey, tryParseScopeKey, isScopeHandle } from './scope-handle.mjs';
 export { decideReplay, normalizeSeqSpan } from './replay-decision.mjs';
-export { createLiveDelivery, createLiveServer } from './live-delivery.mjs';
+export { createWebSocketLiveDelivery, createLiveServer } from './live-delivery.mjs';
 export { upgradeWebSocket, FrameSender, FrameParser } from './websocket.mjs';
 export { resolveTemplate, matchExtension, isSafePath, escapeHtml } from './views.mjs';
 export { mayVerb, mayFieldOp, mayRow } from './row-grant.mjs';

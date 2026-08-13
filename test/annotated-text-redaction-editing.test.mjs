@@ -5,10 +5,10 @@ import { DatabaseSync } from 'node:sqlite';
 import workbench, {
   annotatedText, annotation, text, entity, everyone, executeDDL, executeFrameworkDDL,
   protectingAnnotation, grant, admin, read, write, ref, scope,
-} from '../src/internal.mjs';
-import { materializeText, restoreTextFamily } from '../src/annotated-text-continuous.mjs';
-import { projectAnnotatedTextSnapshot } from '../src/internal.mjs';
-import { durableHistory } from '../src/internal.mjs';
+} from '../build/internal.mjs';
+import { materializeText, restoreTextFamily } from '../build/annotated-text-continuous.mjs';
+import { projectAnnotatedTextSnapshot } from '../build/internal.mjs';
+import { durableHistory } from '../build/internal.mjs';
 import { withAuthoringBinding } from './annotated-text-authoring-fixture.mjs';
 
 // #22 Component B: a redacted recipient edits surrounding visible text. The

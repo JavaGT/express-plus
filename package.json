@@ -3,12 +3,12 @@
 	"version": "0.1.2",
 	"description": "Workbench for collaborative, persisted, realtime data.",
 	"type": "module",
-	"main": "src/index.mjs",
+	"main": "build/index.mjs",
 	"types": "index.d.ts",
 	"exports": {
 		".": {
 			"types": "./index.d.ts",
-			"default": "./src/index.mjs"
+			"default": "./build/index.mjs"
 		},
 		"./client": {
 			"types": "./client.d.ts",
@@ -16,11 +16,11 @@
 		},
 		"./server": {
 			"types": "./src/server.d.ts",
-			"default": "./src/server.mjs"
+			"default": "./build/server.mjs"
 		},
 		"./annotated-text": {
 			"types": "./annotated-text.d.ts",
-			"default": "./src/annotated-text-public.mjs"
+			"default": "./build/annotated-text-public.mjs"
 		},
 		"./annotated-text-coords": {
 			"types": "./annotated-text-coords.d.ts",
@@ -29,6 +29,7 @@
 	},
 	"scripts": {
 		"emit:ts": "node --disable-warning=ExperimentalWarning scripts/emit-ts.mjs",
+		"build": "pnpm emit:ts",
 		"lint": "eslint .",
 		"test": "pnpm emit:ts && node scripts/run-tests.mjs",
 		"bench": "node bench/hot-path.mjs",

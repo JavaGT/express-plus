@@ -11,14 +11,14 @@
 // the event through its reducer. The SAME mayVerb authorizes the action — no
 // second auth path.
 
-import { text, ref, grant, read, write, subscribe, scope } from '../src/index.mjs';
+import { text, ref, grant, read, write, subscribe, scope } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import { entity, action, event } from '../src/index.mjs';
-import workbench from '../src/app.mjs';
-import { createServer, createClient, generateDDL } from '../src/internal.mjs';
+import { entity, action, event } from '../build/index.mjs';
+import workbench from '../build/app.mjs';
+import { createServer, createClient, generateDDL } from '../build/internal.mjs';
 
 test('an app opts into the pipeline: action → event → reducer fold', async () => {
   const db = new DatabaseSync(':memory:');

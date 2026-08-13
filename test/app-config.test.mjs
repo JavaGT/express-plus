@@ -6,9 +6,9 @@
 // Session copy whose schedule.remove trigger carries the app's delay, which
 // buildKernel prefers over the framework singleton.
 
-import { entity, text, ref, grant, read, write, subscribe, scope, Session } from '../src/index.mjs';
-import { resolveConfig, config } from '../src/internal.mjs';
-import workbench from '../src/internal.mjs';
+import { entity, text, ref, grant, read, write, subscribe, scope, Session } from '../build/index.mjs';
+import { resolveConfig, config } from '../build/internal.mjs';
+import workbench from '../build/internal.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 

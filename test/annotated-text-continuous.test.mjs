@@ -5,7 +5,7 @@ import {
   createTextState,
   applyTextOp,
   textCheckpoint,
-} from '../src/annotated-text.mjs';
+} from '../build/annotated-text.mjs';
 import {
   createTextFamily,
   materializeText,
@@ -20,7 +20,7 @@ import {
   restoreTextFamilySerialized,
   serializeCompactTextFamilyCheckpoint,
   textFamilyCheckpoint,
-} from '../src/annotated-text-continuous.mjs';
+} from '../build/annotated-text-continuous.mjs';
 
 function actorFor(index) {
   return (index + 1).toString(16).padStart(32, '0');

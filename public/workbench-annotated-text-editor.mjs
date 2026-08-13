@@ -113,10 +113,11 @@ function wireDocumentOf(span) {
  * The document is ONE `text` with absolute `ranges` and document-wide
  * `redactions`; the editor renders one contentEditable root span and reads
  * caret/selection/edit offsets through the wire↔display coordinate module. */
-export function bindAnnotatedTextEditor({ element, session, onError = () => {}, caretLayer }) {
+export function bindAnnotatedTextEditor({ element, session, onError = () => {}, caretLayer, caretColor = null }) {
   if (!element || typeof element.addEventListener !== 'function') throw new TypeError('annotated text editor requires an element');
   if (!session || typeof session.subscribe !== 'function' || typeof session.replace !== 'function') throw new TypeError('annotated text editor requires a session');
   if (typeof onError !== 'function') throw new TypeError('annotated text editor onError must be a function');
+  if (caretColor !== null && typeof caretColor !== 'function') throw new TypeError('annotated text editor caretColor must be a function or null');
 
   let closed = false;
   let rendering = false;
@@ -144,10 +145,20 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {}, 
   let caretFrame = null;
   let caretTimer = null;
   let caretThrottle = null;
-  let caretSentOffset = null;
+  // Last published presence shape: either "offset" (collapsed caret) or
+  // "from:to" (selection). Deduped so continuous selection drags don't spam.
+  let caretSentShape = null;
   let caretLastSentAt = 0;
   let caretWasLive = isLive();
+  // The server reveals this connection's own presence token via an `own` op;
+  // a marker is "self" only when its presence matches (never by sourceId, which
+  // two tabs of the same principal share).
+  let selfPresence = null;
   const caretBars = new Map();
+  // Remote selection highlights (per presence, one absolutely-positioned div
+  // per line rect). Mutually exclusive with the caret bar for a presence.
+  const selectionHighlights = new Map();
+  const selectionShapes = new Map();
   let unsubscribeCaret = null;
 
   // The markers the editor is currently showing: an active optimistic draft
@@ -286,7 +297,13 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {}, 
     const fromDisplay = wireToDisplayPosition({ offset: from.offset, affinity: from.affinity }, redactions);
     const toDisplay = wireToDisplayPosition({ offset: to.offset, affinity: to.affinity }, redactions);
     if (selectionCrossesDisplayRedaction(fromDisplay.offset, toDisplay.offset, redactions)) return null;
-    if (fromDisplay.offset > toDisplay.offset) return { from: to, to: from };
+    // A text selection's start and end become range endpoints when applied.
+    // Both lean 'right' — the same convention the declaration-action handlers
+    // use: an insert at the range start joins it (range grows left), while an
+    // insert at the range end stays outside (typing after a marker keeps the
+    // new text unannotated, e.g. after a confidential span).
+    if (fromDisplay.offset > toDisplay.offset) return { from: { ...to, affinity: 'right' }, to: { ...from, affinity: 'right' } };
+    if (fromDisplay.offset !== toDisplay.offset) return { from: { ...from, affinity: 'right' }, to: { ...to, affinity: 'right' } };
     return { from, to };
   }
 
@@ -346,15 +363,20 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {}, 
 
   function caretClearLocal() {
     if (!hasCaretSurface || closed) return;
-    caretSentOffset = null;
+    caretSentShape = null;
     caretLastSentAt = 0;
     try { session.clearCaret(); } catch { /* isolated */ }
   }
 
-  function publishCaretOffset(offset, now) {
+  function publishCaretShape(selection, collapsed, now) {
     try {
-      if (session.publishCaret({ offset })) {
-        caretSentOffset = offset;
+      const sent = collapsed
+        ? session.publishCaret({ offset: selection.from.offset })
+        : session.publishCaret({ offset: selection.to.offset, selection: { from: selection.from.offset, to: selection.to.offset } });
+      if (sent) {
+        caretSentShape = collapsed
+          ? String(selection.from.offset)
+          : `${selection.from.offset}:${selection.to.offset}`;
         caretLastSentAt = now;
       }
     } catch { /* isolated */ }
@@ -364,12 +386,13 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {}, 
     if (!hasCaretSurface || closed) return;
     if (!caretActive || !isLive() || caretDocumentHidden()) return;
     const selection = getSelection();
-    if (!selection || selection.from.offset !== selection.to.offset) return;
-    const offset = selection.from.offset;
-    if (offset === caretSentOffset) return;
+    if (!selection) return;
+    const collapsed = selection.from.offset === selection.to.offset;
+    const shape = collapsed ? String(selection.from.offset) : `${selection.from.offset}:${selection.to.offset}`;
+    if (shape === caretSentShape) return;
     const now = Date.now();
     if (immediate || now - caretLastSentAt >= CARET_THROTTLE_MS) {
-      publishCaretOffset(offset, now);
+      publishCaretShape(selection, collapsed, now);
       return;
     }
     if (caretThrottle != null) return;
@@ -396,13 +419,20 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {}, 
     }
   }
 
+  function caretTerminallyUnavailable() {
+    return session.status === 'revoked' || session.status === 'unavailable';
+  }
+
   function caretCheckStatus() {
     if (!hasCaretSurface || closed) return;
     const live = isLive();
     if (live === caretWasLive) return;
     caretWasLive = live;
     if (!live) {
-      caretClearLocal();
+      // Transient recoveries (recovering/catching-up) must NOT clear the
+      // window's presence — peers keep seeing it. Only a terminal loss of the
+      // document session (revoked/unavailable) retracts the caret.
+      if (caretTerminallyUnavailable()) caretClearLocal();
     } else if (caretActive) {
       caretPublish(true);
     }
@@ -411,7 +441,7 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {}, 
   function handleCaretFocus() {
     if (!hasCaretSurface || closed) return;
     caretActive = true;
-    caretSentOffset = null;
+    caretSentShape = null;
     caretPublish(true);
   }
 
@@ -429,21 +459,23 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {}, 
     caretScheduleFlush();
   }
 
-  function handleCaretVisibility() {
-    if (caretDocumentHidden()) caretClearLocal();
-  }
-
   function handleCaretFrame(frame) {
     if (closed) return;
     const change = frame?.change;
     if (!change || typeof change !== 'object') return;
     const presence = change.value?.presence ?? change.presence;
     if (typeof presence !== 'string' || presence === '') return;
-    if (change.op === 'upsert') {
+    if (change.op === 'own') {
+      selfPresence = change.presence;
+    } else if (change.op === 'upsert') {
       const value = change.value;
       if (!value || typeof value !== 'object') return;
-      if (value.kind === 'caret') upsertCaretBar(presence, 'caret', value.offset);
-      else if (value.kind === 'edge') upsertCaretBar(presence, 'edge', null);
+      // "Self" is decided CLIENT-SIDE by matching the marker's connection-scoped
+      // presence token against the one the server revealed for this connection.
+      const isSelf = selfPresence !== null && value.presence === selfPresence;
+      if (value.kind === 'caret') upsertCaretBar(presence, 'caret', value.offset, isSelf);
+      else if (value.kind === 'edge') upsertCaretBar(presence, 'edge', null, isSelf);
+      else if (value.kind === 'selection') upsertSelectionHighlight(presence, value.from, value.to);
     } else if (change.op === 'remove') {
       removeCaretBar(presence);
     }
@@ -458,14 +490,22 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {}, 
     bar.setAttribute('contenteditable', 'false');
     bar.style.position = 'absolute';
     bar.style.pointerEvents = 'none';
+    // The host owns the palette: a `caretColor(presence)` hook lets each
+    // session's bar render in its own color without the editor knowing what
+    // the colors mean. The bar consumes the value through `--caret-color`.
+    const color = typeof caretColor === 'function' ? caretColor(presence) : null;
+    if (color) bar.style.setProperty('--caret-color', color);
     caretLayer.appendChild(bar);
     caretBars.set(presence, bar);
     return bar;
   }
 
-  function upsertCaretBar(presence, kind, offset) {
+  function upsertCaretBar(presence, kind, offset, self = false) {
+    clearSelectionHighlight(presence);
     const bar = caretBarFor(presence);
     bar.dataset.kind = kind;
+    if (self) bar.dataset.self = 'true';
+    else delete bar.dataset.self;
     if (kind === 'caret' && Number.isSafeInteger(offset) && offset >= 0) {
       bar.dataset.offset = String(offset);
       bar.__displayOffset = wireToDisplayPosition({ offset, affinity: 'left' }, currentRedactions()).offset;
@@ -477,13 +517,107 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {}, 
   }
 
   function removeCaretBar(presence) {
+    clearSelectionHighlight(presence);
     const bar = caretBars.get(presence);
     if (!bar) return;
     bar.remove();
     caretBars.delete(presence);
   }
 
+  // --- Remote selection presence (issue: collaborative selection) ---
+  // A session with a non-collapsed selection renders as one translucent
+  // highlight div per line rect of the selected display range (multi-line
+  // selections get one div per line), keyed by the same presence token and
+  // consuming the same per-session color.
+
+  function displayPointFor(displayOffset) {
+    const span = rootSpan(element);
+    if (!span) return null;
+    const displayLength = (span.textContent ?? '').length;
+    let target = null;
+    let nodeOffset = 0;
+    let remaining = Math.max(0, Math.min(displayOffset, displayLength));
+    const walker = textWalker(span);
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      if (remaining <= node.data.length) {
+        target = node;
+        nodeOffset = remaining;
+        break;
+      }
+      remaining -= node.data.length;
+    }
+    if (target === null) {
+      target = span;
+      nodeOffset = 0;
+    }
+    return { node: target, offset: nodeOffset };
+  }
+
+  function selectionRects(from, to) {
+    const start = displayPointFor(from);
+    const end = displayPointFor(to);
+    if (!start || !end) return [];
+    const range = element.ownerDocument.createRange();
+    try {
+      range.setStart(start.node, start.offset);
+      range.setEnd(end.node, end.offset);
+    } catch {
+      return [];
+    }
+    if (typeof range.getClientRects === 'function') {
+      return [...range.getClientRects()];
+    }
+    const rect = typeof range.getBoundingClientRect === 'function' ? range.getBoundingClientRect() : null;
+    return rect && !Number.isNaN(rect.left) && !Number.isNaN(rect.top) ? [rect] : [];
+  }
+
+  function upsertSelectionHighlight(presence, from, to) {
+    const bar = caretBars.get(presence);
+    if (bar) {
+      bar.remove();
+      caretBars.delete(presence);
+    }
+    clearSelectionHighlight(presence);
+    let layerRect = null;
+    try { layerRect = caretLayer.getBoundingClientRect(); } catch { /* ignore */ }
+    if (!layerRect) return;
+    const color = typeof caretColor === 'function' ? caretColor(presence) : null;
+    const doc = caretLayer.ownerDocument;
+    const els = [];
+    for (const rect of selectionRects(from, to)) {
+      if (rect.width <= 0 && rect.height <= 0) continue;
+      const el = doc.createElement('div');
+      el.dataset.presence = presence;
+      el.dataset.kind = 'selection';
+      el.setAttribute('contenteditable', 'false');
+      el.style.position = 'absolute';
+      el.style.pointerEvents = 'none';
+      el.style.left = `${rect.left - layerRect.left}px`;
+      el.style.top = `${rect.top - layerRect.top}px`;
+      el.style.width = `${rect.width}px`;
+      el.style.height = `${rect.height}px`;
+      if (color) el.style.setProperty('--caret-color', color);
+      caretLayer.appendChild(el);
+      els.push(el);
+    }
+    if (els.length > 0) {
+      selectionHighlights.set(presence, els);
+      selectionShapes.set(presence, { from, to });
+    }
+  }
+
+  function clearSelectionHighlight(presence) {
+    const els = selectionHighlights.get(presence);
+    if (!els) return;
+    for (const el of els) el.remove();
+    selectionHighlights.delete(presence);
+    selectionShapes.delete(presence);
+  }
+
   function clearRemoteCaretBars() {
+    for (const els of selectionHighlights.values()) for (const el of els) el.remove();
+    selectionHighlights.clear();
     for (const bar of caretBars.values()) bar.remove();
     caretBars.clear();
   }
@@ -533,8 +667,19 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {}, 
       if (!layerRect) continue;
       const rect = caretDisplayPoint(bar.__displayOffset);
       if (!rect) continue;
+      // A caret bar is a line-height marker at the caret's display point, not a
+      // full-height column: pin its top to the caret line and size it to that
+      // line box (the layer's own height is the whole editor).
       bar.style.left = `${rect.left - layerRect.left}px`;
       bar.style.top = `${rect.top - layerRect.top}px`;
+      if (rect.height > 0) bar.style.height = `${rect.height}px`;
+    }
+    // Selections track text on scroll/resize the same way: re-render from the
+    // stored display range. Iterate a snapshot — each re-render deletes and
+    // re-adds its key in `selectionShapes`, which would otherwise loop forever
+    // on a live Map iterator.
+    for (const [presence, shape] of [...selectionShapes]) {
+      upsertSelectionHighlight(presence, shape.from, shape.to);
     }
   }
 
@@ -793,8 +938,9 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {}, 
     if (!document) {
       for (const child of [...element.children]) child.remove();
       caretCheckStatus();
-      caretClearLocal();
-      clearRemoteCaretBars();
+      // Retract the local caret only on terminal loss of the session; a
+      // transient null document (revoke paths aside) must not wipe presence.
+      if (caretTerminallyUnavailable()) caretClearLocal();
       return;
     }
     const current = document ?? session.document;
@@ -1158,7 +1304,6 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {}, 
     element.addEventListener('focus', handleCaretFocus);
     element.addEventListener('blur', handleCaretBlur);
     element.ownerDocument.addEventListener('selectionchange', handleSelectionChange);
-    element.ownerDocument.addEventListener('visibilitychange', handleCaretVisibility);
     caretLayer.addEventListener('scroll', repositionCaretBars);
     element.addEventListener('scroll', repositionCaretBars);
     element.ownerDocument.defaultView?.addEventListener('resize', repositionCaretBars);
@@ -1195,7 +1340,6 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {}, 
         element.removeEventListener('focus', handleCaretFocus);
         element.removeEventListener('blur', handleCaretBlur);
         element.ownerDocument.removeEventListener('selectionchange', handleSelectionChange);
-        element.ownerDocument.removeEventListener('visibilitychange', handleCaretVisibility);
         caretLayer.removeEventListener('scroll', repositionCaretBars);
         element.removeEventListener('scroll', repositionCaretBars);
         element.ownerDocument.defaultView?.removeEventListener('resize', repositionCaretBars);

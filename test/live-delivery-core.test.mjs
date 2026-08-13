@@ -2,10 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import { createLiveDeliveryCore } from '../src/live-delivery-core.mjs';
-import { createLiveEnvelopeBuilder } from '../src/live-delivery-envelope.mjs';
-import { executeFrameworkDDL } from '../src/ddl.mjs';
-import { scope } from '../src/scope.mjs';
+import { createLiveDeliveryCore } from '../build/live-delivery-core.mjs';
+import { createLiveEnvelopeBuilder } from '../build/live-delivery-envelope.mjs';
+import { executeFrameworkDDL } from '../build/ddl.mjs';
+import { scope } from '../build/scope.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

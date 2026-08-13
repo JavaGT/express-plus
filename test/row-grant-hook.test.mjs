@@ -4,13 +4,13 @@
 // The kernel runs the row-grant hook INSIDE the write txn, after projections,
 // and rolls back on deny. bindReadScope stays pure outside the txn.
 
-import { text, ref, grant, read, write, scope, everyone } from '../src/index.mjs';
+import { text, ref, grant, read, write, scope, everyone } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  entity, generateFrameworkDDL, mayVerb } from '../src/internal.mjs';
+  entity, generateFrameworkDDL, mayVerb } from '../build/internal.mjs';
 
 test('in-txn row-grant hook: deny after projections roll back the txn', async () => {
   const db = new DatabaseSync(':memory:');
@@ -34,7 +34,7 @@ test('in-txn row-grant hook: deny after projections roll back the txn', async ()
   // Seed a row owned by u1 (trusted insert, bypasses readonly check)
   const row = Note_b.insert({ body: 'original', owner: 'u1' });
 
-  const { createServer, durableMutationVariant } = await import('../src/pipeline.mjs');
+  const { createServer, durableMutationVariant } = await import('../build/pipeline.mjs');
 
   const server = createServer({
     handlers: {
@@ -106,7 +106,7 @@ test('in-txn row-grant hook: create — runs on the newly projected row', async 
 
   for (const sql of Note.generateDDL()) db.exec(sql);
 
-  const { createServer, durableMutationVariant } = await import('../src/pipeline.mjs');
+  const { createServer, durableMutationVariant } = await import('../build/pipeline.mjs');
 
   // A restrictive hook: only u1 may create (simulating an entity-level create gate)
   const server = createServer({

@@ -3,7 +3,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { evaluateLockout, nextFailedAttemptCount, loginLockoutDecision, totpLockoutDecision } from '../src/auth/lockout.mjs';
+import { evaluateLockout, nextFailedAttemptCount, loginLockoutDecision, totpLockoutDecision } from '../build/auth/lockout.mjs';
 
 test('loginLockoutDecision returns null below threshold', () => {
   assert.equal(loginLockoutDecision({ attempts: 0 }), null);

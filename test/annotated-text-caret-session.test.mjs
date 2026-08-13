@@ -100,12 +100,17 @@ function caretFrames() {
     caret: {
       type: 'annotated-text-caret', version: 1,
       entity: 'Doc', id: 'd1', field: 'body',
-      change: { op: 'upsert', value: { kind: 'caret', presence: 'p1', offset: 3 } },
+      change: { op: 'upsert', value: { kind: 'caret', name: '', sourceId: 'demo', presence: 'p1', offset: 3 } },
     },
     edge: {
       type: 'annotated-text-caret', version: 1,
       entity: 'Doc', id: 'd1', field: 'body',
-      change: { op: 'upsert', value: { kind: 'edge', presence: 'p2', edge: 'start' } },
+      change: { op: 'upsert', value: { kind: 'edge', name: '', sourceId: 'demo', presence: 'p2', edge: 'start' } },
+    },
+    selection: {
+      type: 'annotated-text-caret', version: 1,
+      entity: 'Doc', id: 'd1', field: 'body',
+      change: { op: 'upsert', value: { kind: 'selection', name: '', sourceId: 'demo', presence: 'p3', from: 1, to: 3 } },
     },
     remove: {
       type: 'annotated-text-caret', version: 1,
@@ -181,17 +186,18 @@ test('onCaret receives validated frames and unsubscribe detaches', async () => {
     const unsubscribe = h.session.onCaret((frame) => frames.push(frame));
     socket.emit('message', framesCaret.caret);
     socket.emit('message', framesCaret.edge);
+    socket.emit('message', framesCaret.selection);
     socket.emit('message', framesCaret.remove);
     // Malformed / wrong-version / wrong-scope frames are dropped by the channel.
     socket.emit('message', { type: 'annotated-text-caret', version: 2, entity: 'Doc', id: 'd1', field: 'body', change: { op: 'remove', presence: 'pX' } });
     socket.emit('message', { type: 'annotated-text-caret', version: 1, entity: 'Doc', id: 'd1', field: 'body', change: { op: 'upsert', value: { kind: 'caret', presence: 'p1', offset: 3, extra: 'x' } } });
     socket.emit('message', { type: 'annotated-text-caret', version: 1, entity: 'Doc', id: 'other', field: 'body', change: { op: 'remove', presence: 'pY' } });
     await tick();
-    assert.deepEqual(frames, [framesCaret.caret, framesCaret.edge, framesCaret.remove]);
+    assert.deepEqual(frames, [framesCaret.caret, framesCaret.edge, framesCaret.selection, framesCaret.remove]);
     unsubscribe();
     socket.emit('message', framesCaret.caret);
     await tick();
-    assert.equal(frames.length, 3);
+    assert.equal(frames.length, 4);
   } finally {
     h.session.close();
   }

@@ -6,14 +6,14 @@
 // `{resync:'stale'}` — forcing a full re-bootstrap. Never a silent truncate
 // (eng-review §3.6, the single non-negotiable correctness property; spec #1, D6/D7).
 
-import { text, ref, scope, grant, read, write, subscribe } from '../src/index.mjs';
+import { text, ref, scope, grant, read, write, subscribe } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  entity, event } from '../src/internal.mjs';
-import { createClient } from '../src/pipeline.mjs';
+  entity, event } from '../build/internal.mjs';
+import { createClient } from '../build/pipeline.mjs';
 
 function ownedNote() {
   return entity('Note', {

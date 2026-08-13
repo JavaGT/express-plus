@@ -6,11 +6,11 @@ import {
   createHistoryReader,
   createLiveDelivery,
   readCommittedCursor,
-} from '../src/server.mjs';
-import { executeFrameworkDDL } from '../src/ddl.mjs';
-import { read, grant, subscribe, text, everyone } from '../src/index.mjs';
-import { entity } from '../src/internal.mjs';
-import { scope } from '../src/scope.mjs';
+} from '../build/server.mjs';
+import { executeFrameworkDDL } from '../build/ddl.mjs';
+import { read, grant, subscribe, text, everyone } from '../build/index.mjs';
+import { entity } from '../build/internal.mjs';
+import { scope } from '../build/scope.mjs';
 
 function appendEvent(db, scope, seq, type, data = {}) {
   db.prepare(`

@@ -5,11 +5,11 @@ import { DatabaseSync } from 'node:sqlite';
 import workbench, {
   annotatedText, annotation, entity, everyone, executeDDL, executeFrameworkDDL,
   protectingAnnotation, grant, admin, read, write, ref, scope,
-} from '../src/internal.mjs';
-import { durableHistory } from '../src/internal.mjs';
-import { tryBuildAnnotatedTextFoldEnvelopes } from '../src/annotated-text-fold-envelope.mjs';
-import { projectAnnotatedTextSnapshot } from '../src/annotated-text-snapshot.mjs';
-import { ensureStream, ensureLease, hashClientNonce } from '../src/annotated-text-authoring-stream.mjs';
+} from '../build/internal.mjs';
+import { durableHistory } from '../build/internal.mjs';
+import { tryBuildAnnotatedTextFoldEnvelopes } from '../build/annotated-text-fold-envelope.mjs';
+import { projectAnnotatedTextSnapshot } from '../build/annotated-text-snapshot.mjs';
+import { ensureStream, ensureLease, hashClientNonce } from '../build/annotated-text-authoring-stream.mjs';
 import { createAnnotatedTextHttpSession, materializeAnnotatedTextSnapshot } from '../public/workbench-client.mjs';
 import { withAuthoringBinding } from './annotated-text-authoring-fixture.mjs';
 

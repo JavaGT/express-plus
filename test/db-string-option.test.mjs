@@ -4,7 +4,7 @@
 // PRAGMAs + schema DDL run through the same default-driver bootstrap a
 // pre-built handle would, and a pre-built handle still works unchanged.
 
-import { entity, text, ref, grant, read, write, subscribe, scope } from '../src/index.mjs';
+import { entity, text, ref, grant, read, write, subscribe, scope } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
@@ -12,7 +12,7 @@ import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 
-import workbench from '../src/internal.mjs';
+import workbench from '../build/internal.mjs';
 
 // A minimal owned entity (the note.mjs floor), used to confirm a string-opened
 // db yields a working app whose entity table is created by prepareSchema.

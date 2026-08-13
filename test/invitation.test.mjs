@@ -6,12 +6,12 @@
 
 import workbench, {
   entity, ref, text, map, membership, read, Invitation, createInvitationApi,
-} from '../src/index.mjs';
+} from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import { principal } from '../src/principal.mjs';
+import { principal } from '../build/principal.mjs';
 
 const owner = principal({ type: 'user', id: 'owner-1' });
 const member = principal({ type: 'user', id: 'member-1' });

@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { generateDDL } from '../src/internal.mjs';
+import workbench, { generateDDL } from '../build/internal.mjs';
 
 // --- Note demo ---
 import { Note } from '../projects/note.mjs';

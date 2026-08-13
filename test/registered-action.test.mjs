@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 
-import workbench from '../src/index.mjs';
-import { readCommittedCursor } from '../src/server.mjs';
+import workbench from '../build/index.mjs';
+import { readCommittedCursor } from '../build/server.mjs';
 
 function sourceAction(_db, authorize = () => true) {
   return {

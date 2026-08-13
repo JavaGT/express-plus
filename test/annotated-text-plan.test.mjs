@@ -6,13 +6,13 @@ import {
   materializeText,
   resolveOffsetToEndpoint,
   projectEndpointToOffset,
-} from '../src/annotated-text-continuous.mjs';
+} from '../build/annotated-text-continuous.mjs';
 import {
   planTextOffsetEdit,
   planAnnotationApplyOffsets,
   planAnnotationRemove,
   planTextRangeApply,
-} from '../src/annotated-text-plan.mjs';
+} from '../build/annotated-text-plan.mjs';
 
 const ACTOR = 'a'.repeat(32);
 const EDIT_ACTOR = 'b'.repeat(32);

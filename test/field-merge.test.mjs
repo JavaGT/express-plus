@@ -21,7 +21,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveStrategy } from '../src/field-strategy.mjs';
+import { resolveStrategy } from '../build/field-strategy.mjs';
 
 const crdt = resolveStrategy('crdt');
 const store = resolveStrategy('store');

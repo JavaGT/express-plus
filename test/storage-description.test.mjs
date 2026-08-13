@@ -2,9 +2,9 @@ import { DatabaseSync } from 'node:sqlite';
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 
-import { entity, list, map, number, ref, text } from '../src/index.mjs';
-import { generateDDL } from '../src/ddl.mjs';
-import { describeEntityStorage, describeSqliteStorage } from '../src/server.mjs';
+import { entity, list, map, number, ref, text } from '../build/index.mjs';
+import { generateDDL } from '../build/ddl.mjs';
+import { describeEntityStorage, describeSqliteStorage } from '../build/server.mjs';
 
 function executeEntityDdl(entityDeclaration) {
   const db = new DatabaseSync(':memory:');

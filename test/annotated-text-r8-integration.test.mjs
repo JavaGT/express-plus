@@ -6,11 +6,11 @@ import { DatabaseSync } from 'node:sqlite';
 import workbench, {
   annotatedText, annotation, boolean, entity, executeDDL, executeFrameworkDDL, grant, measurement, ref, read, scope, text, write, everyone,
   registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension, protectingAnnotation, annotationEntityAction, admin, deny,
-} from '../src/internal.mjs';
-import { exportAnnotatedText } from '../src/index.mjs';
-import { materializeText, restoreTextFamily } from '../src/annotated-text-continuous.mjs';
-import { projectRangeToOffsets } from '../src/annotated-text-ranges.mjs';
-import { native } from '../src/event-handle.mjs';
+} from '../build/internal.mjs';
+import { exportAnnotatedText } from '../build/index.mjs';
+import { materializeText, restoreTextFamily } from '../build/annotated-text-continuous.mjs';
+import { projectRangeToOffsets } from '../build/annotated-text-ranges.mjs';
+import { native } from '../build/event-handle.mjs';
 import { withAuthoringBinding } from './annotated-text-authoring-fixture.mjs';
 
 const extension = {

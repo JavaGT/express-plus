@@ -8,6 +8,9 @@ alphabetical `src/` listing.
 Status: living map. Update when a seam moves. Do not invent modules here that
 do not exist.
 
+> Module names below live in `build/**/*.mjs`, emitted from the typed
+> `src/**/*.ts` sources (edit `src/`, never `build/`).
+
 ## Compile loop
 
 Declaration → compiled Entity (handlers, DDL, auth, effects, schedules, routes).
@@ -26,7 +29,7 @@ Declaration → compiled Entity (handlers, DDL, auth, effects, schedules, routes
 | `scope-sql.mjs` / `check.mjs` / `registry.mjs` / `authz.mjs` | Check registry + SQL harvest |
 | `row-grant.mjs` | Runtime mayRow / mayVerb / mayFieldOp |
 | `route-gate.mjs` | Route admission gates |
-| `membership.mjs` / `owner.mjs` | Auth sugar over the same engine |
+| `owner.mjs` | Auth sugar over the same engine |
 | `effect-compiler.mjs` | In-txn effects compile + execute |
 | `schedule.mjs` (constructors) | schedule/tick declaration |
 | `ddl.mjs` | Table generation |
@@ -41,6 +44,8 @@ Action → authorize → handler → `_Log` append → projection (+ in-txn effe
 | --- | --- |
 | `pipeline.mjs` | `createServer`, durable variant, `createClient` |
 | `kernel.mjs` | Thin Compile/Commit assembly + engaged consumers |
+| `protected-artefact-store.mjs` | Transaction-bound write/erase authority over declared protected app tables |
+| `application-table-guard.mjs` | Shared table-safety guard for erasure + protected-artefact capabilities |
 | `application-runtime.mjs` | Singular headless/HTTP start, recovery, maintenance, clocks |
 | `committed-log.mjs` / `cursor.mjs` / `durable-history.mjs` | Log, seq storage, authorized history reads + session undo cursors |
 | `scope-handle.mjs` | Scope key grammar |

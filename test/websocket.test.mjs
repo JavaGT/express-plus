@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createHash } from 'node:crypto';
 
-import { upgradeWebSocket, FrameSender, FrameParser } from '../src/websocket.mjs';
+import { upgradeWebSocket, FrameSender, FrameParser } from '../build/websocket.mjs';
 
 // --- helpers: frame-level tests (no live socket needed) ---
 

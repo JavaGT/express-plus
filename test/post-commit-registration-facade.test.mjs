@@ -11,12 +11,12 @@ import workbench, {
   read,
   write,
   subscribe,
-} from '../src/index.mjs';
-import { entity } from '../src/internal.mjs';
+} from '../build/index.mjs';
+import { entity } from '../build/internal.mjs';
 import {
   operationalConsumerAdmin,
   createPostCommitEffectRunner,
-} from '../src/server.mjs';
+} from '../build/server.mjs';
 
 function noteEntity() {
   return entity('Note', {
@@ -144,7 +144,7 @@ test('host auto-wires postCommitEffects; createPostCommitEffectRunner remains ad
 });
 
 test('server entry re-exports operationalConsumerAdmin and createPostCommitEffectRunner', async () => {
-  const server = await import('../src/server.mjs');
+  const server = await import('../build/server.mjs');
   assert.equal(typeof server.operationalConsumerAdmin, 'function');
   assert.equal(typeof server.createPostCommitEffectRunner, 'function');
   assert.equal(typeof server.createHistoryReader, 'function');

@@ -1,9 +1,9 @@
 // Hardening: route error edges — mount-after-resolve, broken thunk, idempotent.
-import { text, grant, read } from '../src/index.mjs';
+import { text, grant, read } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import workbench, { entity } from '../src/internal.mjs';
+import workbench, { entity } from '../build/internal.mjs';
 
 test('mount after resolveRoutes throws', async () => {
   const E = entity('E', { x: text(), grant: () => grant(read) });

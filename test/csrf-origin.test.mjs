@@ -8,13 +8,13 @@
 // non-browser API clients (AGENTS.md → Authorization: decisions are computed,
 // not magic words; allowlist over denylist).
 
-import { text, ref, scope, grant, read, write, subscribe } from '../src/index.mjs';
+import { text, ref, scope, grant, read, write, subscribe } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  entity } from '../src/internal.mjs';
+  entity } from '../build/internal.mjs';
 
 function ownedNote() {
   return entity('Note', {

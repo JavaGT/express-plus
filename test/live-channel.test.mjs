@@ -3,13 +3,13 @@
 // 13 tests: connect, subscribe, event delivery, unsubscribe, multiplex,
 // reconnect, close cleanup, and connection-state emitter.
 
-import { text, ephemeral, scope, everyone, grant, read, write, subscribe } from '../src/index.mjs';
+import { text, ephemeral, scope, everyone, grant, read, write, subscribe } from '../build/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import workbench, { entity } from '../src/internal.mjs';
+import workbench, { entity } from '../build/internal.mjs';
 import { LiveChannel } from '../public/workbench-client.mjs';
-import { createLiveFanout } from '../src/live-fanout.mjs';
+import { createLiveFanout } from '../build/live-fanout.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
