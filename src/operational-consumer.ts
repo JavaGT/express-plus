@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { consumerCursorMap, upsertConsumerCursor } from './consumer-cursor.ts';
+import { sweepBehindCursor, upsertConsumerCursor } from './consumer-cursor.ts';
 import type { DbHandle } from './driver.ts';
 import { txn } from './driver.ts';
 import type { LogRow } from './committed-log.ts';
@@ -261,33 +261,10 @@ export function createOperationalConsumers(consumers: readonly unknown[] = [], {
     engage(db);
     try {
       for (const consumer of declared) {
-        const consumerCursor = cursorName(consumer.name);
-        const cursors = consumerCursorMap(db, consumerCursor);
-        const blockedScopes = new Set<string>();
-        // Read only records beyond this consumer's durable per-scope cursor.
-        // Selecting the whole committed log here makes every post-commit pass
-        // proportional to retained history (and materializes large eventData
-        // values on the application's main thread) even when every old record
-        // has already been acknowledged.
-        const rows = db.prepare(`SELECT log.* FROM _Log AS log
-          LEFT JOIN _ConsumerCursor AS cursor
-            ON cursor.consumer = ? AND cursor.scope = log.scope
-          WHERE log.seq > COALESCE(cursor.lastSeq, 0)
-          ORDER BY log.scope, log.seq`).all(consumerCursor);
-        for (const row of rows) {
-          if (blockedScopes.has(row.scope as string)) continue;
-          if ((cursors.get(row.scope as string) ?? 0) >= (row.seq as number)) continue;
-          if (row.eventType !== consumer.event.eventType) {
-            upsertConsumerCursor(db, { consumer: cursorName(consumer.name), scope: row.scope as string, lastSeq: row.seq as number });
-            cursors.set(row.scope as string, row.seq as number);
-            continue;
-          }
-          if (!await deliver(db, consumer, row as unknown as LogRow)) {
-            blockedScopes.add(row.scope as string);
-            continue;
-          }
-          cursors.set(row.scope as string, row.seq as number);
-        }
+        await sweepBehindCursor(db, cursorName(consumer.name), async (row) => {
+          if (row.eventType !== consumer.event.eventType) return 'skip';
+          return (await deliver(db, consumer, row)) ? 'done' : 'block';
+        });
       }
     } finally {
       armRetryScheduler(db);

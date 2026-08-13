@@ -29,7 +29,7 @@
 //     delivery. The transport is called as a post-commit side effect, never
 //     blocking the calling transaction.
 
-import { consumerCursorMap, upsertConsumerCursor } from './consumer-cursor.ts';
+import { sweepBehindCursor, upsertConsumerCursor } from './consumer-cursor.ts';
 import { txn, type DbHandle } from './driver.ts';
 
 const CONSUMER = 'email';
@@ -122,26 +122,20 @@ export function emailSeam({ transport = noopTransport }: { transport?: Transport
   };
 
   async function reconcileEmailDelivery(db: DbHandle): Promise<{ delivered: number }> {
-    const recoveryByScope = consumerCursorMap(db, CONSUMER);
-    const rows = db.prepare('SELECT * FROM _Log ORDER BY scope, seq').all();
-    const blockedScopes = new Set<string>();
     let delivered = 0;
-    for (const row of rows) {
-      if (blockedScopes.has(row.scope as string)) continue;
-      const applied = recoveryByScope.get(row.scope as string) ?? 0;
-      if (applied >= (row.seq as number)) continue;
+    await sweepBehindCursor(db, CONSUMER, async (row) => {
       let data: Record<string, unknown>;
       try { data = JSON.parse(row.eventData as string) as Record<string, unknown>; } catch { data = {}; }
-      const payload = extractEmailPayload({ type: row.eventType as string, data });
+      const payload = extractEmailPayload({ type: row.eventType, data });
       try {
-        await deliverAndAdvance(db, { scope: row.scope as string, seq: row.seq as number }, payload);
-        recoveryByScope.set(row.scope as string, row.seq as number);
+        await deliverAndAdvance(db, { scope: row.scope, seq: row.seq }, payload);
         if (payload) delivered += 1;
+        return 'done';
       } catch (err) {
-        blockedScopes.add(row.scope as string);
         console.error('[email] delivery recovery failed:', (err as Error).message);
+        return 'block';
       }
-    }
+    });
     return { delivered };
   }
 
