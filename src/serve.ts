@@ -8,10 +8,14 @@
 //
 // The request flow, fail-closed at each step:
 //   1. derive the principal (default: anonymous, until session hydration lands)
-//   2. match { method, url } to a route in the table — no match → 404
-//   3. run the route's gate(principal) — the first default-on auth layer — and
+//   2. two-valued admission collapse (S5/A1): a non-'active' principal is
+//      treated as anonymous BEFORE anything below sees it — a revoked and an
+//      unauthenticated caller are indistinguishable, and the real status rides
+//      only on the pre-collapse principal for statusOf() (the audit reader)
+//   3. match { method, url } to a route in the table — no match → 404
+//   4. run the route's gate(principal) — the first default-on auth layer — and
 //      deny with 401 when it returns false
-//   4. dispatch the admitted request (slice 1: a stub echoing the matched verb;
+//   5. dispatch the admitted request (slice 1: a stub echoing the matched verb;
 //      DB-backed CRUD is the next slice)
 //
 // The row grant (the SQL scope + .can) still runs downstream in dispatch on every
@@ -20,7 +24,7 @@
 
 import { createServer as createHttpServer } from 'node:http';
 
-import { anonymous, type Principal } from './principal.ts';
+import { anonymous, collapseForAdmission, type Principal } from './principal.ts';
 import { mayVerb, mayRow } from './row-grant.ts';
 import { config } from './config.ts';
 import { applySecurityHeaders, renderError, isSameOriginRequest } from './middleware.ts';
@@ -124,6 +128,18 @@ export function makeRequestHandler(source: any, { principalOf = anonymousPrincip
   // request first awaits `app.ready` so the socket may accept connections before
   // resolution completes without ever dispatching against a partial table.
   const isApp = source && typeof source.resolveRoutes === 'function';
+  // Two-valued admission (S5/A1): the principal that enters admission is
+  // collapsed to anonymous unless 'active' — ONE seam at the boundary, so the
+  // gate AND every downstream layer (the row grant in dispatch, the handler
+  // chain, the resync/blob/action routes) see a non-active status principal
+  // exactly as anonymous. A revoked and an unauthenticated caller are
+  // indistinguishable to admission; the real status stays on the pre-collapse
+  // principal for statusOf() — the audit reader.
+  const principalOfAdmitted = (req: any) => collapseForAdmission(principalOf(req));
+  // The registered-action transport resolves the principal with a demo-only
+  // `viewAs` hint; the same collapse applies to whatever resolver it derives.
+  const actionPrincipalOf = (req: any, hint: unknown) =>
+    collapseForAdmission((principalOf as (req: any, hint?: unknown) => Principal)(req, hint));
   // Request log (opt-in via `listen(port, {requestLog:true})`). The structured
   // logger also captures every request at info-level on the 'http' channel.
   const shouldLogRequest = requestLog;
@@ -144,8 +160,12 @@ export function makeRequestHandler(source: any, { principalOf = anonymousPrincip
       return;
     }
 
-    // the first default-on auth layer: the route gate decides admission.
-    const principal = principalOf(req);
+    // the first default-on auth layer: the route gate decides admission. The
+    // two-valued admission collapse already happened at the boundary
+    // (principalOfAdmitted), so a non-active status principal arrives here as
+    // anonymous — denied by the gate exactly like an unauthenticated caller,
+    // and never passed to dispatch with its real status.
+    const principal = principalOfAdmitted(req);
     if (!route.gate(principal)) {
       sendFailure(sendJsonCompat, res, failure('denied', 'unauthorized'), { status: 401 });
       return;
@@ -308,7 +328,7 @@ export function makeRequestHandler(source: any, { principalOf = anonymousPrincip
         {
           match: () => isApp && req.method === 'GET',
           handle: async () => {
-            const handled = await handleResyncRoute(source, req, res, principalOf(req));
+            const handled = await handleResyncRoute(source, req, res, principalOfAdmitted(req));
             return handled || responseHasStarted(res);
           },
         },
@@ -316,7 +336,7 @@ export function makeRequestHandler(source: any, { principalOf = anonymousPrincip
         {
           match: () => isApp && req.method === 'POST',
           handle: async () => {
-            const handled = await handleBlobUploadRoute(source, req, res, principalOf(req));
+            const handled = await handleBlobUploadRoute(source, req, res, principalOfAdmitted(req));
             return handled || responseHasStarted(res);
           },
         },
@@ -333,7 +353,7 @@ export function makeRequestHandler(source: any, { principalOf = anonymousPrincip
         // package-owned registered-action kernel.
         {
           match: () => isApp,
-          handle: async () => handleApplicationActionHttp(source, req, res, principalOf, sendJsonCompat),
+          handle: async () => handleApplicationActionHttp(source, req, res, actionPrincipalOf, sendJsonCompat),
         },
         // Application-integrated SSE delivery is package-owned: this mounted
         // handler has no access to raw log rows or action callbacks.
@@ -355,7 +375,7 @@ export function makeRequestHandler(source: any, { principalOf = anonymousPrincip
                 body: undefined,
                 params: { path: rest.replace(/^\//, '') },
                 query: Object.fromEntries(url.searchParams),
-                principal: principalOf(req),
+                principal: principalOfAdmitted(req),
                 raw: req,
                 headers: req.headers,
                 method: req.method,
@@ -527,7 +547,10 @@ export function listen(app: any, port: any, optionsOrCallback: any = {}) {
     app.live = createWebSocketLiveDelivery(httpServer, {
       path: '/events',
       mayVerb: (entity: any, verb: any, row: any, principal: any) => mayVerb(entity, verb, row, principal),
-      principalOf,
+      // The same two-valued admission collapse as the HTTP seam: a non-active
+      // principal connects as anonymous, so live re-authorization (mayVerb) and
+      // subscription presence never see a real revoked/expired status.
+      principalOf: (req: any) => collapseForAdmission(principalOf(req)),
       db: app.db,
       resolveEntity: (name: any) => app.entities?.get(name),
       ready: () => app.ready,

@@ -13,7 +13,7 @@ export { postCommitEffect } from './post-commit-effects.mjs';
 export { authorizedRows } from './action-authorization.mjs';
 export { User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor } from './auth/entities.mjs';
 export { everyone, never, anyOf, inherit } from './scope-sql.mjs';
-export { principal, anonymous, statusOf, UnknownPrincipalStatusError } from './principal.mjs';
+export { principal, anonymous, statusOf, collapseForAdmission, UnknownPrincipalStatusError } from './principal.mjs';
 export { requireUser, allowAnonymous } from './route-gate.mjs';
 export * as operations from './operation.mjs';
 export { router } from './app.mjs';

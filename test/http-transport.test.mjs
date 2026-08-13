@@ -22,8 +22,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import workbench, {
-  entity } from '../build/internal.mjs';
-import { principal } from '../build/principal.mjs';
+  entity, router } from '../build/internal.mjs';
+import { principal, anonymous } from '../build/principal.mjs';
 
 // An owned entity, routes omitted → auto-CRUD, every verb default-on.
 function makeNote() {
@@ -151,5 +151,45 @@ test('a request with an unsupported method on a known path returns 405', async (
     });
   } finally {
     await close();
+  }
+});
+
+// --- two-valued admission (S5/A1): non-active principals collapse at the boundary ---
+
+test('a revoked/expired principal is denied 401 exactly like anonymous', async () => {
+  // principalOf returns a non-active user principal — the admission boundary
+  // collapses it to anonymous BEFORE the default-on requireUser gate, so the
+  // response is the same 401 an unauthenticated caller gets (no status oracle).
+  for (const status of ['revoked', 'expired']) {
+    const app = workbench().mount('/notes', makeNote());
+    app.listen(0, { principalOf: () => principal({ type: 'user', id: 'u1', status }) });
+    await app.ready;
+    const { port } = app.httpServer.address();
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/notes`);
+      assert.equal(res.status, 401, `${status} principal denied like anonymous`);
+    } finally {
+      await new Promise((r) => app.httpServer.close(r));
+    }
+  }
+});
+
+test('downstream dispatch never sees the real non-active principal (collapsed to anonymous)', async () => {
+  // An allowAnonymous() route admits the request past the gate, so a handler
+  // can observe the principal admission actually hands downstream: it must be
+  // the canonical `anonymous`, never the real revoked principal.
+  let seen = null;
+  const r = router();
+  r.get('/ping', allowAnonymous(), (req, res) => { seen = req.principal; res.json({ ok: true }); });
+  const app = workbench().mount('/api', r);
+  app.listen(0, { principalOf: () => principal({ type: 'user', id: 'u1', status: 'revoked' }) });
+  await app.ready;
+  const { port } = app.httpServer.address();
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/api/ping`);
+    assert.equal(res.status, 200);
+    assert.equal(seen, anonymous, 'a revoked principal reaches handlers as the canonical anonymous');
+  } finally {
+    await new Promise((r) => app.httpServer.close(r));
   }
 });

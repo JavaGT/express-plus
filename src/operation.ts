@@ -60,31 +60,50 @@ export const OPERATION_CATEGORIES: readonly OperationCategory[] = Object.freeze(
 // subscribe/admin) map to their category; every category NAME maps to itself so
 // operationCategory() round-trips the whole vocabulary. One mapping source: the
 // row grant routes VERB_CAPABILITY through this and no other verb table exists.
-const VERB_CATEGORY: Readonly<Record<string, OperationCategory>> = Object.freeze({
-  list: read,
-  read,
-  create,
-  update,
-  remove: deleteOp,
-  delete: deleteOp,
-  subscribe,
-  admin: administrative,
-  administrative,
-  execute,
-  search,
-  'blob-read': blobRead,
-});
+//
+// The table is a NULL-prototype object and every lookup is an own-property
+// check, so a name inherited from Object.prototype (`constructor`,
+// `__proto__`, `toString`, ...) can never masquerade as a category — fail
+// closed.
+const VERB_CATEGORY: Readonly<Record<string, OperationCategory>> = Object.freeze(
+  Object.assign(Object.create(null), {
+    list: read,
+    read,
+    create,
+    update,
+    remove: deleteOp,
+    delete: deleteOp,
+    subscribe,
+    admin: administrative,
+    administrative,
+    execute,
+    search,
+    'blob-read': blobRead,
+  }),
+);
 
 // Normalize a verb (or category name) to its category token. Fail closed: an
 // unknown name throws rather than silently returning a category that does not
-// exist.
+// exist — including a name inherited from Object.prototype (checked with an
+// own-property test over a null-prototype table, so no prototype lookup can
+// answer for a key the vocabulary never declared).
 export function operationCategory(verb: string): OperationCategory {
-  const normalized = VERB_CATEGORY[verb];
-  if (!normalized) {
+  if (!Object.hasOwn(VERB_CATEGORY, verb)) {
     throw new Error(
       `unknown operation '${verb}'. The categories are ` +
         `${OPERATION_CATEGORIES.map((c) => c.operation).join('/')} (fail closed — likely a typo).`,
     );
   }
-  return normalized;
+  return VERB_CATEGORY[verb];
 }
+
+// The stable-vocabulary ALIASES. `delete` is a reserved word in JS (so the
+// category is exported as `deleteOp`), and `blob-read` uses the same
+// hyphenated form as the row-grant capability. Both spellings export the SAME
+// frozen token — `deleteOp` / `blobRead` are the canonical identifiers to use
+// in code; `delete` / `blob-read` are the exact vocabulary spellings a
+// category's `operation` string names. Import them as needed:
+//
+//   import { deleteOp as delete } from '...'   // or: import { deleteOp } ...
+//   import { blobRead } from '...'             // the operation string is 'blob-read'
+export { deleteOp as delete, blobRead as 'blob-read' };

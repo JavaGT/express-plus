@@ -21,6 +21,7 @@ import {
   isGate,
   resolveRouteGate,
   routeGateFor,
+  ROUTE_VERBS,
 } from '../build/route-gate.mjs';
 import { principal, anonymous } from '../build/principal.mjs';
 
@@ -39,6 +40,21 @@ test('requireUser() admits a user principal, rejects anonymous', () => {
 test('requireUser() admits any non-anonymous principal (link, system are authed)', () => {
   const gate = requireUser();
   assert.equal(gate(link), true);
+});
+
+test('requireUser() denies a non-active principal exactly like anonymous (two-valued admission)', () => {
+  const gate = requireUser();
+  for (const status of ['revoked', 'expired', 'disabled']) {
+    const who = principal({ type: 'user', id: 'user-1', status });
+    assert.equal(gate(who), false, `${status} denied by the default gate`);
+    assert.equal(gate(who), gate(anonymous), `${status} denied the same way anonymous is`);
+  }
+  assert.equal(gate(principal({ type: 'user', id: 'user-1', status: 'active' })), true);
+});
+
+test('a status-less principal shape still admits (absent status is the model default)', () => {
+  const gate = requireUser();
+  assert.equal(gate({ type: 'user', id: 'user-1' }), true);
 });
 
 test('allowAnonymous() admits everyone including anonymous', () => {
@@ -113,4 +129,19 @@ test('routeGateFor admits/denies by verb + principal, relaxing only the named ve
 test('routeGateFor throws on an unknown verb (cannot admit a request to an undeclared verb)', () => {
   const resolved = resolveRouteGate();
   assert.throws(() => routeGateFor(resolved, 'frobnicate', user), /unknown verb/i);
+});
+
+test('routeGateFor denies a revoked principal on every default-on verb, like anonymous', () => {
+  const resolved = resolveRouteGate();
+  const revoked = principal({ type: 'user', id: 'user-1', status: 'revoked' });
+  const expired = principal({ type: 'user', id: 'user-1', status: 'expired' });
+  for (const verb of ROUTE_VERBS) {
+    assert.equal(routeGateFor(resolved, verb, revoked), false, `${verb} denies revoked`);
+    assert.equal(
+      routeGateFor(resolved, verb, revoked),
+      routeGateFor(resolved, verb, anonymous),
+      `${verb}: a revoked principal is indistinguishable from anonymous`,
+    );
+    assert.equal(routeGateFor(resolved, verb, expired), false, `${verb} denies expired`);
+  }
 });

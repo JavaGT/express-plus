@@ -50,10 +50,19 @@ export function isGate(value: unknown): value is Gate {
   return typeof value === 'function' && (value as { [GATE_BRAND]?: unknown })[GATE_BRAND] === true;
 }
 
-// requireUser() — admit any authenticated (non-anonymous) principal; reject
-// anonymous. This is the default-on route gate: the smoothest path is authed.
+// requireUser() — admit any authenticated (non-anonymous) ACTIVE principal;
+// reject anonymous. Two-valued admission (S5/A1): a non-'active' status
+// principal is treated exactly like anonymous — denied — so a revoked, expired,
+// or disabled caller is indistinguishable from an unauthenticated one (no
+// status oracle). Absent status is the model default ('active'), so pre-status
+// principal shapes keep admitting. This is the default-on route gate: the
+// smoothest path is authed and active.
 export function requireUser(): Gate {
-  return brand((principal) => principal.type !== 'anonymous');
+  return brand((principal) => {
+    if (principal.type === 'anonymous') return false;
+    const status = (principal as { status?: unknown }).status;
+    return status == null || status === 'active';
+  });
 }
 
 // allowAnonymous() — admit everyone, including the first-class `anonymous`

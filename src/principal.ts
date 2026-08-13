@@ -74,7 +74,14 @@ export class UnknownPrincipalStatusError extends Error {
 }
 
 const PRINCIPAL_TYPES = Object.freeze(['user', 'link', 'system', 'anonymous', 'apiKey'] as const);
-const PRINCIPAL_STATUSES = Object.freeze(['active', 'disabled', 'expired', 'revoked'] as const);
+export const PRINCIPAL_STATUSES = Object.freeze(['active', 'disabled', 'expired', 'revoked'] as const);
+
+// Type guard for the closed status union. The one place a DB cell or other
+// `unknown` value is narrowed to a PrincipalStatus BEFORE it crosses into the
+// typed principal seam — narrower than asserting, fail closed on anything else.
+export function isPrincipalStatus(value: unknown): value is PrincipalStatus {
+  return PRINCIPAL_STATUSES.includes(value as (typeof PRINCIPAL_STATUSES)[number]);
+}
 
 export function principalKeyOf(value: unknown): string | null {
   const candidate = value as { type?: unknown; id?: unknown } | null | undefined;
@@ -177,6 +184,19 @@ export const anonymous: Principal = principal({ type: 'anonymous', id: null });
 // indistinguishable to a caller — no status oracle).
 export function statusOf(principal: Principal): PrincipalStatus {
   return principal.status;
+}
+
+// The two-valued admission collapse (S5/A1) — applied AT the admission
+// boundary (the route-gate/serve seam). Returns the canonical `anonymous` for
+// any non-'active' principal, so admission sees a revoked caller exactly as it
+// sees an unauthenticated one (no status oracle); an 'active' principal passes
+// through unchanged (identity preserved). The REAL status stays on the original
+// principal for statusOf() — this never keys a decision off which non-active
+// status applied. An absent status is 'active' by the model default, so
+// pre-#79 principal shapes pass through unchanged.
+export function collapseForAdmission(principal: Principal): Principal {
+  if (principal.status == null || principal.status === 'active') return principal;
+  return anonymous;
 }
 
 // Mint a bounded system principal tagged with a source identifier. Used by the

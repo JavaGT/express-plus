@@ -17,7 +17,7 @@ export { scope } from './scope.ts';
 export { entity } from './entity/compile.ts';
 export { User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor } from './auth/entities.ts';
 export { everyone, never, anyOf, inherit, NonCompilableError, bindReadScope, cosineSimilarity, nearest } from './scope-sql.ts';
-export { principal, anonymous, UnknownPrincipalTypeError, UnknownPrincipalStatusError, principalFrom, effectSource, statusOf } from './principal.ts';
+export { principal, anonymous, UnknownPrincipalTypeError, UnknownPrincipalStatusError, principalFrom, effectSource, statusOf, collapseForAdmission, isPrincipalStatus } from './principal.ts';
 export { requireUser, allowAnonymous, isGate, resolveRouteGate, routeGateFor, ROUTE_VERBS } from './route-gate.ts';
 export * as operations from './operation.ts';
 export { action, event, createServer, createClient, durableMutationVariant, noAdmission, noBlobAdapter, NOW } from './pipeline.ts';

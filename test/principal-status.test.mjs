@@ -11,7 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  principal, anonymous, statusOf, principalKeyOf,
+  principal, anonymous, statusOf, collapseForAdmission, principalKeyOf,
   UnknownPrincipalStatusError,
 } from '../build/principal.mjs';
 
@@ -90,4 +90,21 @@ test('a non-active principal is NOT the canonical anonymous (audit context only)
   assert.notEqual(revoked, anonymous);
   assert.equal(revoked.type, 'user');
   assert.equal(statusOf(revoked), 'revoked');
+});
+
+test('collapseForAdmission collapses every non-active principal to the canonical anonymous', () => {
+  for (const status of NON_ACTIVE) {
+    const who = principal({ type: 'user', id: 'alice', status });
+    assert.equal(collapseForAdmission(who), anonymous, `${status} collapses to anonymous`);
+    assert.equal(statusOf(collapseForAdmission(who)), 'active', 'the collapsed principal reads active');
+  }
+  // The real status stays readable on the ORIGINAL principal — statusOf remains
+  // the audit reader after the collapse.
+  assert.equal(statusOf(principal({ type: 'user', id: 'alice', status: 'revoked' })), 'revoked');
+});
+
+test('collapseForAdmission passes an active principal through unchanged (identity preserved)', () => {
+  const who = principal({ type: 'user', id: 'alice', status: 'active' });
+  assert.equal(collapseForAdmission(who), who);
+  assert.equal(collapseForAdmission(anonymous), anonymous, 'idempotent on the canonical anonymous');
 });

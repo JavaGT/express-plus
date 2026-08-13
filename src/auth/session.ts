@@ -11,7 +11,7 @@
 // replaces, never a second auth path. When an app is constructed with a db
 // (`workbench({ db })`), session hydration becomes the default principal source.
 
-import { principal, anonymous, type Principal, type PrincipalType, type PrincipalStatus } from '../principal.ts';
+import { principal, anonymous, isPrincipalStatus, type Principal, type PrincipalType, type PrincipalStatus } from '../principal.ts';
 import { config } from '../config.ts';
 import { createHash } from 'node:crypto';
 
@@ -183,10 +183,16 @@ export function sessionPrincipalOf(db: SqlDb, { durationMs = config.sessionDurat
       // the link principal reads nothing (fail-closed by accident, not by the
       // token match the session was minted to grant).
       const attributes = row.type === 'link' ? { token: row.id } : {};
-      // Thread the stored status when present; principal() defaults to 'active'
-      // and rejects an unknown status (→ anonymous, fail closed). SQL NULL /
-      // absent cell → no status → the 'active' default applies.
-      const storedStatus = (row.status ?? undefined) as PrincipalStatus | undefined;
+      // Thread the stored status when present; principal() defaults to 'active'.
+      // The DB cell is an `unknown` — narrow it through the closed-union guard
+      // (never a bare assertion). SQL NULL / absent cell → no status → the
+      // 'active' default applies; a present-but-corrupt status fails closed
+      // (→ anonymous), exactly as principal()'s own closed-union check did.
+      let storedStatus: PrincipalStatus | undefined;
+      if (row.status != null) {
+        if (!isPrincipalStatus(row.status)) return anonymous;
+        storedStatus = row.status;
+      }
       return principal({ type: row.type, id: row.id, attributes, status: storedStatus });
     } catch {
       return anonymous;

@@ -102,6 +102,13 @@ export const anonymous: Principal;
 // calling into row/field gates; they never key a decision off this.
 export function statusOf(principal: Principal): PrincipalStatus;
 
+// The two-valued admission collapse (S5/A1), applied AT the admission boundary
+// (the route-gate/serve seam): a non-'active' principal becomes the canonical
+// `anonymous`, so a revoked and an unauthenticated caller are indistinguishable
+// to admission; an 'active' principal passes through unchanged. The real status
+// stays on the original principal for statusOf().
+export function collapseForAdmission(principal: Principal): Principal;
+
 // Raised by principal() when a status outside the closed union is declared
 // (fail closed, sibling to the type-union error).
 export class UnknownPrincipalStatusError extends Error {
@@ -110,20 +117,25 @@ export class UnknownPrincipalStatusError extends Error {
 
 // The stable operation-category vocabulary (S5/A1): frozen identity tokens the
 // same discipline as the grant capabilities. `operationCategory(verb)`
-// normalizes any verb or category name to its token; an unknown name throws.
-export namespace operations {
-  const read: OperationCategory;
-  const subscribe: OperationCategory;
-  const create: OperationCategory;
-  const update: OperationCategory;
-  const deleteOp: OperationCategory;
-  const execute: OperationCategory;
-  const search: OperationCategory;
-  const blobRead: OperationCategory;
-  const administrative: OperationCategory;
-  const OPERATION_CATEGORIES: readonly OperationCategory[];
-  function operationCategory(verb: string): OperationCategory;
-}
+// normalizes any verb or category name to its token; an unknown name throws
+// (including an inherited Object.prototype name). `deleteOp` is the canonical
+// identifier for the 'delete' category (`delete` is a reserved word); `delete`
+// and `blob-read` are exported as aliases of the same tokens.
+export const operations: {
+  readonly read: OperationCategory;
+  readonly subscribe: OperationCategory;
+  readonly create: OperationCategory;
+  readonly update: OperationCategory;
+  readonly deleteOp: OperationCategory;
+  readonly delete: OperationCategory;
+  readonly execute: OperationCategory;
+  readonly search: OperationCategory;
+  readonly blobRead: OperationCategory;
+  readonly 'blob-read': OperationCategory;
+  readonly administrative: OperationCategory;
+  readonly OPERATION_CATEGORIES: readonly OperationCategory[];
+  operationCategory(verb: string): OperationCategory;
+};
 export interface OperationCategory {
   readonly operation: string;
 }

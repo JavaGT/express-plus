@@ -17,7 +17,7 @@ export { scope } from './scope.mjs';
 export { entity } from './entity/compile.mjs';
 export { User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor } from './auth/entities.mjs';
 export { everyone, never, anyOf, inherit, NonCompilableError, bindReadScope, cosineSimilarity, nearest } from './scope-sql.mjs';
-export { principal, anonymous, UnknownPrincipalTypeError, UnknownPrincipalStatusError, principalFrom, effectSource, statusOf } from './principal.mjs';
+export { principal, anonymous, UnknownPrincipalTypeError, UnknownPrincipalStatusError, principalFrom, effectSource, statusOf, collapseForAdmission, isPrincipalStatus } from './principal.mjs';
 export { requireUser, allowAnonymous, isGate, resolveRouteGate, routeGateFor, ROUTE_VERBS } from './route-gate.mjs';
 export * as operations from './operation.mjs';
 export { action, event, createServer, createClient, durableMutationVariant, noAdmission, noBlobAdapter, NOW } from './pipeline.mjs';
