@@ -9,7 +9,7 @@ import { createLiveDeliveryHttpHandler } from './live-delivery-http.mjs';
 import { createLiveDeliveryWebSocket } from './live-delivery-websocket.mjs';
 import { mayVerb } from './row-grant.mjs';
 import { validatePrincipalSnapshotDeclarations } from './principal-snapshot-delivery.mjs';
-                                                
+import { collapseForAdmission,                } from './principal.mjs';
                                              
                                                                        
 
@@ -55,6 +55,16 @@ export function attachApplicationLiveDelivery(app                    , {
   if (!app.db) throw new Error('live delivery requires an application database');
   validatePrincipalSnapshotDeclarations(principalSnapshots         , app.schema         );
 
+  // Two-valued admission collapse (S5/A1), applied at the application delivery
+  // seam — the ONE boundary a revoked/expired/disabled principal could reach a
+  // transport as a real non-active status. Both skins resolve the caller here:
+  // HTTP bootstrap/catchup/SSE and the WebSocket upgrade. A non-'active'
+  // principal enters delivery as the canonical `anonymous`, so re-authorization
+  // (mayVerb / the grant) and subscription presence never see a real non-active
+  // status — a revoked caller is admitted exactly as an unauthenticated one
+  // (no status oracle). The REAL status stays on the pre-collapse principal for
+  // statusOf() — the audit reader.
+  const principalOfAdmitted = async (request                 ) => collapseForAdmission(await principalOf(request));
   const owned = createOwnedLiveDelivery({
     db: app.db                ,
     entities: (name        , declaration          ) => declaration === undefined ? app.entities.get(name) : app.entity(declaration),
@@ -70,7 +80,7 @@ export function attachApplicationLiveDelivery(app                    , {
   });
   const handler = createLiveDeliveryHttpHandler({
     delivery: owned.delivery,
-    principalOf,
+    principalOf: principalOfAdmitted,
     path,
     maxSubscriptions,
     log: app.log,
@@ -95,7 +105,7 @@ export function attachApplicationLiveDelivery(app                    , {
         wsTransport = createLiveDeliveryWebSocket(httpServer, {
           path: `${path}/events`,
           core: owned.core,
-          principalOf,
+          principalOf: principalOfAdmitted,
           resolveEntity: (name        ) => app.entities.get(name),
           mayVerb: (entity                  , verb        , row                                            , principal           ) => mayVerb(entity         , verb, row, principal),
           db: app.db                ,

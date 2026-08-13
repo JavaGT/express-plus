@@ -13,7 +13,7 @@ import { connect as tcpConnect } from 'node:net';
 import { randomBytes } from 'node:crypto';
 
 import workbench, {
-  annotatedText, annotation, deny, entity, ephemeral, everyone, grant, read, ref, scope, subscribe, text, write, admin,
+  annotatedText, annotation, anonymous, deny, entity, ephemeral, everyone, grant, read, ref, scope, subscribe, text, write, admin,
 } from '../build/index.mjs';
 import { createAnnotatedDocApp } from '../projects/annotated-doc/server.mjs';
 
@@ -204,6 +204,40 @@ test('async principalOf is awaited before WebSocket admission', async (t) => {
     assert.ok(ack, 'subscribed ack received');
     assert.equal(ack.type, 'subscribed', `expected admission as the awaited principal, got ${JSON.stringify(ack)}`);
     assert.ok(resolved >= 1, 'principalOf was called');
+  } finally {
+    ws.close();
+  }
+});
+
+test('app-integrated WebSocket collapses a revoked principal to canonical anonymous before admission', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const seen = [];
+  const Owned = entity('CollapseWSOwned', {
+    name: text(),
+    ownerId: text(),
+    checks: { owner: ({ entity: row, principal }) => { seen.push(principal); return row.ownerId === principal.id; } },
+    grant: () => [scope(() => everyone()).can(async ({ is }) => (
+      await is.owner() ? grant(read, subscribe) : deny('not owner')
+    ))],
+  });
+  const app = workbench({ db, entities: [Owned] });
+  // The connection principal is the revoked owner of the row — if it reached
+  // admission as itself it would be subscribed. The two-valued collapse must
+  // admit it as canonical anonymous, so the ownership grant denies.
+  app.attachLiveDelivery({ principalOf: () => ({ type: 'user', id: 'u1', attributes: {}, status: 'revoked' }) });
+  app.listen(0);
+  await app.ready;
+  t.after(async () => { app.httpServer.closeAllConnections?.(); await app.shutdown(); db.close(); });
+  app.entity(Owned).insert({ id: 'p1', name: 'Visible', ownerId: 'u1' });
+
+  const port = app.httpServer.address().port;
+  const ws = await openRawWS(port);
+  try {
+    ws.send(JSON.stringify({ type: 'subscribe', entity: 'CollapseWSOwned', id: 'p1' }));
+    const ack = await ws.nextMessage();
+    assert.ok(seen.length >= 1, 'the grant ran for the WebSocket subscription');
+    assert.equal(seen[seen.length - 1], anonymous, 'a revoked principal reaches the WebSocket seam as the canonical anonymous value');
+    assert.notEqual(ack?.type, 'subscribed', 'admission sees anonymous, so the revoked owner is not subscribed');
   } finally {
     ws.close();
   }

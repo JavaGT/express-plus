@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import workbench, {
   annotatedText, annotatedTextCreateAction, annotatedTextRetireAction, annotation,
   deny, entity, everyone, exportAnnotatedText, inherit,
-  admin, grant, keyed, map, measurement, membership, object, read, ref, registerAnnotatedTextContract, scope, select, snapshot, subscribe, text, write, principalSnapshot, projectionSource,
+  admin, anonymous, grant, keyed, map, measurement, membership, object, read, ref, registerAnnotatedTextContract, scope, select, snapshot, statusOf, subscribe, text, write, principalSnapshot, projectionSource,
 } from '../build/index.mjs';
 import { executeDDL, executeFrameworkDDL, registerAnnotatedTextStructuralExtension } from '../build/internal.mjs';
 import { defineSqliteSchema } from '../build/sqlite-schema.mjs';
@@ -99,6 +99,42 @@ test('application-integrated live delivery owns registered action wakeup and rec
   assert.equal(JSON.stringify(envelope).includes('update-project'), false);
   await reader.cancel();
   streamController.abort();
+});
+
+test('application live delivery collapses non-active principals to canonical anonymous at the HTTP seam', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const seen = [];
+  const Project = entity('CollapseLiveProject', {
+    name: text(),
+    ownerId: text(),
+    checks: { owner: ({ entity: row, principal }) => { seen.push(principal); return row.ownerId === principal.id; } },
+    grant: () => [scope(() => everyone()).can(async ({ is }) => (
+      await is.owner() ? grant(read, subscribe) : deny('not owner')
+    ))],
+  });
+  const app = workbench({ db, entities: [Project] });
+  let principal = { type: 'user', id: 'u1', attributes: {}, status: 'revoked' };
+  app.attachLiveDelivery({ principalOf: () => principal });
+  app.listen(0);
+  await app.ready;
+  t.after(async () => { app.httpServer.closeAllConnections?.(); await app.shutdown(); db.close(); });
+  app.entity(Project).insert({ id: 'p1', name: 'Visible', ownerId: 'u1' });
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+  const endpoint = `${origin}/live-delivery/bootstrap?scope=CollapseLiveProject%3Ap1&mode=snapshot`;
+
+  // A revoked principal for the owner id must NOT be admitted as itself: the
+  // live seam collapses it to canonical anonymous before the grant runs, so the
+  // ownership check sees no identity and the snapshot is denied.
+  const revoked = await fetch(endpoint).then((response) => response.json());
+  assert.equal(revoked.kind, 'revoked', 'a revoked owner collapses to anonymous and is denied');
+  assert.ok(seen.length >= 1, 'the grant ran at the live seam');
+  assert.equal(seen[seen.length - 1], anonymous, 'a revoked principal reaches live delivery as the canonical anonymous value');
+  assert.equal(statusOf(seen[seen.length - 1]), 'active', 'statusOf() still reads the collapsed principal as the audit reader');
+
+  principal = { type: 'user', id: 'u1', attributes: {}, status: 'expired' };
+  const expired = await fetch(endpoint).then((response) => response.json());
+  assert.equal(expired.kind, 'revoked', 'an expired owner collapses to anonymous and is denied');
+  assert.equal(seen[seen.length - 1], anonymous, 'an expired principal reaches live delivery as the canonical anonymous value');
 });
 
 test('application live delivery rejects duplicate and late attachment', async () => {
