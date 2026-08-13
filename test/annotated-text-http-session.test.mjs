@@ -1051,11 +1051,13 @@ test('a v4 fold missing or malformed dispositions recovers by snapshot instead o
 
 test('a collapsed range without a matching disposition recovers by snapshot instead of silently pruning', async () => {
   const { createTextState, applyTextOp, textCheckpoint } = await import('../build/annotated-text.mjs');
-  const { createTextFamily, applyTextOperation, textFamilyCheckpoint, materializeText, textOperationForOffsetEdit } = await import('../build/annotated-text-continuous.mjs');
+  const { createTextFamily, applyTextOperation, textFamilyCheckpoint, materializeText, textOperationForOffsetEdit, resolveOffsetToEndpoint } = await import('../build/annotated-text-continuous.mjs');
   const A = 'a'.repeat(32);
   const B = 'b'.repeat(32);
   const insertOp = ['workbench.text', 1, [A, 1], 1, [], ['insert', ['root'], 'hello world']];
   const baseFamily = createTextFamily('d1', textCheckpoint(applyTextOp(createTextState(), insertOp)));
+  const start = resolveOffsetToEndpoint(baseFamily, 6, baseFamily.checkpoint.frontier, 'right');
+  const end = resolveOffsetToEndpoint(baseFamily, 11, baseFamily.checkpoint.frontier, 'right');
   const deleteOp = textOperationForOffsetEdit(baseFamily, { kind: 'text.delete', from: { offset: 6 }, to: { offset: 11 } }, B, 2);
   const nextFamily = applyTextOperation(baseFamily, deleteOp);
   const nextText = materializeText(nextFamily);
@@ -1078,8 +1080,9 @@ test('a collapsed range without a matching disposition recovers by snapshot inst
       const body = number === 1
         ? {
           ...snapshot().body,
+          version: 2,
           text: 'hello world',
-          ranges: [{ annotationId: 'c1', start: 6, end: 11 }],
+          ranges: [{ annotationId: 'c1', start, end }],
           annotations: [{ id: 'c1', family: 'note', fields: {}, owner: 'u1' }],
           orphans: [],
         }

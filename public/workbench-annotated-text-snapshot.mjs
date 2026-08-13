@@ -39,12 +39,77 @@ function materializeRecipientRanges(snapshot, family) {
       || !isStructuralEndpoint(range.start) || !isStructuralEndpoint(range.end)) {
       throw new Error('annotatedText snapshot: v2 ranges must be structural endpoints');
     }
-    return {
-      annotationId: range.annotationId,
-      start: projectEndpointToOffset(family, range.start),
-      end: projectEndpointToOffset(family, range.end),
-    };
+    return { annotationId: range.annotationId, start: range.start, end: range.end };
   });
+}
+
+export function isOffsetRange(range) {
+  return !!range && typeof range === 'object' && !Array.isArray(range)
+    && Number.isSafeInteger(range.start) && Number.isSafeInteger(range.end);
+}
+
+/** Resolve one document range to UTF-16 offsets. Offset-form (redacted) passes through. */
+export function resolveRangeOffsets(range, family) {
+  if (isOffsetRange(range)) return { annotationId: range.annotationId, start: range.start, end: range.end };
+  if (!family) throw new Error('annotated text range resolution requires a family replica');
+  return {
+    annotationId: range.annotationId,
+    start: projectEndpointToOffset(family, range.start),
+    end: projectEndpointToOffset(family, range.end),
+  };
+}
+
+export function resolveRangesOffsets(ranges, family) {
+  if (!Array.isArray(ranges)) return ranges;
+  return ranges.map((range) => resolveRangeOffsets(range, family));
+}
+
+/**
+ * Shift redacted/offset ranges through one absolute-offset edit. Anchored
+ * ranges are returned unchanged — callers resolve them against a family.
+ */
+export function shiftOffsetRangesOverEdit(ranges, from, to, text) {
+  if (!Array.isArray(ranges) || ranges.length === 0) return ranges;
+  if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 0 || to < from) return ranges;
+  const insertion = from === to;
+  const delta = text.length - (to - from);
+  if (insertion && text.length === 0) return ranges;
+  return ranges.map((range) => {
+    if (!isOffsetRange(range)) return range;
+    let start;
+    let end;
+    if (insertion) {
+      if (range.end <= from) {
+        start = range.start;
+        end = range.end;
+      } else if (range.start <= from) {
+        start = range.start;
+        end = range.end + text.length;
+      } else {
+        start = range.start + text.length;
+        end = range.end + text.length;
+      }
+    } else {
+      start = range.start < from ? range.start : range.start >= to ? range.start + delta : from + text.length;
+      end = range.end <= from ? range.end : range.end > to ? range.end + delta : from + text.length;
+    }
+    return Object.freeze({ ...range, start, end });
+  });
+}
+
+export function shiftOffsetRangesOverText(ranges, beforeText, afterText) {
+  if (!Array.isArray(ranges) || ranges.length === 0 || beforeText === afterText) return ranges;
+  let from = 0;
+  while (from < beforeText.length && from < afterText.length && beforeText[from] === afterText[from]) from += 1;
+  let beforeEnd = beforeText.length;
+  let afterEnd = afterText.length;
+  while (beforeEnd > from && afterEnd > from && beforeText[beforeEnd - 1] === afterText[afterEnd - 1]) {
+    beforeEnd -= 1;
+    afterEnd -= 1;
+  }
+  from = scalarStart(beforeText, scalarStart(afterText, from));
+  beforeEnd = scalarEnd(beforeText, beforeEnd);
+  return shiftOffsetRangesOverEdit(ranges, from, beforeEnd, afterText.slice(from, scalarEnd(afterText, afterEnd)));
 }
 
 export function materializeAnnotatedTextSnapshot(snapshot, handle, options = {}) {
@@ -152,69 +217,13 @@ export function projectPendingAnnotatedTextDocument(document, action, _ignored) 
   const start = edit.kind === 'text.insert' ? edit.at.offset : edit.from.offset;
   const end = edit.kind === 'text.insert' ? start : edit.to.offset;
   if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end > text.length) return document;
-  const spliced = edit.kind === 'text.insert'
-    ? `${text.slice(0, start)}${edit.text}${text.slice(start)}`
-    : `${text.slice(0, start)}${edit.kind === 'text.replace' ? edit.text : ''}${text.slice(end)}`;
-  const projected = projectRangesOverEdit(document.ranges, start, end, edit.kind === 'text.insert' || edit.kind === 'text.replace' ? edit.text : '');
+  const inserted = edit.kind === 'text.insert' || edit.kind === 'text.replace' ? edit.text : '';
+  const spliced = `${text.slice(0, start)}${inserted}${text.slice(end)}`;
   return Object.freeze({
     ...document,
     text: spliced,
-    ...(Array.isArray(document.ranges) ? { ranges: projected } : {}),
+    ...(Array.isArray(document.ranges) ? { ranges: Object.freeze(shiftOffsetRangesOverEdit(document.ranges, start, end, inserted)) } : {}),
   });
-}
-
-/**
- * Project annotation ranges through one absolute-offset edit that replaces
- * [from, to) with `text` (an insertion has from === to). Ranges are absolute
- * in the document text. Boundary affinity matches the family semantics:
- * an insertion AT a range's start joins the range (its end grows), an
- * insertion at its end stays outside, and a covering replace collapses the
- * range to zero width. The authoritative server projection corrects any
- * approximation on the next fold or snapshot.
- */
-export function projectRangesOverEdit(ranges, from, to, text) {
-  if (!Array.isArray(ranges) || ranges.length === 0) return ranges;
-  if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 0 || to < from) return ranges;
-  const insertion = from === to;
-  const delta = text.length - (to - from);
-  if (insertion && text.length === 0) return ranges;
-  return ranges.map((range) => {
-    if (!range || typeof range !== 'object' || !Number.isSafeInteger(range.start) || !Number.isSafeInteger(range.end)) return range;
-    let start;
-    let end;
-    if (insertion) {
-      if (range.end <= from) {
-        start = range.start;
-        end = range.end;
-      } else if (range.start <= from) {
-        start = range.start;
-        end = range.end + text.length;
-      } else {
-        start = range.start + text.length;
-        end = range.end + text.length;
-      }
-    } else {
-      start = range.start < from ? range.start : range.start >= to ? range.start + delta : from + text.length;
-      end = range.end <= from ? range.end : range.end > to ? range.end + delta : from + text.length;
-    }
-    return Object.freeze({ ...range, start, end });
-  });
-}
-
-/** Project ranges through the text transition from one materialized text to the next. */
-export function projectRangesOverText(ranges, beforeText, afterText) {
-  if (!Array.isArray(ranges) || ranges.length === 0 || beforeText === afterText) return ranges;
-  let from = 0;
-  while (from < beforeText.length && from < afterText.length && beforeText[from] === afterText[from]) from += 1;
-  let beforeEnd = beforeText.length;
-  let afterEnd = afterText.length;
-  while (beforeEnd > from && afterEnd > from && beforeText[beforeEnd - 1] === afterText[afterEnd - 1]) {
-    beforeEnd -= 1;
-    afterEnd -= 1;
-  }
-  from = scalarStart(beforeText, scalarStart(afterText, from));
-  beforeEnd = scalarEnd(beforeText, beforeEnd);
-  return projectRangesOverEdit(ranges, from, beforeEnd, afterText.slice(from, scalarEnd(afterText, afterEnd)));
 }
 
 // Bounds may land between a surrogate pair when the transition crosses an

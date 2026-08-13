@@ -14,6 +14,8 @@
 
 import {
   applyTextOp,
+  assertUtf16Offset,
+  canonicalTextOp,
   compareOpId,
   createTextState,
   frontierDominates,
@@ -182,6 +184,116 @@ export function projectEndpointToOffset(family, endpoint) {
   assertDominatingBasis(family, endpoint, 'projectEndpointToOffset');
   const { visibleOffsets } = derivedIndex(family);
   return visibleOffsets[endpointVirtualPosition(family, endpoint)];
+}
+
+/**
+ * The RGA anchor element for an insert AT an absolute offset: the last visible
+ * element whose scalar ends at or contains the offset.
+ */
+export function insertAnchorForOffset(family, utf16Offset) {
+  let accumulated = 0;
+  for (const [, element] of derivedIndex(family).order) {
+    if (element.deletedBy.length) continue;
+    const postScalar = accumulated + element.scalar.length;
+    if (accumulated < utf16Offset && utf16Offset <= postScalar) {
+      return ['element', [[...element.op], element.ordinal]];
+    }
+    accumulated = postScalar;
+  }
+  fail('failed to resolve insert anchor for offset');
+}
+
+/** An absolute-offset insert/delete against the whole document (unique actor per edit). */
+export function textOperationForOffsetEdit(family, edit, actor, lamport) {
+  assertTrustedFamily(family);
+  const basis = family.checkpoint.frontier;
+  const text = materializeText(family);
+  if (edit.kind === 'text.insert') {
+    assertUtf16Offset(text, edit.at.offset);
+    const anchor = edit.at.offset === 0 || text.length === 0
+      ? ['root']
+      : insertAnchorForOffset(family, edit.at.offset);
+    return canonicalTextOp(['workbench.text', 1, [actor, 1], lamport, basis, ['insert', anchor, edit.text]]);
+  }
+  if (edit.kind !== 'text.delete') fail('text.replace is not supported by this builder — compose delete + insert operations; emitting a delete-only op would silently drop the replacement text');
+  if (edit.from.offset >= edit.to.offset) fail('delete range must be non-empty and forward');
+  assertUtf16Offset(text, edit.from.offset);
+  assertUtf16Offset(text, edit.to.offset);
+
+  const byOp = new Map();
+  let offset = 0;
+  for (const [, element] of derivedIndex(family).order) {
+    if (element.deletedBy.length) continue;
+    const next = offset + element.scalar.length;
+    if (offset >= edit.from.offset && next <= edit.to.offset) {
+      const opKey = `${element.op[0]}:${element.op[1]}`;
+      const list = byOp.get(opKey);
+      if (list) list.push(element.ordinal);
+      else byOp.set(opKey, [element.ordinal]);
+    }
+    offset = next;
+  }
+  if (offset !== text.length || byOp.size === 0) fail('delete range cannot be resolved');
+  const spans = [];
+  const sortedKeys = [...byOp.keys()].sort((a, b) => {
+    const [aActor, aCounter] = a.split(':');
+    const [bActor, bCounter] = b.split(':');
+    return compareOpId([aActor, Number(aCounter)], [bActor, Number(bCounter)]);
+  });
+  for (const key of sortedKeys) {
+    const [spActor, spCounterS] = key.split(':');
+    const spCounter = Number(spCounterS);
+    const ordinals = byOp.get(key).sort((a, b) => a - b);
+    let spanStart = ordinals[0];
+    let spanCount = 1;
+    for (let i = 1; i < ordinals.length; i += 1) {
+      if (ordinals[i] === ordinals[i - 1] + 1) {
+        spanCount += 1;
+      } else {
+        spans.push([[spActor, spCounter], spanStart, spanCount]);
+        spanStart = ordinals[i];
+        spanCount = 1;
+      }
+    }
+    spans.push([[spActor, spCounter], spanStart, spanCount]);
+  }
+  return canonicalTextOp(['workbench.text', 1, [actor, 1], lamport, basis, ['delete', spans]]);
+}
+
+let offsetEditActor = 0;
+function nextOffsetEditActor() {
+  offsetEditActor += 1;
+  return offsetEditActor.toString(16).padStart(32, '0');
+}
+
+function nextOffsetEditLamport(family) {
+  let max = 0;
+  for (const element of Object.values(family.checkpoint.elements)) {
+    if (element.lamport > max) max = element.lamport;
+  }
+  return max + 1;
+}
+
+/** Apply one absolute-offset splice [from, to) → `text` to a family copy. */
+export function applyOffsetTextEdit(family, from, to, text) {
+  assertTrustedFamily(family);
+  if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 0 || to < from) {
+    fail('applyOffsetTextEdit requires a forward [from, to) interval');
+  }
+  let next = family;
+  if (from < to) {
+    next = applyTextOperation(next, textOperationForOffsetEdit(
+      next, { kind: 'text.delete', from: { offset: from }, to: { offset: to } },
+      nextOffsetEditActor(), nextOffsetEditLamport(next),
+    ));
+  }
+  if (typeof text === 'string' && text.length > 0) {
+    next = applyTextOperation(next, textOperationForOffsetEdit(
+      next, { kind: 'text.insert', at: { offset: from, affinity: 'right' }, text },
+      nextOffsetEditActor(), nextOffsetEditLamport(next),
+    ));
+  }
+  return next;
 }
 
 function deepFreeze(value) {

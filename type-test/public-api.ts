@@ -39,7 +39,7 @@ import {
 } from 'workbench/annotated-text';
 import {
   changedRange, classifyDisplayOffset, displayToWirePosition, placeholderDisplayWidth,
-  projectRangesOverEdit, projectRangesOverText, scalarEnd, scalarStart,
+  scalarEnd, scalarStart,
   selectionCrossesDisplayRedaction, wireToDisplayPosition,
   type AnnotatedTextChangedRange, type AnnotatedTextCoordinatedPosition,
   type AnnotatedTextRange, type AnnotatedTextRedactionMarker,
@@ -107,9 +107,7 @@ const scalarStartOffset: number = scalarStart('ab', 1);
 const scalarEndOffset: number = scalarEnd('ab', 1);
 const change: AnnotatedTextChangedRange = changedRange('ab', 'ac');
 declare const sourceRanges: readonly AnnotatedTextRange[];
-const editedRanges: readonly AnnotatedTextRange[] = projectRangesOverEdit(sourceRanges, 0, 0, 'x');
-const projectedRanges: readonly AnnotatedTextRange[] = projectRangesOverText(sourceRanges, 'ab', 'axb');
-void [displayPosition, displayOffset, crosses, placeholderWidth, scalarStartOffset, scalarEndOffset, change, editedRanges, projectedRanges];
+void [displayPosition, displayOffset, crosses, placeholderWidth, scalarStartOffset, scalarEndOffset, change, sourceRanges];
 
 declare const annotatedTextEntity: WorkbenchEntity;
 declare const requiredAnnotatedTextHandle: AnnotatedTextFieldHandle;
@@ -164,7 +162,7 @@ const projectedAnnotatedText = materializeAnnotatedTextSnapshot(
 );
 const projectedKind: 'workbench.annotatedText.recipient' = projectedAnnotatedText.kind;
 const projectedText: string = projectedAnnotatedText.text;
-const materializedRanges: readonly { readonly annotationId: string; readonly start: number; readonly end: number }[] = projectedAnnotatedText.ranges;
+const materializedRanges: readonly AnnotatedTextRange[] = projectedAnnotatedText.ranges;
 // The materializer always projects the wire capabilityHints into a public
 // `capabilities` array (restricted recipients are review-only with null).
 const projectedCapabilities: readonly string[] | null = projectedAnnotatedText.capabilities;

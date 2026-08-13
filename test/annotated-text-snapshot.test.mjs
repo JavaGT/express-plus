@@ -220,6 +220,7 @@ test('projectPendingAnnotatedTextDocument splices absolute offsets', () => {
     payload: { version: 9, edit: { kind: 'text.insert', at: { offset: 6 }, text: 'brave ' } },
   });
   assert.equal(afterInsert.text, 'Hello brave world');
+  assert.deepEqual(afterInsert.ranges, [{ annotationId: 'a1', start: 6, end: 17 }]);
 
   const afterDelete = projectPendingAnnotatedTextDocument(afterInsert, {
     payload: { version: 9, edit: { kind: 'text.delete', from: { offset: 6 }, to: { offset: 12 } } },

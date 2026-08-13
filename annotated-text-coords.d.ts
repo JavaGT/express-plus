@@ -1,6 +1,6 @@
 // Type definitions for workbench/annotated-text-coords — the annotated-text
-// coordinate grammar for recipient documents: wire↔display redaction mapping,
-// scalar-bounded edit intervals, and absolute range projection.
+// coordinate grammar for recipient documents: wire↔display redaction mapping
+// and scalar-bounded edit intervals.
 //
 // Source of truth: public/workbench-annotated-text-coords.mjs (a re-export
 // aggregator over the redaction-coords, editor, and snapshot modules).
@@ -24,12 +24,16 @@ export interface AnnotatedTextRedactionMarker {
   readonly placeholder: string;
 }
 
-/** An absolute annotation range in the document text. */
-export interface AnnotatedTextRange {
-  readonly annotationId: string;
-  readonly start: number;
-  readonly end: number;
+/** A stored structural endpoint: RGA point plus the historical basis frontier. */
+export interface AnnotatedTextStructuralEndpoint {
+  readonly point: readonly ['point', readonly ['root'] | readonly ['element', readonly [readonly [string, number], number]], 'left' | 'right'];
+  readonly basisFrontier: readonly (readonly [string, number])[];
 }
+
+/** An annotation range: anchored endpoints (fully-visible) or UTF-16 offsets (redacted). */
+export type AnnotatedTextRange =
+  | { readonly annotationId: string; readonly start: number; readonly end: number }
+  | { readonly annotationId: string; readonly start: AnnotatedTextStructuralEndpoint; readonly end: AnnotatedTextStructuralEndpoint };
 
 /** The scalar-bounded edit interval from one text to the next. */
 export interface AnnotatedTextChangedRange {
@@ -89,20 +93,3 @@ export declare function scalarEnd(text: string, offset: number): number;
 
 /** The minimal scalar-bounded edit interval from `before` to `after`. */
 export declare function changedRange(before: string, after: string): AnnotatedTextChangedRange;
-
-/** Project absolute annotation ranges through one absolute-offset edit that
- * replaces [from, to) with `text` (an insertion has from === to). */
-export declare function projectRangesOverEdit(
-  ranges: readonly AnnotatedTextRange[],
-  from: number,
-  to: number,
-  text: string,
-): readonly AnnotatedTextRange[];
-
-/** Project absolute annotation ranges through the text transition from one
- * materialized text to the next. */
-export declare function projectRangesOverText(
-  ranges: readonly AnnotatedTextRange[],
-  beforeText: string,
-  afterText: string,
-): readonly AnnotatedTextRange[];

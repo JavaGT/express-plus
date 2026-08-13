@@ -138,7 +138,7 @@ test('a whole-document restriction stays offset-empty v1', async () => {
   await app.shutdown(); db.close();
 });
 
-test('materialize resolves v2 endpoints to offsets and fails closed without a family replica', async () => {
+test('materialize keeps v2 endpoints on the document and fails closed without a family replica', async () => {
   const { db, app, Doc } = setup();
   await app.ready;
   const family = seedDocument(db, 'hello world', [{ id: 'a1', family: 'comment', start: 6, end: 11 }]);
@@ -156,7 +156,11 @@ test('materialize resolves v2 endpoints to offsets and fails closed without a fa
   const publicFamily = restoreTextFamily({ id: family.id, checkpoint: family.checkpoint });
   const document = materializeAnnotatedTextSnapshot(wire, Doc.body, { family: publicFamily });
   assert.equal(document.version, 2);
-  assert.deepEqual(document.ranges, [{ annotationId: 'a1', start: 6, end: 11 }]);
+  assert.equal(document.ranges.length, 1);
+  assert.equal(document.ranges[0].annotationId, 'a1');
+  assert.equal(typeof document.ranges[0].start, 'object');
+  assert.equal(publicProjectEndpointToOffset(publicFamily, document.ranges[0].start), 6);
+  assert.equal(publicProjectEndpointToOffset(publicFamily, document.ranges[0].end), 11);
   assert.equal(document.text, 'hello world');
   await app.shutdown(); db.close();
 });

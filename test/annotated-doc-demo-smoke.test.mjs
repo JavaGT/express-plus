@@ -4,7 +4,17 @@ import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
 import { createAnnotatedTextHttpSession } from '../public/workbench-client.mjs';
+import { projectEndpointToOffset } from '../public/workbench-annotated-text-continuous.mjs';
 import { createAnnotatedDocApp } from '../projects/annotated-doc/server.mjs';
+
+function rangeOffsets(session, range) {
+  if (!range) return range;
+  if (typeof range.start === 'number') return { start: range.start, end: range.end };
+  return {
+    start: projectEndpointToOffset(session.family, range.start),
+    end: projectEndpointToOffset(session.family, range.end),
+  };
+}
 
 test('annotated-doc migration adds a color for legacy comments', async (t) => {
   const db = new DatabaseSync(':memory:');
@@ -208,7 +218,7 @@ test('a composed comment keeps an end insert outside and absorbs a start insert,
   assert.equal((await composed.settlement.wait()).status, 'reconciled');
   const annotationId = session.document.annotations[0].id;
   const rangeOf = () => session.document.ranges.find((candidate) => candidate.annotationId === annotationId);
-  assert.deepEqual({ start: rangeOf().start, end: rangeOf().end }, { start: 2, end: 4 });
+  assert.deepEqual(rangeOffsets(session, rangeOf()), { start: 2, end: 4 });
 
   // The documented boundary contract (demo README): an insert AT the range
   // START joins the comment, an insert AT its END stays outside.
@@ -220,7 +230,7 @@ test('a composed comment keeps an end insert outside and absorbs a start insert,
   assert.equal(insertedStart.ok, true, insertedStart.failure?.message);
   assert.equal((await insertedStart.settlement.wait()).status, 'reconciled');
   assert.equal(session.document.text, '12L34567890');
-  assert.deepEqual({ start: rangeOf().start, end: rangeOf().end }, { start: 2, end: 5 }, 'start insert joins the comment');
+  assert.deepEqual(rangeOffsets(session, rangeOf()), { start: 2, end: 5 }, 'start insert joins the comment');
 
   const insertedEnd = await session.insert({
     mutationId: 'affinity-end',
@@ -230,7 +240,7 @@ test('a composed comment keeps an end insert outside and absorbs a start insert,
   assert.equal(insertedEnd.ok, true, insertedEnd.failure?.message);
   assert.equal((await insertedEnd.settlement.wait()).status, 'reconciled');
   assert.equal(session.document.text, '12L34R567890');
-  assert.deepEqual({ start: rangeOf().start, end: rangeOf().end }, { start: 2, end: 5 }, 'end insert stays outside the comment');
+  assert.deepEqual(rangeOffsets(session, rangeOf()), { start: 2, end: 5 }, 'end insert stays outside the comment');
 
   // The committed range survives canonical export with the same boundary.
   const exported = await exportAnnotatedText({
@@ -310,7 +320,7 @@ test('a confidential span keeps an end insert outside and absorbs a start insert
 
   const sensitiveRange = () => session.document.ranges
     .find((candidate) => session.document.annotations.find((entry) => entry.id === candidate.annotationId)?.family === 'sensitive');
-  assert.deepEqual({ start: sensitiveRange().start, end: sensitiveRange().end }, { start: 6, end: 12 });
+  assert.deepEqual(rangeOffsets(session, sensitiveRange()), { start: 6, end: 12 });
 
   // Boundary contract (same locked affinity as comments): an insert AT the
   // range START joins the confidential span, an insert AT its END stays
@@ -323,7 +333,7 @@ test('a confidential span keeps an end insert outside and absorbs a start insert
   assert.equal(insertedStart.ok, true, insertedStart.failure?.message);
   assert.equal((await insertedStart.settlement.wait()).status, 'reconciled');
   assert.equal(session.document.text, 'hello Lsecret world');
-  assert.deepEqual({ start: sensitiveRange().start, end: sensitiveRange().end }, { start: 6, end: 13 }, 'start insert joins the confidential span');
+  assert.deepEqual(rangeOffsets(session, sensitiveRange()), { start: 6, end: 13 }, 'start insert joins the confidential span');
 
   const insertedEnd = await session.insert({
     mutationId: 'conf-aff-end',
@@ -333,7 +343,7 @@ test('a confidential span keeps an end insert outside and absorbs a start insert
   assert.equal(insertedEnd.ok, true, insertedEnd.failure?.message);
   assert.equal((await insertedEnd.settlement.wait()).status, 'reconciled');
   assert.equal(session.document.text, 'hello LsecretR world');
-  assert.deepEqual({ start: sensitiveRange().start, end: sensitiveRange().end }, { start: 6, end: 13 }, 'end insert stays outside the confidential span');
+  assert.deepEqual(rangeOffsets(session, sensitiveRange()), { start: 6, end: 13 }, 'end insert stays outside the confidential span');
 
   // The committed boundaries survive canonical export.
   const exported = await exportAnnotatedText({
@@ -403,13 +413,14 @@ test('annotated-doc resolve action toggles the comment marker field through the 
   assert.equal((await composed.settlement.wait()).status, 'reconciled');
   const annotationId = session.document.annotations[0].id;
   const range = session.document.ranges.find((candidate) => candidate.annotationId === annotationId);
-  assert.deepEqual({ start: range.start, end: range.end }, { start: 0, end: 5 });
+  assert.deepEqual(rangeOffsets(session, range), { start: 0, end: 5 });
+  const resolvedSpan = rangeOffsets(session, range);
 
   // Resolve: the action contributes only `resolved` over the current record.
   const resolved = await session.applyAnnotationAction(resolveHandle, {
     mutationId: 'resolve-set',
-    from: { offset: range.start, affinity: 'right' },
-    to: { offset: range.end, affinity: 'right' },
+    from: { offset: resolvedSpan.start, affinity: 'right' },
+    to: { offset: resolvedSpan.end, affinity: 'right' },
     values: { resolved: true },
   });
   assert.equal(resolved.ok, true, resolved.failure?.message);
@@ -419,8 +430,8 @@ test('annotated-doc resolve action toggles the comment marker field through the 
   // Reopen: the same action flips the field back and the color/comment refs survive.
   const reopened = await session.applyAnnotationAction(resolveHandle, {
     mutationId: 'resolve-unset',
-    from: { offset: range.start, affinity: 'right' },
-    to: { offset: range.end, affinity: 'right' },
+    from: { offset: resolvedSpan.start, affinity: 'right' },
+    to: { offset: resolvedSpan.end, affinity: 'right' },
     values: { resolved: false },
   });
   assert.equal(reopened.ok, true, reopened.failure?.message);
@@ -638,7 +649,7 @@ test('the codebook stores code name + color centrally and code annotations refer
   assert.equal(annotation.family, 'code');
   assert.deepEqual(annotation.fields, { code: codeId });
   const range = session.document.ranges.find((candidate) => candidate.annotationId === 'codebook-ann');
-  assert.deepEqual({ start: range.start, end: range.end }, { start: 0, end: 5 });
+  assert.deepEqual(rangeOffsets(session, range), { start: 0, end: 5 });
 
   // Rename then recolor the code centrally (two separate updates, so the
   // annotation's Code reference stays the same row): every range tagged with it

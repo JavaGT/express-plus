@@ -64,7 +64,6 @@ export const PUBLIC_API = Object.freeze({
       'wireToDisplayPosition', 'displayToWirePosition', 'classifyDisplayOffset',
       'selectionCrossesDisplayRedaction', 'placeholderDisplayWidth',
       'scalarStart', 'scalarEnd', 'changedRange',
-      'projectRangesOverEdit', 'projectRangesOverText',
     ]),
   }),
 });

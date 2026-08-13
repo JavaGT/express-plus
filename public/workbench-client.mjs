@@ -15,7 +15,7 @@
 import { applyTextOp, createTextState, materializeText, restoreTextCheckpoint } from './workbench-annotated-text.mjs';
 import { deleteText, insertText } from './workbench-text-edit.mjs';
 import { createAnnotatedTextSnapshotSessionBinding, revokeAnnotatedTextSnapshotSessionBinding } from './workbench-annotated-text-snapshot-internal.mjs';
-import { materializeAnnotatedTextSnapshot, projectPendingAnnotatedTextDocument, projectRangesOverText } from './workbench-annotated-text-snapshot.mjs';
+import { materializeAnnotatedTextSnapshot, projectPendingAnnotatedTextDocument, resolveRangeOffsets, shiftOffsetRangesOverText } from './workbench-annotated-text-snapshot.mjs';
 import { applyTextOperation, materializeText as materializeFamilyText, restoreTextFamily } from './workbench-annotated-text-continuous.mjs';
 import { annotatedTextAction } from './workbench-annotated-text-action.mjs';
 export { bindAnnotatedTextEditor } from './workbench-annotated-text-editor.mjs';
@@ -3512,7 +3512,8 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       }
       // A range the server emptied always carries a disposition. A collapsed
       // range without one is a projection divergence; recover with a snapshot.
-      if (range.start >= range.end) throw new Error('annotated text fold collapsed a range without a disposition');
+      const offsets = resolveRangeOffsets(range, familyReplica);
+      if (offsets.start >= offsets.end) throw new Error('annotated text fold collapsed a range without a disposition');
       retainedRanges.push(range);
     }
     const retainedAnnotations = currentDocument.annotations.filter((annotation) => !dispositionById.has(annotation.id));
@@ -3557,20 +3558,14 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       throw new Error('annotated text fold requires a family checkpoint seeded by the snapshot');
     }
     let family = familyReplica;
-    // A fold ships text operations only; the annotation ranges must track the
-    // same transition. Project the authoritative snapshot ranges through the
-    // fold's COMBINED text change (a replace is one delete+insert pair whose
-    // combined effect empties a covered range without re-opening it), then let
-    // the fold's server-carried dispositions decide each emptied annotation's
-    // delete-vs-orphan fate (the client never infers the policy itself).
-    const beforeText = materializeFamilyText(family);
+    // A fold ships text operations only. Anchored ranges stay put — they
+    // resolve against the advanced family at point of use. Offset-form
+    // (redacted) ranges never reach this fold. Dispositions still decide
+    // each emptied annotation's delete-vs-orphan fate.
     for (const operation of fold.text.operations) {
       family = applyTextOperation(family, operation);
     }
-    const afterText = materializeFamilyText(family);
-    const foldedRanges = beforeText === afterText
-      ? currentDocument.ranges
-      : projectRangesOverText(currentDocument.ranges, beforeText, afterText);
+    const foldedRanges = currentDocument.ranges;
     if (materializeFamilyText(family) !== fold.projection.text) {
       throw new Error('annotated text fold projection disagrees with family');
     }
@@ -3668,7 +3663,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       // walk between turns while a rapid typing burst settles one fold at a
       // time. The next authoritative fold remains the sole reconciliation
       // path and replaces this approximation.
-      ranges: projectRangesOverText(view.ranges, view.text, queuedDocumentText),
+      ranges: shiftOffsetRangesOverText(view.ranges, view.text, queuedDocumentText),
     });
   }
   function publishAnnotatedDocument() {
@@ -3857,6 +3852,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
   }
   const annotatedSurface = {
     get document() { return currentAnnotatedDocument(); },
+    get family() { return familyReplica; },
     get history() { return session.history; },
     get status() { return session.status; },
     get ready() { return session.ready; },

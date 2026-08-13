@@ -766,6 +766,7 @@ export interface AnnotatedTextEditPosition {
 
 export interface AnnotatedTextHttpSession {
   readonly document: AnnotatedTextDocument | null;
+  readonly family: unknown;
   readonly history: LiveDeliveryHistorySession;
   readonly status: LiveDeliverySession<AnnotatedTextDocument>['status'];
   readonly ready: Promise<void>;

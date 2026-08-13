@@ -11,7 +11,8 @@ import {
   selectionCrossesDisplayRedaction,
   wireToDisplayPosition,
 } from './workbench-annotated-text-redaction-coords.mjs';
-import { projectRangesOverEdit } from './workbench-annotated-text-snapshot.mjs';
+import { applyOffsetTextEdit } from './workbench-annotated-text-continuous.mjs';
+import { resolveRangesOffsets, shiftOffsetRangesOverEdit } from './workbench-annotated-text-snapshot.mjs';
 
 // The blockless document renders as ONE contentEditable root span. The root
 // holds interval marker spans (annotation runs) and redaction placeholders
@@ -837,9 +838,14 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {}, 
    * leftover nodes are removed. Returns true when the DOM changed.
    */
   function paintDisplay(span, document, text, draftEdit) {
-    const ranges = draftEdit
-      ? projectRangesOverEdit(document.ranges, draftEdit.from, draftEdit.to, draftEdit.text)
-      : document.ranges;
+    const family = session.family
+      ? (draftEdit ? applyOffsetTextEdit(session.family, draftEdit.from, draftEdit.to, draftEdit.text) : session.family)
+      : null;
+    const ranges = family
+      ? resolveRangesOffsets(document.ranges, family)
+      : (draftEdit
+        ? shiftOffsetRangesOverEdit(document.ranges, draftEdit.from, draftEdit.to, draftEdit.text)
+        : document.ranges);
     const redactions = currentRedactions();
     const annotationsById = new Map((document.annotations ?? []).map((annotation) => [annotation.id, annotation.family]));
     const runs = splitRuns(text);

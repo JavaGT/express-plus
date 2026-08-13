@@ -1,8 +1,7 @@
 // The annotated-text coordinate grammar for recipient documents: wire↔display
-// redaction mapping, scalar-bounded edit intervals, and absolute range
-// projection. Consumers (including the Scope transcript flow) import this one
-// subpath instead of copying the predicates; it re-exports source modules only,
-// never copies them.
+// redaction mapping and scalar-bounded edit intervals. Consumers (including
+// the Scope transcript flow) import this one subpath instead of copying the
+// predicates; it re-exports source modules only, never copies them.
 export {
   wireToDisplayPosition,
   displayToWirePosition,
@@ -15,7 +14,3 @@ export {
   scalarEnd,
   changedRange,
 } from './workbench-annotated-text-editor.mjs';
-export {
-  projectRangesOverEdit,
-  projectRangesOverText,
-} from './workbench-annotated-text-snapshot.mjs';
