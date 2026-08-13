@@ -1,6 +1,6 @@
 // Live Delivery — singular public seam for the Deliver loop (SPEC §8).
 //
-// One factory: createLiveDelivery(httpServer, opts) →
+// One factory: createWebSocketLiveDelivery(httpServer, opts) →
 //   { count, close, createConsumer, wake }
 //
 // Owns: the committed-event delivery core (live-delivery-core), the shared
@@ -45,7 +45,7 @@ import type { LiveDatabase } from './live-fanout.ts';
  * @param {object|null} [options.log] — application-owned structured logger
  * @returns {{ count: Function, close: Function, createConsumer: Function, wake: Function }}
  */
-export function createLiveDelivery(httpServer: Server, {
+export function createWebSocketLiveDelivery(httpServer: Server, {
   path = '/events',
   mayVerb = null,
   principalOf = (() => ({ type: 'anonymous', id: null }) as Principal),
@@ -130,5 +130,5 @@ export function createLiveDelivery(httpServer: Server, {
   };
 }
 
-/** @deprecated Use createLiveDelivery — same function (singular seam). */
-export const createLiveServer = createLiveDelivery;
+/** @deprecated Use createWebSocketLiveDelivery — same function. */
+export const createLiveServer = createWebSocketLiveDelivery;

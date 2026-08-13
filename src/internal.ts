@@ -30,7 +30,7 @@ export { createBlobLifecycle } from './blob-lifecycle.ts';
 export { EventKind, created, updated, removed, fieldSet, native, parseEventType, lifecycleVerb } from './event-handle.ts';
 export { scopeOf, parseScopeKey, tryParseScopeKey, isScopeHandle } from './scope-handle.ts';
 export { decideReplay, normalizeSeqSpan } from './replay-decision.ts';
-export { createLiveDelivery, createLiveServer } from './live-delivery.ts';
+export { createWebSocketLiveDelivery, createLiveServer } from './live-delivery.ts';
 export { upgradeWebSocket, FrameSender, FrameParser } from './websocket.ts';
 export { resolveTemplate, matchExtension, isSafePath, escapeHtml } from './views.ts';
 export { mayVerb, mayFieldOp, mayRow } from './row-grant.ts';

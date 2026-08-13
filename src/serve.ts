@@ -25,7 +25,7 @@ import { mayVerb, mayRow } from './row-grant.ts';
 import { config } from './config.ts';
 import { applySecurityHeaders, renderError, isSameOriginRequest } from './middleware.ts';
 import { sessionPrincipalOf, sessionTokenOf, apiKeyPrincipalOf } from './auth/session.ts';
-import { createLiveDelivery } from './live-delivery.ts';
+import { createWebSocketLiveDelivery } from './live-delivery.ts';
 import { getLog, withLog } from './log.ts';
 import { createRateLimiter } from './rate-limit.ts';
 import { BodyError, readRequestBody } from './http-body.ts';
@@ -519,7 +519,7 @@ export function listen(app: any, port: any, optionsOrCallback: any = {}) {
   // WebSocket handshake degraded into an ordinary GET and 400'd against the
   // SSE handler.
   if (app.db && !app._applicationLiveDelivery) {
-    app.live = createLiveDelivery(httpServer, {
+    app.live = createWebSocketLiveDelivery(httpServer, {
       path: '/events',
       mayVerb: (entity: any, verb: any, row: any, principal: any) => mayVerb(entity, verb, row, principal),
       principalOf,

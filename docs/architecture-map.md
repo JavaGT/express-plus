@@ -56,7 +56,8 @@ Post-commit → re-auth → wire → client Replay decision → fold.
 
 | Module | Role |
 | --- | --- |
-| `live-delivery.mjs` | **Singular public seam** `createLiveDelivery` → `{ emit, count, close, createConsumer }` |
+| `live-delivery.mjs` | Framework WebSocket seam `createWebSocketLiveDelivery` → `{ count, close, createConsumer, wake }` (stateful delta/reducer envelopes) |
+| `live-delivery-public.mjs` | Transport-neutral committed seam `createOwnedLiveDelivery` (public `createLiveDelivery` via `./server`) — stateless recipient envelopes |
 | `live-connection.mjs` / `live-admission.mjs` / `live-fanout.mjs` | Private impl of the seam (conn / subscribe auth / fan-out) |
 | `websocket.mjs` | Framing |
 | `field-delta.mjs` / `field-pace.mjs` | Delta + pace |

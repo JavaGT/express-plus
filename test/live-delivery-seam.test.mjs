@@ -5,10 +5,10 @@ import { DatabaseSync } from 'node:sqlite';
 import { connect as tcpConnect } from 'node:net';
 import { randomBytes } from 'node:crypto';
 
-import { createLiveDelivery, createLiveServer } from '../src/live-delivery.mjs';
-import { executeFrameworkDDL } from '../src/ddl.mjs';
-import { scope } from '../src/scope.mjs';
-import { grant, read, write, subscribe } from '../src/grant.mjs';
+import { createWebSocketLiveDelivery, createLiveServer } from '../build/live-delivery.mjs';
+import { executeFrameworkDDL } from '../build/ddl.mjs';
+import { scope } from '../build/scope.mjs';
+import { grant, read, write, subscribe } from '../build/grant.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -174,18 +174,18 @@ function gateMayVerbCall(gateCall) {
 
 // --- tests ---
 
-test('createLiveDelivery is the singular factory (createLiveServer is the same function)', () => {
-  assert.equal(createLiveServer, createLiveDelivery);
+test('createWebSocketLiveDelivery is the framework WebSocket seam (createLiveServer is the same function)', () => {
+  assert.equal(createLiveServer, createWebSocketLiveDelivery);
 });
 
-test('createLiveDelivery exposes no public durable fanout', async () => {
+test('createWebSocketLiveDelivery exposes no public durable fanout', async () => {
   const db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);
   db.exec(`CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT)`);
   db.prepare(`INSERT INTO Note (id, title) VALUES (?, ?)`).run('n1', 'hello');
 
   const httpServer = http.createServer();
-  const live = createLiveDelivery(httpServer, {
+  const live = createWebSocketLiveDelivery(httpServer, {
     path: '/events',
     mayVerb: async () => true,
     principalOf: () => ({ type: 'user', id: 'u1' }),
@@ -230,7 +230,7 @@ test('WebSocket subscribe receives ack, consumer delivers core-projected event v
   appendEvent(db, 'Note:n1', 1, 'Note.created', { title: 'hello' });
 
   const httpServer = http.createServer();
-  const live = createLiveDelivery(httpServer, {
+  const live = createWebSocketLiveDelivery(httpServer, {
     mayVerb: async () => true,
     principalOf: (req) => {
       const u = req.headers?.['x-test-user'] ?? 'test';
@@ -304,7 +304,7 @@ test('annotated-text/native operated event produces resync, not raw event data',
   appendEvent(db, 'Doc:d1', 1, 'Doc.created', { title: 'doc' });
 
   const httpServer = http.createServer();
-  const live = createLiveDelivery(httpServer, {
+  const live = createWebSocketLiveDelivery(httpServer, {
     mayVerb: async () => true,
     principalOf: (req) => {
       const u = req.headers?.['x-test-user'] ?? 'test';
@@ -386,7 +386,7 @@ test('(R1) one connection with two entity scopes, unsubscribe one, subsequent co
   appendEvent(db, 'Note:n2', 1, 'Note.created', { title: 'b' });
 
   const httpServer = http.createServer();
-  const live = createLiveDelivery(httpServer, {
+  const live = createWebSocketLiveDelivery(httpServer, {
     mayVerb: async () => true,
     principalOf: (req) => {
       const u = req.headers?.['x-test-user'] ?? 'test';
@@ -466,7 +466,7 @@ test('(R1b) terminal reauthorization denial revokes with an error frame; connect
   appendEvent(db, 'Note:n2', 1, 'Note.created', { title: 'ok' });
 
   const httpServer = http.createServer();
-  const live = createLiveDelivery(httpServer, {
+  const live = createWebSocketLiveDelivery(httpServer, {
     mayVerb: async () => true,
     principalOf: (req) => {
       const u = req.headers?.['x-test-user'] ?? 'test';
@@ -546,7 +546,7 @@ test('(R1c) unsubscribe all scopes leaves the connection alive; shutdown drops i
   appendEvent(db, 'Note:n3', 1, 'Note.created', { title: 'c' });
 
   const httpServer = http.createServer();
-  const live = createLiveDelivery(httpServer, {
+  const live = createWebSocketLiveDelivery(httpServer, {
     mayVerb: async () => true,
     principalOf: (req) => {
       const u = req.headers?.['x-test-user'] ?? 'test';
@@ -629,7 +629,7 @@ test('(R4) public live delivery cannot emit an annotated-text ephemeral payload'
   appendEvent(db, 'Doc:d1', 1, 'Doc.created', { title: 'doc' });
 
   const httpServer = http.createServer();
-  const live = createLiveDelivery(httpServer, {
+  const live = createWebSocketLiveDelivery(httpServer, {
     mayVerb: async () => true,
     principalOf: (req) => {
       const u = req.headers?.['x-test-user'] ?? 'test';
@@ -686,7 +686,7 @@ test('(R6) activation failure occurs only after the subscribed acknowledgement',
   };
 
   const httpServer = http.createServer();
-  const live = createLiveDelivery(httpServer, {
+  const live = createWebSocketLiveDelivery(httpServer, {
     mayVerb: failCoreMayVerb,
     principalOf: (req) => {
       const u = req.headers?.['x-test-user'] ?? 'test';
@@ -731,7 +731,7 @@ test('(P1a) concurrent same-scope subscribes: newest wins, stale request acks no
 
   const gate = gateMayVerbCall(1);
   const httpServer = http.createServer();
-  const live = createLiveDelivery(httpServer, {
+  const live = createWebSocketLiveDelivery(httpServer, {
     mayVerb: gate.mayVerb,
     principalOf: (req) => {
       const u = req.headers?.['x-test-user'] ?? 'test';
@@ -806,7 +806,7 @@ test('(P1b) unsubscribe during an in-flight subscribe invalidates it; nothing le
 
   const gate = gateMayVerbCall(1);
   const httpServer = http.createServer();
-  const live = createLiveDelivery(httpServer, {
+  const live = createWebSocketLiveDelivery(httpServer, {
     mayVerb: gate.mayVerb,
     principalOf: (req) => {
       const u = req.headers?.['x-test-user'] ?? 'test';
@@ -874,7 +874,7 @@ test('(P1c) a subscribe superseded and unsubscribed while pending inside core.su
   // map. This races after admission, not merely at the admission mayVerb.
   const gate = gateMayVerbCall(2);
   const httpServer = http.createServer();
-  const live = createLiveDelivery(httpServer, {
+  const live = createWebSocketLiveDelivery(httpServer, {
     mayVerb: gate.mayVerb,
     principalOf: (req) => {
       const u = req.headers?.['x-test-user'] ?? 'test';
@@ -967,7 +967,7 @@ test('(P1d) a subscribe superseded while its activation is in flight settles sil
   // emitting a second terminal frame and without reaching the winner's state.
   const gate = gateMayVerbCall(3);
   const httpServer = http.createServer();
-  const live = createLiveDelivery(httpServer, {
+  const live = createWebSocketLiveDelivery(httpServer, {
     mayVerb: gate.mayVerb,
     principalOf: (req) => {
       const u = req.headers?.['x-test-user'] ?? 'test';
@@ -1047,7 +1047,7 @@ test('(P2) core activation terminal failure emits exactly one terminal frame', a
   // resumed catch-up throws after the core has already terminally revoked.
   const gate = gateMayVerbCall(3);
   const httpServer = http.createServer();
-  const live = createLiveDelivery(httpServer, {
+  const live = createWebSocketLiveDelivery(httpServer, {
     mayVerb: gate.mayVerb,
     principalOf: (req) => {
       const u = req.headers?.['x-test-user'] ?? 'test';
