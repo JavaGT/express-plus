@@ -69,6 +69,37 @@ function projectRangeToOffsets(family: ContinuousTextFamily, startPoint: string,
   return { start, end };
 }
 
+function parseStoredEndpoint(serialized: string): { point: unknown; basisFrontier: unknown } {
+  let endpoint;
+  try {
+    endpoint = JSON.parse(serialized);
+  } catch {
+    fail('stored endpoint is not JSON');
+  }
+  if (!endpoint || typeof endpoint !== 'object' || Array.isArray(endpoint)
+    || !Object.hasOwn(endpoint, 'point') || !Object.hasOwn(endpoint, 'basisFrontier')) {
+    fail('stored endpoint is not a structural endpoint');
+  }
+  return { point: endpoint.point, basisFrontier: endpoint.basisFrontier };
+}
+
+function isFullyVisibleRecipient(recipient: any): boolean {
+  return !recipient.restricted && !recipient.redactions?.length && authoringRedactionsForRecipient(recipient).length === 0;
+}
+
+// Fully-visible recipients receive the stored structural endpoints (envelope v2).
+// Redacted/restricted recipients keep the offset-only v1 wire so op ids in a
+// basisFrontier never leak hidden causal history.
+function attachAnchoredRanges(recipient: any, anchored: ReadonlyArray<{ annotationId: string; start: { point: unknown; basisFrontier: unknown }; end: { point: unknown; basisFrontier: unknown } }>): any {
+  if (!isFullyVisibleRecipient(recipient)) return recipient;
+  const retained = new Set(recipient.ranges.map((range: { annotationId: string }) => range.annotationId));
+  return Object.freeze({ ...recipient, version: 2, ranges: Object.freeze(anchored.filter((range) => retained.has(range.annotationId)).map((range) => Object.freeze({
+    annotationId: range.annotationId,
+    start: Object.freeze(range.start),
+    end: Object.freeze(range.end),
+  }))) });
+}
+
 function loadAnnotations({ db, prefix, descriptor, documentId }: { db: any; prefix: string; descriptor: any; documentId: string }): any[] {
   const rows = db.prepare(`SELECT id, family, owner_id FROM ${prefix}_annotation WHERE document_id = ? ORDER BY id`).all(documentId);
   const targets = db.prepare(
@@ -130,6 +161,7 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
   // (fail closed); an unprojectable non-protector is dropped.
   const rangeRows = annotationRangeRows(db, prefix, row.id);
   const ranges: any[] = [];
+  const anchoredRanges: Array<{ annotationId: string; start: { point: unknown; basisFrontier: unknown }; end: { point: unknown; basisFrontier: unknown } }> = [];
   const droppedAnnotationIds = new Set<string>();
   for (const rangeRow of rangeRows) {
     const projected = projectRangeToOffsets(family, rangeRow.start_point, rangeRow.end_point);
@@ -143,6 +175,11 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
       continue;
     }
     ranges.push({ annotationId: rangeRow.annotation_id, start: projected.start, end: projected.end });
+    anchoredRanges.push({
+      annotationId: rangeRow.annotation_id,
+      start: parseStoredEndpoint(rangeRow.start_point),
+      end: parseStoredEndpoint(rangeRow.end_point),
+    });
   }
 
   const orphanRows = db.prepare(
@@ -203,7 +240,7 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
     capabilityHints: canWrite ? Object.keys(meta.capabilityHandles ?? {}) : [],
   };
   const recipient = caret === null
-    ? projectAnnotatedTextForRecipient(canonical, descriptor, decisions)
+    ? attachAnchoredRanges(projectAnnotatedTextForRecipient(canonical, descriptor, decisions), anchoredRanges)
     : projectAnnotatedTextCaretForRecipient(canonical, descriptor, decisions, caret, presence);
   if (caret !== null || !mintBasis) return recipient;
 

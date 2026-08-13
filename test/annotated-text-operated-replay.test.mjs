@@ -333,9 +333,17 @@ test('one-cardinality exclusive trim survives replay through the real projector 
     db: rebuilt, entity: ReplayDoc, row, principal,
     fieldName: 'body', descriptor: ReplayDoc.fields.body, mintBasis: false,
   });
-  const speakerRanges = recipient.ranges.filter((range) => range.annotationId === 'speaker-a').sort((a, b) => a.start - b.start);
+  const family = liveFamily(rebuilt);
+  const asOffsets = (range) => ({
+    annotationId: range.annotationId,
+    start: projectEndpointToOffset(family, range.start),
+    end: projectEndpointToOffset(family, range.end),
+  });
+  const speakerRanges = recipient.ranges.filter((range) => range.annotationId === 'speaker-a')
+    .map(asOffsets)
+    .sort((a, b) => a.start - b.start);
   assert.deepEqual(speakerRanges.map(({ start, end }) => [start, end]), [[0, 3], [7, 11]]);
-  assert.deepEqual(recipient.ranges.find((range) => range.annotationId === 'speaker-b'), { annotationId: 'speaker-b', start: 3, end: 7 });
+  assert.deepEqual(asOffsets(recipient.ranges.find((range) => range.annotationId === 'speaker-b')), { annotationId: 'speaker-b', start: 3, end: 7 });
   rebuilt.close();
 });
 

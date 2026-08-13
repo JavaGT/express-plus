@@ -584,12 +584,21 @@ export interface AnnotatedTextMeasurement {
   readonly formatVersion: number;
   readonly payload: unknown;
 }
+/** A stored structural endpoint: RGA point plus the historical basis frontier. */
+export interface AnnotatedTextStructuralEndpoint {
+  readonly point: readonly ['point', readonly ['root'] | readonly ['element', readonly [readonly [string, number], number]], 'left' | 'right'];
+  readonly basisFrontier: readonly (readonly [string, number])[];
+}
+/** Wire range: offsets on the v1 (redacted) envelope, endpoints on the v2 (fully-visible) envelope. */
+export type AnnotatedTextRecipientRange =
+  | { readonly annotationId: string; readonly start: number; readonly end: number }
+  | { readonly annotationId: string; readonly start: AnnotatedTextStructuralEndpoint; readonly end: AnnotatedTextStructuralEndpoint };
 /** The blockless recipient document: one continuous text frame plus document-scoped annotation ranges. */
 export interface AnnotatedTextDocument {
   readonly kind: 'workbench.annotatedText.recipient';
-  readonly version: 1;
+  readonly version: 1 | 2;
   readonly text: string;
-  readonly ranges: readonly { readonly annotationId: string; readonly start: number; readonly end: number }[];
+  readonly ranges: readonly AnnotatedTextRecipientRange[];
   readonly annotations: readonly AnnotatedTextAnnotation[];
   readonly orphans?: readonly {
     readonly id: string;
@@ -656,9 +665,9 @@ export interface AnnotatedTextRecipientRedaction {
 }
 export interface AnnotatedTextRecipientDocument {
   readonly kind: 'workbench.annotatedText.recipient';
-  readonly version: 1;
+  readonly version: 1 | 2;
   readonly text: string;
-  readonly ranges: readonly { readonly annotationId: string; readonly start: number; readonly end: number }[];
+  readonly ranges: readonly AnnotatedTextRecipientRange[];
   readonly annotations: readonly AnnotatedTextAnnotation[];
   readonly measurements?: readonly AnnotatedTextMeasurement[];
   readonly capabilities: readonly string[] | null;

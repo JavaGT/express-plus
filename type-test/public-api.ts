@@ -145,7 +145,7 @@ const canonicalText: string = canonicalDoc.text;
 const canonicalRanges: readonly { annotationId: string; start: number; end: number }[] = canonicalDoc.ranges;
 declare const recipientDoc: AnnotatedTextRecipientDocument;
 const recipientText: string = recipientDoc.text;
-const recipientRanges: readonly { annotationId: string; start: number; end: number }[] = recipientDoc.ranges;
+const recipientRanges: AnnotatedTextRecipientDocument['ranges'] = recipientDoc.ranges;
 // @ts-expect-error the blockless canonical document has no blocks
 canonicalDoc.blocks;
 // @ts-expect-error the blockless canonical document has no memberships

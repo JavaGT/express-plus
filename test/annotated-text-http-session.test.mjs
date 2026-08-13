@@ -797,7 +797,7 @@ test('own-echo fold installs text without a second bootstrap snapshot', async ()
     type: 'event', entity: 'Project', id: 'p1', seq: 2, seqSpan: [2, 2],
     event: { type: 'LiveDocument.body.operated', scope: 'Project:p1', seq: 2, actionId },
     fold: {
-      kind: 'annotatedText', version: 4, field: 'body', baseCursor: 1, fence: 2,
+      kind: 'annotatedText', version: 5, field: 'body', baseCursor: 1, fence: 2,
       text: { reducer: 'workbench.text', operations: [nextOp] },
       projection: { text: nextText },
       dispositions: [],
@@ -880,7 +880,7 @@ test('own-echo fold does not double-apply a pending insert or reject a queued su
     type: 'event', entity: 'Project', id: 'p1', seq: 2, seqSpan: [2, 2],
     event: { type: 'LiveDocument.body.operated', scope: 'Project:p1', seq: 2, actionId: 'action-1' },
     fold: {
-      kind: 'annotatedText', version: 4, field: 'body', baseCursor: 1, fence: 2,
+      kind: 'annotatedText', version: 5, field: 'body', baseCursor: 1, fence: 2,
       text: { reducer: 'workbench.text', operations: [insertA] },
       projection: { text: textA },
       dispositions: [],
@@ -906,7 +906,7 @@ test('own-echo fold does not double-apply a pending insert or reject a queued su
     type: 'event', entity: 'Project', id: 'p1', seq: 3, seqSpan: [3, 3],
     event: { type: 'LiveDocument.body.operated', scope: 'Project:p1', seq: 3, actionId: 'action-2' },
     fold: {
-      kind: 'annotatedText', version: 4, field: 'body', baseCursor: 2, fence: 3,
+      kind: 'annotatedText', version: 5, field: 'body', baseCursor: 2, fence: 3,
       text: { reducer: 'workbench.text', operations: [insertB] },
       projection: { text: textAB },
       dispositions: [],
@@ -1009,7 +1009,7 @@ test('a v4 fold missing or malformed dispositions recovers by snapshot instead o
     type: 'event', entity: 'Project', id: 'p1', seq: 2, seqSpan: [2, 2],
     event: { type: 'LiveDocument.body.operated', scope: 'Project:p1', seq: 2, actionId: 'missing-dispositions' },
     fold: {
-      kind: 'annotatedText', version: 4, field: 'body', baseCursor: 1, fence: 2,
+      kind: 'annotatedText', version: 5, field: 'body', baseCursor: 1, fence: 2,
       text: { reducer: 'workbench.text', operations: [['workbench.text', 1, ['a'.repeat(32), 1], 1, [], ['insert', ['root'], 'x']]] },
       projection: { text: 'x' },
       familyElementCount: 1,
@@ -1030,7 +1030,7 @@ test('a v4 fold missing or malformed dispositions recovers by snapshot instead o
     type: 'event', entity: 'Project', id: 'p1', seq: 3, seqSpan: [3, 3],
     event: { type: 'LiveDocument.body.operated', scope: 'Project:p1', seq: 3, actionId: 'malformed-dispositions' },
     fold: {
-      kind: 'annotatedText', version: 4, field: 'body', baseCursor: 2, fence: 3,
+      kind: 'annotatedText', version: 5, field: 'body', baseCursor: 2, fence: 3,
       text: { reducer: 'workbench.text', operations: [['workbench.text', 1, ['a'.repeat(32), 1], 1, [], ['insert', ['root'], 'y']]] },
       projection: { text: 'y' },
       dispositions: { annotationId: 'c1' },
@@ -1112,7 +1112,7 @@ test('a collapsed range without a matching disposition recovers by snapshot inst
     type: 'event', entity: 'Project', id: 'p1', seq: 2, seqSpan: [2, 2],
     event: { type: 'LiveDocument.body.operated', scope: 'Project:p1', seq: 2, actionId: 'no-disposition' },
     fold: {
-      kind: 'annotatedText', version: 4, field: 'body', baseCursor: 1, fence: 2,
+      kind: 'annotatedText', version: 5, field: 'body', baseCursor: 1, fence: 2,
       text: { reducer: 'workbench.text', operations: [deleteOp] },
       projection: { text: nextText },
       dispositions: [],
@@ -1203,7 +1203,7 @@ test('a v4 fold disposition reproduces the fresh authorized snapshot for emptied
     type: 'event', entity: 'Project', id: 'p1', seq: 2, seqSpan: [2, 2],
     event: { type: 'LiveDocument.body.operated', scope: 'Project:p1', seq: 2, actionId: 'foreign' },
     fold: {
-      kind: 'annotatedText', version: 4, field: 'body', baseCursor: 1, fence: 2,
+      kind: 'annotatedText', version: 5, field: 'body', baseCursor: 1, fence: 2,
       text: { reducer: 'workbench.text', operations: [deleteOp] },
       projection: { text: nextText },
       dispositions: [
@@ -1270,7 +1270,7 @@ test('baseCursor mismatch forces snapshot recovery rather than applying fold', a
     type: 'event', entity: 'Project', id: 'p1', seq: 2, seqSpan: [2, 2],
     event: { type: 'LiveDocument.body.operated', scope: 'Project:p1', seq: 2, actionId: 'foreign' },
     fold: {
-      kind: 'annotatedText', version: 4, field: 'body', baseCursor: 0, fence: 2,
+      kind: 'annotatedText', version: 5, field: 'body', baseCursor: 0, fence: 2,
       text: { reducer: 'workbench.text', operations: [['workbench.text', 1, ['a'.repeat(32), 1], 1, [], ['insert', ['root'], 'x']]] },
       projection: { text: 'x' },
       dispositions: [],

@@ -2,7 +2,7 @@
 // blockless model).
 //
 // The server emits BLOCKLESS state: one continuous RGA family per document.
-// This projector emits a single v4 fold envelope for a contiguous whole-document
+// This projector emits a single v5 fold envelope for a contiguous whole-document
 // text.apply / text.replace transition when the recipient's view of the ENTIRE
 // document is fully visible and unredacted. The fully-visible client folds the
 // text operations onto its own family copy (seeded from its snapshot's authoring
@@ -12,12 +12,10 @@
 // verify a fold. Annotation edits change no text and fall through to the
 // ordinary envelope grammar; block-era operation shapes fall through with them.
 //
-// v4 additionally ships the authoritative `dispositions` for annotations whose
-// range an edit emptied (deleted vs orphaned, with the orphan's saved quote) so
-// the client's one reconciliation path reproduces the server's policy instead
-// of inferring it. v3 clients (and pre-disposition servers) fail closed to
-// snapshot recovery on a version mismatch: a v3 client that silently pruned an
-// emptied orphan would diverge from the server.
+// v5 is the fold that pairs with recipient envelope v2 (anchored ranges).
+// Earlier fold versions fail closed to snapshot recovery on a version mismatch
+// so a client never misreads endpoints as offsets or silently prunes an
+// emptied orphan.
 
 import { parseEventType, EventKind } from './event-handle.mjs';
 import { projectAnnotatedTextSnapshot } from './annotated-text-snapshot.mjs';
@@ -374,7 +372,7 @@ export async function tryBuildAnnotatedTextFoldEnvelopes(ctx         , { db, doc
 
   const fold = Object.freeze({
     kind: 'annotatedText',
-    version: 4,
+    version: 5,
     field: document.fieldName,
     baseCursor,
     fence,

@@ -696,7 +696,7 @@ export interface AnnotatedTextMeasurement {
  */
 export interface AnnotatedTextDocument {
   readonly kind: 'workbench.annotatedText.recipient';
-  readonly version: 1;
+  readonly version: 1 | 2;
   readonly text: string;
   readonly ranges: readonly AnnotatedTextRange[];
   readonly annotations: readonly AnnotatedTextAnnotation[];
@@ -711,8 +711,11 @@ export interface AnnotatedTextDocument {
 export function materializeAnnotatedTextSnapshot(
   snapshot: Record<string, unknown>,
   declaration: AnnotatedTextFieldHandle,
-  options?: { readonly binding?: unknown },
+  options?: { readonly binding?: unknown; readonly family?: unknown },
 ): AnnotatedTextDocument;
+
+/** Project a historical-basis endpoint to an absolute UTF-16 offset. */
+export function projectEndpointToOffset(family: unknown, endpoint: unknown): number;
 
 // ---------------------------------------------------------------------------
 // createAnnotatedTextHttpSession — document-bound typed authoring

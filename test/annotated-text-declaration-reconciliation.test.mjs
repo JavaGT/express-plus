@@ -10,6 +10,7 @@ import { annotatedTextCreateAction } from '../build/annotated-text-action.mjs';
 import { projectAnnotatedTextSnapshot } from '../build/annotated-text-snapshot.mjs';
 import { withAuthoringBinding } from './annotated-text-authoring-fixture.mjs';
 import { createAnnotatedTextHttpSession, materializeAnnotatedTextSnapshot } from '../public/workbench-client.mjs';
+import { restoreTextFamily } from '../public/workbench-annotated-text-continuous.mjs';
 
 const protectingAccess = async ({ is }) => (await is.owner()) ? grant(read) : grant();
 
@@ -164,10 +165,13 @@ function makeSession({ Doc, origin, viewAs = null, sources }) {
 
 async function freshRecipient(ctx, principalId = 'u1') {
   const row = ctx.db.prepare("SELECT * FROM ReconDoc WHERE id = 'd1'").get();
+  const family = restoreTextFamily(JSON.parse(
+    ctx.db.prepare("SELECT family_checkpoint FROM ReconDoc_body_state WHERE document_id = 'd1'").get().family_checkpoint,
+  ));
   return materializeAnnotatedTextSnapshot(await projectAnnotatedTextSnapshot({
     db: ctx.db, entity: ctx.Doc, row, principal: { type: 'user', id: principalId, attributes: {} },
     fieldName: 'body', descriptor: ctx.Doc.fields.body, mintBasis: false,
-  }), ctx.Doc.body);
+  }), ctx.Doc.body, { family });
 }
 
 async function assertMatchesFresh(ctx, session, principalId = 'u1') {

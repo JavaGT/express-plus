@@ -561,7 +561,7 @@ test('annotated text text-insert is delivered as a fold envelope over the live S
   assert.equal(envelope.fold.kind, 'annotatedText');
   // The complete blockless v4 fold shape: a malformed fold — or one with the
   // wrong projected text — must not pass as "usable fold delivery".
-  assert.equal(envelope.fold.version, 4);
+  assert.equal(envelope.fold.version, 5);
   assert.equal(envelope.fold.field, 'body');
   assert.ok(Array.isArray(envelope.fold.dispositions), 'a fold always ships its emptied-annotation dispositions');
   assert.equal(envelope.fold.dispositions.length, 0, 'a pure text insert empties no annotation');
@@ -974,7 +974,7 @@ test('annotated-text capability hints distinguish live read-only from write-gran
   principal = { type: 'user', id: 'u2', attributes: {} };
   const viewer = boot('u2', 'viewer-op');
   await viewer.ready.catch((error) => { error.message = `viewer ready: ${error.message}`; throw error; });
-  assert.equal(viewer.document.version, 1);
+  assert.equal(viewer.document.version, 2);
   assert.notEqual(viewer.status, 'revoked');
   assert.deepEqual(viewer.document.capabilities, []);
 

@@ -20,6 +20,7 @@ import { applyTextOperation, materializeText as materializeFamilyText, restoreTe
 import { annotatedTextAction } from './workbench-annotated-text-action.mjs';
 export { bindAnnotatedTextEditor } from './workbench-annotated-text-editor.mjs';
 export { materializeAnnotatedTextSnapshot };
+export { projectEndpointToOffset } from './workbench-annotated-text-continuous.mjs';
 
 // --- BEGIN GENERATED from src/replay-decision.ts (keep in sync; zero-import) ---
 function normalizeSeqSpan(seqOrSpan) {
@@ -3533,7 +3534,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
   function foldAnnotatedTextDocument(currentDocument, envelope) {
     const startedAt = onFoldApplied ? performance.now() : 0;
     const fold = envelope?.fold;
-    if (!fold || fold.kind !== 'annotatedText' || fold.version !== 4 || fold.field !== field.fieldName) {
+    if (!fold || fold.kind !== 'annotatedText' || fold.version !== 5 || fold.field !== field.fieldName) {
       throw new Error('annotated text fold envelope is missing or unsupported');
     }
     const fence = envelope.seq ?? envelope.seqSpan?.[1];
@@ -3635,7 +3636,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       // subsequent folds apply against the client's own copy instead of
       // re-shipping the whole family per keystroke.
       familyReplica = authoring.family ? restoreTextFamily(authoring.family) : null;
-      const result = materializeAnnotatedTextSnapshot({ ...snapshot[field?.fieldName], authoring }, field, snapshotBinding);
+      const result = materializeAnnotatedTextSnapshot({ ...snapshot[field?.fieldName], authoring }, field, { binding: snapshotBinding, family: familyReplica });
       return result;
     },
   });

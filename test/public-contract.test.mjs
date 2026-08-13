@@ -45,7 +45,7 @@ export const PUBLIC_API = Object.freeze({
     named: Object.freeze([
       'LiveChannel', 'LiveList', 'WorkbenchFailureError', 'decodeResult', 'createLiveStore',
        'createScopeLiveStore', 'createLiveDeliverySession', 'createLiveDeliveryHttpSession', 'createAnnotatedTextHttpSession',
-      'createAuthClient',
+      'createAuthClient', 'projectEndpointToOffset',
     ]),
   }),
   'workbench/annotated-text': Object.freeze({

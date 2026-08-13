@@ -58,7 +58,7 @@ test('recipient read returns a deeply frozen, cursor-bound public projection and
   assert.ok(Object.isFrozen(snapshot));
   assert.ok(Object.isFrozen(snapshot.document));
   assert.equal(snapshot.document.kind, 'workbench.annotatedText.recipient');
-  assert.equal(snapshot.document.version, 1);
+  assert.equal(snapshot.document.version, 2);
   assert.equal(snapshot.document.text, 'visible');
   assert.equal(Object.hasOwn(snapshot.document, 'blocks'), false);
   assert.ok(Object.isFrozen(snapshot.document.ranges));

@@ -11,6 +11,7 @@ import { tryBuildAnnotatedTextFoldEnvelopes } from '../build/annotated-text-fold
 import { projectAnnotatedTextSnapshot } from '../build/annotated-text-snapshot.mjs';
 import { ensureStream, ensureLease, hashClientNonce } from '../build/annotated-text-authoring-stream.mjs';
 import { createAnnotatedTextHttpSession, materializeAnnotatedTextSnapshot } from '../public/workbench-client.mjs';
+import { restoreTextFamily } from '../public/workbench-annotated-text-continuous.mjs';
 import { withAuthoringBinding } from './annotated-text-authoring-fixture.mjs';
 
 // A foldable text edit that empties an annotation carries the server's
@@ -150,6 +151,16 @@ async function ownerRecipient(ctx) {
     db: ctx.db, entity: ctx.Doc, row, principal: { id: 'u1' },
     fieldName: 'body', descriptor: ctx.Doc.fields.body, mintBasis: false,
   });
+}
+
+function ownerFamily(ctx) {
+  return restoreTextFamily(JSON.parse(
+    ctx.db.prepare("SELECT family_checkpoint FROM FoldDispositionDoc_body_state WHERE document_id = 'd1'").get().family_checkpoint,
+  ));
+}
+
+function materializeOwner(ctx, recipient) {
+  return materializeAnnotatedTextSnapshot(recipient, ctx.Doc.body, { family: ownerFamily(ctx) });
 }
 
 async function buildFoldWithNonce(ctx, event, clientNonce) {
@@ -335,7 +346,7 @@ test('integrated: real fold envelopes reconcile own echo and foreign events to t
   assert.equal((await applyRange(ctx, 'f-orph-apply', { id: 'f-orph', family: 'comment', fields: {} }, 11, 15, auth)).ok, true);
 
   // The pre-edit authorized snapshot is the comparison oracle throughout.
-  const freshBefore = materializeAnnotatedTextSnapshot(await ownerRecipient(ctx), ctx.Doc.body);
+  const freshBefore = materializeOwner(ctx, await ownerRecipient(ctx));
   assert.equal(freshBefore.text, 'three four five six');
   assert.deepEqual(freshBefore.orphans.map((orphan) => orphan.id), ['a-old', 'z-old']);
 
@@ -429,7 +440,7 @@ test('integrated: real fold envelopes reconcile own echo and foreign events to t
   // policy dropped m-del, the orphan policy kept m-new, and the combined
   // orphan list is the canonical id-ascending order with the new orphan
   // BETWEEN the pre-existing a-old and z-old.
-  const freshAfterOwn = materializeAnnotatedTextSnapshot(await ownerRecipient(ctx), ctx.Doc.body);
+  const freshAfterOwn = materializeOwner(ctx, await ownerRecipient(ctx));
   assert.equal(freshAfterOwn.text, 'five six');
   assert.deepEqual(freshAfterOwn.orphans.map((orphan) => orphan.id), ['a-old', 'm-new', 'z-old']);
   assert.equal(session.document.text, freshAfterOwn.text);
@@ -451,7 +462,7 @@ test('integrated: real fold envelopes reconcile own echo and foreign events to t
   sources[0].onmessage({ data: JSON.stringify(foreignEnvelope) });
   await new Promise((resolve) => setTimeout(resolve, 20));
 
-  const freshAfterForeign = materializeAnnotatedTextSnapshot(await ownerRecipient(ctx), ctx.Doc.body);
+  const freshAfterForeign = materializeOwner(ctx, await ownerRecipient(ctx));
   assert.equal(freshAfterForeign.text, 'six');
   assert.deepEqual(freshAfterForeign.orphans.map((orphan) => orphan.id), ['a-old', 'f-orph', 'm-new', 'z-old']);
   assert.equal(session.document.text, freshAfterForeign.text);

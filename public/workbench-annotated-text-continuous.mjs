@@ -14,14 +14,17 @@
 
 import {
   applyTextOp,
+  compareOpId,
   createTextState,
-  materializeText as materializeCheckpointText,
+  frontierDominates,
   restoreTextCheckpoint,
   textCheckpoint,
 } from './workbench-annotated-text.mjs';
 
+const ROOT_ID = 'root';
 const trustedFamilies = new WeakSet();
 const materializedTextCache = new WeakMap();
+const derivedIndexCache = new WeakMap();
 
 function fail(message) {
   throw new Error(`annotated-text continuous: ${message}`);
@@ -87,9 +90,98 @@ export function materializeText(family) {
   const trusted = assertTrustedFamily(family);
   const cached = materializedTextCache.get(trusted);
   if (cached !== undefined) return cached;
-  const text = materializeCheckpointText(trusted.checkpoint);
+  const text = derivedIndex(trusted).text;
   materializedTextCache.set(trusted, text);
   return text;
+}
+
+function anchorKeyStr(anchor) {
+  if (anchor[0] === 'root') return ROOT_ID;
+  return `${anchor[1][0][0]}:${anchor[1][0][1]}:${anchor[1][1]}`;
+}
+
+function rgaTraversal(checkpoint) {
+  const children = new Map([[ROOT_ID, []]]);
+  for (const [key, element] of Object.entries(checkpoint.elements)) {
+    const list = children.get(element.parent) ?? [];
+    list.push([key, element]);
+    children.set(element.parent, list);
+  }
+  for (const list of children.values()) {
+    list.sort(([, left], [, right]) => right.lamport - left.lamport || -compareOpId(left.op, right.op));
+  }
+  const order = [];
+  const stack = [...(children.get(ROOT_ID) ?? [])].reverse();
+  while (stack.length > 0) {
+    const entry = stack.pop();
+    order.push(entry);
+    const descendants = children.get(entry[0]);
+    if (descendants) stack.push(...descendants.slice().reverse());
+  }
+  return order;
+}
+
+function derivedIndex(family) {
+  const cached = derivedIndexCache.get(family);
+  if (cached) return cached;
+  const order = rgaTraversal(family.checkpoint);
+  const positions = new Map();
+  const visibleOffsets = [0];
+  let visibleOffset = 0;
+  let text = '';
+  for (let index = 0; index < order.length; index += 1) {
+    const [key, element] = order[index];
+    positions.set(key, index);
+    if (element.deletedBy.length === 0) {
+      text += element.scalar;
+      visibleOffset += element.scalar.length;
+    }
+    visibleOffsets.push(visibleOffset);
+  }
+  const derived = Object.freeze({ order, positions, visibleOffsets, text });
+  derivedIndexCache.set(family, derived);
+  return derived;
+}
+
+function endpointVirtualPosition(family, endpoint) {
+  const { order, positions } = derivedIndex(family);
+  const anchor = endpoint.point[1];
+  const affinity = endpoint.point[2];
+  const anchorKey = anchorKeyStr(anchor);
+  const basis = endpoint.basisFrontier;
+  if (anchorKey === ROOT_ID) {
+    if (affinity === 'left') return 0;
+    for (let i = 0; i < order.length; i += 1) {
+      const [, element] = order[i];
+      if (element.parent === ROOT_ID && frontierDominates(basis, [[...element.op]])) return i;
+    }
+    return order.length;
+  }
+  const anchorIdx = positions.get(anchorKey);
+  if (anchorIdx === undefined) fail('anchor element not found in checkpoint');
+  return affinity === 'left' ? anchorIdx : anchorIdx + 1;
+}
+
+function assertDominatingBasis(family, endpoint, label) {
+  if (!frontierDominates(family.checkpoint.frontier, endpoint.basisFrontier)) {
+    fail(`${label}: current frontier does not dominate endpoint basis — anchor is lost`);
+  }
+  const anchorKey = anchorKeyStr(endpoint.point[1]);
+  if (anchorKey !== ROOT_ID && !Object.hasOwn(family.checkpoint.elements, anchorKey)) {
+    fail(`${label}: endpoint anchor element no longer exists`);
+  }
+}
+
+/**
+ * Project a historical-basis endpoint to an absolute UTF-16 offset in the
+ * current document. The current frontier must dominate the endpoint basis and
+ * the anchor must still exist (including as a tombstone).
+ */
+export function projectEndpointToOffset(family, endpoint) {
+  assertTrustedFamily(family);
+  assertDominatingBasis(family, endpoint, 'projectEndpointToOffset');
+  const { visibleOffsets } = derivedIndex(family);
+  return visibleOffsets[endpointVirtualPosition(family, endpoint)];
 }
 
 function deepFreeze(value) {

@@ -161,7 +161,7 @@ test('a recipient with any confidential span never receives a fold envelope (no 
   assert.ok(Array.isArray(owner));
   assert.equal(owner[0].type, 'event');
   assert.equal(owner[0].fold?.kind, 'annotatedText');
-  assert.equal(owner[0].fold?.version, 4);
+  assert.equal(owner[0].fold?.version, 5);
   assert.equal(typeof owner[0].fold?.projection?.text, 'string');
   assert.match(owner[0].fold.projection.text, /x/);
 });

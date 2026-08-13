@@ -165,7 +165,7 @@ test('rejects incomplete or non-recipient envelopes', () => {
   const errors = [
     { ...recipient(), kind: 'other' },
     { ...recipient(), kind: undefined },
-    { ...recipient(), version: 2 },
+    { ...recipient(), version: 3 },
     { ...recipient(), text: undefined },
     { ...recipient(), ranges: 'nope' },
     { ...recipient(), annotations: 'nope' },
@@ -178,6 +178,7 @@ test('rejects incomplete or non-recipient envelopes', () => {
   }
   assert.throws(() => materializeAnnotatedTextSnapshot(recipient({ orphans: 'nope' })), /orphans must be an array/);
   assert.throws(() => materializeAnnotatedTextSnapshot(recipient({ redactions: 'nope' })), /redactions must be an array/);
+  assert.throws(() => materializeAnnotatedTextSnapshot(recipient({ version: 2 })), /family replica|structural endpoints/);
 });
 
 test('materializes restricted flag and orphans without savedRange', () => {

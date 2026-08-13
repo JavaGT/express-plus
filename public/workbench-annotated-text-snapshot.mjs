@@ -1,4 +1,5 @@
 import { createAnnotatedTextSnapshotSessionBinding, getAnnotatedTextSnapshotSessionBinding } from './workbench-annotated-text-snapshot-internal.mjs';
+import { projectEndpointToOffset } from './workbench-annotated-text-continuous.mjs';
 
 function deepFreeze(value) {
   if (value === null || typeof value !== 'object') return value;
@@ -7,10 +8,50 @@ function deepFreeze(value) {
   return Object.freeze(value);
 }
 
+function isStructuralEndpoint(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+    && Object.hasOwn(value, 'point') && Object.hasOwn(value, 'basisFrontier');
+}
+
+function materializeRecipientRanges(snapshot, family) {
+  if (snapshot.version === 1) {
+    return snapshot.ranges.map((range) => {
+      if (!range || typeof range !== 'object' || Array.isArray(range)
+        || typeof range.annotationId !== 'string'
+        || !Number.isSafeInteger(range.start) || !Number.isSafeInteger(range.end)) {
+        throw new Error('annotatedText snapshot: v1 ranges must be offset pairs');
+      }
+      if (isStructuralEndpoint(range.start) || isStructuralEndpoint(range.end)) {
+        throw new Error('annotatedText snapshot: v1 envelope must not carry endpoints');
+      }
+      return { annotationId: range.annotationId, start: range.start, end: range.end };
+    });
+  }
+  if (snapshot.version !== 2) {
+    throw new Error('annotatedText snapshot: snapshot must be a complete blockless recipient envelope');
+  }
+  if (!family) {
+    throw new Error('annotatedText snapshot: v2 endpoints require a family replica');
+  }
+  return snapshot.ranges.map((range) => {
+    if (!range || typeof range !== 'object' || Array.isArray(range)
+      || typeof range.annotationId !== 'string'
+      || !isStructuralEndpoint(range.start) || !isStructuralEndpoint(range.end)) {
+      throw new Error('annotatedText snapshot: v2 ranges must be structural endpoints');
+    }
+    return {
+      annotationId: range.annotationId,
+      start: projectEndpointToOffset(family, range.start),
+      end: projectEndpointToOffset(family, range.end),
+    };
+  });
+}
+
 export function materializeAnnotatedTextSnapshot(snapshot, handle, options = {}) {
-  const binding = getAnnotatedTextSnapshotSessionBinding({ binding: options?.binding }) ?? createAnnotatedTextSnapshotSessionBinding();
+  const binding = getAnnotatedTextSnapshotSessionBinding(options?.binding ?? options) ?? createAnnotatedTextSnapshotSessionBinding();
   if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot) ||
-      snapshot.kind !== 'workbench.annotatedText.recipient' || snapshot.version !== 1 ||
+      snapshot.kind !== 'workbench.annotatedText.recipient' ||
+      (snapshot.version !== 1 && snapshot.version !== 2) ||
       typeof snapshot.text !== 'string' || !Array.isArray(snapshot.ranges) ||
       !Array.isArray(snapshot.annotations) || !Array.isArray(snapshot.measurements)) {
     throw new Error('annotatedText snapshot: snapshot must be a complete blockless recipient envelope');
@@ -57,9 +98,9 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options = {})
     capabilities = names;
   }
   const document = deepFreeze({
-    kind: 'workbench.annotatedText.recipient', version: 1,
+    kind: 'workbench.annotatedText.recipient', version: snapshot.version,
     text: snapshot.text,
-    ranges: snapshot.ranges.map((r) => ({ annotationId: r.annotationId, start: r.start, end: r.end })),
+    ranges: materializeRecipientRanges(snapshot, options.family),
     annotations: snapshot.annotations.map((a) => ({ id: a.id, family: a.family, fields: { ...a.fields }, ...(a.owner ? { owner: a.owner } : {}) })),
     orphans: (snapshot.orphans ?? []).map((o) => ({ id: o.id, family: o.family, fields: { ...o.fields }, savedQuote: o.savedQuote, ...(o.owner ? { owner: o.owner } : {}) })),
     measurements: (snapshot.measurements ?? []).map((m) => ({ ...m })),
