@@ -9,19 +9,12 @@ import { test } from 'node:test';
 import {
   applyTextOp, canonicalTextOp, createTextState, materializeText,
   restoreTextCheckpoint, textCheckpoint,
-} from '../src/annotated-text.mjs';
-import {
-  applyTextOperationToBlock, createTextFamily, materializeBlock, mergeBlocks,
-  restoreTextFamilyCheckpoint, splitBlock, textFamilyCheckpoint,
-  textOperationForOffsetEdit,
-} from '../src/annotated-text-family.mjs';
-import { deleteText, insertText } from '../public/workbench-text-edit.mjs';
+} from '../build/annotated-text.mjs';
+import { insertText, deleteText } from '../public/workbench-text-edit.mjs';
 
 const A = 'a'.repeat(32);
 const B = 'b'.repeat(32);
 const C = 'c'.repeat(32);
-const E = 'e'.repeat(32);
-const F = 'f'.repeat(32);
 
 const EMOJI = '😀';
 const COMBINING = 'e\u0301';
@@ -42,12 +35,6 @@ function scalarOffsets(text) {
   const offsets = [0];
   for (const scalar of text) offsets.push(offsets[offsets.length - 1] + scalar.length);
   return offsets;
-}
-
-function interiorOffset(text) {
-  const offsets = scalarOffsets(text);
-  assert.ok(offsets.length >= 3, `text too short to split interior: ${text.length}`);
-  return offsets[Math.floor(offsets.length / 2)];
 }
 
 // Simulate three actors with independent causal views. Each generated op's
@@ -276,77 +263,3 @@ test('duplicate delivery is idempotent and never disturbs the canonical converge
   assert.equal(JSON.stringify(textCheckpoint(replica)), once);
 });
 
-function assertPartitionInvariant(family) {
-  const keys = family.blocks.flatMap((block) => block.elementKeys);
-  assert.equal(new Set(keys).size, keys.length, 'element keys must never repeat across blocks');
-  assert.equal(keys.length, Object.keys(family.checkpoint.elements).length, 'blocks must partition every element');
-  const globalText = materializeText(restoreTextCheckpoint(family.checkpoint));
-  const blockText = family.blocks.map((block) => materializeBlock(family, block.id)).join('');
-  assert.equal(blockText, globalText, 'concatenated block text must equal global materialization');
-}
-
-test('family invariants survive block-local edits, split/merge, and checkpoint restore', () => {
-  const { ops } = generateHistory({ seed: 2024, steps: 60 });
-  const cp = textCheckpoint(ops.reduce(applyTextOp, createTextState()));
-  const family0 = createTextFamily('doc1', cp, 'block1');
-  assert.ok(materializeBlock(family0, 'block1').length > 0);
-  assertPartitionInvariant(family0);
-
-  // Split then merge restores the family checkpoint byte-for-byte.
-  const splitResult = splitBlock(family0, 'block1', 'block2', interiorOffset(materializeBlock(family0, 'block1')));
-  assert.equal(splitResult.type, 'split');
-  assertPartitionInvariant(splitResult.family);
-  const mergedBack = mergeBlocks(splitResult.family, 'block1', 'block2');
-  assert.equal(
-    JSON.stringify(textFamilyCheckpoint(mergedBack)),
-    JSON.stringify(textFamilyCheckpoint(family0)),
-    'split+merge must preserve the original family checkpoint',
-  );
-
-  // Block-local insert generated with textOperationForOffsetEdit.
-  const insertEdit = {
-    kind: 'text.insert',
-    at: { blockId: 'block2', offset: interiorOffset(materializeBlock(splitResult.family, 'block2')), affinity: 'right' },
-    text: `${EMOJI}p`,
-  };
-  const insertOp = textOperationForOffsetEdit(splitResult.family, insertEdit, E, 500);
-  canonicalTextOp(insertOp);
-  assert.ok(insertOp[5][2].includes(EMOJI));
-  let family = applyTextOperationToBlock(splitResult.family, 'block2', insertOp);
-  assertPartitionInvariant(family);
-  assert.ok(materializeBlock(family, 'block2').includes(EMOJI), 'inserted emoji must land in block2');
-
-  // Block-local delete of the inserted emoji stays inside the owning block.
-  const block2Text = materializeBlock(family, 'block2');
-  const countBefore = block2Text.split(EMOJI).length - 1;
-  assert.ok(countBefore >= 1);
-  const emojiIndex = block2Text.indexOf(EMOJI);
-  const deleteEdit = {
-    kind: 'text.delete',
-    from: { blockId: 'block2', offset: emojiIndex },
-    to: { blockId: 'block2', offset: emojiIndex + EMOJI.length },
-  };
-  const deleteOp = textOperationForOffsetEdit(family, deleteEdit, F, 501);
-  assert.equal(deleteOp[5][0], 'delete');
-  canonicalTextOp(deleteOp);
-  family = applyTextOperationToBlock(family, 'block2', deleteOp);
-  assertPartitionInvariant(family);
-  const countAfter = materializeBlock(family, 'block2').split(EMOJI).length - 1;
-  assert.equal(countAfter, countBefore - 1, 'exactly one emoji scalar must be deleted within the block');
-
-  // Split and merge on the edited family preserves ownership and concatenation.
-  if (scalarOffsets(materializeBlock(family, 'block2')).length >= 3) {
-    const r = splitBlock(family, 'block2', 'block3', interiorOffset(materializeBlock(family, 'block2')));
-    assert.equal(r.type, 'split');
-    family = r.family;
-    assertPartitionInvariant(family);
-    family = mergeBlocks(family, 'block2', 'block3');
-    assertPartitionInvariant(family);
-  }
-
-  // Family checkpoint restore round-trips the post-edit state exactly.
-  const saved = textFamilyCheckpoint(family);
-  const restored = restoreTextFamilyCheckpoint(saved);
-  assert.equal(JSON.stringify(restored), JSON.stringify(family));
-  assert.deepEqual(restored, family);
-});

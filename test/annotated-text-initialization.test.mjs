@@ -5,10 +5,10 @@ import { DatabaseSync } from 'node:sqlite';
 import workbench, {
   annotatedText, annotation, entity, everyone, executeDDL, executeFrameworkDDL, grant, measurement,
   read, ref, scope, write, registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension,
-} from '../src/internal.mjs';
-import { materializeText, restoreTextFamily } from '../src/annotated-text-continuous.mjs';
-import { annotatedTextCreateAction } from '../src/annotated-text-public.mjs';
-import { frozenJsonSnapshot } from '../src/annotated-text-r2.mjs';
+} from '../build/internal.mjs';
+import { materializeText, restoreTextFamily } from '../build/annotated-text-continuous.mjs';
+import { annotatedTextCreateAction } from '../build/annotated-text-public.mjs';
+import { frozenJsonSnapshot } from '../build/frozen-json.mjs';
 import { withAuthoringBinding } from './annotated-text-authoring-fixture.mjs';
 
 registerAnnotatedTextContract('sourceInit', Object.freeze({ kind: 'measurement' }));

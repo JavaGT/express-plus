@@ -99,7 +99,6 @@ interface V9AdmitContext {
   scope: string;
   principal: Principal | null | undefined;
   actionId: string;
-  handlers?: unknown;
 }
 
 interface V9Prelude extends V9AdmitContext {
@@ -458,7 +457,7 @@ function edit_annotationId(command: V9Command): string | undefined {
 /**
  * Admit a validated v9 annotated-text command. Structure edits (block.split,
  * block.merge, block.continue, block-group.assignment) are gone in the
- * blockless model and are rejected. `handlers` from the block era are ignored.
+ * blockless model and are rejected.
  */
 export async function admitV9AnnotatedTextEdit(ctx: V9AdmitContext): Promise<unknown[]> {
   const prelude = await assertV9AuthoringPrelude(ctx);

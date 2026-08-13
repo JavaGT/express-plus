@@ -18,13 +18,49 @@ import {
   projectEndpointToOffset,
   compareStructuralEndpoints,
 } from './annotated-text-continuous.ts';
-import { assertAnnotation } from './annotated-text-membership.ts';
 import type { ContinuousTextFamily } from './annotated-text-continuous.ts';
 import type { StructuralEndpoint } from './annotated-text-family.ts';
 import type { TextElement } from './annotated-text.ts';
 
 function fail(message: string): never {
   throw new Error(`annotated-text ranges: ${message}`);
+}
+
+/** A blockless annotation record (the block-free shape reused from the block era). */
+export interface Annotation {
+  id: string;
+  family: string;
+  empty: 'delete' | 'orphan';
+  protectedTargetIds?: readonly string[];
+}
+
+/** Validate and freeze an annotation record. */
+export function assertAnnotation(annotation: any): Annotation {
+  if (!annotation || typeof annotation !== 'object' || Array.isArray(annotation)) fail('annotation must be a non-array object');
+  const allowedKeys = ['id', 'family', 'empty', 'protectedTargetIds'];
+  for (const key of Object.keys(annotation)) {
+    if (!allowedKeys.includes(key)) fail(`unknown annotation key: ${key}`);
+  }
+  if (typeof annotation.id !== 'string' || annotation.id.length === 0) fail('annotation id must be a non-empty string');
+  if (typeof annotation.family !== 'string' || annotation.family.length === 0) fail('annotation family must be a non-empty string');
+  if (annotation.empty !== 'delete' && annotation.empty !== 'orphan') fail('annotation empty must be delete or orphan');
+  if (annotation.protectedTargetIds !== undefined) {
+    if (!Array.isArray(annotation.protectedTargetIds)) fail('protectedTargetIds must be an array');
+    for (const id of annotation.protectedTargetIds) {
+      if (typeof id !== 'string' || id.length === 0) fail('protectedTargetIds must contain non-empty strings');
+    }
+    const sorted = [...annotation.protectedTargetIds].sort();
+    const unique = sorted.filter((id, i) => i === 0 || id !== sorted[i - 1]);
+    if (JSON.stringify(annotation.protectedTargetIds) !== JSON.stringify(unique)) fail('protectedTargetIds must be sorted and unique');
+  }
+  return deepFreeze({
+    id: annotation.id,
+    family: annotation.family,
+    empty: annotation.empty,
+    protectedTargetIds: annotation.protectedTargetIds !== undefined
+      ? Object.freeze([...annotation.protectedTargetIds])
+      : undefined,
+  });
 }
 
 export interface AnnotationRange {

@@ -16,7 +16,7 @@ import {
 } from '../annotated-text-continuous.ts';
 import { resolveDeclarationMeasurementExtension } from '../annotated-text-field.ts';
 import { annotationRangeRows, attachAnnotationRange, canonicalEndpointJSON } from '../annotated-text-storage.ts';
-import { frozenJsonSnapshot } from '../annotated-text-r2.ts';
+import { frozenJsonSnapshot } from '../frozen-json.ts';
 import { markAnnotatedEntityProjection } from '../annotated-text-history.ts';
 import type { DbHandle } from '../driver.ts';
 import type { SideTableStrategyEntry, ProjectionEvent } from '../side-table-strategy.ts';

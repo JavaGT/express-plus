@@ -1,6 +1,6 @@
 import { assertUtf16Offset, assertWellFormedText } from './annotated-text.ts';
 import { resolveDeclarationMeasurementExtension } from './annotated-text-field.ts';
-import { frozenJsonSnapshot } from './annotated-text-r2.ts';
+import { frozenJsonSnapshot } from './frozen-json.ts';
 import { annotatedTextAction as buildAnnotatedTextAction } from './annotated-text-action-builder.ts';
 
 interface AnnotatedTextEntity {
