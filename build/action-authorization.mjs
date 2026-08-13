@@ -1,11 +1,17 @@
 import { read, write, subscribe, admin } from './grant.mjs';
                                              
 import { readScopedRow,                                   } from './http-crud-dispatch.mjs';
-import { mayRow } from './row-grant.mjs';
+import { createAuthorizationAdapter,                                                } from './authorization-adapter.mjs';
+                                                   
                                                 
 
 const AUTHORIZED_ROWS                = Symbol('workbench.authorizedRows');
 const VERB = new Map                    ([[read, 'read'], [write, 'update'], [subscribe, 'subscribe'], [admin, 'admin']]);
+
+// The default adapter composite actions use when no adapter is injected (the
+// kernel's action gate). It wraps the framework row-grant — behavior identical
+// to the pre-adapter bindAuthorizedRows loop, but through the ONE admit seam.
+const DEFAULT_AUTHORIZATION                       = createAuthorizationAdapter();
 
                                     
                                                       
@@ -48,13 +54,23 @@ export function isAuthorizedRows(value         )                                
                                                      
  
 
+// Bind a registered action's authorizedRows declaration to a concrete app and
+// an authorization adapter (S5/A2). The resolver selects the affected rows;
+// authorization evaluates ALL of the resulting requirements through ONE
+// adapter.admit() call (category 'action') — a single denied requirement
+// denies the whole action, and every requirement must pass its verb's
+// capability. With no adapter injected, the framework default is used
+// (behavior identical to the pre-adapter per-row mayRow loop).
 export function bindAuthorizedRows(
   declaration                           ,
   app                  ,
+  authorization                       ,
 )                                                  {
+  const adapter = authorization ?? DEFAULT_AUTHORIZATION;
   return async ({ payload, principal }) => {
     const requirements = await declaration({ payload, principal });
     if (!Array.isArray(requirements) || requirements.length === 0) return false;
+    const loaded                   = [];
     for (const requirement of requirements) {
       const name = typeof requirement?.entity === 'string' ? requirement.entity : requirement?.entity?.name;
       const entity = app.entities?.get(name);
@@ -63,8 +79,14 @@ export function bindAuthorizedRows(
       let row;
       try { row = readScopedRow(app               , entity                         , requirement.id, principal); } catch { return false; }
       if (row) row = entity.deserializeRow({ ...row });
-      if (!row || !(await mayRow(entity, verb, row, principal))) return false;
+      loaded.push({
+        entity: entity                           ,
+        verb,
+        row,
+        capability: requirement.capability,
+      });
     }
-    return true;
+    const decision = await adapter.admit({ category: 'action', operation: 'execute', principal, requirements: loaded });
+    return decision.admitted;
   };
 }

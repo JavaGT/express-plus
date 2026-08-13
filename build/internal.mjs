@@ -35,6 +35,7 @@ export { createWebSocketLiveDelivery, createLiveServer } from './live-delivery.m
 export { upgradeWebSocket, FrameSender, FrameParser } from './websocket.mjs';
 export { resolveTemplate, matchExtension, isSafePath, escapeHtml } from './views.mjs';
 export { mayVerb, mayFieldOp, mayRow } from './row-grant.mjs';
+export { createAuthorizationAdapter,                                                                                                                                                } from './authorization-adapter.mjs';
 export { generateDDL, executeDDL, generateFrameworkDDL, executeFrameworkDDL, frameworkCursorSchema } from './ddl.mjs';
 export { authRoutes } from './auth/routes.mjs';
 export { config, resolveConfig } from './config.mjs';

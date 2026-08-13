@@ -16,6 +16,7 @@ export { everyone, never, anyOf, inherit } from './scope-sql.mjs';
 export { principal, anonymous, statusOf, collapseForAdmission, UnknownPrincipalStatusError } from './principal.mjs';
 export { requireUser, allowAnonymous } from './route-gate.mjs';
 export * as operations from './operation.mjs';
+export { createAuthorizationAdapter,                                                                                                    } from './authorization-adapter.mjs';
 export { router } from './app.mjs';
 export {
   FAILURE_CATEGORIES,

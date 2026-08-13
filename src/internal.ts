@@ -35,6 +35,7 @@ export { createWebSocketLiveDelivery, createLiveServer } from './live-delivery.t
 export { upgradeWebSocket, FrameSender, FrameParser } from './websocket.ts';
 export { resolveTemplate, matchExtension, isSafePath, escapeHtml } from './views.ts';
 export { mayVerb, mayFieldOp, mayRow } from './row-grant.ts';
+export { createAuthorizationAdapter, type AuthorizationAdapter, type AdmitInput, type AdmissionDecision, type AdmissionReasonCode, type ResourceCategory, type ResourceRegistration } from './authorization-adapter.ts';
 export { generateDDL, executeDDL, generateFrameworkDDL, executeFrameworkDDL, frameworkCursorSchema } from './ddl.ts';
 export { authRoutes } from './auth/routes.ts';
 export { config, resolveConfig } from './config.ts';

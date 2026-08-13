@@ -11,12 +11,21 @@ import { readProjectedCursors } from './projected-async.ts';
 import { projectedCursorHeaders, type HttpResponseLike } from './http-response.ts';
 import { mayRow } from './row-grant.ts';
 import type { EntityRecord } from './row-grant.ts';
+import { createAuthorizationAdapter, type AuthorizationAdapter } from './authorization-adapter.ts';
 import { scopeOf } from './scope-handle.ts';
 import { failure, type WorkbenchFailure } from './outcome.ts';
 import { sendFailure, type SendJson } from './http-failure.ts';
 import { readDeletedRowAnchor } from './deleted-row-anchor.ts';
 import { rawRow } from './entity/query.ts';
 import type { Principal } from './principal.ts';
+
+// The default authorization adapter (S5/A2) — THE admission path for REST CRUD
+// dispatch. It wraps the framework row-grant (mayRow / mayVerb /
+// fieldCapabilities) as its default implementation, so existing callers of
+// those module functions are unchanged. An app injects its own adapter via
+// listen({ authorization }) to swap the policy engine without touching HTTP,
+// sockets, or DB state.
+const DEFAULT_AUTHORIZATION: AuthorizationAdapter = createAuthorizationAdapter();
 
 // Loose persistence/app handles. The entity compiler and kernel are authored in
 // modules that own their full shapes; these seams only need the surfaces below.
@@ -111,7 +120,7 @@ export function readScopedRow(
 // `allowDeletedAnchor` is a narrow, explicit opt-in (default off — every
 // existing caller is unaffected). When set and the live row is gone, it falls
 // back to the row's captured deleted-row history anchor (Wave 3.7 Contract 1)
-// and runs the SAME mayRow grant check against that historical snapshot. This
+// and runs the SAME row-admission check against that historical snapshot. This
 // is not a second auth engine and not a second "current row" source: it never
 // resurrects CRUD or list visibility, only lets a principal who held a grant
 // AT THE TIME OF DELETION continue past the row-gate for a historical read
@@ -125,7 +134,7 @@ export async function authorizeRow(
   id: string,
   principal: Principal,
   preRow: Record<string, unknown> | null = null,
-  { allowDeletedAnchor = false }: { allowDeletedAnchor?: boolean } = {},
+  { allowDeletedAnchor = false, authorization }: { allowDeletedAnchor?: boolean; authorization?: AuthorizationAdapter } = {},
 ): Promise<RowAuthorization> {
   const row = preRow ?? readScopedRow(app, entity, id, principal);
   if (row) {
@@ -133,17 +142,40 @@ export async function authorizeRow(
     // materialized copy, while callers retain the stored row for one later
     // hydration at their public boundary.
     const materialized = entity.deserializeRow({ ...row });
-    if (!(await mayRow(entity as unknown as EntityRecord, verb, materialized, principal))) return { status: 403 };
+    if (!(await admitEntityRow(authorization, entity, verb, materialized, principal))) return { status: 403 };
     return { row };
   }
   if (allowDeletedAnchor) {
     const anchorRow = readDeletedRowAnchor(app.db! as unknown as Parameters<typeof readDeletedRowAnchor>[0], entity.name, id);
     const materialized = anchorRow ? entity.deserializeRow({ ...(anchorRow as Record<string, unknown>) }) : undefined;
-    if (materialized && (await mayRow(entity as unknown as EntityRecord, verb, materialized, principal))) {
+    if (materialized && (await admitEntityRow(authorization, entity, verb, materialized, principal))) {
       return { row: anchorRow as Record<string, unknown>, historical: true };
     }
   }
   return { status: 404 };
+}
+
+// The one row-admission call every REST CRUD verb makes (S5/A2). When an
+// adapter is provided it is THE admission path — its decision is final. With
+// no adapter (a direct authorizeRow caller), the framework default mayRow runs,
+// preserving the pre-adapter behavior exactly.
+async function admitEntityRow(
+  authorization: AuthorizationAdapter | undefined,
+  entity: CrudEntity,
+  verb: string,
+  row: unknown,
+  principal: Principal,
+): Promise<boolean> {
+  if (!authorization) return mayRow(entity as unknown as EntityRecord, verb, row, principal);
+  const decision = await authorization.admit({
+    category: 'entity',
+    verb,
+    principal,
+    entity: entity as unknown as EntityRecord,
+    row,
+    resourceId: (row as { id?: unknown } | null | undefined)?.id as string | null | undefined,
+  });
+  return decision.admitted;
 }
 
 export interface DispatchCrudOptions {
@@ -159,12 +191,15 @@ export interface DispatchCrudOptions {
   res: HttpResponseLike;
   sendJson: SendJson;
   committedEventHeaders: (result: unknown, actionId: string, scope: string | null) => Record<string, string>;
-  mayRow: (entity: unknown, verb: string, row: unknown, principal: unknown) => Promise<unknown>;
+  authorization?: AuthorizationAdapter;
 }
 
-// DB-backed dispatch for one admitted verb.
+// DB-backed dispatch for one admitted verb. Every row admission on every verb
+// (list/read/update/remove/fieldApply) consults the authorization adapter —
+// the injected one when provided, else the framework default. The adapter is
+// THE admission path; this dispatcher never runs a second row-grant engine.
 export async function dispatchCrud({ entity, verb, fieldName, db, principal, params, body, actionId: requestedActionId, app, res,
-  sendJson, committedEventHeaders, mayRow }: DispatchCrudOptions): Promise<void> {
+  sendJson, committedEventHeaders, authorization }: DispatchCrudOptions): Promise<void> {
   if (!db) {
     sendFailure(sendJson, res, failure('internal', 'Internal error.'));
     return;
@@ -172,18 +207,19 @@ export async function dispatchCrud({ entity, verb, fieldName, db, principal, par
   const actionId = typeof requestedActionId === 'string' && requestedActionId.length > 0 ? requestedActionId : randomUUID();
   const table = entity.name;
   const { sql: where, params: scopeParams } = entity.scopeFilter(principal);
+  const authz = authorization ?? DEFAULT_AUTHORIZATION;
 
   if (verb === 'list') {
     const rows = db.prepare(`SELECT * FROM ${table} AS t0 WHERE ${where}`).all(scopeParams)
       .map((row) => entity.deserializeRow(row));
-    // Post-filter through the SAME mayRow('list') engine `read` uses — the SQL
+    // Post-filter through the SAME row-admission engine `read` uses — the SQL
     // scope decides VISIBILITY, the .can body decides the read CAPABILITY. A
     // grant can admit a row via scope yet deny read in .can; without this list
     // would leak it (one auth path: list + read agree). mayRow owns inherit and
     // scope-only handling so list does not re-derive the skip.
     const listed: Record<string, unknown>[] = [];
     for (const row of rows) {
-      if (await mayRow(entity, 'list', row, principal)) listed.push(row);
+      if (await admitEntityRow(authz, entity, 'list', row, principal)) listed.push(row);
     }
     const cursorHeaders = projectedCursorHeaders(readProjectedCursors(db as unknown as Parameters<typeof readProjectedCursors>[0], entity as unknown as Parameters<typeof readProjectedCursors>[1]));
     sendJson(res, 200, listed, { 'x-workbench-action-id': actionId, ...cursorHeaders });
@@ -192,7 +228,7 @@ export async function dispatchCrud({ entity, verb, fieldName, db, principal, par
 
   if (verb === 'read') {
     // Scoped load + capability check: absent-or-invisible → 404, denied → 403.
-    const auth = await authorizeRow(app as CrudAppLike, entity, 'read', params.id, principal);
+    const auth = await authorizeRow(app as CrudAppLike, entity, 'read', params.id, principal, null, { authorization: authz });
     if (auth.status) {
       const denied = auth.status === 404
         ? failure('not-found', 'not found')
@@ -218,7 +254,7 @@ export async function dispatchCrud({ entity, verb, fieldName, db, principal, par
   if (verb === 'update') {
     const kernel = app?.kernel;
     if (!kernel) return void sendFailure(sendJson, res, failure('internal', 'Internal error.'));
-    const auth = await authorizeRow(app as CrudAppLike, entity, 'update', params.id, principal);
+    const auth = await authorizeRow(app as CrudAppLike, entity, 'update', params.id, principal, null, { authorization: authz });
     if (auth.status) {
       const denied = auth.status === 404
         ? failure('not-found', 'not found')
@@ -244,7 +280,7 @@ export async function dispatchCrud({ entity, verb, fieldName, db, principal, par
     if (descriptor?.kind !== 'crdt' || descriptor.type !== 'text') {
       return void sendFailure(sendJson, res, failure('not-found', 'not found'));
     }
-    const auth = await authorizeRow(app as CrudAppLike, entity, 'update', params.id, principal);
+    const auth = await authorizeRow(app as CrudAppLike, entity, 'update', params.id, principal, null, { authorization: authz });
     if (auth.status) {
       return void sendFailure(sendJson, res, failure(auth.status === 404 ? 'not-found' : 'denied', auth.status === 404 ? 'not found' : 'forbidden'));
     }
@@ -264,7 +300,7 @@ export async function dispatchCrud({ entity, verb, fieldName, db, principal, par
   if (verb === 'remove') {
     const kernel = app?.kernel;
     if (!kernel) return void sendFailure(sendJson, res, failure('internal', 'Internal error.'));
-    const auth = await authorizeRow(app as CrudAppLike, entity, 'remove', params.id, principal);
+    const auth = await authorizeRow(app as CrudAppLike, entity, 'remove', params.id, principal, null, { authorization: authz });
     if (auth.status) {
       const denied = auth.status === 404
         ? failure('not-found', 'not found')

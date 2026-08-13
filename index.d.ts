@@ -140,6 +140,119 @@ export interface OperationCategory {
   readonly operation: string;
 }
 
+// The authorization adapter seam (S5/A2) — the injectable AUTHORIZATION half
+// of the auth/authz split. REST CRUD dispatch, the route gate, and composite
+// (registered) actions all consult ONE adapter instance; an app passes its own
+// via `listen(port, { authorization })` to swap the policy engine without
+// touching HTTP, sockets, or DB state. The vocabulary is generic — never app
+// nouns. Admission is two-valued: a non-'active' principal collapses to
+// `anonymous` before any row/field gate runs, so a revoked and an unknown
+// principal are indistinguishable on the decision surface (no status oracle).
+export type ResourceCategory =
+  | 'entity'
+  | 'blob'
+  | 'search'
+  | 'action'
+  | 'subscription'
+  | 'principal'
+  | 'policy';
+
+export type AdmissionReasonCode =
+  | 'anonymous'
+  | 'principal-status'
+  | 'no-row-scope'
+  | 'no-capability'
+  | 'no-field-access'
+  | 'no-resource'
+  | 'unknown-category'
+  | 'policy-error';
+
+export interface DecisionTraceEntry {
+  readonly check: string;
+  readonly outcome: boolean;
+}
+
+export interface AdmissionDecision {
+  readonly admitted: boolean;
+  readonly operation: OperationCategory;
+  readonly resourceCategory: ResourceCategory;
+  readonly resourceId: string | null;
+  readonly reasonCode: AdmissionReasonCode | null;
+  readonly capabilities: readonly Capability[];
+  /** Dev-only diagnostic (env WORKBENCH_AUTH_TRACE=1 or the trace option); null in production. */
+  readonly trace: readonly DecisionTraceEntry[] | null;
+}
+
+export interface EntityAdmitInput {
+  readonly category: 'entity';
+  readonly verb: string;
+  readonly principal: Principal;
+  readonly entity: unknown;
+  readonly row: unknown;
+  readonly operation?: OperationCategory | string;
+  readonly fieldName?: string;
+  readonly capability?: Capability;
+  readonly resourceId?: string | null;
+}
+
+export interface PrincipalAdmitInput {
+  readonly category: 'principal';
+  readonly principal: Principal;
+  readonly operation?: OperationCategory | string;
+  readonly gate?: Gate;
+  readonly resourceId?: string | null;
+}
+
+export interface RowRequirement {
+  readonly entity: unknown;
+  readonly verb: string;
+  readonly row: unknown;
+  readonly capability?: Capability;
+}
+
+export interface ActionAdmitInput {
+  readonly category: 'action';
+  readonly principal: Principal;
+  readonly requirements: readonly RowRequirement[];
+  readonly operation?: OperationCategory | string;
+  readonly resourceId?: string | null;
+}
+
+export interface ResourceAdmitInput {
+  readonly category: 'blob' | 'search' | 'subscription' | 'policy';
+  readonly principal: Principal;
+  readonly operation?: OperationCategory | string;
+  readonly resourceName?: string;
+  readonly row?: unknown;
+  readonly resourceId?: string | null;
+}
+
+export type AdmitInput = EntityAdmitInput | PrincipalAdmitInput | ActionAdmitInput | ResourceAdmitInput;
+
+export interface ResourceRegistration {
+  readonly category: 'blob' | 'search' | 'subscription' | 'policy';
+  readonly name: string;
+  readonly scope: (context: { readonly is: unknown; readonly fields: unknown }) => unknown;
+  readonly fields?: Readonly<Record<string, unknown>>;
+  readonly checks?: Readonly<Record<string, (context: unknown) => boolean>>;
+}
+
+export interface AuthorizationAdapter {
+  /** Decide admission for one operation on one resource; frozen decision. */
+  admit(input: AdmitInput): Promise<AdmissionDecision>;
+  /** Register a non-entity resource; a non-compilable scope throws here, never at query time. */
+  registerResource(input: ResourceRegistration): void;
+}
+
+export interface AuthorizationAdapterOptions {
+  trace?: boolean;
+  mayRow?: (entity: unknown, verb: string, row: unknown, principal: Principal) => Promise<boolean>;
+  mayVerb?: (entity: unknown, verb: string, row: unknown, principal: Principal) => Promise<boolean>;
+  fieldCapabilities?: (entity: unknown, fieldName: string, row: unknown, principal: Principal) => Promise<{ granted: boolean; capabilities: readonly Capability[] }>;
+}
+
+export function createAuthorizationAdapter(options?: AuthorizationAdapterOptions): AuthorizationAdapter;
+
 export interface HandlerReq {
   body: Record<string, unknown>;
   params: Record<string, string>;
@@ -1136,6 +1249,8 @@ export interface ListenOptions {
   hsts?: boolean;
   cors?: { origins: readonly string[] };
   requestLog?: boolean;
+  /** The authorization adapter — THE admission path for the route gate and REST CRUD dispatch. */
+  authorization?: AuthorizationAdapter;
 }
 
 export interface SnapshotSelect { readonly kind: 'select'; }
@@ -1480,6 +1595,38 @@ export interface WriteQueue {
   readonly owned: boolean;
 }
 
+/**
+ * Controlled, read-only connection description for external readers (S1/A5).
+ * Open it with `openReadMirror`, which enforces read-only at the engine
+ * (`mode=ro`) AND via a query-class rejector. It never carries a write path.
+ */
+export interface ReadMirrorDescription {
+  readonly kind: 'read-mirror';
+  readonly mode: 'read-only';
+  readonly readOnly: true;
+  readonly connectionString: string;
+  readonly options?: Readonly<Record<string, unknown>>;
+}
+
+/** The opened read-mirror surface: `prepare`/`exec` are rejector-wrapped; `raw` is the underlying connection (still mode=ro). */
+export interface ReadMirrorHandle {
+  prepare(sql: string): { run(...args: unknown[]): { changes: number }; get(...args: unknown[]): Record<string, unknown> | undefined; all(...args: unknown[]): Record<string, unknown>[] };
+  exec(sql: string): unknown;
+  close(): void;
+  readonly raw: unknown;
+}
+
+/** A statement class a read-mirror rejector refuses (`write`/`ddl`/`pragma` mutations). */
+export type ReadMirrorStatementKind = 'read' | 'write' | 'ddl' | 'pragma' | 'transaction' | 'refuse';
+
+export class ReadMirrorError extends Error {
+  readonly code: 'WB_READ_MIRROR_REFUSED';
+  readonly kind: Exclude<ReadMirrorStatementKind, 'read'>;
+}
+
+/** Open a read-mirror description as a rejector-wrapped, engine-read-only connection. */
+export function openReadMirror(description: ReadMirrorDescription): ReadMirrorHandle;
+
 export interface WorkbenchApp extends RouteBuilder {
   readonly db?: WorkbenchDatabase;
   readonly routes: readonly unknown[];
@@ -1489,6 +1636,17 @@ export interface WorkbenchApp extends RouteBuilder {
   readonly log: WorkbenchLog;
   readonly clock: WorkbenchClock;
   readonly writeQueue: WriteQueue;
+  /** The platform write coordinator (S1/A5) — the same object as `writeQueue`; every write category enters through it. */
+  readonly writeCoordinator: WriteQueue;
+  /** Controlled read-only description for external readers; throws fail-closed on a raw-handle app. */
+  readMirror(): ReadMirrorDescription;
+  /**
+   * Shared-state PRAGMA maintenance seam (S1/A5): runs `fn` with
+   * `foreign_keys = OFF` inside one coordinated write turn and restores `ON`
+   * in a finally even when `fn` throws. The sole route for shared-state PRAGMA
+   * toggles.
+   */
+  withForeignKeysDisabled<T>(fn: () => Promise<T> | T): Promise<T>;
   readonly port?: number;
   readonly httpServer?: Server;
   readonly jobs?: unknown;

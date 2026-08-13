@@ -25,7 +25,8 @@
 import { createServer as createHttpServer } from 'node:http';
 
 import { anonymous, collapseForAdmission,                } from './principal.mjs';
-import { mayVerb, mayRow } from './row-grant.mjs';
+import { mayVerb } from './row-grant.mjs';
+import { createAuthorizationAdapter,                           } from './authorization-adapter.mjs';
 import { config } from './config.mjs';
 import { applySecurityHeaders, renderError, isSameOriginRequest } from './middleware.mjs';
 import { sessionPrincipalOf, sessionTokenOf, apiKeyPrincipalOf } from './auth/session.mjs';
@@ -113,7 +114,7 @@ const csrfGuard = (req     ) => SAFE_METHODS.has(req.method) || isSameOriginRequ
 // resolver; the request handler is deliberately not re-architected here.
 const anonymousPrincipalOf                  = () => anonymous;
 
-export function makeRequestHandler(source     , { principalOf = anonymousPrincipalOf, db, env = config.env, rateLimiter = null, csp, hsts, cors, requestLog = false }   
+export function makeRequestHandler(source     , { principalOf = anonymousPrincipalOf, db, env = config.env, rateLimiter = null, csp, hsts, cors, requestLog = false, authorization }   
                                         
            
                
@@ -122,6 +123,7 @@ export function makeRequestHandler(source     , { principalOf = anonymousPrincip
                  
              
                        
+                                       
   = {}) {
   // `source` is either a plain resolved routing table (an array) or an app whose
   // table resolves asynchronously (two-phase boot). When it is an app, every
@@ -146,6 +148,28 @@ export function makeRequestHandler(source     , { principalOf = anonymousPrincip
   const log = (isApp && source.log) ? source.log : getLog();
   const requestCount = { count: 0 };
 
+  // The authorization adapter (S5/A2) — THE admission path for this transport.
+  // An injected adapter (listen({ authorization })) swaps the policy engine;
+  // the framework default wraps the row-grant so behavior is unchanged. The
+  // route gate AND the REST CRUD dispatch below both consult this one adapter.
+  const authorizationAdapter                       = authorization ?? createAuthorizationAdapter();
+
+  // The operation category label a route-gate admission carries (informational
+  // metadata on the decision; the per-verb gate function is the authority).
+  // fieldApply is an update under the hood; an imperative route has no verb,
+  // so its HTTP method names the closest category.
+  function routeOperationLabel(route     )         {
+    if (route.verb && route.verb !== 'fieldApply') return route.verb;
+    if (route.verb === 'fieldApply') return 'update';
+    switch (route.method) {
+      case 'GET': return 'read';
+      case 'POST': return 'create';
+      case 'PATCH': return 'update';
+      case 'DELETE': return 'remove';
+      default: return 'read';
+    }
+  }
+
   // Handles the default route matching + dispatch after the handler chain.
   async function handleRouteMatch(req     , res     , routes     , url     ) {
     const { route, params, pathMatched } = matchRoute(routes, req.method, url.pathname)       ;
@@ -164,9 +188,17 @@ export function makeRequestHandler(source     , { principalOf = anonymousPrincip
     // two-valued admission collapse already happened at the boundary
     // (principalOfAdmitted), so a non-active status principal arrives here as
     // anonymous — denied by the gate exactly like an unauthenticated caller,
-    // and never passed to dispatch with its real status.
+    // and never passed to dispatch with its real status. The gate runs through
+    // the authorization adapter (the injected one when provided, else the
+    // framework default), so an app policy adapter can override route admission.
     const principal = principalOfAdmitted(req);
-    if (!route.gate(principal)) {
+    const gateDecision = await authorizationAdapter.admit({
+      category: 'principal',
+      operation: routeOperationLabel(route),
+      principal,
+      gate: route.gate,
+    });
+    if (!gateDecision.admitted) {
       sendFailure(sendJsonCompat, res, failure('denied', 'unauthorized'), { status: 401 });
       return;
     }
@@ -199,7 +231,7 @@ export function makeRequestHandler(source     , { principalOf = anonymousPrincip
     if (route.handlers) {
       await runChain(route.handlers, req, res, { principal, params, body, query: url.searchParams, autoLoad: route.autoLoad, app: source }, { env });
     } else {
-      await dispatchCrud({ entity: route.entity, verb: route.verb, fieldName: route.fieldName, db, principal, params, body, actionId: req.headers['x-workbench-action-id'], app: isApp ? source : null, res, sendJson: sendJsonCompat, committedEventHeaders, mayRow }       );
+      await dispatchCrud({ entity: route.entity, verb: route.verb, fieldName: route.fieldName, db, principal, params, body, actionId: req.headers['x-workbench-action-id'], app: isApp ? source : null, res, sendJson: sendJsonCompat, committedEventHeaders, authorization: authorizationAdapter }       );
     }
   }
 
