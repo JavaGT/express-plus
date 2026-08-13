@@ -19,17 +19,16 @@ import { createBlobLifecycle } from './blob-lifecycle.ts';
 import { createOperationalConsumers } from './operational-consumer.ts';
 import { createPendingBlobLifecycle } from './pending-blob.ts';
 import { readSeq } from './committed-log.ts';
-import { CRUD_CURSOR_POLICY, assertV9AnnotatedTextOffsetEditPayload, ANNOTATED_TEXT_COMPENSATION } from './entity/crud.ts';
+import { CRUD_CURSOR_POLICY } from './entity/crud.ts';
 import { EventKind } from './event-handle.ts';
-import { tryParseScopeKey } from './scope-handle.ts';
 import { bindAuthorizedRows, isAuthorizedRows } from './action-authorization.ts';
-import { write } from './grant.ts';
 import { replayPrivateFactProjections } from './post-commit-effects.ts';
 import { txn } from './driver.ts';
 import { installRemovalCascades } from './entity/removal-cascade.ts';
 import { rawRow } from './entity/query.ts';
 import { readDeletedRowAnchor } from './deleted-row-anchor.ts';
 import { validateAnnotatedTextEntityActions } from './annotated-text-field.ts';
+import { createAnnotatedTextKernelSeam } from './annotated-text-kernel.ts';
 import { validateProtectedArtefactsDeclaration } from './protected-artefact-store.ts';
 
 // Framework auth entities are always-available effect targets (an app's effect
@@ -240,7 +239,7 @@ function buildEffects(entities: Map<string, any>) {
   return effectsRegistry;
 }
 
-function buildDurableAdmission(app: any) {
+function buildDurableAdmission(app: any, annotatedKernel: any) {
   const registeredEventTypes = new Set(
     (app.actions ?? []).flatMap((action: any) =>
       (action.projections ?? []).flatMap((projection: any) => projection.eventTypes ?? [])),
@@ -266,20 +265,6 @@ function buildDurableAdmission(app: any) {
     }
     return admitRow({ kind: 'verb', entity, row, principal, verb });
   }
-  async function admitsAnnotatedProject({ entityName, verb, principal, event }: any) {
-    const entity = app.entities?.get(entityName);
-    const descriptor = entity && Object.values(entity.fields).find((field: any) => field.kind === 'annotatedText');
-    if (!descriptor) return true;
-    const project = tryParseScopeKey(event?.scope);
-    const projectEntity = project && app.entities?.get(project.entity);
-    // Declarations may target an externally-owned project table. When that
-    // declaration is registered, it is the package authorization boundary.
-    if (!projectEntity) return true;
-    let row = null;
-    try { row = projectEntity.findById(project.id, principal); } catch { row = null; }
-    return admitRow({ kind: 'verb', entity: projectEntity, row, principal, verb });
-  }
-
   return {
     async beforeProjection({ entityName, verb, principal, event, payload, db: hookDb, now }: any) {
       if (registeredEventTypes.has(event?.type)) return true;
@@ -323,7 +308,7 @@ function buildDurableAdmission(app: any) {
       }
       if (verb === 'update' || verb === 'remove') {
         const granted = await admitsExistingRow({ entityName, verb, principal, event })
-          && await admitsAnnotatedProject({ entityName, verb, principal, event });
+          && await annotatedKernel.admitProject({ entityName, verb, principal, event }, app);
         if (granted) {
           rearmChangedScheduleReceipts({
             entity: app.entities?.get(entityName),
@@ -334,7 +319,7 @@ function buildDurableAdmission(app: any) {
         }
         return granted;
       }
-      return admitsAnnotatedProject({ entityName, verb, principal, event });
+      return annotatedKernel.admitProject({ entityName, verb, principal, event }, app);
     },
     async afterProjection({ entityName, verb, principal, event, db: hookDb }: any) {
       if (registeredEventTypes.has(event?.type)) return true;
@@ -350,9 +335,9 @@ function buildDurableAdmission(app: any) {
           db: hookDb ?? app.db,
         });
       }
-      if (verb !== 'create') return admitsAnnotatedProject({ entityName, verb, principal, event });
+      if (verb !== 'create') return annotatedKernel.admitProject({ entityName, verb, principal, event }, app);
       return (await admitsExistingRow({ entityName, verb, principal, event }))
-        && await admitsAnnotatedProject({ entityName, verb, principal, event });
+        && await annotatedKernel.admitProject({ entityName, verb, principal, event }, app);
     },
   };
 }
@@ -479,88 +464,16 @@ export function buildKernel(app: any) {
   );
 
   const registeredActions = new Map<string, any>((app.actions ?? []).map((action: any) => [action.type, action]));
-  const annotatedEntities = new Set(
-    [...entities.values()]
-      .filter((entity: any) => Object.values(entity.fields).some((field: any) => field.kind === 'annotatedText'))
-      .map((entity: any) => entity.name),
-  );
-  const annotatedActionTypes = new Set(
-    [...entities.values()].flatMap((entity: any) => Object.entries(entity.fields)
-      .filter(([, field]) => (field as any).kind === 'annotatedText')
-      .map(([field]) => `${entity.name}.${field}.operation`)),
-  );
-  const annotatedActionDetails = new Map();
-  for (const entity of entities.values()) for (const [fieldName, field] of Object.entries(entity.fields)) {
-    if ((field as any).kind !== 'annotatedText') continue;
-    annotatedActionDetails.set(`${entity.name}.${fieldName}.operation`, { entity, fieldName, field });
-    annotatedActionDetails.set(`${entity.name}.${fieldName}.compensate`, { entity, fieldName, field, compensation: true });
-  }
-   const isAnnotatedHistoryAction = ({ type, payload }: any) => {
-    const detail = annotatedActionDetails.get(type);
-    if (!detail || detail.compensation) return false;
-     try { const command = assertV9AnnotatedTextOffsetEditPayload(detail.entity.name, detail.fieldName, payload); return command.edit.kind === 'text.insert' && command.edit.text.length > 0; } catch { return false; }
-  };
-    const isContribution = (fact: any, documentId: any) => fact?.version === 2 && fact.kind === 'annotated-text.contribution'
-      && fact.documentId === documentId && fact.contribution?.kind === 'text.insert'
-      && (!Object.hasOwn(fact.contribution, 'blockId') || (typeof fact.contribution.blockId === 'string' && fact.contribution.blockId.length > 0))
-      && Array.isArray(fact.contribution.opId)
-      && typeof fact.contribution.text === 'string' && Number.isSafeInteger(fact.contribution.scalarCount);
-    const isAnnotatedHistoryFact = ({ type, payload, fact }: any) => {
-      const detail = annotatedActionDetails.get(type);
-      return Boolean(detail && isAnnotatedHistoryAction({ type, payload }) && isContribution(fact, payload.id));
-    };
-  // Annotated text history is a package-owned compensation action. It is not a
-  // public action and is admitted only through the trusted history capability.
-  for (const type of annotatedActionTypes) {
-    generatedHistoryActions[type] = {
-      inverse: ({ origin, target, targetFact }: any) => ({ type: `${type.replace(/\.operation$/, '')}.compensate`, payload: { version: 1, id: origin.payload.id, history: { version: 1, rootActionId: origin.actionId, targetActionId: target.actionId, direction: 'undo' } }, input: { kind: ANNOTATED_TEXT_COMPENSATION, targetFact } }),
-      redo: ({ origin, target, targetFact }: any) => ({ type: `${type.replace(/\.operation$/, '')}.compensate`, payload: { version: 1, id: origin.payload.id, history: { version: 1, rootActionId: origin.actionId, targetActionId: target.actionId, direction: 'redo' } }, input: { kind: ANNOTATED_TEXT_COMPENSATION, targetFact } }),
-    };
-  }
+  const annotatedKernel = createAnnotatedTextKernelSeam(entities);
+  Object.assign(generatedHistoryActions, annotatedKernel.historyActions);
 
   // Generated CRUD is authorized by row admission. Registered actions own an
   // explicit authorization function which runs at both durable auth gates.
   return createServer({
     handlers,
     authorize: async (context) => {
-      for (const entity of entities.values()) {
-        for (const [fieldName, field] of Object.entries(entity.fields)) {
-          if ((field as any).kind !== 'annotatedText') continue;
-          for (const annotation of (field as any).annotations ?? []) for (const [actionName, action] of Object.entries(annotation.actions ?? {}) as Array<[string, any]>) {
-            const actionType = `${entity.name}.${fieldName}.${annotation.annotationName}.${actionName}`;
-            if (context.type !== actionType) continue;
-            const id = context.payload?.id;
-            const row = typeof id === 'string' ? rawRow(app.db, entity.name, id) : null;
-            if (!row) return false;
-            if (!(await admitRow({ kind: 'fieldOp', entity, row: entity.deserializeRow({ ...row }), fieldName, capability: write, principal: context.principal }))) return false;
-            if (action.kind === 'annotationAction') return true;
-            const targetName = typeof (field as any).annotations?.find((candidate: any) => candidate.annotationName === annotation.annotationName)?.fields?.[action.relation]?.target === 'string'
-              ? (field as any).annotations.find((candidate: any) => candidate.annotationName === annotation.annotationName).fields[action.relation].target
-              : (field as any).annotations.find((candidate: any) => candidate.annotationName === annotation.annotationName).fields[action.relation].target?.name;
-            const target = targetName ? app.entities?.get(targetName) : null;
-            if (!target || !target.grant) return false;
-            const candidate: Record<string, any> = { id: 'authorization-probe', [action.project]: row[(field as any).project], [action.author]: context.principal?.id };
-            for (const [publicName, entityField] of Object.entries(action.input ?? {})) candidate[entityField as string] = context.payload?.values?.[publicName];
-            if (!(await admitRow({ kind: 'verb', entity: target, row: candidate, verb: 'create', principal: context.principal }))) return false;
-            return true;
-          }
-        }
-      }
-      const annotated = annotatedActionDetails.get(context.type);
-      if (annotated) {
-        const id = context.payload?.id;
-        if (typeof id !== 'string' || id.length === 0) return false;
-        const row = rawRow(app.db, annotated.entity.name, id);
-        if (!row) return false;
-        return admitRow({
-          kind: 'fieldOp',
-          entity: annotated.entity,
-          row: annotated.entity.deserializeRow({ ...row }),
-          fieldName: annotated.fieldName,
-          capability: write,
-          principal: context.principal,
-        });
-      }
+      const annotatedVerdict = await annotatedKernel.authorize(context, app);
+      if (annotatedVerdict !== null) return annotatedVerdict;
       const declaration = registeredActions.get(context.type);
       if (!declaration) {
         const [entityName, verb] = String(context.type).split('.');
@@ -586,10 +499,10 @@ export function buildKernel(app: any) {
     history: app._history,
     historyActions: generatedHistoryActions,
     cursorPolicy,
-     annotatedHistory: Object.freeze({ entities: annotatedEntities, actionTypes: annotatedActionTypes, moveActionTypes: new Set([...annotatedActionDetails].filter(([, detail]) => detail).map(([type]) => type)), isEligibleAction: isAnnotatedHistoryAction, isCanonicalFact: isAnnotatedHistoryFact }),
+     annotatedHistory: annotatedKernel.annotatedHistory,
     pipeline: durableMutationVariant({
       projectionConsumers: projections,
-      admission: buildDurableAdmission(app),
+      admission: buildDurableAdmission(app, annotatedKernel),
       blobAdapter: blobAdapter as any,
       effectsRegistry: effectsRegistry.size > 0 ? effectsRegistry : null,
       executeEffectsForEvent,
