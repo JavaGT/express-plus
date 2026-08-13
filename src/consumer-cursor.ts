@@ -1,4 +1,5 @@
 import { upsert, type DbHandle } from './driver.ts';
+import { getLog } from './log.ts';
 
 export function upsertConsumerCursor(
   db: DbHandle,
@@ -63,7 +64,8 @@ export async function sweepBehindCursor(
     let verdict: CursorSweepVerdict;
     try {
       verdict = await work(row, db);
-    } catch {
+    } catch (err) {
+      getLog().warn('system', 'durable projection sweep failed', { err, consumer, scope: row.scope, seq: row.seq });
       verdict = 'block';
     }
     if (verdict === 'skip') {
