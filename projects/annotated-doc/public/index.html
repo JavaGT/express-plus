@@ -15,7 +15,9 @@
     aside { overflow:auto; padding:12px; border-right:1px solid var(--line); background:var(--panel); }
     button { padding:7px 10px; border:1px solid var(--line); border-radius:7px; background:var(--panel); cursor:pointer; }
     button:disabled { opacity:.5; cursor:default; }
-    #create { width:100%; margin-bottom:12px; color:#fff; border-color:var(--accent); background:var(--accent); }
+    #create { width:100%; margin-bottom:4px; color:#fff; border-color:var(--accent); background:var(--accent); }
+    #delete-all { width:100%; margin-bottom:12px; color:var(--danger); }
+    #delete-all:disabled { opacity:.5; cursor:default; }
     .doc { display:flex; align-items:center; gap:8px; margin-bottom:4px; padding:8px 10px; border:1px solid transparent; border-radius:8px; cursor:pointer; }
     .doc:hover { background:#eef2ff; }
     .doc.active { border-color:#c7d2fe; background:#e0e7ff; }
@@ -30,22 +32,44 @@
     #marker-bar { display:flex; gap:8px; align-items:center; padding:6px 16px; border-bottom:1px solid var(--line); background:var(--panel); }
     #marker-bar label { display:flex; gap:6px; align-items:center; color:var(--muted); font-size:12px; }
     #comment-color { width:112px; padding:5px 7px; border:1px solid var(--line); border-radius:7px; background:var(--panel); color:inherit; }
-    #add-comment:disabled { opacity:.5; cursor:default; }
+    #code-picker { width:112px; padding:5px 7px; border:1px solid var(--line); border-radius:7px; background:var(--panel); color:inherit; }
+    #add-comment:disabled, #apply-code:disabled { opacity:.5; cursor:default; }
     #document-workspace { display:grid; grid-template-columns:minmax(0,1fr) 260px; flex:1; min-height:0; }
     #editor-column { display:flex; flex-direction:column; min-width:0; overflow:auto; }
+    #side-column { display:flex; flex-direction:column; min-height:0; overflow:auto; border-left:1px solid var(--line); }
+    #side-column > section { margin:16px; }
+    #side-column h2 { margin:0 0 10px; font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); }
+    #side-column > section + section { padding-top:16px; border-top:1px solid var(--line); }
+    #codebook-empty, #codes-empty, #annotations-empty { margin:0; color:var(--muted); font-size:12px; }
     #editor-host { position:relative; display:flex; flex:1; min-width:0; min-height:200px; margin:16px 16px 8px; }
     #editor { flex:1; min-width:0; min-height:200px; padding:16px 18px; border:1px solid var(--line); border-radius:10px; outline:none; background:var(--panel); white-space:pre-wrap; overflow:auto; font:15px/1.55 ui-sans-serif,system-ui,sans-serif; }
     #editor-carets { position:absolute; inset:0; overflow:hidden; pointer-events:none; }
-    #editor-carets [data-presence] { position:absolute; width:2px; height:100%; background:var(--accent); opacity:.85; border-radius:1px; }
+    #editor-carets [data-presence] { position:absolute; pointer-events:none; }
+    #editor-carets [data-kind="caret"] { width:2px; height:1.2em; background:var(--caret-color, var(--accent)); opacity:.85; border-radius:1px; transform:translateX(-1px); }
+    #editor-carets [data-kind="caret"][data-self="true"], #editor-carets [data-kind="edge"][data-self="true"] { animation: caret-blink 1.1s step-end infinite; }
+    @keyframes caret-blink { 0%, 49% { opacity:.85; } 50%, 100% { opacity:0; } }
+    #editor-carets [data-kind="selection"] { background:var(--caret-color, var(--accent)); opacity:.28; border-radius:2px; }
     #editor-carets [data-kind="edge"] { width:10px; height:10px; background:var(--danger); opacity:1; border-radius:999px; }
     #editor [data-annotation-families~="comment"] { background:var(--annotation-color, #fef08a); }
+    #editor [data-annotation-families~="code"] { background:var(--annotation-color, #d1d5db); }
     #editor [data-annotation-families~="sensitive"] { background:#111; color:#fff; border-radius:3px; padding:0 2px; box-shadow:inset 0 0 0 1px #000; }
     #editor [data-restricted="true"] { background:#111; color:#fff; border-radius:3px; padding:0 2px; box-shadow:inset 0 0 0 1px #000; }
     #editor [data-active-annotation="true"] { background:#f59e0b !important; box-shadow:inset 0 -2px #b45309; }
     #editor:empty::before { color:#98a2b3; content:attr(data-placeholder); }
-    #annotations-panel { overflow:auto; margin:16px 16px 16px 0; padding-left:16px; border-left:1px solid var(--line); }
-    #annotations-panel h2 { margin:0 0 10px; font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); }
-    #annotations-empty { margin:0; color:var(--muted); font-size:12px; }
+    .codebook-entry { display:flex; gap:6px; align-items:center; margin-bottom:6px; padding:6px 8px; border:1px solid var(--line); border-radius:8px; background:var(--panel); }
+    .codebook-entry .codebook-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; }
+    .codebook-entry select { padding:2px 4px; font-size:11px; }
+    .codebook-entry button { padding:2px 6px; font-size:11px; }
+    #codebook-add { display:flex; gap:6px; align-items:center; margin-top:10px; }
+    #codebook-add label { display:flex; gap:6px; align-items:center; color:var(--muted); font-size:12px; }
+    #codebook-add select { width:96px; padding:4px 6px; border:1px solid var(--line); border-radius:7px; background:var(--panel); color:inherit; }
+    .code-card { margin-bottom:8px; padding:10px; border:1px solid var(--line); border-radius:9px; background:var(--panel); }
+    .code-card:hover, .code-card:focus-within { border-color:#f59e0b; }
+    .code-card strong { display:block; margin-bottom:3px; }
+    .code-card p { overflow:hidden; margin:0 0 8px; color:var(--muted); font-size:12px; text-overflow:ellipsis; white-space:nowrap; }
+    .code-card button { padding:4px 7px; color:var(--danger); font-size:12px; }
+    .code-card .annotation-actions { display:flex; gap:6px; margin-top:8px; }
+    #annotations-panel, #codes-panel, #codebook-panel { min-height:0; }
     .annotation-card { margin-bottom:8px; padding:10px; border:1px solid var(--line); border-radius:9px; background:var(--panel); }
     .annotation-card:hover, .annotation-card:focus-within { border-color:#f59e0b; }
     .annotation-card strong { display:block; margin-bottom:3px; }
@@ -54,12 +78,16 @@
     .annotation-card .annotation-body { color:inherit; white-space:pre-wrap; }
     .annotation-card small { display:block; margin-bottom:8px; color:var(--muted); }
     .annotation-card button { padding:4px 7px; color:var(--danger); font-size:12px; }
+    .annotation-card .annotation-actions { display:flex; gap:6px; margin-top:8px; }
+    .annotation-card .annotation-actions [data-action="resolve"] { color:var(--accent); }
+    .annotation-card.resolved .annotation-body { color:var(--muted); text-decoration:line-through; }
+    .annotation-card.resolved .annotation-color { opacity:.4; }
     #live-state { margin:0 16px 16px; border:1px solid var(--line); border-radius:9px; background:var(--panel); }
     #live-state summary { padding:8px 10px; cursor:pointer; color:var(--muted); font-size:12px; }
     #live-state pre { max-height:240px; overflow:auto; margin:0; padding:10px; border-top:1px solid var(--line); background:#f8fafc; color:#334155; font:11px/1.45 ui-monospace,SFMono-Regular,monospace; }
     #empty { margin:40px auto; color:var(--muted); text-align:center; }
     .hidden { display:none !important; }
-    @media (max-width:700px) { main { grid-template-columns:1fr; grid-template-rows:auto 1fr; } aside { display:flex; gap:8px; overflow:auto; border-right:0; border-bottom:1px solid var(--line); } #create { width:auto; margin:0; } #list { display:flex; gap:4px; } .doc { min-width:140px; } #document-workspace { grid-template-columns:1fr; grid-template-rows:minmax(240px,1fr) auto; overflow:auto; } #editor-host { min-height:240px; } #editor { min-height:240px; } #annotations-panel { overflow:visible; margin:0 16px 16px; padding:14px 0 0; border-top:1px solid var(--line); border-left:0; } }
+    @media (max-width:700px) { main { grid-template-columns:1fr; grid-template-rows:auto 1fr; } aside { display:flex; gap:8px; overflow:auto; border-right:0; border-bottom:1px solid var(--line); } #create { width:auto; margin:0; } #list { display:flex; gap:4px; } .doc { min-width:140px; } #document-workspace { grid-template-columns:1fr; grid-template-rows:minmax(240px,1fr) auto; overflow:auto; } #editor-host { min-height:240px; } #editor { min-height:240px; } #side-column { overflow:visible; border-top:1px solid var(--line); border-left:0; } }
   </style>
 </head>
 <body>
@@ -70,6 +98,7 @@
   <main>
     <aside>
       <button id="create">New document</button>
+      <button id="delete-all" hidden>Delete all</button>
       <div id="list"></div>
     </aside>
     <section id="editor-wrap">
@@ -85,6 +114,10 @@
           </select>
         </label>
         <button id="add-comment" disabled>Add comment marker</button>
+        <label for="code-picker">Code
+          <select id="code-picker" aria-label="Code"></select>
+        </label>
+        <button id="apply-code" disabled>Apply code</button>
         <button id="mark-confidential" disabled>Mark confidential</button>
         <label for="view-as">View as
           <select id="view-as" aria-label="View as">
@@ -105,11 +138,29 @@
              <pre aria-label="Live JSON state"></pre>
            </details>
          </div>
-        <section id="annotations-panel" aria-label="Comments">
-          <h2>Comments</h2>
-          <p id="annotations-empty">No comments yet.</p>
-          <div id="annotations"></div>
-        </section>
+        <div id="side-column">
+          <section id="codebook-panel" aria-label="Codebook">
+            <h2>Codebook</h2>
+            <p id="codebook-empty">No codes yet.</p>
+            <div id="codebook"></div>
+            <div id="codebook-add">
+              <label for="codebook-color">New code color
+                <select id="codebook-color" aria-label="New code color"></select>
+              </label>
+              <button id="codebook-add-code">Add code</button>
+            </div>
+          </section>
+          <section id="codes-panel" aria-label="Codes">
+            <h2>Codes</h2>
+            <p id="codes-empty">No codes applied.</p>
+            <div id="codes"></div>
+          </section>
+          <section id="annotations-panel" aria-label="Comments">
+            <h2>Comments</h2>
+            <p id="annotations-empty">No comments yet.</p>
+            <div id="annotations"></div>
+          </section>
+        </div>
       </div>
     </section>
   </main>
@@ -117,6 +168,7 @@
     import { bindAnnotatedTextEditor, createAnnotatedTextHttpSession } from '/workbench.mjs';
     import { DocClient } from '/client-handle.mjs';
     import { awaitSettlement, createCommentPanel } from '/comment-panel.mjs';
+    import { CODEBOOK_COLORS, createCodebookPanel } from '/codebook-panel.mjs';
 
     const $ = (id) => document.getElementById(id);
     const historySession = (() => {
@@ -134,14 +186,31 @@
     let unsubscribe = null;
     let commentThreads = [];
     let openChain = Promise.resolve();
+    const openingIds = new Set();
+    // A click to create or select a document wins over the asynchronous startup
+    // default. Opening an older document first briefly replaces the editor and
+    // retires its caret channel before the requested document can take over.
+    let userRequestedOpen = false;
     // Per-tab view: stored in sessionStorage (per-tab, not shared across tabs),
     // and carried in every session request's identity. Two tabs in one browser
     // can be owner and reader independently.
     const viewAs = sessionStorage.getItem('annotated-doc-view-as') === 'reader' ? 'reader' : 'demo';
 
-    function enqueueOpen(id) {
-      const run = openChain.then(() => openDoc(id));
+    function enqueueOpen(id, { auto = false } = {}) {
+      // A startup auto-open can be queued before the user acts (the initial
+      // load resolves fast). When a user action arrives while it is still
+      // queued, skip it — otherwise its openDoc would close the user's caret
+      // channel mid-flight. User-requested opens always run.
+      if (openingIds.has(id)) return openChain;
+      openingIds.add(id);
+      const run = openChain.then(() => {
+        if (auto && userRequestedOpen) return;
+        return openDoc(id);
+      });
       openChain = run.catch(() => {});
+      run.finally(() => {
+        openingIds.delete(id);
+      }).catch(() => {});
       return run;
     }
 
@@ -149,8 +218,30 @@
       editorEl: $('editor'),
       annotationsEl: $('annotations'),
       emptyEl: $('annotations-empty'),
+      codesEl: $('codes'),
+      codesEmptyEl: $('codes-empty'),
       getEditorBinding: () => editorBinding,
     });
+
+    const codebookPanel = createCodebookPanel({
+      codebookEl: $('codebook'),
+      emptyEl: $('codebook-empty'),
+      pickerEl: $('code-picker'),
+      canEdit: () => viewAs === 'demo',
+      onRename: (id, currentName) => void renameCode(id, currentName),
+      onRecolor: (id, color) => void recolorCode(id, color),
+      onDelete: (id) => void deleteCode(id),
+    });
+    // The codebook is the central store; the code picker and applied-code cards
+    // both derive from the same list.
+    let codebook = [];
+    async function loadCodebook() {
+      const response = await fetch('/codes', { credentials: 'include' });
+      if (!response.ok) throw new Error(`codebook failed (${response.status})`);
+      codebook = (await response.json()).codes ?? [];
+      codebookPanel.render(codebook);
+      updateCommentButton();
+    }
 
     function setStatus(message, kind = '') {
       $('status').textContent = message;
@@ -203,7 +294,10 @@
           };
           item.append(remove);
         }
-        item.onclick = () => void enqueueOpen(doc.id);
+        item.onclick = () => {
+          userRequestedOpen = true;
+          void enqueueOpen(doc.id);
+        };
         $('list').append(item);
       }
     }
@@ -246,6 +340,50 @@
       renderDocList();
     }
 
+    // Delete every document in one action. Each doc goes through the same
+    // retire action the per-doc Delete uses; the current editor is closed first.
+    async function deleteAllDocs() {
+      if (docs.length === 0) {
+        setStatus('no documents to delete', 'error');
+        return;
+      }
+      if (!window.confirm(`Delete all ${docs.length} documents? This cannot be undone.`)) return;
+      const target = [...docs];
+      const deleteAll = $('delete-all');
+      deleteAll.disabled = true;
+      const wasCurrent = currentId != null;
+      if (wasCurrent) {
+        closeSession();
+        currentId = null;
+        $('empty').classList.remove('hidden');
+        $('document-workspace').classList.add('hidden');
+        setStatus(`deleting ${target.length} documents...`);
+      }
+      let failed = 0;
+      try {
+        for (const doc of target) {
+          try {
+            const response = await fetch(
+              `/docs/${encodeURIComponent(doc.id)}${viewAs === 'reader' ? '?viewAs=reader' : ''}`,
+              { method: 'DELETE', credentials: 'include' },
+            );
+            if (!response.ok) failed += 1;
+          } catch {
+            failed += 1;
+          }
+        }
+        await loadDocs();
+        setStatus(
+          failed ? `deleted ${target.length - failed} of ${target.length} documents` : `deleted ${target.length} documents`,
+          failed ? 'error' : 'ok',
+        );
+      } catch (error) {
+        reportError(error);
+      } finally {
+        deleteAll.disabled = false;
+      }
+    }
+
     function closeSession() {
       unsubscribe?.();
       editorBinding?.close();
@@ -258,6 +396,7 @@
       session = null;
       commentThreads = [];
       panel.renderAnnotations(null);
+      panel.renderCodes(null, { codebook });
       $('live-state').querySelector('pre').textContent = 'null';
     }
 
@@ -270,8 +409,16 @@
 
     function renderSession(document = session?.document) {
       renderSessionStatus(document);
-      panel.renderAnnotations(document, { threads: commentThreads, onRemove: viewAs === 'demo' ? removeAnnotation : undefined });
-      panel.renderAnnotationColors(document);
+      panel.renderAnnotations(document, {
+        threads: commentThreads,
+        onRemove: viewAs === 'demo' ? removeAnnotation : undefined,
+        onResolve: viewAs === 'demo' ? resolveAnnotation : undefined,
+      });
+      panel.renderCodes(document, {
+        codebook,
+        onRemove: viewAs === 'demo' ? removeAnnotation : undefined,
+      });
+      panel.renderAnnotationColors(document, codebook);
       $('live-state').querySelector('pre').textContent = JSON.stringify(document ?? null, null, 2);
     }
 
@@ -281,6 +428,19 @@
         promise,
         new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), ms); }),
       ]).finally(() => clearTimeout(timer));
+    }
+
+    // One distinct caret color per session (presence id). A stable hash picks
+    // from a small palette, so every collaborating tab renders its own marker
+    // color and stays the same color for the whole session.
+    const CARET_COLORS = ['#7c3aed', '#db2777', '#0891b2', '#65a30d', '#ea580c', '#2563eb', '#0d9488', '#c026d3'];
+    function caretColorFor(presence) {
+      let hash = 2166136261;
+      for (let i = 0; i < presence.length; i += 1) {
+        hash ^= presence.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+      }
+      return CARET_COLORS[Math.abs(hash) % CARET_COLORS.length];
     }
 
     async function openDoc(id) {
@@ -307,6 +467,7 @@
           element: $('editor'),
           session,
           caretLayer: $('editor-carets'),
+          caretColor: caretColorFor,
           onError: reportError,
         });
         unsubscribe = session.subscribe(renderSession);
@@ -324,6 +485,7 @@
     }
 
     async function createDoc() {
+      userRequestedOpen = true;
       $('create').disabled = true;
       try {
         const response = await fetch('/docs', {
@@ -342,6 +504,7 @@
     }
 
     $('create').onclick = () => void createDoc();
+    $('delete-all').onclick = () => void deleteAllDocs();
 
     function addCommentMarker() {
       if ($('editor').getAttribute('aria-busy') === 'true') {
@@ -357,19 +520,41 @@
         setStatus('select a range of text to comment on', 'error');
         return;
       }
-       const actionHandle = DocClient.body.annotations.comment.actions.compose;
+       const compose = DocClient.body.annotations.comment.actions.compose;
+       const recolor = DocClient.body.annotations.comment.actions.recolor;
+       const color = $('comment-color').value;
        const body = window.prompt('Comment');
        if (body == null || body.trim() === '') return;
        Promise.resolve().then(async () => {
-         const result = await session.applyAnnotationAction(actionHandle, {
-           mutationId: crypto.randomUUID(), from: selection.from, to: selection.to,
-           values: { body },
+          const result = await session.applyAnnotationAction(compose, {
+            mutationId: crypto.randomUUID(), from: selection.from,
+            // A selected range owns its start but not its end: typing at the
+            // end must remain outside the annotation after a fresh snapshot.
+            to: { ...selection.to, affinity: 'left' },
+            values: { body },
          });
-         await awaitSettlement(result, {
-           failMessage: 'comment thread was not applied',
-           unreconciledMessage: 'comment thread was not reconciled',
-         });
-         await refreshCommentThreads();
+          await awaitSettlement(result, {
+            failMessage: 'comment thread was not applied',
+            unreconciledMessage: 'comment thread was not reconciled',
+          });
+          const recolored = await session.applyAnnotationAction(recolor, {
+            mutationId: crypto.randomUUID(), from: selection.from,
+            to: { ...selection.to, affinity: 'left' },
+            values: { color },
+          });
+          await awaitSettlement(recolored, {
+            failMessage: 'comment color was not applied',
+            unreconciledMessage: 'comment color was not reconciled',
+          });
+          await refreshCommentThreads();
+         // Restore focus and select the just-added comment range, so the editor
+         // is ready for the next keystroke (the prompt stole focus).
+         const document = session?.document;
+         const annotation = (document?.annotations ?? [])
+           .filter((candidate) => candidate.family === 'comment')
+           .find((candidate) => (document?.ranges ?? []).some((range) => range.annotationId === candidate.id
+             && range.start === selection.from.offset && range.end === selection.to.offset));
+         if (annotation) panel.selectAnnotation(annotation.id);
          setStatus('comment thread added', 'ok');
       }).catch((error) => {
         reportError(error);
@@ -378,13 +563,45 @@
 
     async function removeAnnotation(annotationId, button) {
       button.disabled = true;
+      // The annotation is gone from the snapshot after removal, so capture its
+      // family before dispatching.
+      const family = (session?.document?.annotations ?? []).find((candidate) => candidate.id === annotationId)?.family;
       try {
         const result = await session.removeAnnotation({ mutationId: crypto.randomUUID(), annotationId });
         await awaitSettlement(result, {
-          failMessage: 'comment marker was not removed',
-          unreconciledMessage: 'comment marker removal was not reconciled',
+          failMessage: 'annotation was not removed',
+          unreconciledMessage: 'annotation removal was not reconciled',
         });
-        setStatus('comment marker deleted', 'ok');
+        setStatus(family === 'code' ? 'code removed' : 'comment marker deleted', 'ok');
+      } catch (error) {
+        button.disabled = false;
+        reportError(error);
+      }
+    }
+
+    // Resolve/reopen a comment through the declaration-owned `resolve` action
+    // (unified annotations): it contributes only the changed `resolved` field
+    // over the comment's current record, through the same Commit loop as every
+    // other mutation.
+    async function resolveAnnotation(annotationId, button) {
+      button.disabled = true;
+      try {
+        const document = session?.document;
+        const range = (document?.ranges ?? []).find((candidate) => candidate.annotationId === annotationId);
+        const annotation = (document?.annotations ?? []).find((candidate) => candidate.id === annotationId);
+        if (!range || !annotation) throw new Error('comment marker is not attached to text');
+        const resolved = annotation.fields.resolved !== true;
+        const result = await session.applyAnnotationAction(DocClient.body.annotations.comment.actions.resolve, {
+          mutationId: crypto.randomUUID(),
+          from: { offset: range.start, affinity: 'right' },
+          to: { offset: range.end, affinity: 'right' },
+          values: { resolved },
+        });
+        await awaitSettlement(result, {
+          failMessage: 'comment was not resolved',
+          unreconciledMessage: 'comment resolution was not reconciled',
+        });
+        setStatus(resolved ? 'comment resolved' : 'comment reopened', 'ok');
       } catch (error) {
         button.disabled = false;
         reportError(error);
@@ -406,9 +623,107 @@
         && selection.from != null && selection.to != null
         && selection.from.offset !== selection.to.offset;
       $('add-comment').disabled = session?.status !== 'live' || !enabled;
+      $('apply-code').disabled = session?.status !== 'live' || !enabled || !$('code-picker').value;
       $('mark-confidential').disabled = session?.status !== 'live' || !enabled;
     }
     document.addEventListener('selectionchange', updateCommentButton);
+
+    // Codebook mutations go through the package's generic Code entity actions
+    // (Code.create / Code.update / Code.remove) — the same single write path as
+    // every other mutation in the demo.
+    async function mutateCode(path, method, payload, { errorStatus } = {}) {
+      const response = await fetch(`/codes${path}`, {
+        method,
+        credentials: 'include',
+        ...(payload === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        if (errorStatus) errorStatus(body.error ?? `codebook update failed (${response.status})`);
+        return null;
+      }
+      await loadCodebook();
+      renderSession();
+      return body;
+    }
+
+    async function addCode() {
+      const name = window.prompt('New code name');
+      if (name == null || name.trim() === '') return;
+      const created = await mutateCode('', 'POST', { name: name.trim(), color: $('codebook-color').value }, {
+        errorStatus: (message) => reportError(new Error(message)),
+      });
+      if (created) setStatus(`code '${name.trim()}' added`, 'ok');
+    }
+
+    async function renameCode(id, currentName) {
+      const name = window.prompt('Rename code', currentName);
+      if (name == null || name.trim() === '' || name.trim() === currentName) return;
+      const renamed = await mutateCode(`/${encodeURIComponent(id)}`, 'PATCH', { name: name.trim() }, {
+        errorStatus: (message) => reportError(new Error(message)),
+      });
+      if (renamed) setStatus(`code renamed to '${name.trim()}'`, 'ok');
+    }
+
+    async function recolorCode(id, color) {
+      const recolored = await mutateCode(`/${encodeURIComponent(id)}`, 'PATCH', { color }, {
+        errorStatus: (message) => reportError(new Error(message)),
+      });
+      if (recolored) setStatus('code recolored', 'ok');
+    }
+
+    async function deleteCode(id) {
+      if (!window.confirm('Delete this code? Codes applied to text must be removed first.')) return;
+      const deleted = await mutateCode(`/${encodeURIComponent(id)}`, 'DELETE', undefined, {
+        errorStatus: (message) => reportError(new Error(message)),
+      });
+      if (deleted) setStatus('code deleted', 'ok');
+    }
+
+    // Apply the selected code to the current text selection. The annotation
+    // stores only the Code row id; the name and color render from the central
+    // codebook.
+    function applyCode() {
+      if ($('editor').getAttribute('aria-busy') === 'true') {
+        setStatus('wait for the local text change to finish before applying a code', 'error');
+        return;
+      }
+      const selection = editorBinding?.getSelection();
+      if (!selection) {
+        setStatus('select text in the document first', 'error');
+        return;
+      }
+      if (selection.from.offset === selection.to.offset) {
+        setStatus('select a range of text to code', 'error');
+        return;
+      }
+      const codeId = $('code-picker').value;
+      if (!codeId) {
+        setStatus('create a code in the codebook first', 'error');
+        return;
+      }
+      Promise.resolve().then(async () => {
+        const applied = await session.applyAnnotation({
+          mutationId: crypto.randomUUID(),
+          annotation: { id: crypto.randomUUID(), family: 'code', fields: { code: codeId } },
+          from: selection.from,
+          // Same boundary contract as comments: the selected range owns its
+          // start but not its end.
+          to: { ...selection.to, affinity: 'left' },
+        });
+        await awaitSettlement(applied, {
+          failMessage: 'code was not applied',
+          unreconciledMessage: 'code was not reconciled',
+        });
+        const code = codebook.find((candidate) => candidate.id === codeId);
+        setStatus(`code '${code?.name ?? codeId}' applied`, 'ok');
+      }).catch((error) => {
+        reportError(error);
+      });
+    }
+
+    $('apply-code').onclick = () => void applyCode();
+    $('codebook-add-code').onclick = () => void addCode();
 
     // Confidential marking applies a comment (target) then a protecting
     // confidential span over the same selection. The reader principal sees the
@@ -476,6 +791,15 @@
     $('mark-confidential').onclick = () => void markConfidential();
 
     $('view-as').value = viewAs;
+    // The owner can create and delete; the reader view is read-only.
+    $('delete-all').hidden = viewAs === 'reader';
+    $('codebook-add').hidden = viewAs === 'reader';
+    for (const color of CODEBOOK_COLORS) {
+      const option = document.createElement('option');
+      option.value = color.value;
+      option.textContent = color.label;
+      $('codebook-color').append(option);
+    }
     $('view-as').addEventListener('change', (event) => {
       const next = event.target.value === 'reader' ? 'reader' : 'demo';
       sessionStorage.setItem('annotated-doc-view-as', next);
@@ -490,8 +814,13 @@
       renderSession();
     }
     try {
+      await loadCodebook();
       await loadDocs();
-      if (docs[0]) await openDoc(docs[0].id);
+      // Auto-open only the single-document case. With multiple documents a
+      // startup auto-open races any user pick/create — it can leave the caret
+      // channel bound to the wrong document and drop presence updates. Show the
+      // list instead and let the user choose.
+      if (docs.length === 1 && !userRequestedOpen) await enqueueOpen(docs[0].id);
     } catch (error) {
       reportError(error);
     }

@@ -4,8 +4,10 @@ The floor demo for Workbench **`annotatedText()`** — collaborative CRDT text
 with recipient-projected delivery, without Scope Studio chrome.
 
 One document field, a fixed demo principal, browser typing via
-`createAnnotatedTextHttpSession` + `bindAnnotatedTextEditor`, and **comment**
-markers with colors (apply/delete). Optional live JSON debug on the page.
+`createAnnotatedTextHttpSession` + `bindAnnotatedTextEditor`, **comment**
+markers with colors (apply/delete), and a **codebook**: central code
+definitions (name + color) that `code` annotation ranges reference. Optional
+live JSON debug on the page.
 
 ## Run
 
@@ -31,10 +33,12 @@ running or nginx returns 502.
 1. Click **New document** (or pick one from the list)
 2. Type in the editor — inserts/deletes go through the session binding
 3. Select a range → **Add comment marker** (choose a color first)
-4. Delete a marker from the Comments panel
-5. Expand **Live JSON state** for the folded document snapshot (optional)
-6. Delete a document from the list (owner view) — erases the document and its log
-7. Reload — text and comments persist; a second tab converges over live delivery
+4. Select a range → pick a **Code** and **Apply code** — the range references a
+   codebook entry; rename or recolor the code centrally and every range follows
+5. Delete a marker from the Comments panel, or **Resolve**/**Reopen** it through the declaration-owned `resolve` action
+6. Expand **Live JSON state** for the folded document snapshot (optional)
+7. Delete a document from the list (owner view) — erases the document and its log
+8. Reload — text and comments persist; a second tab converges over live delivery
 
 DB file defaults to `projects/annotated-doc/annotated-doc.db` (override with
 `ANNOTATED_DOC_DB`).
@@ -44,14 +48,17 @@ DB file defaults to `projects/annotated-doc/annotated-doc.db` (override with
 | Piece | Role |
 | --- | --- |
 | `Doc.body: annotatedText(...)` | Decision-0010 document field (one continuous CRDT text + range annotations) |
-| `annotation('comment', { empty: 'orphan', fields: { color: text({ oneOf: [...] }) } })` | Comment family; color required, one of five palette hexes |
+| `annotation('comment', { empty: 'orphan', fields: { color, comment, resolved }, actions: { compose, recolor, resolve } })` | Comment family; color required (one of five palette hexes), `comment` joins the `Comment` row, and `recolor` / `resolve` are declaration-owned marker actions |
+| `resolve: annotationAction({ input: { resolved: boolean() }, change })` | A declaration-owned domain action (unified annotations): one keyed handle, one Commit-loop path — the partial `resolved` contribution merges over the comment's current record |
+| `Code` entity + `annotation('code', { fields: { code: ref('Code') } })` | The codebook: name + color live centrally on a `Code` row; a `code` annotation stores only the Code id, so every range tagged with a code follows a rename or recolor |
+| `GET/POST/PATCH/DELETE /codes` | Codebook CRUD through generic `Code.create` / `Code.update` / `Code.remove` actions; a code still applied to a range cannot be deleted (409) |
 | `protectingAnnotation('confidential', { protects: 'sensitive', ... })` | Confidential span: a protecting annotation over a range; the reader principal sees the real text replaced by the placeholder |
 | Fixed principals `demo` (owner) + `reader` | The demo shows both sides of the per-recipient projection: owner sees real text, reader sees the redacted placeholder |
 | `?view-as` / **View as** toggle | Switch between the owner and reader views of the same document |
 | `GET/POST /docs`, `DELETE /docs/:id` → list, create + `annotatedTextRetireAction` | Doc list/create/delete through package actions only |
-| `createAnnotatedTextHttpSession` + `bindAnnotatedTextEditor` | Typed text + `applyAnnotation` / `removeAnnotation`; no raw CRDT ops |
+| `createAnnotatedTextHttpSession` + `bindAnnotatedTextEditor` | Typed text + `applyAnnotation` / `applyAnnotationAction` (compose, recolor, resolve) / `removeAnnotation`; no raw CRDT ops |
 | `/live-delivery` | Recipient snapshot fold + ingest recovery |
-| Comments panel + color select | Marker apply/delete UI with highlight colors |
+| Comments panel + color select | Marker apply/delete/resolve UI with highlight colors |
 | Live JSON state (`<details>`) | Optional debug of the session document snapshot |
 
 Range boundaries follow the CRDT's locked affinity: typing at the **start** of a
@@ -87,7 +94,8 @@ background — signalling that the placeholder is a redaction, not the content.
 - Block split / merge / continue controls
 - Carets / multi-user presence
 - Login, sharing, or multi-principal grants (the demo uses two fixed principals)
-- Scope entities, coding, speakers, or Studio
+- Scope entities, speakers, or Studio — the codebook is a demo-level central
+  store, not the full Scope coding workflow
 - `text.crdt()` (see `projects/note.mjs` / `projects/gdoc.mjs` for that floor)
 
 ## Client handle
@@ -100,7 +108,7 @@ does not maintain a second declaration or manually mirror annotation families.
 ```text
 contenteditable beforeinput
   → bindAnnotatedTextEditor
-  → createAnnotatedTextHttpSession (replace / applyAnnotation / removeAnnotation)
+  → createAnnotatedTextHttpSession (replace / applyAnnotation / applyAnnotationAction / removeAnnotation)
   → package actions (one write path)
   → committed log + projection
   → live-delivery recipient snapshot fold

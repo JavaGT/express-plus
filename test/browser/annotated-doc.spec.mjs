@@ -74,11 +74,17 @@ async function createCommentedDocument(page, { text = '1234567890', from = 2, to
     selection.addRange(range);
   }, { from, to });
   await page.getByRole('combobox', { name: 'Comment color' }).selectOption(color);
-  await page.getByRole('button', { name: 'Add comment marker' }).click();
-  await expect(page.locator('#status')).toHaveText('comment marker added');
+  await addCommentMarker(page);
+  await expect(page.locator('#status')).toHaveText('comment thread added');
   const marked = editor.locator('[data-annotation-families~="comment"]');
   await expect(marked).toHaveText(text.slice(from, to));
   return { id, editor, marked };
+}
+
+/** Click Add comment marker and accept the demo's comment-body prompt. */
+async function addCommentMarker(page, body = 'A comment') {
+  page.once('dialog', (dialog) => dialog.accept(body));
+  await page.getByRole('button', { name: 'Add comment marker' }).click();
 }
 
 async function placeCaret(target, offset) {
@@ -216,8 +222,8 @@ test('adding a comment marker preserves the selected and following text', async 
     selection.addRange(range);
   });
 
-  await page.getByRole('button', { name: 'Add comment marker' }).click();
-  await expect(page.locator('#status')).toHaveText('comment marker added');
+  await addCommentMarker(page);
+  await expect(page.locator('#status')).toHaveText('comment thread added');
   await expect(editor).toHaveText(text);
   const marked = editor.locator('[data-annotation-families~="comment"]');
   await expect(marked).toHaveText('selected');
@@ -278,7 +284,7 @@ test('overlapping comment colors mix and persist after reload', async ({ page })
     selection.addRange(range);
   });
   await page.getByRole('combobox', { name: 'Comment color' }).selectOption('#bfdbfe');
-  await page.getByRole('button', { name: 'Add comment marker' }).click();
+  await addCommentMarker(page);
   await expect(page.locator('.annotation-card')).toHaveCount(2);
   const overlap = editor.locator('[data-annotation-ids]').filter({ hasText: '56' });
   await expect(overlap).toHaveAttribute('data-annotation-ids', / /);
@@ -304,7 +310,7 @@ test('a comment can be deleted from the annotation list and stays deleted after 
     selection.removeAllRanges();
     selection.addRange(range);
   });
-  await page.getByRole('button', { name: 'Add comment marker' }).click();
+  await addCommentMarker(page);
   await expect(page.locator('.annotation-card')).toHaveCount(1);
   await page.getByRole('button', { name: 'Delete comment 1' }).click();
   await expect(page.locator('#status')).toHaveText('comment marker deleted');
@@ -313,6 +319,39 @@ test('a comment can be deleted from the annotation list and stays deleted after 
   await page.reload();
   await openDocument(page, id);
   await expect(page.locator('.annotation-card')).toHaveCount(0);
+  await expect(editor).toHaveText('before selected after');
+});
+
+test('a comment can be resolved and reopened from the annotation list', async ({ page }) => {
+  const id = await createDocument(page);
+  const editor = page.locator('#editor');
+  await editor.pressSequentially('before selected after', { delay: 0 });
+  await expect(editor).toHaveText('before selected after');
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await editor.evaluate((element) => {
+    const node = element.ownerDocument.createTreeWalker(element.firstElementChild, NodeFilter.SHOW_TEXT).nextNode();
+    const range = document.createRange();
+    range.setStart(node, 7);
+    range.setEnd(node, 15);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await addCommentMarker(page);
+  await expect(page.locator('#status')).toHaveText('comment thread added');
+  const card = page.locator('.annotation-card');
+  await expect(card).toContainText('selected');
+  await page.getByRole('button', { name: 'Resolve comment 1' }).click();
+  await expect(page.locator('#status')).toHaveText('comment resolved');
+  await expect(card).toHaveClass(/resolved/);
+  await page.getByRole('button', { name: 'Reopen comment 1' }).click();
+  await expect(page.locator('#status')).toHaveText('comment reopened');
+  await expect(card).not.toHaveClass(/resolved/);
+  // Resolved state is the marker field: it survives a reload.
+  await page.getByRole('button', { name: 'Resolve comment 1' }).click();
+  await page.reload();
+  await openDocument(page, id);
+  await expect(page.locator('.annotation-card')).toHaveClass(/resolved/);
   await expect(editor).toHaveText('before selected after');
 });
 
@@ -335,8 +374,8 @@ test('typing after an end comment keeps the caret outside the comment', async ({
     selection.removeAllRanges();
     selection.addRange(range);
   });
-  await page.getByRole('button', { name: 'Add comment marker' }).click();
-  await expect(page.locator('#status')).toHaveText('comment marker added');
+  await addCommentMarker(page);
+  await expect(page.locator('#status')).toHaveText('comment thread added');
   const marked = editor.locator('[data-annotation-families~="comment"]');
   await expect(marked).toHaveText('90');
 
@@ -383,7 +422,7 @@ test('boundary typing follows the blockless range affinity', async ({ page }) =>
     selection.removeAllRanges();
     selection.addRange(range);
   });
-  await page.getByRole('button', { name: 'Add comment marker' }).click();
+  await addCommentMarker(page);
   const marked = editor.locator('[data-annotation-families~="comment"]');
   await expect(marked).toHaveText('34');
 
@@ -448,7 +487,7 @@ test('typing at the edges of a whole-document comment follows boundary affinity'
     selection.removeAllRanges();
     selection.addRange(range);
   });
-  await page.getByRole('button', { name: 'Add comment marker' }).click();
+  await addCommentMarker(page);
   const marked = editor.locator('[data-annotation-families~="comment"]');
   await expect(marked).toHaveText('34');
 
@@ -605,7 +644,7 @@ test('clicking a comment card selects the exact annotated text', async ({ page }
     window.getSelection()?.removeAllRanges();
   });
   await expect(editor).not.toBeFocused();
-  await page.locator('.annotation-card p').click();
+  await page.locator('.annotation-card .annotation-body').click();
   await expect.poll(() => page.evaluate(() => window.getSelection()?.toString() ?? '')).toBe('selected');
   await expect(editor).toBeFocused();
 });
@@ -719,12 +758,27 @@ test('an exhausted document surfaces an error and never blocks new documents', a
   const context = await browser.newContext();
   const fresh = await context.newPage();
   await fresh.goto(origin);
-  await expect(fresh.locator('#status')).toContainText('live', { timeout: 15000 });
+  await expect(fresh.locator('.doc', { hasText: exhaustedId })).toBeVisible({ timeout: 15000 });
   await fresh.locator('.doc', { hasText: exhaustedId }).click();
   await expect(fresh.locator('#status')).toContainText('try again', { timeout: 15000 });
   await fresh.getByRole('button', { name: 'New document' }).click();
   await expect(fresh.locator('#status')).toContainText('live', { timeout: 15000 });
   await context.close();
+});
+
+test('delete all removes every document and clears the list', async ({ page }) => {
+  page.on('dialog', (dialog) => dialog.accept());
+  await page.goto(origin);
+  const before = (await (await page.request.get(origin + '/docs')).json()).docs.length;
+  await page.getByRole('button', { name: 'New document' }).click();
+  await expect(page.locator('#status')).toContainText('live', { timeout: 15000 });
+  await page.getByRole('button', { name: 'New document' }).click();
+  await expect(page.locator('#status')).toContainText('live', { timeout: 15000 });
+  const expected = before + 2;
+  await page.getByRole('button', { name: 'Delete all' }).click();
+  await expect(page.locator('#status')).toContainText(`deleted ${expected} documents`, { timeout: 15000 });
+  await expect(page.locator('.doc')).toHaveCount(0);
+  await expect(page.locator('#editor-wrap')).toContainText('No document open.');
 });
 
 test('two pages converge through session ingest without repair writes', async ({ browser }) => {
@@ -929,6 +983,96 @@ test('IME composition inside a comment grows the comment range and persists', as
   await expect(editor.locator('[data-annotation-families~="comment"]')).toHaveText('4語5');
 });
 
+test('typing directly after a confidential span stays outside the redacted region', async ({ page, browser }) => {
+  const id = await createDocument(page);
+  const editor = page.locator('#editor');
+  await editor.pressSequentially('hello secret world', { delay: 0 });
+  await expect(editor).toHaveText('hello secret world');
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await editor.evaluate((element) => {
+    const node = element.ownerDocument.createTreeWalker(element.firstElementChild, NodeFilter.SHOW_TEXT).nextNode();
+    const range = document.createRange();
+    range.setStart(node, 6);
+    range.setEnd(node, 12);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await page.getByRole('button', { name: 'Mark confidential' }).click();
+  await expect(page.locator('#status')).toHaveText('confidential span marked');
+
+  // Caret directly after 'secret' (display offset 12): the new character must
+  // stay OUTSIDE the confidential span.
+  await placeCaretAtDisplay(editor, 12);
+  await editor.pressSequentially('X', { delay: 0 });
+  await expect(editor).toHaveText('hello secretX world');
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await expect(editor.locator('[data-annotation-families~="sensitive"]')).toHaveText('secret');
+
+  // Persisted: after a reload the owner still sees X outside the span.
+  await page.reload();
+  await openDocument(page, id);
+  await expect(page.locator('#editor')).toHaveText('hello secretX world');
+  await expect(page.locator('#editor').locator('[data-annotation-families~="sensitive"]')).toHaveText('secret');
+
+  // The reader renders X OUTSIDE the [restricted] placeholder — the redaction
+  // never absorbed the post-span typing.
+  const context = await browser.newContext();
+  await context.addInitScript(() => sessionStorage.setItem('annotated-doc-view-as', 'reader'));
+  const readerPage = await context.newPage();
+  await readerPage.goto(origin);
+  await readerPage.locator('.doc', { hasText: id }).click();
+  await expect(readerPage.locator('#status')).toContainText('live', { timeout: 15000 });
+  await expect(readerPage.locator('#editor')).toHaveText('hello [restricted]X world');
+  await expect(readerPage.locator('#editor').locator('[data-restricted="true"]')).toHaveText('[restricted]');
+  await context.close();
+});
+
+test('typing at the start of a confidential span joins the redacted region', async ({ page, browser }) => {
+  const id = await createDocument(page);
+  const editor = page.locator('#editor');
+  await editor.pressSequentially('hello secret world', { delay: 0 });
+  await expect(editor).toHaveText('hello secret world');
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await editor.evaluate((element) => {
+    const node = element.ownerDocument.createTreeWalker(element.firstElementChild, NodeFilter.SHOW_TEXT).nextNode();
+    const range = document.createRange();
+    range.setStart(node, 6);
+    range.setEnd(node, 12);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await page.getByRole('button', { name: 'Mark confidential' }).click();
+  await expect(page.locator('#status')).toHaveText('confidential span marked');
+
+  // Caret at the span start (display offset 6): the start of a range leans
+  // 'right' (same locked affinity as comments), so the new character joins the
+  // confidential span and is hidden from the reader.
+  await placeCaretAtDisplay(editor, 6);
+  await editor.pressSequentially('X', { delay: 0 });
+  await expect(editor).toHaveText('hello Xsecret world');
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await expect(editor.locator('[data-annotation-families~="sensitive"]')).toHaveText('Xsecret');
+
+  await page.reload();
+  await openDocument(page, id);
+  await expect(page.locator('#editor')).toHaveText('hello Xsecret world');
+  await expect(page.locator('#editor').locator('[data-annotation-families~="sensitive"]')).toHaveText('Xsecret');
+
+  // The reader sees the joined character inside the opaque placeholder (and
+  // never the plain text).
+  const context = await browser.newContext();
+  await context.addInitScript(() => sessionStorage.setItem('annotated-doc-view-as', 'reader'));
+  const readerPage = await context.newPage();
+  await readerPage.goto(origin);
+  await readerPage.locator('.doc', { hasText: id }).click();
+  await expect(readerPage.locator('#status')).toContainText('live', { timeout: 15000 });
+  await expect(readerPage.locator('#editor')).toHaveText('hello [restricted] world');
+  await expect(readerPage.locator('#editor')).not.toContainText('X');
+  await context.close();
+});
+
 test('a reader selection that crosses a placeholder is rejected and never edits', async ({ page, browser }) => {
   const id = await createDocument(page);
   const editor = page.locator('#editor');
@@ -1093,7 +1237,7 @@ test('ordinary typing repaints only the touched run and preserves the other run 
 // text. A redacted reader receives only an opaque edge (`data-kind="edge"`),
 // never offsets. Carets never survive reload.
 
-test('a peer tab renders the owner caret at the typed position and clears it on blur and close', async ({ browser }) => {
+test('a peer tab renders the owner caret at the typed position, keeps it across blur, and clears it on close', async ({ browser }) => {
   const context = await browser.newContext();
   const owner = await context.newPage();
   const id = await createDocument(owner);
@@ -1115,20 +1259,120 @@ test('a peer tab renders the owner caret at the typed position and clears it on 
   // The peer renders the owner's caret at the typed position. The peer's own
   // presence bar (published on focus, offset 0) may coexist; the owner's bar
   // is the one at offset 2.
-  await expect(ownerBar('2')).toHaveCount(1, { timeout: 10000 });
+  const ownerBarEl = ownerBar('2');
+  await expect(ownerBarEl).toHaveCount(1, { timeout: 10000 });
   await expect(peerEditor).toHaveText('Hello');
 
-  // Blur clears the owner's presence on the peer.
-  await ownerEditor.blur();
-  await expect(ownerBar('2')).toHaveCount(0, { timeout: 10000 });
+  // The bar is a line-height marker (not a full-height column) and carries the
+  // owner session's own caret color, so each collaborating tab is distinct.
+  const barHeight = await ownerBarEl.evaluate((el) => el.getBoundingClientRect().height);
+  const layerHeight = await peerLayer.evaluate((el) => el.getBoundingClientRect().height);
+  expect(barHeight).toBeGreaterThan(0);
+  expect(barHeight).toBeLessThan(layerHeight);
+  expect(await ownerBarEl.evaluate((el) => getComputedStyle(el).getPropertyValue('--caret-color'))).not.toBe('');
 
-  // Re-focus and republish, then close the owner page: the peer clears it.
+  // Blur (e.g. the user clicks the other window) does NOT remove the owner's
+  // presence — presence lifetime is the open document, not DOM focus.
+  await ownerEditor.blur();
+  await expect(ownerBar('2')).toHaveCount(1, { timeout: 5000 });
+
+  // Closing the owner page retracts it (true teardown).
   await ownerEditor.click();
   await placeCaretAtDisplay(ownerEditor, 2);
   await owner.evaluate(() => document.dispatchEvent(new Event('selectionchange')));
   await expect(ownerBar('2')).toHaveCount(1, { timeout: 10000 });
   await owner.close();
   await expect(ownerBar('2')).toHaveCount(0, { timeout: 10000 });
+
+  await context.close();
+});
+
+test('a peer tab renders the owner selection as a highlight and clears it on collapse', async ({ browser }) => {
+  const context = await browser.newContext();
+  const owner = await context.newPage();
+  const id = await createDocument(owner);
+  const peer = await context.newPage();
+  await openDocument(peer, id);
+
+  const ownerEditor = owner.locator('#editor');
+  const peerEditor = peer.locator('#editor');
+  const peerLayer = peer.locator('#editor-carets');
+
+  await ownerEditor.pressSequentially('Hello', { delay: 0 });
+  await expect(ownerEditor).toHaveAttribute('aria-busy', 'false');
+
+  // Select 'el' (display offsets 1..3). The owner publishes the selection
+  // range; the peer renders it as a translucent highlight, not a caret bar.
+  await ownerEditor.evaluate((element) => {
+    const block = element.querySelector('[data-block-id]');
+    const node = element.ownerDocument.createTreeWalker(block, NodeFilter.SHOW_TEXT).nextNode();
+    const range = document.createRange();
+    range.setStart(node, 1);
+    range.setEnd(node, 3);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await owner.evaluate(() => document.dispatchEvent(new Event('selectionchange')));
+
+  const peerSelection = peerLayer.locator('[data-kind="selection"]');
+  await expect(peerSelection).toHaveCount(1, { timeout: 10000 });
+  await expect(peerSelection.first()).toHaveAttribute('data-presence', /.+/);
+  await expect(peerEditor).toHaveText('Hello');
+  // The selection highlight covers the selected text and not a caret bar.
+  await expect(peerLayer.locator('[data-kind="caret"][data-presence="' + await peerSelection.first().getAttribute('data-presence') + '"]')).toHaveCount(0);
+
+  // Collapsing the owner selection republishes a caret, clearing the highlight.
+  await ownerEditor.evaluate((element) => {
+    const block = element.querySelector('[data-block-id]');
+    const node = element.ownerDocument.createTreeWalker(block, NodeFilter.SHOW_TEXT).nextNode();
+    const range = document.createRange();
+    range.setStart(node, 3);
+    range.collapse(true);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await owner.evaluate(() => document.dispatchEvent(new Event('selectionchange')));
+  await expect(peerSelection).toHaveCount(0, { timeout: 10000 });
+
+  await context.close();
+});
+
+test('a peer tab keeps another tab selection highlight when the peer itself is clicked', async ({ browser }) => {
+  const context = await browser.newContext();
+  const a = await context.newPage();
+  await a.goto(origin);
+  await a.getByRole('button', { name: 'New document' }).click();
+  await expect(a.locator('#status')).toContainText('live', { timeout: 15000 });
+  const id = await a.locator('.doc.active small').textContent();
+  const b = await context.newPage();
+  await b.goto(origin);
+  await b.locator('.doc', { hasText: id }).click();
+  await expect(b.locator('#status')).toContainText('live', { timeout: 15000 });
+  const aEditor = a.locator('#editor');
+  const bLayer = b.locator('#editor-carets');
+  await aEditor.pressSequentially('abcdefghij', { delay: 0 });
+  await expect(aEditor).toHaveAttribute('aria-busy', 'false');
+  await aEditor.evaluate((element) => {
+    const block = element.querySelector('[data-block-id]');
+    const node = element.ownerDocument.createTreeWalker(block, NodeFilter.SHOW_TEXT).nextNode();
+    const range = document.createRange();
+    range.setStart(node, 2);
+    range.setEnd(node, 6);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await a.evaluate(() => document.dispatchEvent(new Event('selectionchange')));
+  const bSelection = bLayer.locator('[data-kind="selection"]');
+  await expect(bSelection).toHaveCount(1, { timeout: 10000 });
+
+  // Clicking in the peer collapses the peer's own caret but must NOT remove
+  // the other tab's selection highlight from the peer's layer.
+  await b.locator('#editor').click();
+  await expect(bSelection).toHaveCount(1, { timeout: 10000 });
+  await expect(bLayer.locator('[data-kind="caret"]')).toHaveCount(1, { timeout: 10000 });
 
   await context.close();
 });
@@ -1160,10 +1404,11 @@ test('a redacted reader receives only edge caret presence and never offsets', as
   await expect(readerEditor).toHaveText('hello [restricted] world');
   const readerLayer = reader.locator('#editor-carets');
 
-  // The reader's own focus publishes its caret back to itself as an edge,
-  // which proves the reader's caret channel is subscribed before the owner
-  // publishes below.
-  await expect(readerLayer.locator('[data-kind="edge"]')).toHaveCount(1, { timeout: 10000 });
+  // The reader's own focus publishes its caret back to itself as an edge, and
+  // the owner's persisted presence projects as a second edge (redacted
+  // recipients only ever get opaque edges, never offsets). Both prove the
+  // reader's caret channel is subscribed before the owner publishes below.
+  await expect(readerLayer.locator('[data-kind="edge"]')).toHaveCount(2, { timeout: 10000 });
 
   // The owner publishes a collapsed caret; the reader gets only an opaque
   // edge — never an offset — and the reader's text is untouched.
@@ -1186,4 +1431,63 @@ test('a redacted reader receives only edge caret presence and never offsets', as
   await expect(editor).toHaveText('hello secret world');
 
   await context.close();
+});
+
+test('the codebook is the central store code ranges reference', async ({ page }) => {
+  await createDocument(page);
+  const editor = page.locator('#editor');
+  await editor.pressSequentially('hello world', { delay: 0 });
+  await expect(editor).toHaveText('hello world');
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+
+  // Create a code in the codebook (owner view).
+  await page.getByRole('combobox', { name: 'New code color' }).selectOption('#fecaca');
+  page.once('dialog', (dialog) => dialog.accept('Important'));
+  await page.getByRole('button', { name: 'Add code' }).click();
+  await expect(page.locator('#status')).toHaveText("code 'Important' added");
+  const codebookEntry = page.locator('.codebook-entry');
+  await expect(codebookEntry).toHaveCount(1);
+  await expect(codebookEntry).toContainText('Important');
+
+  // Apply the code to a range.
+  await editor.evaluate((element) => {
+    const node = element.ownerDocument.createTreeWalker(element.firstElementChild, NodeFilter.SHOW_TEXT).nextNode();
+    const range = document.createRange();
+    range.setStart(node, 0);
+    range.setEnd(node, 5);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await page.getByRole('combobox', { name: 'Code', exact: true }).selectOption({ index: 0 });
+  await page.getByRole('button', { name: 'Apply code' }).click();
+  await expect(page.locator('#status')).toHaveText("code 'Important' applied");
+  const coded = editor.locator('[data-annotation-families~="code"]');
+  await expect(coded).toHaveText('hello');
+  // The range renders with the code's color from the codebook (not a
+  // per-annotation color).
+  await expect(coded).toHaveCSS('background-color', 'rgb(254, 202, 202)');
+  const codeCard = page.locator('.code-card');
+  await expect(codeCard).toHaveCount(1);
+  await expect(codeCard).toContainText('Important');
+  await expect(codeCard).toContainText('hello');
+
+  // Rename the code centrally; the card and the picker follow.
+  page.once('dialog', (dialog) => dialog.accept('Crucial'));
+  await page.getByRole('button', { name: 'Rename Important' }).click();
+  await expect(page.locator('#status')).toHaveText("code renamed to 'Crucial'");
+  await expect(codeCard).toContainText('Crucial');
+  await expect(page.getByRole('combobox', { name: 'Code', exact: true })).toContainText('Crucial');
+
+  // Recolor the code centrally; the codebook swatch and every range follow.
+  await page.getByRole('combobox', { name: 'Recolor Crucial' }).selectOption('#bbf7d0');
+  await expect(page.locator('#status')).toHaveText('code recolored');
+  await expect(codebookEntry.locator('.annotation-color')).toHaveCSS('background-color', 'rgb(187, 247, 208)');
+  await expect(coded).toHaveCSS('background-color', 'rgb(187, 247, 208)');
+
+  // A code still applied to a range cannot be deleted.
+  page.once('dialog', (dialog) => dialog.accept());
+  await page.getByRole('button', { name: 'Delete Crucial' }).click();
+  await expect(page.locator('#status')).toContainText('remove its code annotations first');
+  await expect(codebookEntry).toHaveCount(1);
 });
