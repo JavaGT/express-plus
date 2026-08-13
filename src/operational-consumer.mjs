@@ -261,9 +261,18 @@ export function createOperationalConsumers(consumers                     = [], {
     engage(db);
     try {
       for (const consumer of declared) {
-        const cursors = consumerCursorMap(db, cursorName(consumer.name));
+        const consumerCursor = cursorName(consumer.name);
+        const cursors = consumerCursorMap(db, consumerCursor);
         const blockedScopes = new Set        ();
-        const rows = db.prepare('SELECT * FROM _Log ORDER BY scope, seq').all();
+        // Read only records beyond this consumer's durable per-scope cursor.
+        // Selecting the whole committed log here makes every post-commit pass
+        // proportional to retained history and materializes large eventData
+        // values on the application's main thread after they were acknowledged.
+        const rows = db.prepare(`SELECT log.* FROM _Log AS log
+          LEFT JOIN _ConsumerCursor AS cursor
+            ON cursor.consumer = ? AND cursor.scope = log.scope
+          WHERE log.seq > COALESCE(cursor.lastSeq, 0)
+          ORDER BY log.scope, log.seq`).all(consumerCursor);
         for (const row of rows) {
           if (blockedScopes.has(row.scope          )) continue;
           if ((cursors.get(row.scope          ) ?? 0) >= (row.seq          )) continue;
