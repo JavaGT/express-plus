@@ -20,7 +20,7 @@
 //
 // `matchExtension(filename)` returns a content-type for static file serving.
 
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, realpathSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
 import { failure,                       } from './outcome.mjs';
 import { sendFailure,               } from './http-failure.mjs';
@@ -128,7 +128,17 @@ export function serveStatic(dir        , options                     = {}) {
     const relPath = String(rel).replace(/^\/+/, '');
     if (!relPath || !isSafePath(dir, relPath)) return next ? next() : sendStaticFailure(res, failure('not-found', 'not found'));
     const fullPath = resolve(dir, relPath);
-    if (options.isManagedPath?.(fullPath)) return next ? next() : sendStaticFailure(res, failure('not-found', 'not found'));
+    if (options.isManagedPath) {
+      // Real-path containment: a symlink inside an allowed static root that
+      // points into the owned directory must not bypass the managed-path guard.
+      // The path is resolved to its real location when the file exists (a
+      // missing file 404s below regardless of its path).
+      let guarded = fullPath;
+      if (existsSync(fullPath)) {
+        try { guarded = realpathSync(fullPath); } catch { guarded = fullPath; }
+      }
+      if (options.isManagedPath(guarded)) return next ? next() : sendStaticFailure(res, failure('not-found', 'not found'));
+    }
     if (!existsSync(fullPath)) return next ? next() : sendStaticFailure(res, failure('not-found', 'not found'));
     try {
       const content = readFileSync(fullPath);

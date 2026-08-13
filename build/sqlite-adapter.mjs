@@ -15,7 +15,7 @@
 // backups/, quarantine/, and recycle/ are owned by S1/A3/A4/A6 and survive.
 
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, realpathSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import {
   applyConnectionPragmas,
@@ -142,11 +142,19 @@ export function openMemoryAdapter()                       {
 // synchronous).
 export function createSqliteAdapter(config                  = {})                  {
   const root = config.mode === 'memory' || !config.directory ? null : path.resolve(config.directory);
+  // The real root (symlink-resolved) is captured up front so the managed-path
+  // predicate compares REAL paths — a symlink into the owned directory (or a
+  // symlinked parent chain such as macOS /var → /private/var) cannot bypass it.
+  const realRoot = root ? realPathOf(root) : null;
   return {
     config,
     root,
-    isManagedPath: (p) => isUnderRoot(root, p),
-    open: () => Promise.resolve(openSqliteAdapter(config)),
+    isManagedPath: (p) => isUnderRoot(realRoot, p),
+    // The open is deferred through a microtask so a failure (invalid config,
+    // lock contention, corruption) REJECTS the returned promise instead of
+    // throwing synchronously — `Promise.resolve(value)` would evaluate the open
+    // eagerly and break the Promise<OpenedDatabase> contract.
+    open: () => Promise.resolve().then(() => openSqliteAdapter(config)),
     readMirror()                        {
       const dbFile = root ? path.join(root, SQLITE_DATA_FILENAME) : ':memory:';
       return {
@@ -165,11 +173,25 @@ export function createSqliteAdapter(config                  = {})               
 // subdirectory layout under one root.
 function createOwnedLayout(directory        )         {
   const root = path.resolve(directory);
-  mkdirSync(root, { recursive: true, mode: 0o700 });
+  ensurePrivateDirectory(root);
   for (const sub of MANAGED_SUBDIRECTORIES) {
-    mkdirSync(path.join(root, sub), { recursive: true, mode: 0o700 });
+    ensurePrivateDirectory(path.join(root, sub));
   }
   return root;
+}
+
+// mkdirSync's `mode` applies only to NEWLY created directories, so an EXISTING
+// root is tightened explicitly. The adapter owns the whole directory, and a
+// pre-existing root (e.g. a repo examples dir holding the db file, -wal, lock,
+// and blobs) must not stay group/other-readable. Chosen chmod policy (review
+// #81): TIGHTEN to 0o700 on open rather than fail — failing would refuse
+// pre-existing shared directories the app legitimately owns (the repo's own
+// examples own `./examples`, mode 0755). The owned subdirectories are created
+// freshly at 0o700; the same explicit chmod covers a subdirectory that already
+// existed.
+function ensurePrivateDirectory(dir        )       {
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(dir, 0o700);
 }
 
 // Fail-closed integrity gate at open. A fresh or healthy database answers the
@@ -182,10 +204,31 @@ function quickCheck(db              )       {
   }
 }
 
-function isUnderRoot(root               , p        )          {
-  if (!root) return false;
-  const abs = path.resolve(p);
-  return abs === root || abs.startsWith(root + path.sep);
+// Real-path containment for the managed-path predicate. realpath fails on a
+// non-existent leaf, so the parent chain is realpath'd and the leaf re-joined:
+// a non-existent path under a managed directory still resolves as managed,
+// while an unrelated non-existent path is not. This makes the guard immune to
+// symlinks (a static root symlinked into the owned directory, or a symlinked
+// parent such as macOS /var → /private/var).
+function realPathOf(p        )         {
+  try {
+    return realpathSync(p);
+  } catch {
+    const dir = path.dirname(p);
+    const base = path.basename(p);
+    if (!base || base === '.' || base === dir) return p;
+    try {
+      return path.join(realpathSync(dir), base);
+    } catch {
+      return p;
+    }
+  }
+}
+
+function isUnderRoot(realRoot               , p        )          {
+  if (!realRoot) return false;
+  const real = realPathOf(p);
+  return real === realRoot || real.startsWith(realRoot + path.sep);
 }
 
 function makeOpenedSqliteDatabase(
@@ -196,6 +239,9 @@ function makeOpenedSqliteDatabase(
 )                       {
   let closed = false;
   const handle = db                       ;
+  // The real root (symlink-resolved) — the managed-path predicate compares REAL
+  // paths so a symlink cannot bypass containment.
+  const realRoot = root ? realPathOf(root) : null;
   const capabilities = capabilitiesOf({
     transactionalDdl: true,
     onlineBackup: true,
@@ -210,22 +256,27 @@ function makeOpenedSqliteDatabase(
 
   // Checkpoint-then-close: clean shutdown truncates the WAL into the main db
   // file before the handle (and then the ownership lock) goes away. Idempotent.
+  // Failures are NOT swallowed: an explicit close() propagates a failed
+  // wal_checkpoint(TRUNCATE) (or db.close()) to the caller so shutdown knows the
+  // WAL was not drained — while still releasing the ownership lock.
   const close = ()       => {
     if (closed) return;
     closed = true;
+    let failure          = null;
     if (mode === 'file') {
       try {
         db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
-      } catch {
-        /* best-effort checkpoint — a handle already closed by the caller still closes cleanly */
+      } catch (err) {
+        failure = err;
       }
     }
     try {
       db.close();
-    } catch {
-      /* already closed by the caller */
+    } catch (err) {
+      failure ??= err;
     }
     lock?.release();
+    if (failure) throw failure;
   };
 
   const integrityCheck = ()                  => {
@@ -240,7 +291,13 @@ function makeOpenedSqliteDatabase(
   };
 
   const teardown = ()       => {
-    if (!closed) close();
+    if (!closed) {
+      try {
+        close();
+      } catch {
+        /* teardown removes the files regardless of the close outcome */
+      }
+    }
     if (!root) return;
     for (const filename of TEARDOWN_FILENAMES) {
       rmSync(path.join(root, filename), { force: true });
@@ -252,7 +309,7 @@ function makeOpenedSqliteDatabase(
     capabilities,
     mode,
     root,
-    isManagedPath: (p) => isUnderRoot(root, p),
+    isManagedPath: (p) => isUnderRoot(realRoot, p),
     close,
     checkpoint,
     integrityCheck,

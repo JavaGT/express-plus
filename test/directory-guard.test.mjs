@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -92,6 +92,34 @@ test('serveStatic without the guard keeps its existing behavior (no managed refu
   }
 });
 
+test('serveStatic refuses a symlink from an allowed static dir into the owned directory', () => {
+  const root = tempRoot();
+  const owned = path.join(root, 'owned');
+  const staticDir = path.join(root, 'public');
+  try {
+    const opened = openSqliteAdapter({ directory: owned, name: 'app' });
+    try {
+      mkdirSync(staticDir, { recursive: true });
+      writeFileSync(path.join(owned, 'index.html'), '<h1>managed</h1>');
+      // A symlink INSIDE the allowed static root pointing into the owned
+      // directory must not bypass the managed-path guard.
+      symlinkSync(path.join(owned, 'index.html'), path.join(staticDir, 'index.html'));
+      const handler = serveStatic(staticDir, { prefix: '/public', isManagedPath: opened.isManagedPath });
+      const res = mockRes();
+      handler({ params: { path: 'index.html' }, url: '/public/index.html' }, res, null);
+      assert.equal(res.status, 404, 'a symlinked managed file is refused');
+      const ok = mockRes();
+      writeFileSync(path.join(staticDir, 'plain.txt'), 'plain');
+      handler({ params: { path: 'plain.txt' }, url: '/public/plain.txt' }, ok, null);
+      assert.equal(ok.status, 200, 'a genuinely-static sibling file still serves');
+    } finally {
+      opened.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('workbench refuses a blobs.root that overlaps the owned directory (both directions)', () => {
   const root = tempRoot();
   const owned = path.join(root, 'owned');
@@ -119,6 +147,31 @@ test('workbench refuses a blobs.root that overlaps the owned directory (both dir
     ok.shutdown();
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a cwd-owned database re-places the default blob root into the owned blobs/ directory', async () => {
+  const base = tempRoot();
+  const previous = process.cwd();
+  process.chdir(base);
+  try {
+    // Owned directory is cwd; the framework default blob root (cwd/.blobs)
+    // would overlap managed storage, so it is auto-placed into the owned
+    // directory's managed `blobs/` subdirectory (resolveBlobRoot, S1/A2).
+    const app = workbench({ db: { directory: '.', name: 'app', mode: 'file' } });
+    assert.ok(app.blobs, 'blob store constructed');
+    const blobPath = path.resolve(app.blobs.pathFor('any-id', { pending: true }));
+    // process.cwd() returns the REAL (symlink-resolved) cwd after chdir, so it
+    // is the right anchor for the resolved blob path.
+    assert.equal(
+      blobPath.startsWith(path.join(process.cwd(), 'blobs')),
+      true,
+      'the default blob root is re-placed inside the owned blobs/ dir',
+    );
+    await app.shutdown();
+  } finally {
+    process.chdir(previous);
+    rmSync(base, { recursive: true, force: true });
   }
 });
 

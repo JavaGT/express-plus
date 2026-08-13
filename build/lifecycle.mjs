@@ -27,7 +27,11 @@ import { getLog } from './log.mjs';
            
                                       
                                             
-                                            
+                                                                                
+                                                                                
+                                                                              
+                                                
+                                   
                                           
  
 
@@ -146,14 +150,32 @@ export function prepareGracefulShutdown(app         )          {
 
         await app.writeQueue?.close?.();
         // Checkpoint + close the db adapter after the write queue has drained
-        // (S1/A2): the adapter's close() runs wal_checkpoint(TRUNCATE) then
-        // releases the OS-backed ownership lock, so the durable resource is
-        // never closed under an in-flight transaction.
-        try {
-          app._dbAdapter?.close?.();
-        } catch (err) {
-          getLog().warn('system', 'database adapter close failed', { err });
-          process.stderr.write(`database adapter close failed: ${(err         ).message}\n`);
+        // (S1/A2): close() runs wal_checkpoint(TRUNCATE) then releases the
+        // OS-backed ownership lock, so the durable resource is never closed
+        // under an in-flight transaction. A DEFERRED adapter (A1 contract — the
+        // app received a DbAdapter, not an opened database) is opened first so
+        // its opened database can be closed. Close failures are recorded and
+        // re-thrown once cleanup completes: a checkpoint/close failure surfaces
+        // to app.shutdown()'s caller instead of being silently swallowed.
+        let shutdownFailure         ;
+        let dbAdapter = app._dbAdapter;
+        if (app._dbOpen && typeof dbAdapter?.close !== 'function') {
+          try {
+            dbAdapter = (await app._dbOpen())                         ;
+          } catch (err) {
+            // The open itself failed (already surfaced through app.ready / the
+            // boot promise) — there is no opened database to close.
+            shutdownFailure = err;
+          }
+        }
+        if (typeof dbAdapter?.close === 'function') {
+          try {
+            await dbAdapter.close();
+          } catch (err) {
+            shutdownFailure ??= err;
+            getLog().error('system', 'database adapter close failed', { err });
+            process.stderr.write(`database adapter close failed: ${(err                       ).stack ?? err}\n`);
+          }
         }
         // After hooks release application-owned producers (including live
         // delivery), destroy any sockets that remain. closeIdleConnections at
@@ -162,6 +184,7 @@ export function prepareGracefulShutdown(app         )          {
         try { app.httpServer?.closeAllConnections?.(); } catch { /* best-effort */ }
         await serverClosed;
         liveApps.delete(app);
+        if (shutdownFailure) throw shutdownFailure;
       })();
       return shutdownPromise;
     };

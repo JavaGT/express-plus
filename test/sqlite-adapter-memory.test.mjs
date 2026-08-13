@@ -112,6 +112,14 @@ test('createSqliteAdapter({ mode: memory }) is a DbAdapter-conforming bound adap
   opened.close();
 });
 
+test('createSqliteAdapter open() rejects asynchronously — never throws synchronously on failure', async () => {
+  const adapter = createSqliteAdapter({ name: 'app', mode: 'file' }); // no directory
+  let threw = false;
+  try { adapter.open().catch(() => {}); } catch { threw = true; }
+  assert.equal(threw, false, 'a failing open() must not throw synchronously');
+  await assert.rejects(() => adapter.open(), /requires a `directory`/, 'the failure rejects the returned promise');
+});
+
 test('memory and file adapters share the identical capability + lifecycle contract', () => {
   const memory = openMemoryAdapter();
   const file = openSqliteAdapter({ mode: 'memory' }); // routed to memory

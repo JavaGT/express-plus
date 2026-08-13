@@ -250,6 +250,25 @@ test('openSqliteAdapter rejects a config without a directory and routes memory m
   viaMemory.close();
 });
 
+test('an existing owned directory is tightened to 0o700 at open (explicit chmod policy)', () => {
+  const base = tempRoot();
+  try {
+    const loose = path.join(base, 'loose');
+    mkdirSync(loose, { recursive: true, mode: 0o755 });
+    const opened = openSqliteAdapter({ directory: loose, name: 'app' });
+    try {
+      assert.equal(statSync(loose).mode & 0o777, 0o700, 'a pre-existing loose root is tightened to 0o700');
+      for (const sub of MANAGED_SUBDIRECTORIES) {
+        assert.equal(statSync(path.join(loose, sub)).mode & 0o777, 0o700, `${sub}/ is 0o700`);
+      }
+    } finally {
+      opened.close();
+    }
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test('close() releases the ownership lock so a second adapter can open', () => {
   const root = tempRoot();
   const dir = path.join(root, 'owned');
