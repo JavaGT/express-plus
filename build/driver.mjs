@@ -232,22 +232,31 @@ export function upsert(db          , opts               ) {
   sqliteUpsert(db, opts);
 }
 
-// ---- wrapDriver: attach the SQLite defaults (and PRAGMA bootstrap) to a raw
-// handle, or pass a conforming custom driver through untouched. The driver IS
-// the raw handle with helpers attached (object expansion, not a wrapper proxy),
-// so `app.db.prepare` keeps working — entity code and tests reach it everywhere.
-//
-// A conforming custom driver (already provides txn AND upsert) owns its own
-// bootstrap, so NO PRAGMAs run for it — it may not even be SQLite. PRAGMAs run
-// only on the default path (raw DatabaseSync or a bare object) and are guarded
-// so a mock/stub db without a working .exec is a no-op.
-export function wrapDriver(dbOrDriver                             )                              {
-  if (dbOrDriver == null) return dbOrDriver;
-  const isConformingDriver =
-    typeof dbOrDriver.txn === 'function' && typeof dbOrDriver.upsert === 'function';
-  if (isConformingDriver) return dbOrDriver;
-  // Attach the SQLite defaults. `this` inside the arrow closures is lexical, so
-  // we bind to the handle explicitly by closure (not `this`).
+// ---- Connection PRAGMA layer (S1/A2) ------------------------------------
+// THE single source of truth for connection PRAGMAs. The SQLite default adapter
+// runs these fail-closed at open (it does NOT rely on wrapDriver's bootstrap);
+// wrapDriver applies the same list under a thin try/catch for raw-handle test
+// callers. Exactly one module declares the PRAGMA SQL — change them here only.
+
+export const CONNECTION_PRAGMA_SQL                    = Object.freeze([
+  'PRAGMA journal_mode = WAL',
+  'PRAGMA foreign_keys = ON',
+  'PRAGMA synchronous = NORMAL',
+  'PRAGMA busy_timeout = 5000',
+]);
+
+// Fail-closed application: any PRAGMA error propagates. Used by the sqlite
+// adapter at open, where a silent catch would leave a connection misconfigured.
+export function applyConnectionPragmas(db                                )       {
+  for (const sql of CONNECTION_PRAGMA_SQL) db.exec(sql);
+}
+
+// ---- attachDriverHelpers: attach the SQLite default txn/upsert surface ----
+// The adapter needs the driver contract helpers WITHOUT wrapDriver's PRAGMA
+// bootstrap (it runs the centralized layer itself, fail-closed). `this` inside
+// the arrow closures is lexical, so we bind to the handle explicitly by closure
+// (not `this`).
+export function attachDriverHelpers(dbOrDriver          )           {
   dbOrDriver.txn = (fn) => sqliteTxn(dbOrDriver, fn);
   dbOrDriver.exclusiveTxn = (fn) => sqliteExclusiveTxn(dbOrDriver, fn);
   dbOrDriver.readSnapshotTxn = (fn) => sqliteReadSnapshotTxn(dbOrDriver, fn);
@@ -255,12 +264,30 @@ export function wrapDriver(dbOrDriver                             )             
   dbOrDriver.commit = () => sqliteCommit(dbOrDriver );
   dbOrDriver.rollback = () => sqliteRollback(dbOrDriver );
   dbOrDriver.upsert = (opts) => sqliteUpsert(dbOrDriver , opts);
+  return dbOrDriver;
+}
+
+// ---- wrapDriver: attach the SQLite defaults (and thin PRAGMA bootstrap) to a
+// raw handle, or pass a conforming custom driver through untouched. The driver
+// IS the raw handle with helpers attached (object expansion, not a wrapper
+// proxy), so `app.db.prepare` keeps working — entity code and tests reach it
+// everywhere.
+//
+// A conforming custom driver (already provides txn AND upsert) owns its own
+// bootstrap, so NO PRAGMAs run for it — it may not even be SQLite. PRAGMAs run
+// only on the default path (raw DatabaseSync or a bare object) and are guarded
+// so a mock/stub db without a working .exec is a no-op. This path is a THIN
+// back-compat bootstrap for raw-handle callers: the PRAGMA SQL itself lives in
+// CONNECTION_PRAGMA_SQL above, and the sqlite adapter does not rely on it.
+export function wrapDriver(dbOrDriver                             )                              {
+  if (dbOrDriver == null) return dbOrDriver;
+  const isConformingDriver =
+    typeof dbOrDriver.txn === 'function' && typeof dbOrDriver.upsert === 'function';
+  if (isConformingDriver) return dbOrDriver;
+  attachDriverHelpers(dbOrDriver);
   if (typeof dbOrDriver.exec === 'function') {
     try {
-      dbOrDriver.exec('PRAGMA journal_mode = WAL');
-      dbOrDriver.exec('PRAGMA foreign_keys = ON');
-      dbOrDriver.exec('PRAGMA synchronous = NORMAL');
-      dbOrDriver.exec('PRAGMA busy_timeout = 5000');
+      applyConnectionPragmas(dbOrDriver);
     } catch {
       /* mock/stub db — no-op */
     }

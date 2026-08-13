@@ -106,14 +106,20 @@ export interface StaticRequest {
 
 export interface ServeStaticOptions {
   prefix?: string;
+  // Managed-path guard (S1/A2): when provided, a resolved file that the
+  // predicate marks as managed (e.g. under the adapter-owned database
+  // directory) is refused before it is read. Refused paths behave exactly like
+  // unsafe paths: fall through to `next()` when one is provided, else 404.
+  isManagedPath?: (resolvedPath: string) => boolean;
 }
 
 // `serveStatic(dir, options)` is a catch-all request handler factory for the
 // `app.use(prefix, fn)` seam: GET a file under `dir` at the prefix-stripped tail,
 // fall through to `next()` on a missing/unsafe file so a downstream handler (a
 // SPA fallback) may serve it, and 404 only when there is no `next`. Path
-// traversal is rejected via `isSafePath` (fail closed). `options.prefix` is the
-// URL prefix already trimmed of trailing slashes; the tail is taken from
+// traversal is rejected via `isSafePath` (fail closed), and managed paths via
+// `options.isManagedPath` (fail closed). `options.prefix` is the URL prefix
+// already trimmed of trailing slashes; the tail is taken from
 // `req.params.path` when the intercept has already stripped it, else from the
 // raw URL.
 export function serveStatic(dir: string, options: ServeStaticOptions = {}) {
@@ -122,6 +128,7 @@ export function serveStatic(dir: string, options: ServeStaticOptions = {}) {
     const relPath = String(rel).replace(/^\/+/, '');
     if (!relPath || !isSafePath(dir, relPath)) return next ? next() : sendStaticFailure(res, failure('not-found', 'not found'));
     const fullPath = resolve(dir, relPath);
+    if (options.isManagedPath?.(fullPath)) return next ? next() : sendStaticFailure(res, failure('not-found', 'not found'));
     if (!existsSync(fullPath)) return next ? next() : sendStaticFailure(res, failure('not-found', 'not found'));
     try {
       const content = readFileSync(fullPath);

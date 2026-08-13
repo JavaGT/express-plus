@@ -27,6 +27,7 @@ import { getLog } from './log.mjs';
            
                                       
                                             
+                                            
                                           
  
 
@@ -144,6 +145,16 @@ export function prepareGracefulShutdown(app         )          {
         }
 
         await app.writeQueue?.close?.();
+        // Checkpoint + close the db adapter after the write queue has drained
+        // (S1/A2): the adapter's close() runs wal_checkpoint(TRUNCATE) then
+        // releases the OS-backed ownership lock, so the durable resource is
+        // never closed under an in-flight transaction.
+        try {
+          app._dbAdapter?.close?.();
+        } catch (err) {
+          getLog().warn('system', 'database adapter close failed', { err });
+          process.stderr.write(`database adapter close failed: ${(err         ).message}\n`);
+        }
         // After hooks release application-owned producers (including live
         // delivery), destroy any sockets that remain. closeIdleConnections at
         // the top only drops idle keep-alives — an active SSE stream is not

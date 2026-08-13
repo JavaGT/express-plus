@@ -33,6 +33,12 @@ import {
   validateMaintenanceOptions,
 } from './application-runtime.ts';
 import { wrapDriver } from './driver.ts';
+import {
+  openMemoryAdapter,
+  openSqliteAdapter,
+  type OpenedSqliteDatabase,
+} from './sqlite-adapter.ts';
+import type { DbAdapterConfig } from './db-adapter.ts';
 import { executeDDL, executeFrameworkDDL, generateSideTableDDL, generatedIndexNames } from './ddl.ts';
 import { runMigrations } from './migrations.ts';
 import { runWorkbenchMigrations } from './workbench-migrations.ts';
@@ -53,7 +59,6 @@ import { User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor } from 
 import { config, resolveConfig } from './config.ts';
 import path from 'node:path';
 import { mkdirSync } from 'node:fs';
-import { DatabaseSync } from 'node:sqlite';
 import { makeMountable } from './router.ts';
 
 // router(opts) — a mini-app mounted bare into a parent app with
@@ -73,6 +78,52 @@ export function router(options: any = {}) {
     return instance.routes;
   };
   return surface;
+}
+
+// The `db` option may be a DbAdapterConfig (the app opens it via the sqlite
+// adapter), a pre-opened adapter result (OpenedDatabase-shaped), a raw
+// DatabaseSync/DbHandle, or a string ('<file>' / ':memory:'). Raw handles stay
+// the wrapDriver path so ~29 test files passing DatabaseSync directly work
+// unchanged; configs and strings route through the adapter, which owns the
+// directory, locks it, and centralizes the PRAGMA layer.
+function isDbAdapterConfig(value: unknown): value is DbAdapterConfig {
+  if (value == null || typeof value !== 'object') return false;
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate.prepare === 'function' || typeof candidate.open === 'function') {
+    return false;
+  }
+  return candidate.mode !== undefined || candidate.directory !== undefined || candidate.name !== undefined;
+}
+
+function isOpenedAdapter(value: unknown): value is OpenedSqliteDatabase {
+  if (value == null || typeof value !== 'object') return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    candidate.handle !== undefined
+    && typeof candidate.close === 'function'
+    && candidate.capabilities != null
+    && typeof candidate.capabilities === 'object'
+  );
+}
+
+// Mutual overlap: `a` and `b` overlap when either contains the other. Used to
+// refuse a blob root that sits inside the database-owned directory or vice
+// versa (S1/A2 managed-path guard).
+function pathsOverlap(a: string, b: string): boolean {
+  const ra = path.resolve(a);
+  const rb = path.resolve(b);
+  return ra === rb || ra.startsWith(rb + path.sep) || rb.startsWith(ra + path.sep);
+}
+
+// Refuse a blob root overlapping the adapter-owned directory, in either
+// direction. Called BEFORE the adapter opens so a refused configuration never
+// leaks the OS-backed ownership lock.
+function refuseBlobOverlap(ownedDirectory: string, blobRoot: string | null): void {
+  if (blobRoot && pathsOverlap(blobRoot, ownedDirectory)) {
+    throw new Error(
+      `blobs.root '${blobRoot}' overlaps the database-owned directory '${ownedDirectory}'`,
+    );
+  }
 }
 
 // workbench() — the default export. A chainable app. `.mount(path, Entity)`
@@ -112,22 +163,45 @@ export default function workbench({
       throw new Error(`missing required env: ${v}`);
     }
   }
-  // A `db` string is a path (or ':memory:') the framework opens itself, so an app
-  // never imports DatabaseSync just to hand the framework an instance it could
-  // have opened from the same string. One construction path: the PRAGMA bootstrap
-  // and `app.prepareSchema()` below own the driver — an app passing a bare string
-  // gets the same schema/PRAGMA treatment as one passing a pre-built handle.
+  // The blob root the app will use (a conforming byte store has no root we can
+  // see). Computed once up front so the managed-path guard can refuse an
+  // EXPLICIT blobs.root overlap BEFORE the adapter opens — an overlap thrown
+  // after opening would leak the OS-backed ownership lock (S1/A2). The
+  // framework default (cwd/.blobs) is historical and unguarded: an app that
+  // says `blobs: { root }` opts into the guard.
+  const explicitBlobRoot = blobOpts
+    && typeof blobOpts.writePending !== 'function'
+    && blobOpts?.root
+    ? blobOpts.root as string
+    : null;
+  const blobRoot = explicitBlobRoot ?? path.join(process.cwd(), '.blobs');
+  // The `db` option is opened through the sqlite adapter unless a raw
+  // DatabaseSync/DbHandle was supplied. A string is a path (or ':memory:') the
+  // framework opens itself, so an app never imports DatabaseSync just to hand
+  // the framework an instance it could have opened from the same string. The
+  // adapter owns the directory, holds the OS-backed ownership lock, runs the
+  // centralized PRAGMA layer, and checkpoints on close (S1/A2).
+  let openedDb: OpenedSqliteDatabase | null = null;
   if (typeof db === 'string') {
-    const dir = path.dirname(db);
-    if (dir && dir !== '.' && db !== ':memory:') {
-      mkdirSync(dir, { recursive: true });
-    }
-    db = new DatabaseSync(db);
+    if (db !== ':memory:') refuseBlobOverlap(path.dirname(db), explicitBlobRoot);
+    openedDb = db === ':memory:'
+      ? openMemoryAdapter()
+      : openSqliteAdapter({ directory: path.dirname(db), name: path.basename(db), mode: 'file' });
+    db = openedDb.handle;
+  } else if (isDbAdapterConfig(db)) {
+    if (db.mode !== 'memory' && db.directory) refuseBlobOverlap(db.directory, explicitBlobRoot);
+    openedDb = db.mode === 'memory'
+      ? openMemoryAdapter()
+      : openSqliteAdapter({ ...db, mode: db.mode ?? 'file' });
+    db = openedDb.handle;
+  } else if (isOpenedAdapter(db)) {
+    openedDb = db;
+    db = db.handle;
   }
   // Wrap the raw handle with the driver contract helpers (txn/begin/commit/
-  // rollback/upsert) and run the PRAGMA bootstrap. A conforming custom driver
-  // (already providing txn+upsert) is passed through untouched — it owns its
-  // own bootstrap. The driver IS the raw handle with helpers attached, so
+  // rollback/upsert) and run the thin PRAGMA bootstrap. A conforming custom
+  // driver (already providing txn+upsert) is passed through untouched — it owns
+  // its own bootstrap. The driver IS the raw handle with helpers attached, so
   // `app.db.prepare` keeps working — entity code and tests reach it everywhere.
   // One construction path: a bare-string app gets the same treatment as a
   // pre-built handle. (seam-review §2.1, priority #7.)
@@ -223,6 +297,11 @@ export default function workbench({
   // dispatch seam, not this field). An app with no db simply cannot serve
   // DB-backed entity CRUD — fail closed at dispatch.
   app.db = db;
+  // When the app opened the database through the adapter, the adapter is the
+  // app's lifecycle owner (shutdown checkpoints + closes it) and its managed-
+  // path predicate guards static serving below.
+  app._dbAdapter = openedDb;
+  app._isManagedPath = openedDb ? openedDb.isManagedPath : undefined;
   app.schema = schema;
   app._maintenance = validateMaintenanceOptions({
     blobReapIntervalMs,
@@ -248,9 +327,10 @@ export default function workbench({
     if (blobOpts && typeof blobOpts.writePending === 'function') {
       app.blobs = createBlobStore({ db, bytes: blobOpts });
     } else {
-      const root = blobOpts?.root ?? path.join(process.cwd(), '.blobs');
-      mkdirSync(root, { recursive: true });
-      app.blobs = createBlobStore({ root, db });
+      // `blobRoot` was already refused against the owned directory before the
+      // adapter opened (managed-path guard, S1/A2).
+      mkdirSync(blobRoot, { recursive: true });
+      app.blobs = createBlobStore({ root: blobRoot, db });
     }
   }
   if (db) app.postCommitEffects = createPostCommitEffectRunner({ db });
@@ -422,7 +502,11 @@ export default function workbench({
   // (the file-serve factory lives in views.mjs); the framework has ONE interceptor
   // mechanism, not two. A missing file falls through to the next declared
   // handler (e.g. a SPA fallback) rather than short-circuiting the request.
-  app.static = (prefix: any, dir: any) => app.use(prefix, serveStatic(dir, { prefix: prefix.replace(/\/+$/, '') }));
+  app.static = (prefix: any, dir: any) => app.use(prefix, serveStatic(dir, {
+    prefix: prefix.replace(/\/+$/, ''),
+    // Refuse to serve anything under the adapter-owned directory (S1/A2).
+    isManagedPath: app._isManagedPath,
+  }));
   // `.auth()` mounts the framework-owned auth battery at `/auth` — login +
   // logout routes that set/clear the fail-closed `sid` cookie (the Set-Cookie
   // the exemplar omits, which is the whole 0→1 auth bug). Built from the SAME
