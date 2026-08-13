@@ -2416,7 +2416,11 @@ export function createLiveDeliverySession({
     if (closed || baseSnapshot === null) return;
     let projected = baseSnapshot;
     for (const operation of operations.values()) {
-      if (operation.status === 'pending') {
+      // A fold echo already splices the op into the base. Re-applying the
+      // pending optimistic reducer on top of that echo doubles the edit until
+      // the sender receipt deletes the operation, and any queued successor
+      // captured against the single application then fail-closes as stale.
+      if (operation.status === 'pending' && operation.echoCursor == null) {
         for (const action of operation.actions ?? [operation.action]) projected = optimistic(projected, action);
       }
       // Application callbacks may synchronously trigger terminal revocation.
@@ -4004,7 +4008,7 @@ export function createScopeLiveStore({
     if (closed || baseSnapshot === null) return;
     let projected = baseSnapshot;
     for (const operation of operations.values()) {
-      if (operation.status === 'pending') projected = optimistic(projected, operation.action);
+      if (operation.status === 'pending' && operation.echoCursor == null) projected = optimistic(projected, operation.action);
     }
     visibleSnapshot = projected;
     for (const listener of listeners) {
