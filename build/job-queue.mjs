@@ -1,5 +1,13 @@
 // job-queue.mjs — the job-queue substrate (eng-review spec #5, Walk 2, §3.3).
 //
+// WRITE-COORDINATOR RED-LINE (S1/A5): the queue's claim/enqueue/result writes
+// are the DOCUMENTED single-statement exception to the platform write
+// coordinator (write-queue.ts). They are single-statement UPDATE/INSERT …
+// RETURNING with per-statement atomicity — no BEGIN/COMMIT, no cross-statement
+// transaction — so routing them through the mutex would add nothing. This is
+// explicitly NOT a second mutex: no BEGIN/COMMIT, no rollback, no held
+// transaction; a statement either lands atomically or not at all.
+//
 // A job is a unit of work with its own lifecycle (queued→claimed→running→
 // completed/failed, + reassigned→queued by the reaper). It is NOT a derived read
 // model — so the queue is a SEPARATE seam from the projection registry (deletion

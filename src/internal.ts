@@ -48,7 +48,6 @@ export { explain } from './explain.ts';
 export { compileEntityAuthz } from './authz.ts';
 export { canUndoField, undoableFieldKinds } from './field-laws.ts';
 export { startSimulation } from './simulate.ts';
-export { setActiveDb, resetActiveDb, getActiveDb } from './db.ts';
 export { generateTypes } from './generate-types.ts';
 export { parsePrincipalSnapshotScope } from './principal-snapshot-scope.ts';
 export { createPrincipalSnapshotTransaction } from './principal-snapshot-transaction.ts';

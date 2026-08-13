@@ -16,6 +16,7 @@ export { everyone, never, anyOf, inherit } from './scope-sql.ts';
 export { principal, anonymous, statusOf, collapseForAdmission, UnknownPrincipalStatusError } from './principal.ts';
 export { requireUser, allowAnonymous } from './route-gate.ts';
 export * as operations from './operation.ts';
+export { openReadMirror, ReadMirrorError, type ReadMirrorHandle, type ReadMirrorStatementKind } from './read-mirror.ts';
 export { createAuthorizationAdapter, type AuthorizationAdapter, type AdmissionDecision, type AdmissionReasonCode, type ResourceCategory } from './authorization-adapter.ts';
 export { router } from './app.ts';
 export {

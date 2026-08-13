@@ -1,5 +1,13 @@
 // migrations.mjs — versioned schema migrations (eng-review spec #9, #17, D9).
 //
+// WRITE-COORDINATOR RED-LINE (S1/A5): the migration lane is the DOCUMENTED
+// stop-the-world boot exception to the platform write coordinator
+// (write-queue.ts). runMigrations runs pre-traffic during schema preparation,
+// BEFORE the app serves — when no concurrent writer can exist — so it opens
+// its own begin/commit/rollback transaction instead of a write-queue turn. It
+// is explicitly NOT a second mutex: it is a boot-time one-shot that never
+// overlaps a live writer.
+//
 // Migrations run at STARTUP, pre-traffic, stop-the-world for writes (gating to
 // pre-traffic makes a long backfill acceptable — it would otherwise hold the
 // single-writer mutex and block every concurrent write). The framework owns the

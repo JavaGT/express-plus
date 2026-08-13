@@ -1,4 +1,36 @@
-// write-queue.mjs — single-writer async mutex with bounded wait and depth.
+// write-queue.ts — THE platform write coordinator (epic scope#23, S1/A5).
+//
+// Single-writer async mutex with bounded wait and depth. Every platform write
+// category must enter through `run` (the one mutex — there is NO second
+// mutex); `owned` tells a caller whether it is inside the coordinated turn, so
+// a category's entry point can route through the coordinator and a nested call
+// joins the current turn instead of interleaving.
+//
+// The six write categories and their entry points:
+//   1. entity writes        — kernel dispatch (http-crud-dispatch / application
+//                             runtime) → writeCoordinator.run
+//   2. live-state writes    — annotated-text authoring + committed-log
+//                             projections inside kernel dispatch → .run
+//   3. operational queue    — job-queue.ts single-statement writes (DOCUMENTED
+//                             EXCEPTION, below) + operational-consumer sweeps → .run
+//   4. plugin index writes  — side-table strategy projections (FTS/ordered)
+//                             inside kernel dispatch → .run
+//   5. migration writes     — migrations.ts / workbench-migrations.ts boot lane
+//                             (DOCUMENTED EXCEPTION, below)
+//   6. blob metadata writes — blob-store.ts; adopt/discard run in the caller's
+//                             coordinated transaction (kernel dispatch txn), so
+//                             they are coordinated by construction — never their
+//                             own transaction
+//
+// Two documented single-writer exceptions (explicitly NOT a second mutex):
+//   (i)  job-queue.ts claim/enqueue/result are single-statement UPDATE/INSERT
+//        … RETURNING with per-statement atomicity — no BEGIN/COMMIT, no
+//        cross-statement transaction, so the mutex would add nothing;
+//   (ii) migrations.ts / workbench-migrations.ts run a stop-the-world boot
+//        transaction (begin/commit/rollback via the driver dispatchers) before
+//        the app serves, when no concurrent writer can exist.
+// The shared-state PRAGMA maintenance seam (src/maintenance.ts) also enters
+// through this coordinator so its toggles cannot interleave with writes.
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 
@@ -149,6 +181,9 @@ export function createWriteQueue({
       return closed;
     },
     get owned(): boolean {
+      // True only inside a run() turn (or a nested run joining the current
+      // turn). The coordinator-routing red-line and the maintenance seam use
+      // this to prove a write category entered through the one coordinator.
       return ownership.getStore()?.active === true;
     },
   };

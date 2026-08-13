@@ -42,6 +42,10 @@
 // (the shape ~29 test files pass straight to createServer) work unchanged: it is
 // a valid driver because wrapDriver attaches the defaults to it.
 
+// Type-only import: db-adapter.ts imports DbHandle from this module, so a
+// runtime import would cycle. ReadMirrorDescription is erased at emit.
+import type { ReadMirrorDescription } from './db-adapter.ts';
+
 // Loose, Workbench-like db surface. A conforming driver may provide its own
 // txn/upsert; a raw handle falls back to the SQLite defaults wrapped here.
 export type DbStatement = {
@@ -293,4 +297,41 @@ export function wrapDriver(dbOrDriver: DbHandle | null | undefined): DbHandle | 
     }
   }
   return dbOrDriver;
+}
+
+// ---- Read-mirror description builder (S1/A5) -------------------------------
+// The ONE builder for controlled read-mirror descriptions. It pins the literal
+// mode (`mode=ro`) and the `readOnly: true` contract flag; it never carries a
+// write path. Opening these descriptions (src/read-mirror.ts) enforces
+// read-only at the engine AND via a query-class rejector — belt and suspenders.
+export function buildReadMirrorDescription(dbFile: string): ReadMirrorDescription {
+  return {
+    kind: 'read-mirror',
+    mode: 'read-only',
+    readOnly: true,
+    connectionString: `file:${dbFile}?mode=ro`,
+  };
+}
+
+// ---- Shared-state PRAGMA seam (S1/A5) ------------------------------------
+// The maintenance seam is the SOLE route for toggling shared-state PRAGMAs on
+// the shared connection (S1/B1 consumes it). A raw `PRAGMA foreign_keys`
+// toggle anywhere else is forbidden: CONNECTION_PRAGMA_SQL pins the connection
+// defaults, and the helpers here restore `foreign_keys = ON` in a finally even
+// when the maintenance body throws. driver.ts is the only module allowed to
+// issue this toggle (the write-coordinator red-line test enforces that).
+export function setForeignKeys(db: DbHandle, enabled: boolean): void {
+  db.exec(`PRAGMA foreign_keys = ${enabled ? 'ON' : 'OFF'}`);
+}
+
+// Serialized wiring lives in src/maintenance.ts (the write coordinator turn);
+// this is the raw PRAGMA bracket, kept here so driver.ts stays the single
+// source of the statement text.
+export function withForeignKeysDisabledSync<T>(db: DbHandle, fn: () => T): T {
+  setForeignKeys(db, false);
+  try {
+    return fn();
+  } finally {
+    setForeignKeys(db, true);
+  }
 }

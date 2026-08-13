@@ -48,7 +48,6 @@ export { explain } from './explain.mjs';
 export { compileEntityAuthz } from './authz.mjs';
 export { canUndoField, undoableFieldKinds } from './field-laws.mjs';
 export { startSimulation } from './simulate.mjs';
-export { setActiveDb, resetActiveDb, getActiveDb } from './db.mjs';
 export { generateTypes } from './generate-types.mjs';
 export { parsePrincipalSnapshotScope } from './principal-snapshot-scope.mjs';
 export { createPrincipalSnapshotTransaction } from './principal-snapshot-transaction.mjs';

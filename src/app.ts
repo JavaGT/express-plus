@@ -32,10 +32,11 @@ import {
   startApplication,
   validateMaintenanceOptions,
 } from './application-runtime.ts';
-import { wrapDriver } from './driver.ts';
+import { buildReadMirrorDescription, wrapDriver } from './driver.ts';
 import {
   openMemoryAdapter,
   openSqliteAdapter,
+  SQLITE_DATA_FILENAME,
   type OpenedSqliteDatabase,
 } from './sqlite-adapter.ts';
 import type { DbAdapterConfig, OpenedDatabase, ReadMirrorDescription } from './db-adapter.ts';
@@ -49,6 +50,7 @@ import { createJobQueue } from './job-queue.ts';
 import { createPostCommitEffectRunner } from './post-commit-effects.ts';
 import { createClock } from './clock.ts';
 import { createWriteQueue } from './write-queue.ts';
+import { createMaintenanceSeam } from './maintenance.ts';
 import { createPrincipalSnapshotTransaction } from './principal-snapshot-transaction.ts';
 import { prepareGracefulShutdown } from './lifecycle.ts';
 import { createLog, withLog } from './log.ts';
@@ -369,6 +371,28 @@ export default function workbench({
     app._isManagedPath = pendingDbAdapter
       ? pendingDbAdapter.isManagedPath
       : openedDb ? openedDb.isManagedPath : undefined;
+    // The controlled read-mirror description (S1/A5). External readers open it
+    // with openReadMirror (read-mirror.ts), which enforces mode=ro at the
+    // engine AND via a query-class rejector. The description never carries a
+    // write path. A conforming adapter's own readMirror() wins; the default
+    // sqlite adapter's opened database is described from its owned directory +
+    // the fixed data filename (the physical path is never handed to the app
+    // directly). A raw handle has no controlled description — fail closed.
+    app.readMirror = () => {
+      const adapter = app._dbAdapter;
+      if (adapter && typeof adapter.readMirror === 'function') {
+        return adapter.readMirror();
+      }
+      if (openedDb?.mode === 'file' && openedDb.root) {
+        return buildReadMirrorDescription(path.join(openedDb.root, SQLITE_DATA_FILENAME));
+      }
+      if (openedDb?.mode === 'memory') {
+        return buildReadMirrorDescription(':memory:');
+      }
+      throw new Error(
+        'readMirror() requires an adapter-backed database — a raw handle has no controlled read-mirror description',
+      );
+    };
     app.schema = schema;
     app._maintenance = validateMaintenanceOptions({
       blobReapIntervalMs,
@@ -384,7 +408,20 @@ export default function workbench({
     // reads the write queue.
     const clock = createClock();
     app.clock = clock;
+    // The one platform write coordinator (S1/A5): every write category enters
+    // through `run`. `app.writeCoordinator` is the formal name; `app.writeQueue`
+    // is the same object (kept for the transport/kernel seams that already
+    // reference it) — one mutex, never a second one.
     app.writeQueue = createWriteQueue();
+    app.writeCoordinator = app.writeQueue;
+    // The shared-state PRAGMA maintenance seam (S1/A5): withForeignKeysDisabled
+    // runs inside a coordinated write turn and restores foreign_keys = ON even
+    // on throw. The app db may arrive later (deferred adapter open), so the
+    // seam resolves the handle at call time and fails closed without one.
+    app.withForeignKeysDisabled = createMaintenanceSeam(
+      () => app.db ?? null,
+      app.writeCoordinator,
+    ).withForeignKeysDisabled;
     const principalSnapshotRuntime = createPrincipalSnapshotTransaction(app);
     app.principalSnapshots = { transaction: principalSnapshotRuntime.transaction };
     app._principalSnapshotRuntime = principalSnapshotRuntime;

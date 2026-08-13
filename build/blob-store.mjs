@@ -1,5 +1,14 @@
 // blob-store.mjs — durable blob storage with pending/adopted lifecycle.
 //
+// WRITE-COORDINATOR RED-LINE (S1/A5): blob METADATA writes enter through the
+// platform write coordinator (write-queue.ts) via the CALLER'S coordinated
+// transaction — never a transaction this module opens itself. `adopt` takes a
+// db/txn handle and runs its UPDATE in that (already coordinated) transaction;
+// `upload`/`discard`/`discardPending`/`reap` issue single synchronous
+// statements from callers that are themselves inside a coordinator turn (the
+// kernel dispatch txn or the pending-blob staged write). This module issues no
+// BEGIN/COMMIT/ROLLBACK and owns no transaction control of its own.
+//
 // Upload writes atomically to a pending slot with computed hashes, then records
 // a 'pending' row. Caller adopts in their txn (status → 'adopted'), then
 // finalizes out-of-band (promote pending → final) via the cursor-backed
