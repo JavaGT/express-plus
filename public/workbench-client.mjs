@@ -16,7 +16,7 @@ import { applyTextOp, createTextState, materializeText, restoreTextCheckpoint } 
 import { deleteText, insertText } from './workbench-text-edit.mjs';
 import { createAnnotatedTextSnapshotSessionBinding, revokeAnnotatedTextSnapshotSessionBinding } from './workbench-annotated-text-snapshot-internal.mjs';
 import { materializeAnnotatedTextSnapshot, projectPendingAnnotatedTextDocument, resolveRangeOffsets, shiftOffsetRangesOverText } from './workbench-annotated-text-snapshot.mjs';
-import { applyTextOperation, materializeText as materializeFamilyText, restoreTextFamily } from './workbench-annotated-text-continuous.mjs';
+import { applyTextOperation, familyMatchingText, materializeText as materializeFamilyText, restoreTextFamily } from './workbench-annotated-text-continuous.mjs';
 import { annotatedTextAction } from './workbench-annotated-text-action.mjs';
 export { bindAnnotatedTextEditor } from './workbench-annotated-text-editor.mjs';
 export { materializeAnnotatedTextSnapshot };
@@ -3399,6 +3399,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
   // complete family checkpoint for every character replayed the whole document
   // history before applying one operation.
   let familyReplica = null;
+  let displayFamily = null;
   const snapshotBinding = createAnnotatedTextSnapshotSessionBinding();
   const requestIdentity = { entity: entity.name, field: field.fieldName, documentId, authoringClient };
   if (typeof context.viewAs === 'string' && context.viewAs.length > 0) requestIdentity.viewAs = context.viewAs;
@@ -3581,6 +3582,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       throw new Error('annotated text fold left pending operations behind; snapshot recovery required');
     }
     familyReplica = family;
+    displayFamily = family;
     installAuthoringFromFold(fold.authoring, fence);
     if (onFoldApplied) onFoldApplied(fold, performance.now() - startedAt);
     const foldedDocument = applyAnnotatedTextFoldDispositions(currentDocument, foldedRanges, fold.dispositions);
@@ -3597,6 +3599,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     requestIdentity,
     onRecoveryStart: () => {
       familyReplica = null;
+      displayFamily = null;
       revokeAnnotatedTextSnapshotSessionBinding(snapshotBinding);
     },
     onRecoveryDelayed,
@@ -3631,6 +3634,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       // subsequent folds apply against the client's own copy instead of
       // re-shipping the whole family per keystroke.
       familyReplica = authoring.family ? restoreTextFamily(authoring.family) : null;
+      displayFamily = familyReplica;
       const result = materializeAnnotatedTextSnapshot({ ...snapshot[field?.fieldName], authoring }, field, { binding: snapshotBinding, family: familyReplica });
       return result;
     },
@@ -3651,6 +3655,18 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
   let queuedDocumentText = null;
   let queuedAuthoringMutations = 0;
   const documentListeners = new Set();
+  function syncDisplayFamily(afterText) {
+    if (!familyReplica || typeof afterText !== 'string') {
+      displayFamily = familyReplica;
+      return;
+    }
+    try {
+      displayFamily = familyMatchingText(familyReplica, afterText);
+    } catch {
+      displayFamily = null;
+      session.reconnect();
+    }
+  }
   function currentAnnotatedDocument() {
     const view = annotatedDocumentView(session.snapshot);
     if (!view || queuedDocumentText === null) return view;
@@ -3668,6 +3684,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
   }
   function publishAnnotatedDocument() {
     const view = currentAnnotatedDocument();
+    if (view && typeof view.text === 'string') syncDisplayFamily(view.text);
     for (const listener of documentListeners) {
       try { listener(view); } catch { /* isolate consumers */ }
     }
@@ -3852,7 +3869,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
   }
   const annotatedSurface = {
     get document() { return currentAnnotatedDocument(); },
-    get family() { return familyReplica; },
+    get family() { return displayFamily ?? familyReplica; },
     get history() { return session.history; },
     get status() { return session.status; },
     get ready() { return session.ready; },

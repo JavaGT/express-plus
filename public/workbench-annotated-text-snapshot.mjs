@@ -64,6 +64,20 @@ export function resolveRangesOffsets(ranges, family) {
   return ranges.map((range) => resolveRangeOffsets(range, family));
 }
 
+/** Resolve ranges or return null so render can fail closed to snapshot recovery. */
+export function tryResolveRangesOffsets(ranges, family) {
+  if (!Array.isArray(ranges)) return ranges;
+  const resolved = [];
+  for (const range of ranges) {
+    try {
+      resolved.push(resolveRangeOffsets(range, family));
+    } catch {
+      return null;
+    }
+  }
+  return resolved;
+}
+
 /**
  * Shift redacted/offset ranges through one absolute-offset edit. Anchored
  * ranges are returned unchanged — callers resolve them against a family.

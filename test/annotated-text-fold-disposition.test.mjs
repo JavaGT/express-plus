@@ -11,7 +11,7 @@ import { tryBuildAnnotatedTextFoldEnvelopes } from '../build/annotated-text-fold
 import { projectAnnotatedTextSnapshot } from '../build/annotated-text-snapshot.mjs';
 import { ensureStream, ensureLease, hashClientNonce } from '../build/annotated-text-authoring-stream.mjs';
 import { createAnnotatedTextHttpSession, materializeAnnotatedTextSnapshot } from '../public/workbench-client.mjs';
-import { applyOffsetTextEdit, projectEndpointToOffset, restoreTextFamily } from '../public/workbench-annotated-text-continuous.mjs';
+import { projectEndpointToOffset, restoreTextFamily } from '../public/workbench-annotated-text-continuous.mjs';
 import { withAuthoringBinding } from './annotated-text-authoring-fixture.mjs';
 
 // A foldable text edit that empties an annotation carries the server's
@@ -415,10 +415,9 @@ test('integrated: real fold envelopes reconcile own echo and foreign events to t
   const pendingDelete = session.delete({ mutationId: 'ph-a', from: { offset: 0, affinity: 'right' }, to: { offset: 11, affinity: 'left' } });
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(session.document.text, 'five six');
-  const displayFamily = applyOffsetTextEdit(session.family, 0, 11, '');
   const collapsed = session.document.ranges.filter((range) => {
-    const start = typeof range.start === 'number' ? range.start : projectEndpointToOffset(displayFamily, range.start);
-    const end = typeof range.end === 'number' ? range.end : projectEndpointToOffset(displayFamily, range.end);
+    const start = typeof range.start === 'number' ? range.start : projectEndpointToOffset(session.family, range.start);
+    const end = typeof range.end === 'number' ? range.end : projectEndpointToOffset(session.family, range.end);
     return start >= end;
   }).map((range) => range.annotationId).sort();
   assert.deepEqual(collapsed, ['m-del', 'm-new'], 'the optimistic placeholder keeps emptied ranges attached and zero-width');
