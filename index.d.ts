@@ -25,10 +25,19 @@ export interface WorkbenchDatabase {
 
 export type PrincipalType = 'user' | 'link' | 'system' | 'apiKey' | 'anonymous';
 
+// The closed principal-status union (S5/A1). Defaults to `'active'`; the
+// non-active statuses express disabled/expired/revoked without minting a new
+// principal type per state. Admission is two-valued: only `'active'` principals
+// are admitted; the A2 seam collapses any non-active principal to `anonymous`
+// before calling into row/field gates, so the admission surface never exposes
+// which non-active status applied. `statusOf()` is the audit/diagnostic reader.
+export type PrincipalStatus = 'active' | 'disabled' | 'expired' | 'revoked';
+
 export interface Principal {
   readonly type: PrincipalType;
   readonly id: string | null;
   readonly attributes: Readonly<Record<string, unknown>>;
+  readonly status: PrincipalStatus;
 }
 
 export type FailureCategory =
@@ -78,13 +87,46 @@ export function principal(options: {
   type: 'user';
   id: string;
   attributes?: Record<string, unknown>;
+  status?: PrincipalStatus;
 }): UserPrincipal;
 export function principal(options?: {
   type?: PrincipalType;
   id?: string | null;
   attributes?: Record<string, unknown>;
+  status?: PrincipalStatus;
 }): Principal;
 export const anonymous: Principal;
+
+// The REAL principal status — the audit/diagnostic reader. Admission callers
+// (the A2 seam) collapse any non-'active' principal to `anonymous` BEFORE
+// calling into row/field gates; they never key a decision off this.
+export function statusOf(principal: Principal): PrincipalStatus;
+
+// Raised by principal() when a status outside the closed union is declared
+// (fail closed, sibling to the type-union error).
+export class UnknownPrincipalStatusError extends Error {
+  constructor(message: string);
+}
+
+// The stable operation-category vocabulary (S5/A1): frozen identity tokens the
+// same discipline as the grant capabilities. `operationCategory(verb)`
+// normalizes any verb or category name to its token; an unknown name throws.
+export namespace operations {
+  const read: OperationCategory;
+  const subscribe: OperationCategory;
+  const create: OperationCategory;
+  const update: OperationCategory;
+  const deleteOp: OperationCategory;
+  const execute: OperationCategory;
+  const search: OperationCategory;
+  const blobRead: OperationCategory;
+  const administrative: OperationCategory;
+  const OPERATION_CATEGORIES: readonly OperationCategory[];
+  function operationCategory(verb: string): OperationCategory;
+}
+export interface OperationCategory {
+  readonly operation: string;
+}
 
 export interface HandlerReq {
   body: Record<string, unknown>;

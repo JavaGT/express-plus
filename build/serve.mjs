@@ -104,7 +104,12 @@ const csrfGuard = (req     ) => SAFE_METHODS.has(req.method) || isSameOriginRequ
 // hydration as the principal source (sessionPrincipalOf) — the SAME admission
 // path, not a second one. `db` is the app-level node:sqlite handle the
 // dispatcher runs against.
-export function makeRequestHandler(source     , { principalOf = () => anonymous, db, env = config.env, rateLimiter = null, csp, hsts, cors, requestLog = false }   
+//
+// This default is the ONE `principalOf` injection point for a custom principal
+// resolver; the request handler is deliberately not re-architected here.
+const anonymousPrincipalOf                  = () => anonymous;
+
+export function makeRequestHandler(source     , { principalOf = anonymousPrincipalOf, db, env = config.env, rateLimiter = null, csp, hsts, cors, requestLog = false }   
                                         
            
                

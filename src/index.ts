@@ -13,8 +13,9 @@ export { postCommitEffect } from './post-commit-effects.ts';
 export { authorizedRows } from './action-authorization.ts';
 export { User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor } from './auth/entities.ts';
 export { everyone, never, anyOf, inherit } from './scope-sql.ts';
-export { principal, anonymous } from './principal.ts';
+export { principal, anonymous, statusOf, UnknownPrincipalStatusError } from './principal.ts';
 export { requireUser, allowAnonymous } from './route-gate.ts';
+export * as operations from './operation.ts';
 export { router } from './app.ts';
 export {
   FAILURE_CATEGORIES,

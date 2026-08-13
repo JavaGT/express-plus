@@ -17,13 +17,27 @@
 // `{ type: 'anonymous', id: null }`. It is admitted only by identity-free
 // checks (e.g. `published`), never by a flag — so it is a value here, the
 // canonical instance every unauthenticated request shares.
+//
+// `status` is the principal's lifecycle state (S5/A1). Admission is TWO-VALUED:
+// only `'active'` principals are admitted; a non-`'active'` principal must
+// COLLAPSE to `anonymous` at the admission seam so a revoked and an unknown
+// principal are indistinguishable to a caller (no status oracle). The REAL
+// status rides on the principal only for audit/diagnostic contexts — never on
+// the admission decision's public surface. `statusOf()` is that audit reader.
 
                                                                                 
+
+// The closed principal-status union. The default (and the only status
+// `anonymous` may carry) is `'active'`; the non-active statuses exist so a
+// session/principal store can express disabled/expired/revoked without minting
+// a brand-new principal type per state.
+                                                                            
 
                                 
                                
                              
                                                          
+                                   
  
 
                                                            
@@ -49,7 +63,18 @@ export class UnknownPrincipalTypeError extends Error {
   }
 }
 
+// Sibling to UnknownPrincipalTypeError, for a status outside the closed union
+// (S5/A1). An unknown status must never silently construct a principal the
+// admission engine could misread as active — fail closed.
+export class UnknownPrincipalStatusError extends Error {
+  constructor(message        ) {
+    super(message);
+    this.name = 'UnknownPrincipalStatusError';
+  }
+}
+
 const PRINCIPAL_TYPES = Object.freeze(['user', 'link', 'system', 'anonymous', 'apiKey']         );
+const PRINCIPAL_STATUSES = Object.freeze(['active', 'disabled', 'expired', 'revoked']         );
 
 export function principalKeyOf(value         )                {
   const candidate = value                                                       ;
@@ -68,31 +93,38 @@ export function principalKeyOf(value         )                {
                                                      
                      
                                        
+                           
  
 
 // Build a frozen principal from a declared shape. `attributes` defaults to an
 // empty frozen object (a link principal carries `{ token }`; a user typically
-// carries none at this layer). The id/type invariants are checked here so an
-// ill-formed principal can never reach the grant engine.
+// carries none at this layer). `status` defaults to `'active'`, so existing
+// principal literals keep compiling and behaving unchanged. The id/type/status
+// invariants are checked here so an ill-formed principal can never reach the
+// grant engine.
                                      
                
              
                                        
+                           
                         
                                     
                     
             
                                        
+                           
                        
                                      
                        
                      
                                        
+                           
               
-export function principal({ type, id = null, attributes = {} }   
+export function principal({ type, id = null, attributes = {}, status = 'active' }   
                  
                      
                                        
+                           
   = {})            {
   if (!PRINCIPAL_TYPES.includes(type                                  )) {
     throw new UnknownPrincipalTypeError(
@@ -101,22 +133,51 @@ export function principal({ type, id = null, attributes = {} }
         `owned by User via a typed FK (ADR #20), not new principal types.`,
     );
   }
+  if (!PRINCIPAL_STATUSES.includes(status                                     )) {
+    throw new UnknownPrincipalStatusError(
+      `unknown principal status '${String(status)}'. The union is closed: ` +
+        `${PRINCIPAL_STATUSES.join(' | ')}. Non-active statuses collapse to ` +
+        `anonymous for admission decisions (two-valued rule); the real status ` +
+        `is carried here for audit only.`,
+    );
+  }
   if (type === 'anonymous' && id !== null) {
     throw new UnknownPrincipalTypeError(
       `an anonymous principal must have id null (got '${String(id)}'). ` +
         `Anonymous is identity-free by construction (SPEC §6.2).`,
     );
   }
+  if (type === 'anonymous' && status !== 'active') {
+    throw new UnknownPrincipalStatusError(
+      `an anonymous principal must have status 'active' (got '${String(status)}'). ` +
+        `Anonymous is the collapse target for non-active principals; a ` +
+        `non-active anonymous is meaningless (S5/A1).`,
+    );
+  }
   return Object.freeze({
     type,
     id: id                 ,
     attributes: Object.freeze({ ...attributes }),
+    status,
   })             ;
 }
 
 // The canonical unauthenticated principal. Every anonymous request shares this
-// frozen value; there is nothing per-request to vary (it has no identity).
+// frozen value; there is nothing per-request to vary (it has no identity, and
+// its status is always `'active'` — the collapse target for non-active
+// principals).
 export const anonymous            = principal({ type: 'anonymous', id: null });
+
+// The REAL status of a principal (S5/A1). This is the audit/diagnostic reader:
+// `statusOf` returns `'active'` for anonymous and the true status for a
+// non-active principal. Admission callers (the A2 seam) must NOT use it for a
+// decision — they collapse any non-`'active'` principal to `anonymous` BEFORE
+// calling into row/field gates, so the admission surface never exposes which
+// non-active status applied (a revoked and an unknown principal are
+// indistinguishable to a caller — no status oracle).
+export function statusOf(principal           )                  {
+  return principal.status;
+}
 
 // Mint a bounded system principal tagged with a source identifier. Used by the
 // scheduler/tick analogue to re-enter dispatch with a traceable system identity.

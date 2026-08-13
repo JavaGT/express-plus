@@ -21,6 +21,7 @@ import { read, write, subscribe, admin } from './grant.ts';
 import type { Capability, GrantDecision } from './grant.ts';
 import { getLog } from './log.ts';
 import { isRuntimeGrantClause } from './scope.ts';
+import { operationCategory } from './operation.ts';
 
 // Entity declarations are compiled once and their grant thunk is immutable for
 // the lifetime of that declaration. Runtime membership overlays replace the
@@ -220,18 +221,46 @@ export async function rowCapabilities(
   return { ...result, is };
 }
 
-// The capability each CRUD verb requires. Reads (list/read) need `read`;
-// mutations (create/update/remove) need `write`; live re-authorization needs
-// `subscribe`. This is the allowlist: a verb names the capability that GRANTS
-// it, never a condition that denies it. An unknown verb fails closed.
-const VERB_CAPABILITY: Readonly<Record<string, Capability>> = Object.freeze({
-  list: read,
+// The capability each CRUD verb requires, derived through the SINGLE
+// operation-category normalizer (operation.ts, S5/A1): verb → category → the
+// capability that GRANTS it. Reads (list/read) need `read`; mutations
+// (create/update/remove) need `write`; live re-authorization needs `subscribe`;
+// management (admin) needs `admin`. This is the allowlist: a verb names the
+// capability that GRANTS it, never a condition that denies it. Categories with
+// no row-grant capability (execute/search/blob-read) and unknown verbs have NO
+// entry and therefore fail closed in mayVerb.
+const CATEGORY_CAPABILITY: Readonly<Record<string, Capability>> = Object.freeze({
   read,
+  subscribe,
   create: write,
   update: write,
-  remove: write,
-  subscribe,
-  admin,
+  delete: write,
+  administrative: admin,
+});
+
+// The capability a category confers — throwing here means a verb was mapped to
+// a category with no row-grant capability, an authoring bug, not a runtime
+// denial (the seven verbs below all resolve).
+function capabilityFor(verb: string): Capability {
+  const category = operationCategory(verb);
+  const required = CATEGORY_CAPABILITY[category.operation];
+  if (!required) {
+    throw new Error(
+      `operation '${verb}' maps to category '${category.operation}', which has no ` +
+        `row-grant capability (fail closed — likely a missing category→capability entry).`,
+    );
+  }
+  return required;
+}
+
+const VERB_CAPABILITY: Readonly<Record<string, Capability>> = Object.freeze({
+  list: capabilityFor('list'),
+  read: capabilityFor('read'),
+  create: capabilityFor('create'),
+  update: capabilityFor('update'),
+  remove: capabilityFor('remove'),
+  subscribe: capabilityFor('subscribe'),
+  admin: capabilityFor('admin'),
 });
 
 // True iff the entity's grant carries its OWN `.can` body (a scope(...).can(fn)

@@ -11,7 +11,7 @@
 // replaces, never a second auth path. When an app is constructed with a db
 // (`workbench({ db })`), session hydration becomes the default principal source.
 
-import { principal, anonymous,                                    } from '../principal.mjs';
+import { principal, anonymous,                                                          } from '../principal.mjs';
 import { config } from '../config.mjs';
 import { createHash } from 'node:crypto';
 
@@ -37,11 +37,14 @@ import { createHash } from 'node:crypto';
 
 // The Session row projected by the hydration lookup. `type` is validated by
 // principal() against the closed union; `createdAt` is validated by
-// sessionCreatedAtMs. A corrupt stored row therefore resolves to anonymous.
+// sessionCreatedAtMs; `status` (when the table exposes it) is validated by
+// principal() against the closed status union. A corrupt stored row therefore
+// resolves to anonymous.
                       
                        
                      
                       
+                   
  
 
 function sha256hex(s        )         {
@@ -120,7 +123,32 @@ function sessionCreatedAtMs(value         )                {
 // cookie, looks the token up in the Session table, and constructs the principal
 // SERVER-SIDE from the stored identity. Any failure — no cookie, no token, no
 // matching row, or a malformed stored type — yields `anonymous` (fail closed).
+//
+// Status threading (S5/A1): when the Session row exposes a `status` cell, it is
+// carried onto the principal so the audit/diagnostic context can tell a revoked
+// session from a disabled one. The FAIL-CLOSED rule is untouched: the
+// forged/unknown-token path still returns the canonical `anonymous` (always
+// `'active'`), so an unauthenticated caller never learns a real status — the
+// two-valued admission collapse happens at the A2 seam, not here.
 export function sessionPrincipalOf(db       , { durationMs = config.sessionDurationMs, now = Date.now }                                              = {})                                  {
+  // A Session table may or may not have a `status` column yet (downstream
+  // tickets add it for revoked/disabled sessions). Probe ONCE at construction:
+  // a table WITHOUT the column keeps resolving exactly as before (existing
+  // deployments), while a table WITH it threads status into the principal.
+  // Fail closed — a probe failure just means no status column, and a corrupt
+  // stored status is still rejected by principal()'s closed-union check
+  // (→ anonymous).
+  let hasStatusColumn = false;
+  try {
+    db.prepare('SELECT status FROM Session LIMIT 0');
+    hasStatusColumn = true;
+  } catch {
+    hasStatusColumn = false;
+  }
+  const select = hasStatusColumn
+    ? 'SELECT principalType AS type, principalId AS id, createdAt, status FROM Session WHERE token = ?'
+    : 'SELECT principalType AS type, principalId AS id, createdAt FROM Session WHERE token = ?';
+
   return (req) => {
     const token = sessionTokenOf(req);
     if (!token) return anonymous;
@@ -131,7 +159,7 @@ export function sessionPrincipalOf(db       , { durationMs = config.sessionDurat
       // row; the client supplied only the token. principal() re-validates the
       // closed type union, so a corrupt stored type is anonymous too.
       const row = db
-        .prepare('SELECT principalType AS type, principalId AS id, createdAt FROM Session WHERE token = ?')
+        .prepare(select)
         .get(token)                                 ;
       if (!row) return anonymous;
       // Session cleanup reclaims expired rows eventually; authorization must not
@@ -155,7 +183,11 @@ export function sessionPrincipalOf(db       , { durationMs = config.sessionDurat
       // the link principal reads nothing (fail-closed by accident, not by the
       // token match the session was minted to grant).
       const attributes = row.type === 'link' ? { token: row.id } : {};
-      return principal({ type: row.type, id: row.id, attributes });
+      // Thread the stored status when present; principal() defaults to 'active'
+      // and rejects an unknown status (→ anonymous, fail closed). SQL NULL /
+      // absent cell → no status → the 'active' default applies.
+      const storedStatus = (row.status ?? undefined)                               ;
+      return principal({ type: row.type, id: row.id, attributes, status: storedStatus });
     } catch {
       return anonymous;
     }
