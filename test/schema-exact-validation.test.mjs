@@ -368,6 +368,39 @@ test('a matching expression index passes and a matching partial index passes', (
   }
 });
 
+test('a partial index with a different WHERE predicate is an index-mismatch drift', () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    const schema = scopeSchema({
+      indexes: [{ name: 'Article_partial', columns: ['score'], where: 'score IS NOT NULL' }],
+    });
+    db.exec('CREATE TABLE Article (id TEXT PRIMARY KEY, title TEXT NOT NULL, score REAL)');
+    db.exec('CREATE INDEX Article_partial ON Article(score) WHERE score IS NULL');
+    assert.deepEqual(codes(check(db, [schema])), ['index-mismatch']);
+  } finally {
+    db.close();
+  }
+});
+
+test('an index with a different effective term collation is an index-mismatch drift', () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    const schema = scopeSchema({
+      columns: [
+        { name: 'id', type: 'text', primaryKey: true },
+        { name: 'title', type: 'text', notNull: true, collation: 'NOCASE' },
+        { name: 'score', type: 'real' },
+      ],
+      indexes: [{ name: 'Article_title', columns: ['title'] }],
+    });
+    db.exec('CREATE TABLE Article (id TEXT PRIMARY KEY, title TEXT NOT NULL, score REAL)');
+    db.exec('CREATE INDEX Article_title ON Article(title)');
+    assert.deepEqual(codes(check(db, [schema])), ['index-mismatch']);
+  } finally {
+    db.close();
+  }
+});
+
 test('a declared UNIQUE constraint expects its auto-index and a missing one drifts', () => {
   const schema = scopeSchema({ unique: [{ name: 'uq_article_title', columns: ['title'] }] });
   const db = new DatabaseSync(':memory:');

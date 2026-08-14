@@ -171,6 +171,7 @@ interface LiveIndex {
   unique: boolean;
   origin: string;
   partial: boolean;
+  where: string | null;
   sqlTerms: string[];
   terms: LiveIndexTerm[];
 }
@@ -183,16 +184,16 @@ interface LiveForeignKey {
   onDelete: string;
 }
 
-function indexSqlTerms(db: ExactSchemaDb, indexName: string, xinfoTerms: Array<{ name: string | null }>): string[] {
+function indexSqlTermsAndWhere(db: ExactSchemaDb, indexName: string, xinfoTerms: Array<{ name: string | null }>): { terms: string[]; where: string | null } {
   const row = db.prepare("SELECT sql FROM sqlite_schema WHERE type = 'index' AND lower(name) = lower(?)").get(indexName);
   const sql = row === undefined ? '' : String(row.sql ?? '');
   if (sql === '') {
     // Auto-indexes (origin 'u'/'pk' from UNIQUE/PK constraints) have no stored
     // SQL — derive their terms from PRAGMA index_xinfo column names instead.
-    return xinfoTerms.map((term) => (term.name === null ? '' : normaliseSql(quoteIdent(term.name))));
+    return { terms: xinfoTerms.map((term) => (term.name === null ? '' : normaliseSql(quoteIdent(term.name)))), where: null };
   }
   const open = sql.indexOf('(');
-  if (open < 0) return [];
+  if (open < 0) return { terms: [], where: null };
   let depth = 0;
   let close = -1;
   for (let i = open; i < sql.length; i += 1) {
@@ -206,7 +207,7 @@ function indexSqlTerms(db: ExactSchemaDb, indexName: string, xinfoTerms: Array<{
       }
     }
   }
-  if (close < 0) return [];
+  if (close < 0) return { terms: [], where: null };
   const inner = sql.slice(open + 1, close);
   const terms: string[] = [];
   let termDepth = 0;
@@ -230,7 +231,8 @@ function indexSqlTerms(db: ExactSchemaDb, indexName: string, xinfoTerms: Array<{
     }
   }
   terms.push(normaliseSql(inner.slice(start)));
-  return terms;
+  const where = sql.slice(close + 1).match(/^\s+WHERE\s+(.+?)\s*;?\s*$/i);
+  return { terms, where: where === null ? null : normaliseSql(where[1]) };
 }
 
 function readLiveIndexes(db: ExactSchemaDb, tableName: string): LiveIndex[] {
@@ -244,12 +246,14 @@ function readLiveIndexes(db: ExactSchemaDb, tableName: string): LiveIndex[] {
         descending: term.desc as number,
         collation: String(term.coll),
       }));
+    const sql = indexSqlTermsAndWhere(db, name, terms);
     return {
       name,
       unique: row.unique === 1,
       origin: String(row.origin),
       partial: row.partial === 1,
-      sqlTerms: indexSqlTerms(db, name, terms),
+      where: sql.where,
+      sqlTerms: sql.terms,
       terms,
     };
   });
@@ -292,6 +296,21 @@ function declaredIndexTerms(index: { columns?: readonly string[]; expression?: r
   return [
     ...(index.columns ?? []).map((column) => normaliseSql(quoteIdent(column))),
     ...(index.expression ?? []).map((term) => normaliseSql(term)),
+  ];
+}
+
+function declaredIndexCollations(
+  table: SqliteSchemaDescription['tables'][number],
+  index: { columns?: readonly string[]; expression?: readonly string[] },
+): string[] {
+  const columns = new Map(table.columns.map((column) => [folded(column.name), column]));
+  const expressionCollation = (expression: string): string => {
+    const match = expression.match(/\s+COLLATE\s+("(?:""|[^"])+"|[A-Za-z_][A-Za-z0-9_]*)\s*(?:ASC|DESC)?\s*$/i);
+    return match === null ? 'BINARY' : match[1].replace(/^"|"$/g, '').replaceAll('""', '');
+  };
+  return [
+    ...(index.columns ?? []).map((name) => columns.get(folded(name))?.collation ?? 'BINARY'),
+    ...(index.expression ?? []).map(expressionCollation),
   ];
 }
 
@@ -382,10 +401,15 @@ function validateIndexes(db: ExactSchemaDb, owner: string, table: SqliteSchemaDe
     }
     matched.add(liveIndex.name);
     const expectedTerms = declaredIndexTerms(index);
+    const expectedCollations = declaredIndexCollations(table, index);
     const termsMatch = expectedTerms.length === liveIndex.sqlTerms.length
       && expectedTerms.every((term, position) => term === liveIndex.sqlTerms[position]);
+    const collationsMatch = expectedCollations.length === liveIndex.terms.length
+      && expectedCollations.every((collation, position) => folded(collation) === folded(liveIndex.terms[position].collation));
     if (liveIndex.origin !== 'c' || liveIndex.unique !== Boolean(index.unique)
-      || liveIndex.partial !== (index.where !== undefined) || !termsMatch) {
+      || liveIndex.partial !== (index.where !== undefined)
+      || liveIndex.where !== (index.where === undefined ? null : normaliseSql(index.where))
+      || !termsMatch || !collationsMatch) {
       push('index-mismatch', 'schema', owner, 'table', table.name, `index "${index.name}" does not match its declaration`);
     }
   }

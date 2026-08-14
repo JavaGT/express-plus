@@ -159,12 +159,11 @@ interface TableDeclaration {
   triggers?: { name: string }[];
 }
 
-// S2 consideration #9 trigger ownership: a trigger on the entity's main table
-// is permitted when it is declared by the owning schema's table declaration
-// AND (when a census is supplied) the S2/A2 census attributes it to that
-// schema or to an owning plugin. Without a census the declaring table's
-// trigger list is the ownership signal — the census would otherwise claim the
-// same trigger to the declaring schema, so the two views agree.
+// S2 consideration #9 trigger ownership: a schema-owned entity table permits
+// a trigger declared by its schema, or a trigger attributed to a plugin by the
+// S2/A2 census. App schema preparation supplies that census; the declaration
+// fallback keeps this validator usable in isolated tests and tools. A5 consumes
+// the same census for the post-migration exact-schema validation phase.
 export interface SchemaOwnedEntityOptions {
   readonly schemaName?: string;
   readonly census?: ReadonlyMap<string, CensusEntry>;
@@ -182,14 +181,17 @@ export function validateSchemaOwnedEntityTable(db: DbLike, entity: EntityRecord,
     const triggers = db.prepare(`SELECT name FROM ${schema} WHERE type = 'trigger' AND lower(tbl_name) = lower(?)`).all(declaration.name);
     for (const trigger of triggers) {
       const name = String(trigger.name);
-      if (!declaredTriggers.has(folded(name))) fail(entity, `has undeclared trigger "${name}"`);
       if (options?.census) {
         const owner = options.census.get(censusKey('trigger', name));
-        const ownedBySchema = owner?.kind === 'schema' && folded(owner.owner) === folded(options.schemaName ?? '');
+        const ownedBySchema = declaredTriggers.has(folded(name))
+          && owner?.kind === 'schema' && folded(owner.owner) === folded(options.schemaName ?? '');
         const ownedByPlugin = owner?.kind === 'plugin';
         if (!ownedBySchema && !ownedByPlugin) {
+          if (owner === undefined && !declaredTriggers.has(folded(name))) fail(entity, `has undeclared trigger "${name}"`);
           fail(entity, `has trigger "${name}" not owned by schema "${options.schemaName ?? '(none)'}" or a plugin`);
         }
+      } else if (!declaredTriggers.has(folded(name))) {
+        fail(entity, `has undeclared trigger "${name}"`);
       }
     }
   }

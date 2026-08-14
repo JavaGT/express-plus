@@ -250,6 +250,36 @@ test('schema-owned entity table validation permits a trigger declared by the own
   }
 });
 
+test('schema-owned entity table validation permits a trigger owned by a registered plugin', async () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    const schema = noteSchema();
+    schema.prepare(db);
+    db.exec('CREATE TRIGGER SchemaNote_plugin_audit AFTER INSERT ON SchemaNote BEGIN SELECT 1; END');
+    const app = workbench({ db, schema, entities: [Note] });
+    app.registerSearchPlugin({
+      contractVersion: 1,
+      id: 'note-audit',
+      version: '1',
+      ownedObjects: [{
+        kind: 'trigger',
+        name: 'SchemaNote_plugin_audit',
+        ddl: ['CREATE TRIGGER SchemaNote_plugin_audit AFTER INSERT ON SchemaNote BEGIN SELECT 1; END'],
+      }],
+      sourceInterests: [],
+      stalenessKey() { return null; },
+      prepare() {},
+      validate() {},
+      reconcile() { return {}; },
+      rebuild() { return {}; },
+      search() { return { hits: [] }; },
+    });
+    await app.prepareSchema();
+  } finally {
+    db.close();
+  }
+});
+
 test('schema and application migrations are namespaced — same version in different namespaces is legitimate (workbench#90)', () => {
   const schema = defineSqliteSchema({
     name: 'schema-note', tables: [], migrations: [{ namespace: 'schema-note', name: 'seed', version: 17, up() {} }],

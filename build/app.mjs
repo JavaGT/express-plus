@@ -62,6 +62,7 @@ import { authRoutes } from './auth/routes.mjs';
 import { attachApplicationLiveDelivery } from './application-live-delivery.mjs';
 import { User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor } from './auth/entities.mjs';
 import { config, resolveConfig } from './config.mjs';
+import { buildOwnershipCensus } from './schema-census.mjs';
 import path from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { makeMountable } from './router.mjs';
@@ -751,9 +752,26 @@ export default function workbench({
           await runWorkbenchMigrations(app.db);
           if (declaredMigrations.length) runMigrations(app.db, declaredMigrations);
           if (schema) schema.prepare(app.db, { skipMigrations: true });
+          const ownership = buildOwnershipCensus({
+            schemaDeclarations: schema ? [schema] : [],
+            entities: [...app.entities.values()],
+            plugins: app.searchPlugins.ids().map((id        ) => {
+              const plugin               = app.searchPlugins.get(id) ;
+              return {
+                id: plugin.id,
+                ownedObjects: plugin.ownedObjects.map(({ kind, name }) => ({ kind, name })),
+              };
+            }),
+          });
+          if (ownership.errors.length > 0) throw new Error(ownership.errors[0].message);
           for (const entity of app.entities.values()) {
             const declaration = schemaTables.get(entity.name.toLowerCase());
-            if (declaration) validateSchemaOwnedEntityTable(app.db, entity, declaration);
+            if (declaration) {
+              validateSchemaOwnedEntityTable(app.db, entity, declaration, {
+                schemaName: schema?.name,
+                census: ownership.census,
+              });
+            }
           }
           return app;
         })();

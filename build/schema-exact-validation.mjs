@@ -183,16 +183,17 @@ function declaredDefault(column                                                 
 
 
 
-function indexSqlTerms(db               , indexName        , xinfoTerms                                )           {
+
+function indexSqlTermsAndWhere(db               , indexName        , xinfoTerms                                )                                            {
   const row = db.prepare("SELECT sql FROM sqlite_schema WHERE type = 'index' AND lower(name) = lower(?)").get(indexName);
   const sql = row === undefined ? '' : String(row.sql ?? '');
   if (sql === '') {
     // Auto-indexes (origin 'u'/'pk' from UNIQUE/PK constraints) have no stored
     // SQL — derive their terms from PRAGMA index_xinfo column names instead.
-    return xinfoTerms.map((term) => (term.name === null ? '' : normaliseSql(quoteIdent(term.name))));
+    return { terms: xinfoTerms.map((term) => (term.name === null ? '' : normaliseSql(quoteIdent(term.name)))), where: null };
   }
   const open = sql.indexOf('(');
-  if (open < 0) return [];
+  if (open < 0) return { terms: [], where: null };
   let depth = 0;
   let close = -1;
   for (let i = open; i < sql.length; i += 1) {
@@ -206,7 +207,7 @@ function indexSqlTerms(db               , indexName        , xinfoTerms         
       }
     }
   }
-  if (close < 0) return [];
+  if (close < 0) return { terms: [], where: null };
   const inner = sql.slice(open + 1, close);
   const terms           = [];
   let termDepth = 0;
@@ -230,7 +231,8 @@ function indexSqlTerms(db               , indexName        , xinfoTerms         
     }
   }
   terms.push(normaliseSql(inner.slice(start)));
-  return terms;
+  const where = sql.slice(close + 1).match(/^\s+WHERE\s+(.+?)\s*;?\s*$/i);
+  return { terms, where: where === null ? null : normaliseSql(where[1]) };
 }
 
 function readLiveIndexes(db               , tableName        )              {
@@ -244,12 +246,14 @@ function readLiveIndexes(db               , tableName        )              {
         descending: term.desc          ,
         collation: String(term.coll),
       }));
+    const sql = indexSqlTermsAndWhere(db, name, terms);
     return {
       name,
       unique: row.unique === 1,
       origin: String(row.origin),
       partial: row.partial === 1,
-      sqlTerms: indexSqlTerms(db, name, terms),
+      where: sql.where,
+      sqlTerms: sql.terms,
       terms,
     };
   });
@@ -292,6 +296,21 @@ function declaredIndexTerms(index                                               
   return [
     ...(index.columns ?? []).map((column) => normaliseSql(quoteIdent(column))),
     ...(index.expression ?? []).map((term) => normaliseSql(term)),
+  ];
+}
+
+function declaredIndexCollations(
+  table                                           ,
+  index                                                                 ,
+)           {
+  const columns = new Map(table.columns.map((column) => [folded(column.name), column]));
+  const expressionCollation = (expression        )         => {
+    const match = expression.match(/\s+COLLATE\s+("(?:""|[^"])+"|[A-Za-z_][A-Za-z0-9_]*)\s*(?:ASC|DESC)?\s*$/i);
+    return match === null ? 'BINARY' : match[1].replace(/^"|"$/g, '').replaceAll('""', '');
+  };
+  return [
+    ...(index.columns ?? []).map((name) => columns.get(folded(name))?.collation ?? 'BINARY'),
+    ...(index.expression ?? []).map(expressionCollation),
   ];
 }
 
@@ -382,10 +401,15 @@ function validateIndexes(db               , owner        , table                
     }
     matched.add(liveIndex.name);
     const expectedTerms = declaredIndexTerms(index);
+    const expectedCollations = declaredIndexCollations(table, index);
     const termsMatch = expectedTerms.length === liveIndex.sqlTerms.length
       && expectedTerms.every((term, position) => term === liveIndex.sqlTerms[position]);
+    const collationsMatch = expectedCollations.length === liveIndex.terms.length
+      && expectedCollations.every((collation, position) => folded(collation) === folded(liveIndex.terms[position].collation));
     if (liveIndex.origin !== 'c' || liveIndex.unique !== Boolean(index.unique)
-      || liveIndex.partial !== (index.where !== undefined) || !termsMatch) {
+      || liveIndex.partial !== (index.where !== undefined)
+      || liveIndex.where !== (index.where === undefined ? null : normaliseSql(index.where))
+      || !termsMatch || !collationsMatch) {
       push('index-mismatch', 'schema', owner, 'table', table.name, `index "${index.name}" does not match its declaration`);
     }
   }
