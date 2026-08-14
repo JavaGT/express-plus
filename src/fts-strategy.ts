@@ -10,6 +10,7 @@
 import * as eventHandle from './event-handle.ts';
 import type { EventIdentityHandle } from './event-handle.ts';
 import type { DbHandle } from './driver.ts';
+import { fts5TableDdl } from './fts5-plugin.ts';
 
 function ftsTableName(entityName: string, fieldName: string): string {
   return `${entityName}_${fieldName}_fts`;
@@ -20,9 +21,7 @@ function ftsOwnerCol(entityName: string): string {
 }
 
 function ftsDDL(entityName: string, fieldName: string): string {
-  const table = ftsTableName(entityName, fieldName);
-  const ownerCol = ftsOwnerCol(entityName);
-  return `CREATE VIRTUAL TABLE IF NOT EXISTS ${table} USING fts5(${fieldName}, ${ownerCol} UNINDEXED);`;
+  return fts5TableDdl(entityName, fieldName);
 }
 
 interface FtsFieldDescriptor {
