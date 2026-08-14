@@ -8,7 +8,7 @@ import {
   textOperationForOffsetEdit, resolveOffsetToEndpoint,
 } from '../build/annotated-text-continuous.mjs';
 import {
-  restoreTextFamily,
+  materializeText as publicMaterializeText, restoreTextFamily,
 } from '../public/workbench-annotated-text-continuous.mjs';
 import {
   materializeAnnotatedTextSnapshot, projectPendingAnnotatedTextDocument, resolveRangeOffsets,
@@ -479,4 +479,245 @@ test('redacted v1 materialize stays offset-only and never requires a family', ()
   assert.equal(document.version, 1);
   assert.deepEqual(document.ranges, [{ annotationId: 'c1', start: 6, end: 11 }]);
   assert.deepEqual(resolveRangeOffsets(document.ranges[0], null), { annotationId: 'c1', start: 6, end: 11 });
+});
+
+test('a combined ab fold drops both queued inserts and keeps a trailing c', async () => {
+  const A = 'a'.repeat(32);
+  const B = 'b'.repeat(32);
+  const insertOp = ['workbench.text', 1, [A, 1], 1, [], ['insert', ['root'], 'hello world']];
+  const baseFamily = createTextFamily('d1', textCheckpoint(applyTextOp(createTextState(), insertOp)));
+  const start = resolveOffsetToEndpoint(baseFamily, 6, baseFamily.checkpoint.frontier, 'right');
+  const end = resolveOffsetToEndpoint(baseFamily, 11, baseFamily.checkpoint.frontier, 'right');
+  const insertA = textOperationForOffsetEdit(baseFamily, { kind: 'text.insert', at: { offset: 0, affinity: 'right' }, text: 'a' }, B, 2);
+  const familyA = applyTextOperation(baseFamily, insertA);
+  const insertB = textOperationForOffsetEdit(familyA, { kind: 'text.insert', at: { offset: 1, affinity: 'right' }, text: 'b' }, 'c'.repeat(32), 3);
+  const familyAB = applyTextOperation(familyA, insertB);
+  const textAB = materializeText(familyAB);
+
+  const sources = [];
+  let number = 0;
+  const pending = [];
+  const session = createAnnotatedTextHttpSession({
+    typingBurstIdleMs: 0,
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: Document, field: Document.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => 'action-1',
+    fetchImpl: async (url, options) => {
+      if (options?.method === 'POST') {
+        if (url.includes('/authoring/ack')) return { ok: true, status: 200, json: async () => ({ ok: true, acknowledgedThrough: number }) };
+        return new Promise((resolve) => pending.push(resolve));
+      }
+      const cursor = ++number;
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          kind: 'snapshot',
+          snapshot: {
+            body: {
+              kind: 'workbench.annotatedText.recipient', version: 2,
+              text: 'hello world',
+              ranges: [{ annotationId: 'c1', start, end }],
+              annotations: [{ id: 'c1', family: 'note', fields: {} }],
+              orphans: [], measurements: [],
+            },
+          },
+          cursor,
+          authoring: authoringEnvelope(cursor, textFamilyCheckpoint(baseFamily)),
+        }),
+      };
+    },
+    eventSourceFactory: () => {
+      const source = { close() {}, onmessage: null, onerror: null };
+      sources.push(source);
+      return source;
+    },
+  });
+  await session.ready;
+  const first = session.insert({ mutationId: 'ins-a', at: { offset: 0, affinity: 'right' }, text: 'a' });
+  const second = session.insert({ mutationId: 'ins-b', at: { offset: 1, affinity: 'right' }, text: 'b' });
+  const third = session.insert({ mutationId: 'ins-c', at: { offset: 2, affinity: 'right' }, text: 'c' });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(session.document.text, 'abchello world');
+  const beforeFold = resolveRangeOffsets(session.document.ranges[0], session.family);
+  assert.deepEqual(beforeFold, { annotationId: 'c1', start: 9, end: 14 });
+
+  sources[0].onmessage({ data: JSON.stringify([{
+    type: 'event', entity: 'Project', id: 'p1', seq: 2, seqSpan: [2, 2],
+    event: { type: 'FoldDoc.body.operated', scope: 'annotated-text:d1', seq: 2, actionId: 'action-1' },
+    fold: {
+      kind: 'annotatedText', version: 5, field: 'body', baseCursor: 1, fence: 2,
+      text: { reducer: 'workbench.text', operations: [insertA, insertB] },
+      projection: { text: textAB },
+      dispositions: [],
+      familyElementCount: Object.keys(familyAB.checkpoint.elements).length,
+      authoring: {
+        acknowledgementFence: 2,
+        stream: token('stream'), lease: token('lease'), snapshot: token('snapshot2'),
+        positionFrames: [{ positionToken: token('position2') }],
+      },
+    },
+  }]) });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(session.document.text, 'abchello world');
+  assert.equal(publicMaterializeText(session.family), session.document.text);
+  assert.deepEqual(resolveRangeOffsets(session.document.ranges[0], session.family), beforeFold);
+  session.close();
+  for (const resolve of pending) resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
+  await Promise.allSettled([first, second, third]);
+});
+
+test('snapshot recovery mid-queue drops the optimistic overlay', async () => {
+  const baseFamily = seedHelloWorld();
+  const start = resolveOffsetToEndpoint(baseFamily, 6, baseFamily.checkpoint.frontier, 'right');
+  const end = resolveOffsetToEndpoint(baseFamily, 11, baseFamily.checkpoint.frontier, 'right');
+  const sources = [];
+  let number = 0;
+  const pending = [];
+  const session = createAnnotatedTextHttpSession({
+    typingBurstIdleMs: 0,
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: Document, field: Document.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => 'action-1',
+    fetchImpl: async (url, options) => {
+      if (options?.method === 'POST') {
+        if (url.includes('/authoring/ack')) return { ok: true, status: 200, json: async () => ({ ok: true, acknowledgedThrough: number }) };
+        return new Promise((resolve) => pending.push(resolve));
+      }
+      const cursor = ++number;
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          kind: 'snapshot',
+          snapshot: {
+            body: {
+              kind: 'workbench.annotatedText.recipient', version: 2,
+              text: 'hello world',
+              ranges: [{ annotationId: 'c1', start, end }],
+              annotations: [{ id: 'c1', family: 'note', fields: {} }],
+              orphans: [], measurements: [],
+            },
+          },
+          cursor,
+          authoring: authoringEnvelope(cursor, textFamilyCheckpoint(baseFamily)),
+        }),
+      };
+    },
+    eventSourceFactory: () => {
+      const source = { close() {}, onmessage: null, onerror: null };
+      sources.push(source);
+      return source;
+    },
+  });
+  await session.ready;
+  const first = session.insert({ mutationId: 'ins-1', at: { offset: 0, affinity: 'right' }, text: '^' });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(session.document.text, '^hello world');
+  sources[0].onmessage({ data: JSON.stringify([{ type: 'resync', seq: 3, reason: 'opaque' }]) });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(publicMaterializeText(session.family), session.document.text);
+  assert.deepEqual(
+    resolveRangeOffsets(session.document.ranges[0], session.family),
+    session.document.text.startsWith('^')
+      ? { annotationId: 'c1', start: 7, end: 12 }
+      : { annotationId: 'c1', start: 6, end: 11 },
+  );
+  session.close();
+  for (const resolve of pending) resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
+  await Promise.allSettled([first]);
+});
+
+test('a replacement snapshot with the same ranges but a working family stays live', async () => {
+  const baseFamily = seedHelloWorld();
+  const start = resolveOffsetToEndpoint(baseFamily, 6, baseFamily.checkpoint.frontier, 'right');
+  const end = resolveOffsetToEndpoint(baseFamily, 11, baseFamily.checkpoint.frontier, 'right');
+  const lost = {
+    point: ['point', ['element', [['deadbeefdeadbeefdeadbeefdeadbeef', 99], 0]], 'left'],
+    basisFrontier: [['deadbeefdeadbeefdeadbeefdeadbeef', 99]],
+  };
+  const snapshotRequests = [];
+  let number = 0;
+  const session = createAnnotatedTextHttpSession({
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: Document, field: Document.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => 'action-1',
+    fetchImpl: async (url, options) => {
+      if (options?.method === 'POST') {
+        if (url.includes('/authoring/ack')) return { ok: true, status: 200, json: async () => ({ ok: true, acknowledgedThrough: number }) };
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }
+      const cursor = ++number;
+      snapshotRequests.push(cursor);
+      const ranges = number === 1
+        ? [{ annotationId: 'c1', start: lost, end: lost }]
+        : [{ annotationId: 'c1', start, end }];
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          kind: 'snapshot',
+          snapshot: {
+            body: {
+              kind: 'workbench.annotatedText.recipient', version: 2,
+              text: 'hello world', ranges,
+              annotations: [{ id: 'c1', family: 'note', fields: {} }],
+              orphans: [], measurements: [],
+            },
+          },
+          cursor,
+          authoring: authoringEnvelope(cursor, textFamilyCheckpoint(baseFamily)),
+        }),
+      };
+    },
+    eventSourceFactory: () => ({ close() {}, onmessage: null, onerror: null }),
+  });
+  await session.ready;
+  const dom = new JSDOM('<div id="editor"></div>');
+  const element = dom.window.document.getElementById('editor');
+  const binding = bindAnnotatedTextEditor({ element, session });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.ok(snapshotRequests.length >= 2);
+  assert.notEqual(session.status, 'closed');
+  assert.deepEqual(resolveRangeOffsets(session.document.ranges[0], session.family), { annotationId: 'c1', start: 6, end: 11 });
+  binding.close();
+  session.close();
+});
+
+test('a queued insert that splits a surrogate pair is rejected', async () => {
+  const actor = 'a'.repeat(32);
+  const insertOp = ['workbench.text', 1, [actor, 1], 1, [], ['insert', ['root'], 'a😀b']];
+  const baseFamily = createTextFamily('d1', textCheckpoint(applyTextOp(createTextState(), insertOp)));
+  let number = 0;
+  const session = createAnnotatedTextHttpSession({
+    typingBurstIdleMs: 0,
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: Document, field: Document.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => 'action-1',
+    fetchImpl: async (url, options) => {
+      if (options?.method === 'POST') {
+        if (url.includes('/authoring/ack')) return { ok: true, status: 200, json: async () => ({ ok: true, acknowledgedThrough: number }) };
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }
+      const cursor = ++number;
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          kind: 'snapshot',
+          snapshot: {
+            body: {
+              kind: 'workbench.annotatedText.recipient', version: 2,
+              text: 'a😀b', ranges: [], annotations: [], orphans: [], measurements: [],
+            },
+          },
+          cursor,
+          authoring: authoringEnvelope(cursor, textFamilyCheckpoint(baseFamily)),
+        }),
+      };
+    },
+    eventSourceFactory: () => ({ close() {}, onmessage: null, onerror: null }),
+  });
+  await session.ready;
+  assert.equal(session.document.text, 'a😀b');
+  const pending = session.insert({ mutationId: 'bad', at: { offset: 2, affinity: 'right' }, text: 'x' });
+  assert.equal(session.document.text, 'a😀b');
+  session.close();
+  await Promise.allSettled([pending]);
 });

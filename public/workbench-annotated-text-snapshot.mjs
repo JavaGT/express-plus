@@ -231,13 +231,23 @@ export function projectPendingAnnotatedTextDocument(document, action, _ignored) 
   const start = edit.kind === 'text.insert' ? edit.at.offset : edit.from.offset;
   const end = edit.kind === 'text.insert' ? start : edit.to.offset;
   if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end > text.length) return document;
+  if (splitsSurrogate(text, start) || splitsSurrogate(text, end)) return document;
   const inserted = edit.kind === 'text.insert' || edit.kind === 'text.replace' ? edit.text : '';
   const spliced = `${text.slice(0, start)}${inserted}${text.slice(end)}`;
+  const ranges = Array.isArray(document.ranges) && document.ranges.some((range) => isOffsetRange(range))
+    ? Object.freeze(shiftOffsetRangesOverEdit(document.ranges, start, end, inserted))
+    : document.ranges;
   return Object.freeze({
     ...document,
     text: spliced,
-    ...(Array.isArray(document.ranges) ? { ranges: Object.freeze(shiftOffsetRangesOverEdit(document.ranges, start, end, inserted)) } : {}),
+    ...(Array.isArray(document.ranges) ? { ranges } : {}),
   });
+}
+
+function splitsSurrogate(text, offset) {
+  return offset > 0 && offset < text.length
+    && text.charCodeAt(offset - 1) >= 0xd800 && text.charCodeAt(offset - 1) <= 0xdbff
+    && text.charCodeAt(offset) >= 0xdc00 && text.charCodeAt(offset) <= 0xdfff;
 }
 
 // Bounds may land between a surrogate pair when the transition crosses an

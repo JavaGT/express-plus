@@ -15,7 +15,7 @@
 import { applyTextOp, createTextState, materializeText, restoreTextCheckpoint } from './workbench-annotated-text.mjs';
 import { deleteText, insertText } from './workbench-text-edit.mjs';
 import { createAnnotatedTextSnapshotSessionBinding, revokeAnnotatedTextSnapshotSessionBinding } from './workbench-annotated-text-snapshot-internal.mjs';
-import { materializeAnnotatedTextSnapshot, projectPendingAnnotatedTextDocument, resolveRangeOffsets, shiftOffsetRangesOverText } from './workbench-annotated-text-snapshot.mjs';
+import { isOffsetRange, materializeAnnotatedTextSnapshot, projectPendingAnnotatedTextDocument, resolveRangeOffsets, shiftOffsetRangesOverText, tryResolveRangesOffsets } from './workbench-annotated-text-snapshot.mjs';
 import { applyOffsetTextEdit, applyTextOperation, materializeText as materializeFamilyText, restoreTextFamily } from './workbench-annotated-text-continuous.mjs';
 import { annotatedTextAction } from './workbench-annotated-text-action.mjs';
 export { bindAnnotatedTextEditor } from './workbench-annotated-text-editor.mjs';
@@ -3401,7 +3401,9 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
   let familyReplica = null;
   let displayFamily = null;
   const pendingDisplayEdits = [];
-  const unresolvableSnapshots = new Set();
+  let queuedDocumentText = null;
+  let queuedAuthoringMutations = 0;
+  let resolutionFailedOnce = false;
   let resolutionTerminal = false;
   let resolutionRecoveryInFlight = false;
   const snapshotBinding = createAnnotatedTextSnapshotSessionBinding();
@@ -3587,7 +3589,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       throw new Error('annotated text fold left pending operations behind; snapshot recovery required');
     }
     familyReplica = family;
-    consumeFoldedDisplayEdit(beforeFamily, family);
+    consumeFoldedDisplayEdits(beforeFamily, fold.projection.text);
     installAuthoringFromFold(fold.authoring, fence);
     if (onFoldApplied) onFoldApplied(fold, performance.now() - startedAt);
     const foldedDocument = applyAnnotatedTextFoldDispositions(currentDocument, foldedRanges, fold.dispositions);
@@ -3604,8 +3606,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     requestIdentity,
     onRecoveryStart: () => {
       familyReplica = null;
-      displayFamily = null;
-      pendingDisplayEdits.length = 0;
+      resetOptimisticProjection();
       revokeAnnotatedTextSnapshotSessionBinding(snapshotBinding);
     },
     onRecoveryDelayed,
@@ -3640,8 +3641,8 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       // subsequent folds apply against the client's own copy instead of
       // re-shipping the whole family per keystroke.
       familyReplica = authoring.family ? restoreTextFamily(authoring.family) : null;
-      pendingDisplayEdits.length = 0;
-      displayFamily = familyReplica;
+      replayPendingDisplayEdits([...pendingDisplayEdits]);
+      rebuildQueuedDocumentText(snapshot[field?.fieldName]?.text);
       const result = materializeAnnotatedTextSnapshot({ ...snapshot[field?.fieldName], authoring }, field, { binding: snapshotBinding, family: familyReplica });
       return result;
     },
@@ -3659,9 +3660,26 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     for (const authoring of deferredAuthoringAcknowledgements.values()) acknowledgeAuthoring(authoring);
     deferredAuthoringAcknowledgements.clear();
   }
-  let queuedDocumentText = null;
-  let queuedAuthoringMutations = 0;
   const documentListeners = new Set();
+  function rebuildQueuedDocumentText(baseText) {
+    if (!pendingDisplayEdits.length) {
+      queuedDocumentText = null;
+      return;
+    }
+    let text = baseText ?? '';
+    for (const edit of pendingDisplayEdits) {
+      if (!Number.isSafeInteger(edit.from) || !Number.isSafeInteger(edit.to) || edit.from < 0 || edit.to < edit.from || edit.to > text.length) {
+        queuedDocumentText = null;
+        return;
+      }
+      text = `${text.slice(0, edit.from)}${edit.text}${text.slice(edit.to)}`;
+    }
+    queuedDocumentText = text === baseText ? null : text;
+  }
+  function resetOptimisticProjection() {
+    queuedDocumentText = null;
+    displayFamily = familyReplica;
+  }
   function displayEditFromCommand(command) {
     if (command?.kind === 'text.insert') {
       const offset = command.at?.offset;
@@ -3689,9 +3707,8 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       }
       displayFamily = family;
     } catch {
-      displayFamily = null;
       pendingDisplayEdits.length = 0;
-      recoverFromUnresolvableRange();
+      displayFamily = familyReplica;
     }
   }
   function applyPendingDisplayEdit(command) {
@@ -3701,62 +3718,74 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       displayFamily = applyOffsetTextEdit(displayFamily, edit.from, edit.to, edit.text);
       pendingDisplayEdits.push(edit);
     } catch {
-      displayFamily = null;
-      recoverFromUnresolvableRange();
+      displayFamily = familyReplica;
     }
   }
-  function consumeFoldedDisplayEdit(beforeFamily, afterFamily) {
+  function consumeFoldedDisplayEdits(beforeFamily, foldedText) {
     if (!beforeFamily || pendingDisplayEdits.length === 0) {
       replayPendingDisplayEdits([]);
       return;
     }
-    const [first, ...rest] = pendingDisplayEdits;
+    let family = beforeFamily;
+    let matched = 0;
     try {
-      const expected = applyOffsetTextEdit(beforeFamily, first.from, first.to, first.text);
-      if (materializeFamilyText(expected) === materializeFamilyText(afterFamily)) {
-        replayPendingDisplayEdits(rest);
-        return;
+      for (let index = 0; index < pendingDisplayEdits.length; index += 1) {
+        const edit = pendingDisplayEdits[index];
+        family = applyOffsetTextEdit(family, edit.from, edit.to, edit.text);
+        if (materializeFamilyText(family) === foldedText) matched = index + 1;
       }
-    } catch { /* foreign fold or unreplayable pending edit */ }
-    replayPendingDisplayEdits([]);
+    } catch { /* stop at the first unreplayable prefix */ }
+    replayPendingDisplayEdits(matched > 0 ? pendingDisplayEdits.slice(matched) : []);
   }
-  function snapshotResolutionKey(view) {
-    return JSON.stringify({ version: view?.version, text: view?.text, ranges: view?.ranges });
+  function documentRangesUnresolvable(view, family) {
+    if (!view || !Array.isArray(view.ranges) || view.ranges.every((range) => isOffsetRange(range))) return false;
+    if (!family) return true;
+    return tryResolveRangesOffsets(view.ranges, family) === null;
+  }
+  function closeAnnotatedSession() {
+    sessionClosed = true;
+    cancelOpenInsertBurst();
+    wakeAuthoringMutation?.();
+    wakeAuthoringMutation = null;
+    revokeAnnotatedTextSnapshotSessionBinding(snapshotBinding);
+    if (caretChannel) {
+      try { caretChannel.clearCaret({ entity: entity.name, id: documentId, field: field.fieldName }); } catch { /* best effort */ }
+      try { caretChannel.close(); } catch { /* best effort */ }
+      caretChannel = null;
+    }
+    caretListeners.clear();
+    documentListeners.clear();
+    session.close();
   }
   function recoverFromUnresolvableRange() {
     if (resolutionTerminal || resolutionRecoveryInFlight) return;
-    const key = snapshotResolutionKey(currentAnnotatedDocument());
-    if (unresolvableSnapshots.has(key)) {
+    if (resolutionFailedOnce) {
       resolutionTerminal = true;
-      sessionClosed = true;
-      session.close();
+      closeAnnotatedSession();
       return;
     }
-    unresolvableSnapshots.add(key);
+    resolutionFailedOnce = true;
     resolutionRecoveryInFlight = true;
     Promise.resolve(session.reconnect()).finally(() => {
       resolutionRecoveryInFlight = false;
       if (resolutionTerminal) return;
-      if (unresolvableSnapshots.has(snapshotResolutionKey(currentAnnotatedDocument()))) {
+      const view = currentAnnotatedDocument();
+      if (documentRangesUnresolvable(view, displayFamily ?? familyReplica)) {
         resolutionTerminal = true;
-        sessionClosed = true;
-        session.close();
+        closeAnnotatedSession();
       }
     });
   }
   function currentAnnotatedDocument() {
     const view = annotatedDocumentView(session.snapshot);
     if (!view || queuedDocumentText === null) return view;
+    const ranges = Array.isArray(view.ranges) && view.ranges.some((range) => isOffsetRange(range))
+      ? shiftOffsetRangesOverText(view.ranges, view.text, queuedDocumentText)
+      : view.ranges;
     return Object.freeze({
       ...view,
       text: queuedDocumentText,
-      // The queued text is one optimistic placeholder, so its document-wide
-      // annotation ranges must be projected over the same transition. Mixing
-      // the queued text with authoritative offsets makes range-backed chrome
-      // walk between turns while a rapid typing burst settles one fold at a
-      // time. The next authoritative fold remains the sole reconciliation
-      // path and replaces this approximation.
-      ranges: shiftOffsetRangesOverText(view.ranges, view.text, queuedDocumentText),
+      ranges,
     });
   }
   function publishAnnotatedDocument() {
@@ -3780,19 +3809,32 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
   function localAuthoringConflict() {
     return { ok: false, failure: new Error('annotated text changed before queued operation could be submitted') };
   }
+  function splitsSurrogate(text, offset) {
+    return offset > 0 && offset < text.length
+      && text.charCodeAt(offset - 1) >= 0xd800 && text.charCodeAt(offset - 1) <= 0xdbff
+      && text.charCodeAt(offset) >= 0xdc00 && text.charCodeAt(offset) <= 0xdfff;
+  }
   function projectQueuedDocumentText(text, command) {
     if (command.kind === 'text.insert') {
       const offset = command.at?.offset;
-      if (!Number.isSafeInteger(offset) || offset < 0 || offset > text.length) return text;
+      if (!Number.isSafeInteger(offset) || offset < 0 || offset > text.length || splitsSurrogate(text, offset)) return null;
       return text.slice(0, offset) + command.text + text.slice(offset);
     }
     if (command.kind === 'text.delete' || command.kind === 'text.replace') {
       const from = command.from?.offset;
       const to = command.to?.offset;
-      if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 0 || to < from || to > text.length) return text;
+      if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 0 || to < from || to > text.length
+        || splitsSurrogate(text, from) || splitsSurrogate(text, to)) return null;
       return text.slice(0, from) + (command.kind === 'text.replace' ? command.text : '') + text.slice(to);
     }
     return text;
+  }
+  function applyQueuedTextCommand(basis, command) {
+    const next = projectQueuedDocumentText(basis, command);
+    if (next == null) return null;
+    queuedDocumentText = next;
+    applyPendingDisplayEdit(command);
+    return next;
   }
   function queueAuthoringMutation(command, send, { capturedBasis = null, alreadyProjected = false, reserved = false } = {}) {
     // Capture dependent local edits against the projection already queued
@@ -3802,9 +3844,8 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     // makes every character after the first reject itself as stale.
     const queuedBasis = capturedBasis ?? queuedDocumentText ?? session.snapshot?.text ?? '';
     const blocks = new Map([['document', queuedBasis]]);
-    if (!alreadyProjected) {
-      queuedDocumentText = projectQueuedDocumentText(queuedBasis, command);
-      applyPendingDisplayEdit(command);
+    if (!alreadyProjected && applyQueuedTextCommand(queuedBasis, command) == null) {
+      return Promise.resolve({ ok: false, failure: new TypeError('annotated text position splits a surrogate pair') });
     }
     if (!reserved) queuedAuthoringMutations += 1;
     // Queued text is an explicit optimistic placeholder. Publish it immediately
@@ -3846,10 +3887,12 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       } finally {
         release();
         queuedAuthoringMutations -= 1;
-        if (queuedAuthoringMutations === 0) {
+        if (queuedAuthoringMutations <= 0) {
+          queuedAuthoringMutations = 0;
           queuedDocumentText = null;
-          const confirmed = familyReplica ? materializeFamilyText(familyReplica) : null;
-          if (confirmed == null || session.snapshot?.text === confirmed) replayPendingDisplayEdits([]);
+          if (!pendingDisplayEdits.length || (familyReplica && session.snapshot?.text === materializeFamilyText(familyReplica))) {
+            replayPendingDisplayEdits([]);
+          }
         }
         publishAnnotatedDocument();
       }
@@ -3902,16 +3945,14 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       if (contiguous) {
         burst.command = { ...burst.command, text: burst.command.text + command.text };
         burst.waiters.push({ resolve, reject });
-        queuedDocumentText = projectQueuedDocumentText(queuedDocumentText ?? session.snapshot?.text ?? '', command);
-        applyPendingDisplayEdit(command);
+        applyQueuedTextCommand(queuedDocumentText ?? session.snapshot?.text ?? '', command);
         publishAnnotatedDocument();
         armInsertBurst(burst);
         return;
       }
       const capturedBasis = queuedDocumentText ?? session.snapshot?.text ?? '';
-      queuedDocumentText = projectQueuedDocumentText(capturedBasis, command);
+      applyQueuedTextCommand(capturedBasis, command);
       queuedAuthoringMutations += 1;
-      applyPendingDisplayEdit(command);
       publishAnnotatedDocument();
       openInsertBurst = {
         command: { ...command }, send, capturedBasis, waiters: [{ resolve, reject }],
@@ -4041,26 +4082,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       listener(currentAnnotatedDocument());
       return () => documentListeners.delete(listener);
     },
-    close: () => {
-      sessionClosed = true;
-      // An unsent idle-window burst has not crossed the durable boundary. Cancel
-      // it as a settled client result instead of queuing work that immediately
-      // rejects after close (and can surface as an unhandled rejection).
-      cancelOpenInsertBurst();
-      wakeAuthoringMutation?.();
-      wakeAuthoringMutation = null;
-      revokeAnnotatedTextSnapshotSessionBinding(snapshotBinding);
-      if (caretChannel) {
-        // Best-effort retraction before the channel closes; a server with no
-        // presence yet still accepts the clear, so no error is expected.
-        try { caretChannel.clearCaret({ entity: entity.name, id: documentId, field: field.fieldName }); } catch { /* best effort */ }
-        try { caretChannel.close(); } catch { /* best effort */ }
-        caretChannel = null;
-      }
-      caretListeners.clear();
-      documentListeners.clear();
-      session.close();
-    },
+    close: () => closeAnnotatedSession(),
   };
   if (caretsOption != null) {
     annotatedSurface.publishCaret = function publishCaret({ offset, selection } = {}) {

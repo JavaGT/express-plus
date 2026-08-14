@@ -111,7 +111,15 @@ const scalarStartOffset: number = scalarStart('ab', 1);
 const scalarEndOffset: number = scalarEnd('ab', 1);
 const change: AnnotatedTextChangedRange = changedRange('ab', 'ac');
 declare const sourceRanges: readonly AnnotatedTextRange[];
-void [displayPosition, displayOffset, crosses, placeholderWidth, scalarStartOffset, scalarEndOffset, change, sourceRanges];
+const offsetRange: AnnotatedTextRange = { annotationId: 'note-1', start: 0, end: 2 };
+const anchoredRange: AnnotatedTextRange = {
+  annotationId: 'note-1',
+  start: { point: ['point', ['root'], 'left'], basisFrontier: [] },
+  end: { point: ['point', ['root'], 'right'], basisFrontier: [] },
+};
+const offsetStart: number = typeof offsetRange.start === 'number' ? offsetRange.start : 0;
+const anchoredPoint = typeof anchoredRange.start === 'number' ? null : anchoredRange.start.point;
+void [displayPosition, displayOffset, crosses, placeholderWidth, scalarStartOffset, scalarEndOffset, change, sourceRanges, offsetRange, anchoredRange, offsetStart, anchoredPoint];
 
 declare const annotatedTextEntity: WorkbenchEntity;
 declare const requiredAnnotatedTextHandle: AnnotatedTextFieldHandle;
