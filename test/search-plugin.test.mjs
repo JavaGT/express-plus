@@ -797,6 +797,48 @@ describe('search plugin registry — generation and fence transitions', () => {
     assert.equal(state.generation, 2);
     assert.equal(state.fence, 1);
   });
+
+  test('an overlapping stale rebuild cannot overwrite a newer identity', async () => {
+    const registry = createSearchPluginRegistry();
+    let generationIdentity = 'model-v1';
+    let releaseOld;
+    const oldGate = new Promise((resolve) => {
+      releaseOld = resolve;
+    });
+    let firstCall = true;
+    const plugin = makePlugin({
+      id: 'overlap-build',
+      rebuild: async () => {
+        if (firstCall) {
+          firstCall = false;
+          await oldGate;
+          // The OLD identity's stale result: if it were allowed to land, it
+          // would clobber the newer generation's counts.
+          return { counts: { documents: 1 } };
+        }
+        return { counts: { documents: 99 } };
+      },
+    });
+    Object.defineProperty(plugin, 'generationIdentity', { get: () => generationIdentity });
+    registry.register(plugin);
+
+    // The OLD rebuild goes in flight under model-v1.
+    const oldBuild = registry.rebuild('overlap-build');
+    // The identity changes, and a NEWER materialization runs to completion,
+    // synchronizing the ledger to model-v2 with the new counts.
+    generationIdentity = 'model-v2';
+    await registry.rebuild('overlap-build');
+    assert.deepEqual(registry.stateOf('overlap-build').counts, { documents: 99 });
+    // Now the OLD rebuild resumes. Its result belongs to model-v1 and must not
+    // clobber the model-v2 generation's counts/state.
+    releaseOld();
+    const oldOutcome = await oldBuild;
+    const state = registry.stateOf('overlap-build');
+    assert.equal(state.state, 'ready');
+    assert.deepEqual(state.counts, { documents: 99 });
+    assert.equal(oldOutcome.state, 'ready');
+    assert.deepEqual(oldOutcome.counts, { documents: 99 });
+  });
 });
 
 // ---- prepare / validate ----------------------------------------------------
