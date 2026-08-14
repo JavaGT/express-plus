@@ -417,7 +417,63 @@ export interface LiveDeliveryResyncEnvelope {
   readonly reason: string;
 }
 
-export type LiveDeliveryEnvelope = LiveDeliveryEventEnvelope | LiveDeliveryResyncEnvelope;
+/**
+ * S3/A7 replacement projection for a live resource. `seq` is the live
+ * revision. A live row carries the recipient-projected declared-field view
+ * under `state`; a live collection carries its bounded membership replacement
+ * (additions/removals/reorderings/rows). An authoritative `state` replaces
+ * the client's cached state and reconciles a pending placeholder exactly as a
+ * logged `event` does.
+ */
+export interface LiveDeliveryStateEnvelope {
+  readonly type: 'state';
+  readonly entity?: string;
+  readonly id?: string;
+  readonly seq: number;
+  readonly seqSpan?: readonly [number, number];
+  readonly state?: Readonly<Record<string, unknown>>;
+  readonly additions?: readonly Record<string, unknown>[];
+  readonly removals?: readonly string[];
+  readonly reorderings?: readonly { id: string; from: number; to: number }[];
+  readonly rows?: readonly Record<string, unknown>[];
+}
+
+/**
+ * S3/A7 bounded-overflow / resnapshot-required boundary for a live resource.
+ * The client must resnapshot/refresh the resource; it never reconciles a
+ * placeholder from the invalidated content. For a bounded collection the
+ * truncated membership view may still be carried (informational).
+ */
+export interface LiveDeliveryStateInvalidateEnvelope {
+  readonly type: 'state-invalidate';
+  readonly entity?: string;
+  readonly id?: string;
+  readonly seq: number;
+  readonly reason?: string;
+  readonly additions?: readonly Record<string, unknown>[];
+  readonly removals?: readonly string[];
+  readonly reorderings?: readonly { id: string; from: number; to: number }[];
+  readonly rows?: readonly Record<string, unknown>[];
+}
+
+/**
+ * S3/A7 derived/operational notification. This kind is distinct from the
+ * authoritative `event`/`state` kinds and is NEVER authoritative: the client
+ * must reject it as a domain mutation and never reconcile optimistic state
+ * from it.
+ */
+export interface LiveDeliveryNotificationEnvelope {
+  readonly type: 'notification';
+  readonly kind: string;
+  readonly seq?: number;
+}
+
+export type LiveDeliveryEnvelope =
+  | LiveDeliveryEventEnvelope
+  | LiveDeliveryResyncEnvelope
+  | LiveDeliveryStateEnvelope
+  | LiveDeliveryStateInvalidateEnvelope
+  | LiveDeliveryNotificationEnvelope;
 
 export type LiveDeliveryCursor = number | Readonly<{ anchor: number; aggregate: number }>;
 
@@ -465,7 +521,13 @@ export interface LiveDeliverySessionConfig<Snapshot, Payload = unknown> {
     closed: () => void;
   }): Promise<LiveDeliverySubscription>;
   validateSnapshot(snapshot: unknown): Snapshot;
-  /** Omit for a snapshot-only (opaque-resync) composite stream. */
+  /**
+   * Fold an authoritative full-log `event` onto the snapshot. `state`
+   * envelopes are NOT folded — they replace the snapshot wholesale and
+   * reconcile pending placeholders exactly as a logged event does;
+   * `state-invalidate`/`resync` trigger a resnapshot and `notification`
+   * envelopes are never authoritative.
+   */
   fold?: (snapshot: Snapshot, envelope: LiveDeliveryEventEnvelope) => Snapshot;
   optimistic?: (snapshot: Snapshot, action: { actionId: string; type: string; payload: Payload }) => Snapshot;
   /** Snapshot-only sessions require `{ actionId, confirmedThrough }` on success. */

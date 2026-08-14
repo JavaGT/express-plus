@@ -320,6 +320,11 @@ export class LiveConnection {
           signal: ac.signal,
           paused: true,
           deliver: async (batch) => {
+            // Envelope-kind parity is inherited from the shared core: every
+            // kind the SSE seam presents (`event`/`state`/`state-invalidate`/
+            // `resync`) is forwarded verbatim, one frame per envelope. No
+            // kind-specific reshaping happens on this transport, so SSE and
+            // WebSocket can never diverge on tier/admission/recovery/confirmation.
             if (this.#closed) throw new Error('live connection closed');
             for (const envelope of batch) {
               if (this.#closed) throw new Error('live connection closed');

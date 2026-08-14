@@ -10,10 +10,12 @@
 // One authority rule: SSE (live-delivery-http) and WebSocket both present the
 // SAME injected core, so a subscribed client receives committed events through
 // exactly one re-read / re-authorise / project / deliver path regardless of
-// transport. Mounting this seam is the only way an application-integrated
-// delivery gets a WebSocket upgrade; without an 'upgrade' listener a WS
-// handshake request is handled as an ordinary GET and 400s against the SSE
-// handler ('invalid live delivery request').
+// transport — and the same envelope kinds (`event`/`state`/`state-invalidate`/
+// `resync`), so the S3/A7 kind grammar round-trips identically over both.
+// Mounting this seam is the only way an application-integrated delivery gets a
+// WebSocket upgrade; without an 'upgrade' listener a WS handshake request is
+// handled as an ordinary GET and 400s against the SSE handler ('invalid live
+// delivery request').
 
 import type { Server, IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';

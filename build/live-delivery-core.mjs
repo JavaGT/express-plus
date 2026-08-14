@@ -43,6 +43,7 @@ import { anonymous, principalKeyOf } from './principal.mjs';
 import { normalizeRevocationScope } from './live-fanout.mjs';
 import { createCollectionSubscription } from './collection-subscription.mjs';
 
+import { collectionDeliveryEnvelope } from './live-delivery-envelope.mjs';
 
 
 let nextSubId = 1;
@@ -744,7 +745,14 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
         rule: rule ,
         mayVerb: mayVerb ,
         authorization,
-        deliver: (change) => sub.deliver([change]),
+        // S3/A7: the wire envelope for a collection refresh is the shared
+        // `state`/`state-invalidate` grammar — never the storage-tier
+        // `collection` shape. The change's revision is read at delivery time
+        // so the envelope's seq names the revision the rows were projected at.
+        deliver: (change) => sub.deliver([collectionDeliveryEnvelope(change, {
+          entityName: entityRec.name,
+          revision: readRevision(db         , sub.scope),
+        })]),
       });
       sub.collectionInitialized = false;
     }

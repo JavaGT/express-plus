@@ -24,6 +24,7 @@ import { createPrincipalSnapshotDelivery, isPrincipalSnapshotScope, validatePrin
 import type { Principal } from './principal.ts';
 import type { FrameworkLog } from './log.ts';
 import type { LiveDatabase, LiveEntityRecord, MayVerb, FieldDescriptor } from './live-fanout.ts';
+import type { CompiledSubscriptionRule, SubscriptionRule } from './subscription-rule.ts';
 
 function jsonSnapshot(value: unknown, path = 'snapshot', ancestors = new Set<unknown>()): unknown {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
@@ -134,6 +135,9 @@ export interface PublicSubscribeInput {
   revoke?: () => void;
   document?: AnnotatedTextDocument | null;
   paused?: boolean;
+  // Collection subscriptions carry their declarative rule; the shared core
+  // requires it for a collection scope and compiles it at registration.
+  rule?: SubscriptionRule | CompiledSubscriptionRule;
 }
 
 export interface OwnedLiveDelivery {

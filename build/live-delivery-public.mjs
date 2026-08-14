@@ -25,6 +25,7 @@ import { createPrincipalSnapshotDelivery, isPrincipalSnapshotScope, validatePrin
 
 
 
+
 function jsonSnapshot(value         , path = 'snapshot', ancestors = new Set         ())          {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
   if (typeof value === 'number') {
@@ -52,6 +53,9 @@ function jsonSnapshot(value         , path = 'snapshot', ancestors = new Set    
 // ---------------------------------------------------------------------------
 // Package-private shared delivery shapes
 // ---------------------------------------------------------------------------
+
+
+
 
 
 

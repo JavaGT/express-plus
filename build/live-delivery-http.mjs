@@ -6,6 +6,7 @@
 
 
 
+import { envelopeDiagnostics } from './event-delivery.mjs';
 
 const JSON_LIMIT = 1024 * 1024;
 
@@ -43,6 +44,21 @@ function afterFrom(url     )                      {
   }
 }
 
+// An optional declarative collection rule, URL-encoded as JSON (`rule=`), so
+// an EventSource can subscribe a live collection with the same rule grammar a
+// WebSocket subscribe message carries. Absent → undefined; present but not a
+// JSON object → null (the caller rejects the request).
+function ruleFrom(url     )          {
+  const raw = url.searchParams.get('rule');
+  if (raw === null) return undefined;
+  try {
+    const parsed = JSON.parse(raw)           ;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 // Bootstraps and catch-ups are one-time page-load responses: a document's
 // recipient view plus (for unredacted recipients) its family checkpoint seed.
 // Those legitimately reach several MB on large documents. Per-keystroke SSE
@@ -54,6 +70,16 @@ function writeJson(res                , value         , maxBytes = JSON_LIMIT)  
   if (Buffer.byteLength(body) > maxBytes) throw new Error('live delivery response exceeds limit');
   res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
   res.end(body);
+}
+
+// Wait for an SSE frame to drain (backpressure) or the response to close.
+function waitForDrain(res                )                {
+  return new Promise      ((resolve, reject) => {
+    const onDrain = () => { res.off('close', onClose); resolve(); };
+    const onClose = () => { res.off('drain', onDrain); reject(new Error('live delivery stream closed')); };
+    res.once('drain', onDrain);
+    res.once('close', onClose);
+  });
 }
 
 /**
@@ -127,6 +153,11 @@ export function createLiveDeliveryHttpHandler({ delivery, principalOf, path = '/
     }
     const scope = scopeFrom(url);
     const after = afterFrom(url);
+    const rule = ruleFrom(url);
+    if (rule === null) {
+      reject(res, 400, 'invalid live delivery rule');
+      return true;
+    }
     const documentIdentity = url.searchParams.has('documentId') ? {
       entity: url.searchParams.get('entity'), field: url.searchParams.get('field'), documentId: url.searchParams.get('documentId'),
     } : null;
@@ -186,21 +217,35 @@ export function createLiveDeliveryHttpHandler({ delivery, principalOf, path = '/
         scope: effectiveScope,
         document,
         after,
+        rule: rule         ,
         signal: controller.signal,
         revoke: () => { revoked = true; release(); if (res.headersSent && !res.writableEnded) res.end(); },
         deliver: async (envelopes) => {
           if (controller.signal.aborted) throw new Error('live delivery stream closed');
           const payload = JSON.stringify(envelopes);
-          const frame = Buffer.byteLength(payload) > JSON_LIMIT
-            ? JSON.stringify([{ type: 'resync', seq: (envelopes.at(-1)                                )?.seq ?? after, reason: 'recipient-snapshot-required' }])
-            : payload;
-          if (!res.write(`data: ${frame}\n\n`)) {
-            await new Promise      ((resolve, reject) => {
-              const onDrain = () => { res.off('close', onClose); resolve(); };
-              const onClose = () => { res.off('drain', onDrain); reject(new Error('live delivery stream closed')); };
-              res.once('drain', onDrain);
-              res.once('close', onClose);
+          if (Buffer.byteLength(payload) > JSON_LIMIT) {
+            // An SSE frame cannot carry the whole batch. Demote a state-carrying
+            // batch to `state-invalidate` (resnapshot-required) — the kind-
+            // consistent recovery control for a live replacement — and log a
+            // content-free diagnostic (kind + revision only) so an oversized
+            // delivery is diagnosable without leaking row content.
+            const last = envelopes.at(-1)                                ;
+            const frame = JSON.stringify([{
+              type: envelopes.some((envelope) => (envelope                      )?.type === 'state') ? 'state-invalidate' : 'resync',
+              seq: last?.seq ?? after,
+              reason: 'recipient-snapshot-required',
+            }]);
+            log?.warn?.('live', 'delivery frame exceeds transport limit', {
+              scope: effectiveScope,
+              envelope: envelopeDiagnostics(last),
             });
+            if (!res.write(`data: ${frame}\n\n`)) {
+              await waitForDrain(res);
+            }
+            return;
+          }
+          if (!res.write(`data: ${payload}\n\n`)) {
+            await waitForDrain(res);
           }
         },
       });

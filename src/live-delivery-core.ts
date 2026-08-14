@@ -43,6 +43,7 @@ import type { LiveDatabase, LiveEntityRecord, MayVerb, RevocationListener, Revoc
 import { normalizeRevocationScope } from './live-fanout.ts';
 import { createCollectionSubscription } from './collection-subscription.ts';
 import type { CollectionSubscription } from './collection-subscription.ts';
+import { collectionDeliveryEnvelope } from './live-delivery-envelope.ts';
 import type { CompiledSubscriptionRule, SubscriptionRule } from './subscription-rule.ts';
 
 let nextSubId = 1;
@@ -744,7 +745,14 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
         rule: rule!,
         mayVerb: mayVerb!,
         authorization,
-        deliver: (change) => sub.deliver([change]),
+        // S3/A7: the wire envelope for a collection refresh is the shared
+        // `state`/`state-invalidate` grammar — never the storage-tier
+        // `collection` shape. The change's revision is read at delivery time
+        // so the envelope's seq names the revision the rows were projected at.
+        deliver: (change) => sub.deliver([collectionDeliveryEnvelope(change, {
+          entityName: entityRec.name,
+          revision: readRevision(db as never, sub.scope),
+        })]),
       });
       sub.collectionInitialized = false;
     }

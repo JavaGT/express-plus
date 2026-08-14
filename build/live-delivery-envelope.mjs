@@ -17,6 +17,22 @@ import { createdTextReducerSeeds } from './text-reducer-transport.mjs';
 import { tryParseScopeKey } from './scope-handle.mjs';
 
 
+// S3/A7 envelope grammar: feature code distinguishes full-log `event` delivery
+// from live `state` replacement / `state-invalidate` recovery purely by the
+// envelope kind — never by the storage tier behind the resource. The existing
+// `resync` grammar is retained unchanged for composite/text recovery controls.
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -145,6 +161,14 @@ export function createLiveEnvelopeBuilder({ stateful = true, includeActionId = t
 
     const data = recipientLifecycleData(ctx, evHandle, id);
     if (!data) throw new Error('invalid lifecycle event data');
+    // A live-tier resource has no committed event history: the revision-driven
+    // row IS the recipient's authoritative state. Emit a `state` replacement —
+    // never a logged `event` — so feature code sees the envelope kind, never the
+    // storage tier. Delta/reducer grammar is meaningless for a whole-state
+    // replacement and is intentionally absent. `seq` carries the live revision.
+    if (ctx.entity.tier === 'live') {
+      return [{ type: 'state', entity: entityName, id, seq: ctx.event.seq, state: data }];
+    }
     const event                    = { ...loggedEvent, data };
     Object.defineProperty(event, 'handle', { value: evHandle, enumerable: false });
 
@@ -183,4 +207,40 @@ export function createLiveEnvelopeBuilder({ stateful = true, includeActionId = t
   }
 
   return { buildEnvelope, clear };
+}
+
+// Translate a collection subscription's internal change into the shared live
+// envelope grammar. The change carries the bounded membership replacement; a
+// bounded-overflow boundary demotes the whole delivery to `state-invalidate`
+// so the client resnapshots/refreshes instead of trusting a truncated view.
+// The membership data is still carried (informational — a client may show the
+// partial view while its resnapshot is in flight) but the kind is the
+// invalidation boundary and never reconciles authoritative state by itself.
+export function collectionDeliveryEnvelope(
+  change                  ,
+  ctx                                          ,
+)               {
+  if (change.overflow !== null) {
+    return {
+      type: 'state-invalidate',
+      entity: ctx.entityName,
+      id: ctx.entityName,
+      seq: ctx.revision,
+      reason: 'bounded-overflow',
+      additions: change.additions,
+      removals: change.removals,
+      reorderings: change.reorderings,
+      rows: change.rows,
+    };
+  }
+  return {
+    type: 'state',
+    entity: ctx.entityName,
+    id: ctx.entityName,
+    seq: ctx.revision,
+    additions: change.additions,
+    removals: change.removals,
+    reorderings: change.reorderings,
+    rows: change.rows,
+  };
 }
