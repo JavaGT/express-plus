@@ -490,7 +490,7 @@ export interface LiveDeliverySession<Snapshot, Payload = unknown> {
   readonly cursor: LiveDeliveryCursor;
   readonly status: 'bootstrapping' | 'recovering' | 'catching-up' | 'live' | 'unavailable' | 'revoked';
   readonly ready: Promise<void>;
-  dispatch(type: string, payload: Payload): Promise<LiveDeliveryDispatchResult>;
+  dispatch(type: string, payload: Payload, options?: { actionId?: string }): Promise<LiveDeliveryDispatchResult>;
   batch(actions: readonly LiveDeliveryBatchAction<Payload>[]): Promise<LiveDeliveryDispatchResult>;
   retry(opId: string): Promise<LiveDeliveryDispatchResult>;
   reconnect(): Promise<void>;

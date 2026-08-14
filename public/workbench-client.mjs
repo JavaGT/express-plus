@@ -2883,8 +2883,10 @@ export function createLiveDeliverySession({
     }
   }
 
-  async function dispatch(type, payload) {
-    const actionId = nextActionId();
+  async function dispatch(type, payload, options) {
+    // A caller may pre-mint the actionId synchronously so an optimistic layer
+    // can tag the pending state it will reconcile before its fold echo arrives.
+    const actionId = options?.actionId ?? nextActionId();
     const action = freezeClone(structuredClone({ actionId, type, payload }));
     const operation = makeOperation({
       actionId,
@@ -3410,6 +3412,18 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
   const requestIdentity = { entity: entity.name, field: field.fieldName, documentId, authoringClient };
   if (typeof context.viewAs === 'string' && context.viewAs.length > 0) requestIdentity.viewAs = context.viewAs;
 
+  // Mint an actionId synchronously at queue time so every pending display edit
+  // is tagged with the action that will fold it BEFORE its fold echo arrives
+  // (the echo is delivered ahead of the dispatch promise resolving). Mirrors the
+  // live-delivery session's own fallback so ids stay unique when no caller
+  // supplied createActionId.
+  let localActionCounter = 0;
+  const mintActionId = () => {
+    if (typeof createActionId === 'function') return createActionId();
+    if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+    return `annotated_op_${++localActionCounter}`;
+  };
+
   // Optional recipient-projected carets: ephemeral presence ONLY. When the host
   // supplies a `carets` option the session owns ONE caret LiveChannel — the
   // document subscription carries caret interest, validated `annotated-text-caret`
@@ -3589,7 +3603,10 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       throw new Error('annotated text fold left pending operations behind; snapshot recovery required');
     }
     familyReplica = family;
-    consumeFoldedDisplayEdits(beforeFamily, fold.projection.text);
+    consumeFoldedDisplayEdits(beforeFamily, envelope.event?.actionId);
+    // The family advanced (possibly by a foreign edit); re-derive the queued
+    // text so the optimistic overlay stays equal to the replayed display family.
+    rebuildQueuedDocumentText(fold.projection.text);
     installAuthoringFromFold(fold.authoring, fence);
     if (onFoldApplied) onFoldApplied(fold, performance.now() - startedAt);
     const foldedDocument = applyAnnotatedTextFoldDispositions(currentDocument, foldedRanges, fold.dispositions);
@@ -3711,31 +3728,28 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       displayFamily = familyReplica;
     }
   }
-  function applyPendingDisplayEdit(command) {
+  function applyPendingDisplayEdit(command, actionId) {
     const edit = displayEditFromCommand(command);
     if (!edit || !displayFamily) return;
     try {
       displayFamily = applyOffsetTextEdit(displayFamily, edit.from, edit.to, edit.text);
-      pendingDisplayEdits.push(edit);
+      pendingDisplayEdits.push(actionId === undefined ? edit : { ...edit, actionId });
     } catch {
       displayFamily = familyReplica;
     }
   }
-  function consumeFoldedDisplayEdits(beforeFamily, foldedText) {
+  function consumeFoldedDisplayEdits(beforeFamily, actionId) {
     if (!beforeFamily || pendingDisplayEdits.length === 0) {
       replayPendingDisplayEdits([]);
       return;
     }
-    let family = beforeFamily;
-    let matched = 0;
-    try {
-      for (let index = 0; index < pendingDisplayEdits.length; index += 1) {
-        const edit = pendingDisplayEdits[index];
-        family = applyOffsetTextEdit(family, edit.from, edit.to, edit.text);
-        if (materializeFamilyText(family) === foldedText) matched = index + 1;
-      }
-    } catch { /* stop at the first unreplayable prefix */ }
-    replayPendingDisplayEdits(matched > 0 ? pendingDisplayEdits.slice(matched) : []);
+    // Consume ONLY the pending edits dispatched under this actionId. A foreign
+    // fold (an actionId not among the client's pending edits) consumes nothing;
+    // the remaining edits are replayed against the newly-advanced family.
+    const remaining = actionId === undefined
+      ? [...pendingDisplayEdits]
+      : pendingDisplayEdits.filter((edit) => edit.actionId !== actionId);
+    replayPendingDisplayEdits(remaining);
   }
   function documentRangesUnresolvable(view, family) {
     if (!view || !Array.isArray(view.ranges) || view.ranges.every((range) => isOffsetRange(range))) return false;
@@ -3773,6 +3787,10 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       if (documentRangesUnresolvable(view, displayFamily ?? familyReplica)) {
         resolutionTerminal = true;
         closeAnnotatedSession();
+      } else {
+        // A replacement snapshot resolved the ranges; rearm the one-shot latch
+        // so a later independent failure gets its own recovery attempt.
+        resolutionFailedOnce = false;
       }
     });
   }
@@ -3829,22 +3847,25 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     }
     return text;
   }
-  function applyQueuedTextCommand(basis, command) {
+  function applyQueuedTextCommand(basis, command, actionId) {
     const next = projectQueuedDocumentText(basis, command);
     if (next == null) return null;
     queuedDocumentText = next;
-    applyPendingDisplayEdit(command);
+    applyPendingDisplayEdit(command, actionId);
     return next;
   }
-  function queueAuthoringMutation(command, send, { capturedBasis = null, alreadyProjected = false, reserved = false } = {}) {
+  function queueAuthoringMutation(command, send, { capturedBasis = null, alreadyProjected = false, reserved = false, actionId = null } = {}) {
     // Capture dependent local edits against the projection already queued
     // ahead of them, not against the last rendered snapshot. Rapid browser
     // input can enqueue several semantic edits before the first optimistic
     // placeholder is visible; treating each as a sibling of that old snapshot
     // makes every character after the first reject itself as stale.
     const queuedBasis = capturedBasis ?? queuedDocumentText ?? session.snapshot?.text ?? '';
+    // Mint synchronously so the pending edit this mutation covers is tagged
+    // with its actionId before the dispatch (and thus its fold echo) runs.
+    const resolvedActionId = actionId ?? mintActionId();
     const blocks = new Map([['document', queuedBasis]]);
-    if (!alreadyProjected && applyQueuedTextCommand(queuedBasis, command) == null) {
+    if (!alreadyProjected && applyQueuedTextCommand(queuedBasis, command, resolvedActionId) == null) {
       return Promise.resolve({ ok: false, failure: new TypeError('annotated text position splits a surrogate pair') });
     }
     if (!reserved) queuedAuthoringMutations += 1;
@@ -3881,7 +3902,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
         // target. The position basis would be stale server-side anyway; surface
         // the conflict instead of guessing.
         if (!sameCapturedBlocks(blocks)) return localAuthoringConflict();
-        const result = await send(command);
+        const result = await send(command, resolvedActionId);
         if (result?.ok && result.settlement?.wait) await result.settlement.wait();
         return result;
       } finally {
@@ -3920,6 +3941,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       capturedBasis: burst.capturedBasis,
       alreadyProjected: true,
       reserved: true,
+      actionId: burst.actionId,
     }).then(
       (result) => { for (const waiter of burst.waiters) waiter.resolve(result); },
       (error) => { for (const waiter of burst.waiters) waiter.reject(error); },
@@ -3943,19 +3965,27 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     if (!contiguous) flushOpenInsertBurst();
     const promise = new Promise((resolve, reject) => {
       if (contiguous) {
+        if (applyQueuedTextCommand(queuedDocumentText ?? session.snapshot?.text ?? '', command, burst.actionId) == null) {
+          reject(new TypeError('annotated text position splits a surrogate pair'));
+          return;
+        }
         burst.command = { ...burst.command, text: burst.command.text + command.text };
         burst.waiters.push({ resolve, reject });
-        applyQueuedTextCommand(queuedDocumentText ?? session.snapshot?.text ?? '', command);
         publishAnnotatedDocument();
         armInsertBurst(burst);
         return;
       }
       const capturedBasis = queuedDocumentText ?? session.snapshot?.text ?? '';
-      applyQueuedTextCommand(capturedBasis, command);
+      const burstActionId = mintActionId();
+      if (applyQueuedTextCommand(capturedBasis, command, burstActionId) == null) {
+        reject(new TypeError('annotated text position splits a surrogate pair'));
+        return;
+      }
       queuedAuthoringMutations += 1;
       publishAnnotatedDocument();
       openInsertBurst = {
-        command: { ...command }, send, capturedBasis, waiters: [{ resolve, reject }],
+        command: { ...command }, send, capturedBasis, actionId: burstActionId,
+        waiters: [{ resolve, reject }],
         startedAt: Date.now(), timer: null,
       };
       armInsertBurst(openInsertBurst);
@@ -3976,7 +4006,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     for (const waiter of burst.waiters) waiter.resolve(result);
     publishAnnotatedDocument();
   }
-  async function dispatchNow(command) {
+  async function dispatchNow(command, actionId) {
     if (!session.snapshot || !snapshotBinding.authoring) throw new ClientClosedError('Annotated text document is unavailable');
     const tokenAt = (value) => {
       if (!value || typeof value !== 'object' || !Number.isSafeInteger(value.offset) || value.offset < 0) throw new TypeError('annotated text position is invalid');
@@ -3990,7 +4020,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     const action = annotatedTextAction(entity, field, translated);
     translatedActions += 1;
     try {
-      return await session.dispatch(action.type, action.payload);
+      return await session.dispatch(action.type, action.payload, actionId === undefined ? undefined : { actionId });
     } finally {
       translatedActions -= 1;
       flushAuthoringAcknowledgements();
@@ -4005,12 +4035,12 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     get ready() { return session.ready; },
     insert({ mutationId, at, text }) {
       const command = { kind: 'text.insert', mutationId, at, text };
-      return queueTextInsert(command, (current) => dispatchNow(current));
+      return queueTextInsert(command, (current, actionId) => dispatchNow(current, actionId));
     },
     delete({ mutationId, from, to }) {
       flushOpenInsertBurst();
       const command = { kind: 'text.delete', mutationId, from, to };
-      return queueAuthoringMutation(command, (current) => dispatchNow(current));
+      return queueAuthoringMutation(command, (current, actionId) => dispatchNow(current, actionId));
     },
     replace(input) {
       flushOpenInsertBurst();
@@ -4029,13 +4059,13 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
             ...(input?.text ? { text: input.text } : {}),
           };
       return command.kind === 'text.insert'
-        ? queueTextInsert(command, (current) => dispatchNow(current))
-        : queueAuthoringMutation(command, (current) => dispatchNow(current));
+        ? queueTextInsert(command, (current, actionId) => dispatchNow(current, actionId))
+        : queueAuthoringMutation(command, (current, actionId) => dispatchNow(current, actionId));
     },
     applyAnnotation({ mutationId, annotation, from, to }) {
       flushOpenInsertBurst();
       const command = { kind: 'annotation.apply', mutationId, annotation, from, to };
-      return queueAuthoringMutation(command, (current) => dispatchNow(current));
+      return queueAuthoringMutation(command, (current, actionId) => dispatchNow(current, actionId));
      },
       applyAnnotationAction(actionHandle, { mutationId, from, to, values }) {
         if (!actionHandle || (actionHandle.kind !== 'annotationEntityAction' && actionHandle.kind !== 'annotationAction') || typeof actionHandle.actionName !== 'string') {
@@ -4071,7 +4101,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     removeAnnotation({ mutationId, annotationId }) {
       flushOpenInsertBurst();
       const command = { kind: 'annotation.remove', mutationId, annotationId };
-      return queueAuthoringMutation(command, (current) => dispatchNow(current));
+      return queueAuthoringMutation(command, (current, actionId) => dispatchNow(current, actionId));
     },
     reconnect: () => session.reconnect(),
     // Subscribe delivers the same document view the session.document getter

@@ -496,12 +496,12 @@ test('a combined ab fold drops both queued inserts and keeps a trailing c', asyn
 
   const sources = [];
   let number = 0;
+  let actionCounter = 0;
   const pending = [];
   const session = createAnnotatedTextHttpSession({
-    typingBurstIdleMs: 0,
     baseUrl: 'https://example.test/live-delivery',
     context: { entity: Document, field: Document.body, documentId: 'd1' },
-    historySession: 'tab-a', createActionId: () => 'action-1',
+    historySession: 'tab-a', createActionId: () => `action-${++actionCounter}`,
     fetchImpl: async (url, options) => {
       if (options?.method === 'POST') {
         if (url.includes('/authoring/ack')) return { ok: true, status: 200, json: async () => ({ ok: true, acknowledgedThrough: number }) };
@@ -533,8 +533,11 @@ test('a combined ab fold drops both queued inserts and keeps a trailing c', asyn
     },
   });
   await session.ready;
-  const first = session.insert({ mutationId: 'ins-a', at: { offset: 0, affinity: 'right' }, text: 'a' });
-  const second = session.insert({ mutationId: 'ins-b', at: { offset: 1, affinity: 'right' }, text: 'b' });
+  // a and b are contiguous inserts coalesced into ONE typing burst (one
+  // actionId); c carries a caller mutationId, which flushes the burst first and
+  // is queued as a separate still-pending action.
+  const first = session.insert({ at: { offset: 0, affinity: 'right' }, text: 'a' });
+  const second = session.insert({ at: { offset: 1, affinity: 'right' }, text: 'b' });
   const third = session.insert({ mutationId: 'ins-c', at: { offset: 2, affinity: 'right' }, text: 'c' });
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(session.document.text, 'abchello world');
@@ -564,6 +567,192 @@ test('a combined ab fold drops both queued inserts and keeps a trailing c', asyn
   session.close();
   for (const resolve of pending) resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
   await Promise.allSettled([first, second, third]);
+});
+
+test('a foreign same-text fold never consumes a local pending edit', async () => {
+  const A = 'a'.repeat(32);
+  const B = 'b'.repeat(32);
+  const insertOp = ['workbench.text', 1, [A, 1], 1, [], ['insert', ['root'], 'aaa']];
+  const baseFamily = createTextFamily('d1', textCheckpoint(applyTextOp(createTextState(), insertOp)));
+  // Local delete of the FIRST 'a' vs a foreign delete of the SECOND 'a': both
+  // materialize 'aa', so text equality alone cannot tell them apart.
+  const foreignDeleteOp = textOperationForOffsetEdit(
+    baseFamily, { kind: 'text.delete', from: { offset: 1 }, to: { offset: 2 } }, B, 2,
+  );
+  const foreignFamily = applyTextOperation(baseFamily, foreignDeleteOp);
+  assert.equal(materializeText(foreignFamily), 'aa');
+
+  const sources = [];
+  let number = 0;
+  let actionCounter = 0;
+  const session = createAnnotatedTextHttpSession({
+    typingBurstIdleMs: 0,
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: Document, field: Document.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => `action-${++actionCounter}`,
+    fetchImpl: async (url, options) => {
+      if (options?.method === 'POST') {
+        if (url.includes('/authoring/ack')) return { ok: true, status: 200, json: async () => ({ ok: true, acknowledgedThrough: number }) };
+        return new Promise(() => {}); // the local delete never confirms
+      }
+      const cursor = ++number;
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          kind: 'snapshot',
+          snapshot: {
+            body: {
+              kind: 'workbench.annotatedText.recipient', version: 2,
+              text: 'aaa', ranges: [], annotations: [], orphans: [], measurements: [],
+            },
+          },
+          cursor,
+          authoring: authoringEnvelope(cursor, textFamilyCheckpoint(baseFamily)),
+        }),
+      };
+    },
+    eventSourceFactory: () => {
+      const source = { close() {}, onmessage: null, onerror: null };
+      sources.push(source);
+      return source;
+    },
+  });
+  await session.ready;
+  session.delete({ mutationId: 'del-first', from: { offset: 0, affinity: 'right' }, to: { offset: 1, affinity: 'left' } });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(session.document.text, 'aa');
+
+  sources[0].onmessage({ data: JSON.stringify([{
+    type: 'event', entity: 'Project', id: 'p1', seq: 2, seqSpan: [2, 2],
+    event: { type: 'FoldDoc.body.operated', scope: 'annotated-text:d1', seq: 2, actionId: 'foreign' },
+    fold: {
+      kind: 'annotatedText', version: 5, field: 'body', baseCursor: 1, fence: 2,
+      text: { reducer: 'workbench.text', operations: [foreignDeleteOp] },
+      projection: { text: 'aa' },
+      dispositions: [],
+      familyElementCount: Object.keys(foreignFamily.checkpoint.elements).length,
+      authoring: {
+        acknowledgementFence: 2,
+        stream: token('stream'), lease: token('lease'), snapshot: token('snapshot2'),
+        positionFrames: [{ positionToken: token('position2') }],
+      },
+    },
+  }]) });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  // The local delete of the FIRST 'a' is still pending: the foreign fold's 'aa'
+  // minus the local delete materializes 'a'. Had the foreign fold consumed the
+  // local edit, the text would wrongly remain 'aa'.
+  assert.equal(session.document.text, 'a');
+  assert.equal(publicMaterializeText(session.family), session.document.text);
+  session.close();
+});
+
+test('a typing-burst insert that splits a surrogate pair is rejected without dispatch', async () => {
+  const actor = 'a'.repeat(32);
+  const insertOp = ['workbench.text', 1, [actor, 1], 1, [], ['insert', ['root'], 'a😀b']];
+  const baseFamily = createTextFamily('d1', textCheckpoint(applyTextOp(createTextState(), insertOp)));
+  let number = 0;
+  let posted = 0;
+  const session = createAnnotatedTextHttpSession({
+    // DEFAULT burst path — deliberately no typingBurstIdleMs: 0.
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: Document, field: Document.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => 'action-1',
+    fetchImpl: async (url, options) => {
+      if (options?.method === 'POST') {
+        if (url.includes('/authoring/ack')) return { ok: true, status: 200, json: async () => ({ ok: true, acknowledgedThrough: number }) };
+        posted += 1;
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }
+      const cursor = ++number;
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          kind: 'snapshot',
+          snapshot: {
+            body: {
+              kind: 'workbench.annotatedText.recipient', version: 2,
+              text: 'a😀b', ranges: [], annotations: [], orphans: [], measurements: [],
+            },
+          },
+          cursor,
+          authoring: authoringEnvelope(cursor, textFamilyCheckpoint(baseFamily)),
+        }),
+      };
+    },
+    eventSourceFactory: () => ({ close() {}, onmessage: null, onerror: null }),
+  });
+  await session.ready;
+  assert.equal(session.document.text, 'a😀b');
+  await assert.rejects(
+    session.insert({ at: { offset: 2, affinity: 'right' }, text: 'x' }),
+    (error) => error instanceof TypeError && error.message === 'annotated text position splits a surrogate pair',
+  );
+  assert.equal(session.document.text, 'a😀b');
+  assert.equal(posted, 0, 'no mutation was dispatched');
+  session.close();
+});
+
+test('a successful resolution resets the failure latch for a later independent failure', async () => {
+  const baseFamily = seedHelloWorld();
+  const start = resolveOffsetToEndpoint(baseFamily, 6, baseFamily.checkpoint.frontier, 'right');
+  const end = resolveOffsetToEndpoint(baseFamily, 11, baseFamily.checkpoint.frontier, 'right');
+  const lost = {
+    point: ['point', ['element', [['deadbeefdeadbeefdeadbeefdeadbeef', 99], 0]], 'left'],
+    basisFrontier: [['deadbeefdeadbeefdeadbeefdeadbeef', 99]],
+  };
+  const snapshotRequests = [];
+  let number = 0;
+  const session = createAnnotatedTextHttpSession({
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: Document, field: Document.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => 'action-1',
+    fetchImpl: async (url, options) => {
+      if (options?.method === 'POST') {
+        if (url.includes('/authoring/ack')) return { ok: true, status: 200, json: async () => ({ ok: true, acknowledgedThrough: number }) };
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }
+      const cursor = ++number;
+      snapshotRequests.push(cursor);
+      // snapshot 1 lost, snapshot 2 correct, snapshot 3 lost again
+      const ranges = number === 2
+        ? [{ annotationId: 'c1', start, end }]
+        : [{ annotationId: 'c1', start: lost, end: lost }];
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          kind: 'snapshot',
+          snapshot: {
+            body: {
+              kind: 'workbench.annotatedText.recipient', version: 2,
+              text: 'hello world', ranges,
+              annotations: [{ id: 'c1', family: 'note', fields: {} }],
+              orphans: [], measurements: [],
+            },
+          },
+          cursor,
+          authoring: authoringEnvelope(cursor, textFamilyCheckpoint(baseFamily)),
+        }),
+      };
+    },
+    eventSourceFactory: () => ({ close() {}, onmessage: null, onerror: null }),
+  });
+  await session.ready;
+  const dom = new JSDOM('<div id="editor"></div>');
+  const element = dom.window.document.getElementById('editor');
+  const binding = bindAnnotatedTextEditor({ element, session });
+  // The lost initial anchor triggers a one-shot recovery that lands on a
+  // correct replacement snapshot, rearming the latch.
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.ok(snapshotRequests.length >= 2, 'initial failure recovered via replacement snapshot');
+  assert.notEqual(session.status, 'closed');
+  // A new independent failure must recover again (fetch snapshot 3) instead of
+  // immediately closing.
+  session.recoverFromUnresolvableRange();
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.ok(snapshotRequests.length >= 3, 'a second independent failure recovers again');
+  binding.close();
+  session.close();
 });
 
 test('snapshot recovery mid-queue drops the optimistic overlay', async () => {
