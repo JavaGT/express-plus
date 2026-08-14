@@ -98,6 +98,13 @@ function isDbAdapterConfig(value         )                           {
   if (typeof candidate.prepare === 'function' || typeof candidate.open === 'function') {
     return false;
   }
+  // A pre-opened adapter RESULT (handle + close + capabilities) is never a
+  // config — even though an OpenedSqliteDatabase also declares `mode`, which
+  // would otherwise make the config predicate swallow it here and shadow the
+  // pre-opened branch below (review #93 finding 2).
+  if (candidate.handle !== undefined && typeof candidate.close === 'function') {
+    return false;
+  }
   return candidate.mode !== undefined || candidate.directory !== undefined || candidate.name !== undefined;
 }
 
@@ -313,6 +320,18 @@ export default function workbench({
       db = null;
     } else if (isOpenedAdapter(db)) {
       openedDb = db;
+      // FAIL CLOSED (review #93 finding 2): a pre-opened database that does not
+      // declare its `root` cannot prove it is memory-mode. Silently treating it
+      // as memory would hand a FILE-backed database an ephemeral in-memory byte
+      // store — the same durability regression the adapter guard above refuses.
+      // The opened result must declare its owned directory (file mode, the
+      // default blob store roots under it) or null (memory mode).
+      if (typeof openedDb.root === 'undefined') {
+        throw new Error(
+          'a pre-opened database must declare its `root`: the owned directory for file mode '
+            + '(the default blob store roots under it), or null for memory mode',
+        );
+      }
       if (openedDb.root) {
         blobRoot = resolveBlobRoot(openedDb.root, explicitBlobRoot);
         blobStagingRoot = managedStagingRoot(openedDb.root, explicitBlobRoot);

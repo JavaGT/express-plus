@@ -9,7 +9,11 @@
 // (S6/A1) — no disk root at all. `pathFor` is retired from the portable
 // BlobStore surface; it survives only as the `_pathFor` internal/test handle.
 // A conforming custom DbAdapter must declare `root` (owned directory for file
-// mode, null for memory) or construction fails closed (review #93).
+// mode, null for memory) or construction fails closed (review #93). The same
+// guard covers a PRE-OPENED database result: a file-backed result without a
+// declared root is refused (never silently handed the ephemeral in-memory byte
+// store), while a pre-opened result with a root roots the durable store under
+// it and a pre-opened memory result (root: null) keeps the fake store.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -17,7 +21,7 @@ import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { createSqliteAdapter } from '../build/sqlite-adapter.mjs';
+import { createSqliteAdapter, openMemoryAdapter, openSqliteAdapter } from '../build/sqlite-adapter.mjs';
 import workbench from '../build/internal.mjs';
 
 function tempRoot() {
@@ -213,6 +217,71 @@ test('a file-backed custom DbAdapter (root: owned directory) roots the default b
       await app.shutdown();
     }
   } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('a pre-opened file-backed database without `root` fails closed instead of silently going memory (review #93)', () => {
+  const base = tempRoot();
+  const owned = path.join(base, 'owned');
+  const opened = openSqliteAdapter({ directory: owned, name: 'app' });
+  try {
+    // A pre-opened result that lacks the owned-directory declaration. The app
+    // cannot classify it file-vs-memory, so it must REFUSE — never silently
+    // hand a file-backed database the in-memory fake byte store.
+    const withoutRoot = { ...opened, root: undefined };
+    assert.throws(
+      () => workbench({ db: withoutRoot }),
+      /must declare its `root`/,
+      'construction names the missing owned-directory declaration',
+    );
+  } finally {
+    opened.close();
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('a pre-opened file-backed database (root: owned directory) roots the default byte store under it — never memory', async () => {
+  const base = tempRoot();
+  const owned = path.join(base, 'owned');
+  const opened = openSqliteAdapter({ directory: owned, name: 'app' });
+  try {
+    const app = workbench({ db: opened });
+    await app.ddl();
+    try {
+      assert.equal(app.blobs.capabilities.durability, 'durable', 'a pre-opened file-backed database gets a durable store');
+      assert.ok(
+        path.resolve(app.blobs._pathFor('any-id')).startsWith(path.join(owned, 'blobs')),
+        'the default byte root sits under the adapter-owned blobs/',
+      );
+      assert.ok(
+        path.resolve(app.blobs._pathFor('any-id', { pending: true })).startsWith(path.join(owned, 'staging')),
+        'pending slots stage under the adapter-owned staging/',
+      );
+    } finally {
+      await app.shutdown();
+    }
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('a pre-opened memory database (root: null) gets the in-memory fake byte store', async () => {
+  const base = tempRoot();
+  const previous = process.cwd();
+  process.chdir(base);
+  try {
+    const app = workbench({ db: openMemoryAdapter() });
+    await app.ddl();
+    try {
+      assert.equal(app.blobs.capabilities.durability, 'ephemeral', 'the in-memory fake store (S6/A1)');
+      assert.match(app.blobs._pathFor('any-id'), /^mem:\/\/blobs\//, 'the synthetic key handle');
+      assert.equal(existsSync(path.join(base, '.blobs')), false, 'a memory app never touches a disk root');
+    } finally {
+      await app.shutdown();
+    }
+  } finally {
+    process.chdir(previous);
     rmSync(base, { recursive: true, force: true });
   }
 });
