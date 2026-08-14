@@ -21,7 +21,7 @@
 // in-process restart) or start a fresh backing (a process boundary). NOT a
 // production store: bytes never survive a process exit.
 
-import type { ByteStore, ByteStoreCapabilities } from './fs-blobs.ts';
+import type { ByteStore, ByteStoreCapabilities, ByteStoreTestDebugHandle } from './fs-blobs.ts';
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -44,7 +44,7 @@ export interface MemoryBlobsOptions {
   backing?: MemoryBlobBacking;
 }
 
-export function memoryBlobs({ backing }: MemoryBlobsOptions = {}): ByteStore {
+export function memoryBlobs({ backing }: MemoryBlobsOptions = {}): ByteStore & ByteStoreTestDebugHandle {
   const pending = backing?.pending ?? new Map<string, Buffer>();
   const final = backing?.final ?? new Map<string, Buffer>();
 
@@ -57,7 +57,9 @@ export function memoryBlobs({ backing }: MemoryBlobsOptions = {}): ByteStore {
   };
 
   // Synthetic key (an S3 driver would do the same — object storage has no
-  // filesystem path). test/debug-only, like fsBlobs.pathFor.
+  // filesystem path). Retired from the portable contract alongside
+  // fsBlobs.pathFor (S6/A2); present only on the concrete store as the
+  // test/debug-only introspection handle.
   function pathFor(id: string, { pending: p }: { pending?: boolean } = {}): string {
     return `mem://blobs/${id}${p ? '.pending' : ''}`;
   }

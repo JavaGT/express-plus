@@ -119,7 +119,7 @@ test('memoryBlobs plugs into workbench({ blobs }) by shape — upload/read HTTP 
   const mem = memoryBlobs();
   const { app, base } = await harness(t, mem);
 
-  assert.equal(app.blobs.pathFor('x'), 'mem://blobs/x', 'the memory byte store was accepted by shape');
+  assert.equal(app.blobs._pathFor('x'), 'mem://blobs/x', 'the memory byte store was accepted by shape');
 
   const bytes = Buffer.from('a photo in memory');
   const up = await json(await fetch(`${base}/blobs`, {

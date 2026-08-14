@@ -69,6 +69,22 @@ test('POST /blobs uploads a pending blob with one-pass hashes', async (t) => {
   assert.ok(existsSync(path.join(root, `${meta.id}.pending`)), 'a .pending file landed on disk');
 });
 
+test('the /blobs route and app surface read bytes by id — pathFor is retired (S6/A2)', async (t) => {
+  const { app, base } = await harness(t);
+  assert.equal(typeof app.blobs.pathFor, 'undefined', 'no portable pathFor on the app blob store');
+  assert.equal(typeof app.blobs._pathFor, 'function', 'the explicit internal/test handle survives');
+
+  const bytes = Buffer.from('route-reads-by-id');
+  const up = await json(await fetch(`${base}/blobs`, {
+    method: 'POST',
+    headers: { 'content-type': 'image/png' },
+    body: bytes,
+  }));
+  // The upload route and the kernel blob adopter locate/read bytes through the
+  // injected byte store's methods by blob id — never a physical path.
+  assert.deepStrictEqual(app.blobs.readRange(up.id), bytes, 'bytes are read by blob id, not by path');
+});
+
 test('POST /blobs is fail-closed for anonymous', async (t) => {
   const { base } = await harness(t);
   // No principal wiring override here would be the way, but the harness pins u1;

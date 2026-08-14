@@ -108,7 +108,7 @@ test('reconcileBlobFinalize finalizes a missed blob from _Log and is idempotent'
   store.adopt(db, blobId);
   db.exec('COMMIT');
   assert.equal(store.stat(blobId).status, 'adopted');
-  assert.ok(!existsSync(store.pathFor(blobId)), 'not yet finalized — simulating a crash between commit and the post-commit consumer');
+  assert.ok(!existsSync(store._pathFor(blobId)), 'not yet finalized — simulating a crash between commit and the post-commit consumer');
 
   const scopeKey = 'Note:n-recover';
   Note.projection.apply(
@@ -122,7 +122,7 @@ test('reconcileBlobFinalize finalizes a missed blob from _Log and is idempotent'
   const { reconcileBlobFinalize } = createBlobLifecycle({ blobs: store, entities: new Map([[Note.name, Note]]) });
 
   assert.deepEqual(await reconcileBlobFinalize(db), { finalized: 1 });
-  assert.ok(existsSync(store.pathFor(blobId)), 'the missed finalize ran during recovery');
+  assert.ok(existsSync(store._pathFor(blobId)), 'the missed finalize ran during recovery');
   assert.equal(
     db.prepare('SELECT lastSeq FROM _ConsumerCursor WHERE consumer = ? AND scope = ?').get('blob.finalize', scopeKey).lastSeq,
     1,
@@ -178,7 +178,7 @@ test('a blocked cursor write leaves the checkpoint behind, but the idempotent fi
     'Note:n-atomic', 1, 'Note.created', JSON.stringify(event.data), 'create-note-atomic', '2026-01-01T00:00:00.000Z',
   );
   await reconcileBlobFinalize(db);
-  assert.ok(existsSync(store.pathFor(blobId)), 'the recovery sweep converges the checkpoint (a no-op re-finalize is safe)');
+  assert.ok(existsSync(store._pathFor(blobId)), 'the recovery sweep converges the checkpoint (a no-op re-finalize is safe)');
   assert.equal(
     db.prepare('SELECT lastSeq FROM _ConsumerCursor WHERE consumer = ? AND scope = ?').get('blob.finalize', 'Note:n-atomic').lastSeq,
     1,
@@ -229,7 +229,7 @@ test('a same-scope event that fails does not get silently covered by a later sam
     undefined,
     'the scope must still read as behind at seq 1, not skip ahead to the seq-2 event that would have succeeded',
   );
-  assert.ok(!existsSync(store.pathFor(blobB)), 'the second event must not be processed once its scope is blocked — reconcile owns the replay, in order');
+  assert.ok(!existsSync(store._pathFor(blobB)), 'the second event must not be processed once its scope is blocked — reconcile owns the replay, in order');
 
   db.exec('DROP TRIGGER block_first_cursor_write');
   db.prepare('INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt) VALUES (?, ?, ?, ?, ?, ?)').run(
@@ -241,8 +241,8 @@ test('a same-scope event that fails does not get silently covered by a later sam
   const { reconcileBlobFinalize } = createBlobLifecycle({ blobs: store, entities: new Map([[Note.name, Note]]) });
   await reconcileBlobFinalize(db);
 
-  assert.ok(existsSync(store.pathFor(blobA)), 'reconcile finalizes the earlier missed event');
-  assert.ok(existsSync(store.pathFor(blobB)), 'reconcile finalizes the later event too, in order');
+  assert.ok(existsSync(store._pathFor(blobA)), 'reconcile finalizes the earlier missed event');
+  assert.ok(existsSync(store._pathFor(blobB)), 'reconcile finalizes the later event too, in order');
   assert.equal(
     db.prepare('SELECT lastSeq FROM _ConsumerCursor WHERE consumer = ? AND scope = ?').get('blob.finalize', 'Note:n-mono').lastSeq,
     2,
@@ -279,5 +279,5 @@ test('app.ready runs blob finalize recovery sweep before serving', async (t) => 
 
   await app.ready;
 
-  assert.ok(existsSync(store.pathFor(blobId)), 'the pre-existing crashed commit was finalized by the boot recovery sweep');
+  assert.ok(existsSync(store._pathFor(blobId)), 'the pre-existing crashed commit was finalized by the boot recovery sweep');
 });

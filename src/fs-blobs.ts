@@ -52,11 +52,14 @@
 //     reconcile (an adopted blob whose pending slot still exists needs
 //     finalizing) and by tests.
 //
-//   pathFor(id, { pending })
-//     The physical path of a slot — exposed so tests (and the in-process
-//     atomicity fixtures) can assert on the filesystem. An S3 implementation
-//     has no path; it may return a synthetic key or throw if called. Callers
-//     that must be driver-portable do not use it.
+//   pathFor(id, { pending }) — RETIRED from the portable contract (S6/A2)
+//     The physical path of a slot. No longer part of `ByteStore`: the surface
+//     consumed by application code and the /blobs route must not use a physical
+//     path to authorize, read, or locate bytes (an S3 implementation has no
+//     path). It survives only as the test/debug-only introspection handle on
+//     the CONCRETE fsBlobs/memoryBlobs stores (ByteStoreTestDebugHandle), so
+//     tests can assert on the filesystem. Callers that must be
+//     driver-portable do not use it.
 //
 //   capabilities
 //     A queryable, honest declaration of what this backend guarantees:
@@ -171,13 +174,20 @@ export interface ByteStore {
    * finalizing) and by tests.
    */
   exists(id: string, options: { pending: boolean }): boolean;
+}
 
-  /**
-   * The physical path of a slot — TEST/DEBUG-ONLY introspection, NOT part of
-   * the portable contract (an S3 implementation has no path; it may return a
-   * synthetic key or throw if called). Driver-portable callers must not use it.
-   */
+// TEST/DEBUG-ONLY introspection handle — pathFor was RETIRED from the portable
+// ByteStore surface (S6/A2): no production caller may use a physical path to
+// authorize, read, or locate bytes. It survives only on the concrete
+// fsBlobs/memoryBlobs stores so tests can assert on the filesystem. An S3
+// implementation has no path; it may return a synthetic key or throw if called.
+export interface ByteStoreTestDebugHandle {
   pathFor(id: string, options?: FsBlobSlotOptions): string;
+}
+
+/** True when a byte store still exposes the retired test/debug path handle. */
+export function hasPathFor(store: ByteStore): store is ByteStore & ByteStoreTestDebugHandle {
+  return typeof (store as unknown as { pathFor?: unknown }).pathFor === 'function';
 }
 
 function safeId(id: unknown): void {
@@ -186,8 +196,25 @@ function safeId(id: unknown): void {
   }
 }
 
-export function fsBlobs({ root }: { root: string }): ByteStore {
+export interface FsBlobsOptions {
+  /**
+   * Root for FINAL slots: `<root>/<id>`. For the framework-managed default
+   * (S6/A2) this is the owned directory's `blobs/` subdirectory; for a
+   * back-compat explicit `blobs: { root }` it is the caller's own root.
+   */
+  root: string;
+  /**
+   * Root for PENDING slots (the S1/A2 managed `staging/` vocabulary). Only the
+   * framework-managed default sets it; an explicit root omits it and keeps the
+   * legacy single-root `<root>/<id>.pending` layout so existing deployments
+   * keep their on-disk files.
+   */
+  stagingRoot?: string;
+}
+
+export function fsBlobs({ root, stagingRoot }: FsBlobsOptions): ByteStore & ByteStoreTestDebugHandle {
   mkdirSync(root, { recursive: true });
+  if (stagingRoot) mkdirSync(stagingRoot, { recursive: true });
 
   const capabilities: ByteStoreCapabilities = {
     durability: 'durable',
@@ -197,8 +224,13 @@ export function fsBlobs({ root }: { root: string }): ByteStore {
     consistency: 'single-node-strong',
   };
 
+  // Final slots live at <root>/<id>. Pending slots stage at <stagingRoot>/<id>
+  // when a staging root is given (the managed layout: blobs/ + staging/ siblings
+  // under the owned directory), or at <root>/<id>.pending otherwise (the legacy
+  // back-compat layout for explicit roots).
   function pathFor(id: string, { pending }: FsBlobSlotOptions = {}): string {
-    return path.join(root, id + (pending ? '.pending' : ''));
+    if (pending) return stagingRoot ? path.join(stagingRoot, id) : path.join(root, id + '.pending');
+    return path.join(root, id);
   }
 
   function writePending(id: string, bytes: Uint8Array): void {

@@ -49,6 +49,19 @@ test('upload streams to .pending + computes md5+sha256 one-pass', async () => {
   rmSync(root, { recursive: true, force: true });
 });
 
+test('the portable BlobStore surface has no pathFor — bytes are read by id, never by path (S6/A2)', async () => {
+  const { db, store } = await setupBlobStore();
+  const { id } = store.upload({ bytes: Buffer.from('no-path-read') });
+  db.exec('BEGIN IMMEDIATE'); store.adopt(db, id); db.exec('COMMIT'); store.finalize(id);
+
+  assert.equal(typeof store.pathFor, 'undefined', 'pathFor retired from the portable BlobStore surface');
+  assert.equal(typeof store._pathFor, 'function', 'the explicit internal/test handle survives');
+  assert.deepStrictEqual(store.readRange(id), Buffer.from('no-path-read'), 'readRange serves bytes by id alone');
+  assert.ok(!existsSync(store._pathFor(id, { pending: true })), 'no pending slot after finalize');
+
+  rmSync(store._pathFor(id), { force: true });
+});
+
 test('path-containment guard', async () => {
   const { store } = await setupBlobStore();
   
@@ -67,7 +80,7 @@ test('path-containment guard', async () => {
   const result = store.upload({ bytes: 'x', id: validId });
   assert.ok(result.id, 'valid UUID accepted');
   
-  rmSync(store.pathFor(validId, { pending: true }), { recursive: true, force: true });
+  rmSync(store._pathFor(validId, { pending: true }), { recursive: true, force: true });
 });
 
 test('range read [start,end)', async () => {
@@ -88,15 +101,15 @@ test('range read [start,end)', async () => {
   const rangeClamped = store.readRange(id, [0, 100]);
   assert.deepStrictEqual(rangeClamped, bytes, 'range clamped to file size');
   
-  rmSync(store.pathFor(id), { force: true });
+  rmSync(store._pathFor(id), { force: true });
 });
 
 test('adopt in caller txn — commit → adopted + renamed; rollback → pending + .pending', async () => {
   const { root, db, store } = await setupBlobStore();
   
   const { id } = store.upload({ bytes: Buffer.from('test') });
-  const pendingPath = store.pathFor(id, { pending: true });
-  const finalPath = store.pathFor(id);
+  const pendingPath = store._pathFor(id, { pending: true });
+  const finalPath = store._pathFor(id);
   
   // COMMIT path
   db.exec('BEGIN IMMEDIATE');
@@ -114,7 +127,7 @@ test('adopt in caller txn — commit → adopted + renamed; rollback → pending
   
   // ROLLBACK path
   const { id: id2 } = store.upload({ bytes: Buffer.from('test2') });
-  const pendingPath2 = store.pathFor(id2, { pending: true });
+  const pendingPath2 = store._pathFor(id2, { pending: true });
   
   db.exec('BEGIN IMMEDIATE');
   store.adopt(db, id2);
@@ -141,7 +154,7 @@ test('reaper orphan sweep', async () => {
   
   assert.equal(store.stat(id), undefined, 'row deleted');
   
-  rmSync(path.dirname(store.pathFor(id, { pending: true })), { recursive: true, force: true });
+  rmSync(path.dirname(store._pathFor(id, { pending: true })), { recursive: true, force: true });
 });
 
 test('reaper refcount sweep', async () => {
@@ -161,7 +174,7 @@ test('reaper refcount sweep', async () => {
   assert.equal(result.danglers, 1, 'dangling blob swept');
   assert.equal(store.stat(id), undefined, 'dangling row deleted');
   
-  rmSync(store.pathFor(id), { force: true });
+  rmSync(store._pathFor(id), { force: true });
   
   // Now create a referenced blob
   const { id: refId } = store.upload({ bytes: Buffer.from('refblob') });
@@ -177,7 +190,7 @@ test('reaper refcount sweep', async () => {
   assert.equal(result.danglers, 0, 'referenced blob kept');
   assert.ok(store.stat(refId), 'referenced row exists');
   
-  rmSync(store.pathFor(refId), { force: true });
+  rmSync(store._pathFor(refId), { force: true });
 });
 
 test('readRange closes the file descriptor (no leak)', async () => {
@@ -190,7 +203,7 @@ test('readRange closes the file descriptor (no leak)', async () => {
   const { id } = store.upload({ bytes: Buffer.from('0123456789') });
   db.exec('BEGIN IMMEDIATE'); store.adopt(db, id); db.exec('COMMIT'); store.finalize(id);
 
-  const p = store.pathFor(id);
+  const p = store._pathFor(id);
   const fd0 = openSync(p, 'r'); closeSync(fd0);
 
   store.readRange(id, [0, 3]); // must open+close internally
@@ -222,5 +235,5 @@ test('readRange rejects bogus ranges (negative / non-finite / inverted)', async 
   // Sanity: a valid empty range returns an empty buffer (no throw).
   assert.deepStrictEqual(store.readRange(id, [5, 5]), Buffer.alloc(0));
 
-  rmSync(store.pathFor(id), { force: true });
+  rmSync(store._pathFor(id), { force: true });
 });

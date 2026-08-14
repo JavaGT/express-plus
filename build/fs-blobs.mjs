@@ -52,11 +52,14 @@
 //     reconcile (an adopted blob whose pending slot still exists needs
 //     finalizing) and by tests.
 //
-//   pathFor(id, { pending })
-//     The physical path of a slot — exposed so tests (and the in-process
-//     atomicity fixtures) can assert on the filesystem. An S3 implementation
-//     has no path; it may return a synthetic key or throw if called. Callers
-//     that must be driver-portable do not use it.
+//   pathFor(id, { pending }) — RETIRED from the portable contract (S6/A2)
+//     The physical path of a slot. No longer part of `ByteStore`: the surface
+//     consumed by application code and the /blobs route must not use a physical
+//     path to authorize, read, or locate bytes (an S3 implementation has no
+//     path). It survives only as the test/debug-only introspection handle on
+//     the CONCRETE fsBlobs/memoryBlobs stores (ByteStoreTestDebugHandle), so
+//     tests can assert on the filesystem. Callers that must be
+//     driver-portable do not use it.
 //
 //   capabilities
 //     A queryable, honest declaration of what this backend guarantees:
@@ -171,14 +174,21 @@ const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
                               
      
                                                              
+ 
 
-     
-                                                                             
-                                                                             
-                                                                                
-     
+// TEST/DEBUG-ONLY introspection handle — pathFor was RETIRED from the portable
+// ByteStore surface (S6/A2): no production caller may use a physical path to
+// authorize, read, or locate bytes. It survives only on the concrete
+// fsBlobs/memoryBlobs stores so tests can assert on the filesystem. An S3
+// implementation has no path; it may return a synthetic key or throw if called.
+                                           
                                                            
  
+
+/** True when a byte store still exposes the retired test/debug path handle. */
+export function hasPathFor(store           )                                                {
+  return typeof (store                                    ).pathFor === 'function';
+}
 
 function safeId(id         )       {
   if (typeof id !== 'string' || !ID_PATTERN.test(id)) {
@@ -186,8 +196,25 @@ function safeId(id         )       {
   }
 }
 
-export function fsBlobs({ root }                  )            {
+                                 
+     
+                                                                           
+                                                                       
+                                                                        
+     
+               
+     
+                                                                               
+                                                                               
+                                                                            
+                              
+     
+                       
+ 
+
+export function fsBlobs({ root, stagingRoot }                )                                       {
   mkdirSync(root, { recursive: true });
+  if (stagingRoot) mkdirSync(stagingRoot, { recursive: true });
 
   const capabilities                        = {
     durability: 'durable',
@@ -197,8 +224,13 @@ export function fsBlobs({ root }                  )            {
     consistency: 'single-node-strong',
   };
 
+  // Final slots live at <root>/<id>. Pending slots stage at <stagingRoot>/<id>
+  // when a staging root is given (the managed layout: blobs/ + staging/ siblings
+  // under the owned directory), or at <root>/<id>.pending otherwise (the legacy
+  // back-compat layout for explicit roots).
   function pathFor(id        , { pending }                    = {})         {
-    return path.join(root, id + (pending ? '.pending' : ''));
+    if (pending) return stagingRoot ? path.join(stagingRoot, id) : path.join(root, id + '.pending');
+    return path.join(root, id);
   }
 
   function writePending(id        , bytes            )       {

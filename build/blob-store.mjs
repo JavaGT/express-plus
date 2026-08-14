@@ -23,15 +23,19 @@
 // This module fuses METADATA (the BlobStore table) + LIFECYCLE (the
 // pending→adopt→finalize state machine, the reaper's orphan/dangler sweep).
 // The BYTE storage — where the bytes physically live — is delegated to an
-// injected byte store (`bytes`), defaulting to fsBlobs({ root }) (seam-review
-// §2.2). Only the byte half is swappable; lifecycle + metadata are framework
-// invariants. `workbench({ blobs: { root } })` constructs fsBlobs internally
-// (back-compat); `workbench({ blobs: byteStore })` accepts any conforming
-// byte-store object (the deployment reality for a photos app is S3-compatible
-// storage — a future `s3Blobs({...})` implements the same interface).
+// injected byte store (`bytes`), defaulting to fsBlobs (seam-review §2.2). Only
+// the byte half is swappable; lifecycle + metadata are framework invariants.
+// `workbench({ blobs: { root } })` constructs fsBlobs internally (back-compat —
+// an explicit root, refused on overlap with the owned directory);
+// `workbench({ blobs: byteStore })` accepts any conforming byte-store object
+// (the deployment reality for a photos app is S3-compatible storage — a future
+// `s3Blobs({...})` implements the same interface). With NO blobs config, a
+// file-mode app's byte store roots under the owned directory's managed
+// `blobs/` + `staging/` pair (S6/A2 relocation — never cwd); a memory database
+// uses the in-memory fake store (S6/A1).
 
 import { createHash, randomUUID } from 'node:crypto';
-import { fsBlobs,                                            } from './fs-blobs.mjs';
+import { fsBlobs, hasPathFor,                                            } from './fs-blobs.mjs';
                                             
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
@@ -81,25 +85,40 @@ function safeId(id         )       {
                             
                                                                         
                                              
-                                                               
                                                                            
                                                
  
 
+// The retired `pathFor` (S6/A2), kept ONLY behind this explicit internal/test
+// handle: absent from the portable BlobStore surface, present on the concrete
+// store only when the underlying byte store exposes a path key (fs path or
+// memory synthetic key). No production caller may use it to authorize, read, or
+// locate bytes.
+                                          
+                                                                 
+ 
+
                                    
                 
+     
+                                                                               
+                                                                           
+                                                                    
+     
+                       
                
                     
  
 
-export function createBlobStore({ root, db, bytes }                  )            {
+export function createBlobStore({ root, stagingRoot, db, bytes }                  )            {
   // The byte store owns where bytes live (node:fs by default; S3 later). It is
   // the ONLY seam for byte storage — every read/write/remove/finalize goes
   // through it. `root` is accepted for back-compat (`blobs: { root }`): when no
   // byte store is injected, fsBlobs({ root }) is the default. `bytes` may also
   // be passed directly as `root`'s replacement once a caller hands a store in.
-  const store            = bytes ?? fsBlobs({ root: root           });
-  const { writePending, finalizePending, readRange, remove, pathFor } = store;
+  const store            = bytes
+    ?? fsBlobs(stagingRoot ? { root: root          , stagingRoot } : { root: root           });
+  const { writePending, finalizePending, readRange, remove } = store;
 
   function upload({ bytes: uploadBytes, mime, id }                    = { bytes: undefined          }) {
     let blobId = id ?? randomUUID();
@@ -216,6 +235,9 @@ export function createBlobStore({ root, db, bytes }                  )          
     return row;
   }
 
+  const internalHandle                          = {};
+  if (hasPathFor(store)) internalHandle._pathFor = store.pathFor;
+
   return {
     safeId,
     upload,
@@ -226,7 +248,7 @@ export function createBlobStore({ root, db, bytes }                  )          
     discard,
     reap,
     stat,
-    pathFor,
     capabilities: store.capabilities,
+    ...internalHandle,
   };
 }

@@ -187,13 +187,6 @@ export interface ByteStore {
    * finalizing) and by tests.
    */
   exists(id: string, options: { pending: boolean }): boolean;
-
-  /**
-   * The physical path of a slot — TEST/DEBUG-ONLY introspection, NOT part of
-   * the portable contract (an S3 implementation has no path; it may return a
-   * synthetic key or throw if called). Driver-portable callers must not use it.
-   */
-  pathFor(id: string, options?: { pending?: boolean }): string;
 }
 
 export interface BlobStore {
@@ -229,12 +222,12 @@ export interface BlobStore {
       }
     | undefined;
   /**
-   * TEST/DEBUG-ONLY introspection, NOT part of the portable contract — the
-   * byte-store backend owns what it means (an fs path, or a synthetic key for
-   * an in-memory/S3 backend). Driver-portable callers must not use it.
+   * TEST/DEBUG-ONLY introspection was RETIRED from the portable surface (S6/A2):
+   * no code path may use a physical filesystem path to authorize, read, or
+   * locate bytes. The concrete fs/memory byte-store objects still expose a
+   * `pathFor` test handle at the `src/fs-blobs.ts` / `src/memory-blobs.ts`
+   * boundary only.
    */
-  pathFor(id: string, options?: { pending?: boolean }): string;
-  /** The injected byte store's honest capability declaration, surfaced. */
   readonly capabilities: ByteStoreCapabilities;
 }
 
@@ -648,6 +641,14 @@ export function createJobQueue(options: {
 // ---------------------------------------------------------------------------
 
 export function createBlobStore(options: {
+  /**
+   * Explicit byte root (back-compat `blobs: { root }`), refused on overlap with
+   * the owned directory. When omitted and the store is built through
+   * `workbench()`, a file-mode app's byte store roots under the owned
+   * directory's managed `blobs/` (pending slots in `staging/`) — never cwd
+   * (S6/A2 relocation) — and a memory database uses the in-memory fake byte
+   * store (S6/A1).
+   */
   root?: string;
   db: WorkbenchDatabase;
   bytes?: ByteStore;

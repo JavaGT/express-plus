@@ -143,30 +143,38 @@ test('workbench refuses a blobs.root that overlaps the owned directory (both dir
     // A sibling, non-overlapping root is accepted.
     const ok = workbench({ db: { directory: owned, name: 'app', mode: 'file' }, blobs: { root: sibling } });
     assert.ok(ok.blobs, 'blob store constructed');
-    assert.equal(ok.blobs.pathFor('any-id', { pending: true }).startsWith(sibling), true);
+    // The retired pathFor survives as the explicit internal/test handle; an
+    // explicit root keeps the legacy single-root layout (<root>/<id>.pending).
+    assert.equal(ok.blobs._pathFor('any-id', { pending: true }).startsWith(sibling), true);
     ok.shutdown();
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test('a cwd-owned database re-places the default blob root into the owned blobs/ directory', async () => {
+test('a file-mode database roots the default blob store under the owned blobs/ + staging/ directories (never cwd)', async () => {
   const base = tempRoot();
   const previous = process.cwd();
   process.chdir(base);
   try {
-    // Owned directory is cwd; the framework default blob root (cwd/.blobs)
-    // would overlap managed storage, so it is auto-placed into the owned
-    // directory's managed `blobs/` subdirectory (resolveBlobRoot, S1/A2).
+    // S6/A2 relocation: with no blob config, the default byte root is ALWAYS
+    // the owned directory's managed `blobs/` subdirectory (final) with
+    // `staging/` for pending slots — never cwd/.blobs.
     const app = workbench({ db: { directory: '.', name: 'app', mode: 'file' } });
     assert.ok(app.blobs, 'blob store constructed');
-    const blobPath = path.resolve(app.blobs.pathFor('any-id', { pending: true }));
+    const finalPath = path.resolve(app.blobs._pathFor('any-id'));
+    const pendingPath = path.resolve(app.blobs._pathFor('any-id', { pending: true }));
     // process.cwd() returns the REAL (symlink-resolved) cwd after chdir, so it
-    // is the right anchor for the resolved blob path.
+    // is the right anchor for the resolved blob paths.
     assert.equal(
-      blobPath.startsWith(path.join(process.cwd(), 'blobs')),
+      finalPath.startsWith(path.join(process.cwd(), 'blobs')),
       true,
-      'the default blob root is re-placed inside the owned blobs/ dir',
+      'the default blob root is the owned directory\'s managed blobs/ dir',
+    );
+    assert.equal(
+      pendingPath.startsWith(path.join(process.cwd(), 'staging')),
+      true,
+      'pending slots stage in the owned directory\'s managed staging/ dir',
     );
     await app.shutdown();
   } finally {

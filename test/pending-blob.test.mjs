@@ -56,7 +56,7 @@ test('claimed blob lifecycle exposes pending, available, failed, and missing sta
   assert.deepEqual(available.readRange(), Buffer.from([1, 2, 3]));
   assert.deepEqual(available.readRange([1, 3]), Buffer.from([2, 3]));
 
-  writeFileSync(app.blobs.pathFor(blobId), Buffer.from([9]));
+  writeFileSync(app.blobs._pathFor(blobId), Buffer.from([9]));
   assert.deepEqual(facade.inspect(blobId), { kind: 'failed' });
   db.prepare('DELETE FROM _PendingBlob WHERE blobId = ?').run(blobId);
   assert.deepEqual(facade.inspect(blobId), { kind: 'missing' });

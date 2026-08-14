@@ -467,7 +467,6 @@ const customByteStore: ByteStore = {
   readRange: () => Buffer.alloc(0),
   remove: () => {},
   exists: () => false,
-  pathFor: () => '',
 };
 const blobs: BlobStore = createBlobStore({ db, bytes: customByteStore });
 // @ts-expect-error a capability declaration is closed: no extra members allowed
@@ -479,9 +478,11 @@ const declaredDurability: ByteStoreDurability = surfacedCapabilities.durability;
 const orphanDanglerCounts: { orphans: number; danglers: number } = blobs.reap({ ttl: 60_000, blobColumns: [] });
 blobs.discardPending('pending-1');
 blobs.discard('final-1');
-// pathFor remains callable but is documented test/debug-only introspection
-const blobPath: string = blobs.pathFor('id');
-void [job, blobs, customByteStore, surfacedCapabilities, declaredDurability, bogusDurability, orphanDanglerCounts, blobPath, runMigrations(db, [migration]), readCommittedCursor(db, 'Project:project-1')];
+// @ts-expect-error pathFor was retired from the portable ByteStore surface (S6/A2)
+customByteStore.pathFor;
+// @ts-expect-error pathFor was retired from the portable BlobStore surface (S6/A2)
+blobs.pathFor;
+void [job, blobs, customByteStore, surfacedCapabilities, declaredDurability, bogusDurability, orphanDanglerCounts, runMigrations(db, [migration]), readCommittedCursor(db, 'Project:project-1')];
 const live: LiveDelivery = createLiveDelivery({ db, entities: new Map(), mayVerb: () => true });
 createLiveDelivery({ db, entities: new Map(), mayVerb: () => true, snapshots: [] });
 const liveAbort = new AbortController();

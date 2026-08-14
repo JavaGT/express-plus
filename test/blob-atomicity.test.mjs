@@ -88,8 +88,8 @@ test('a denied dispatch rolls its blob adopt back — the blob stays pending', a
   assert.equal(res.ok, false);
   // Atomicity boundary: the in-txn adopt was rolled back with the denial.
   assert.equal(store.stat(blobId).status, 'pending');
-  assert.ok(fs.existsSync(store.pathFor(blobId, { pending: true })), '.pending file still present');
-  assert.ok(!fs.existsSync(store.pathFor(blobId)), 'no final file — finalize skipped on rollback');
+  assert.ok(fs.existsSync(store._pathFor(blobId, { pending: true })), '.pending file still present');
+  assert.ok(!fs.existsSync(store._pathFor(blobId)), 'no final file — finalize skipped on rollback');
 });
 
 test('a successful dispatch adopts + finalizes the blob in the same commit', async (t) => {
@@ -117,6 +117,6 @@ test('a successful dispatch adopts + finalizes the blob in the same commit', asy
 
   assert.equal(res.ok, true);
   assert.equal(store.stat(blobId).status, 'adopted');
-  assert.ok(!fs.existsSync(store.pathFor(blobId, { pending: true })), '.pending renamed away post-commit');
-  assert.ok(fs.existsSync(store.pathFor(blobId)), 'final file exists post-commit');
+  assert.ok(!fs.existsSync(store._pathFor(blobId, { pending: true })), '.pending renamed away post-commit');
+  assert.ok(fs.existsSync(store._pathFor(blobId)), 'final file exists post-commit');
 });

@@ -21,7 +21,7 @@
 // in-process restart) or start a fresh backing (a process boundary). NOT a
 // production store: bytes never survive a process exit.
 
-                                                                      
+                                                                                                
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -44,7 +44,7 @@ function safeId(id         )       {
                               
  
 
-export function memoryBlobs({ backing }                     = {})            {
+export function memoryBlobs({ backing }                     = {})                                       {
   const pending = backing?.pending ?? new Map                ();
   const final = backing?.final ?? new Map                ();
 
@@ -57,7 +57,9 @@ export function memoryBlobs({ backing }                     = {})            {
   };
 
   // Synthetic key (an S3 driver would do the same — object storage has no
-  // filesystem path). test/debug-only, like fsBlobs.pathFor.
+  // filesystem path). Retired from the portable contract alongside
+  // fsBlobs.pathFor (S6/A2); present only on the concrete store as the
+  // test/debug-only introspection handle.
   function pathFor(id        , { pending: p }                        = {})         {
     return `mem://blobs/${id}${p ? '.pending' : ''}`;
   }

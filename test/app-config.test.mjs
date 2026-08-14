@@ -11,6 +11,9 @@ import { resolveConfig, config } from '../build/internal.mjs';
 import workbench from '../build/internal.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 // A minimal owned entity (the note.mjs floor), used so an app has a mounted
 // route to resolve during app.ready.
@@ -74,6 +77,32 @@ test('app.config is frozen', () => {
   const app = workbench({ db: ':memory:' });
   assert.ok(Object.isFrozen(app.config), 'app.config is frozen');
   app.db.close();
+});
+
+test('a file-mode app constructs with the relocated default blob root (S6/A2)', async () => {
+  const base = mkdtempSync(path.join(tmpdir(), 'wb-appcfg-blob-'));
+  const owned = path.join(base, 'owned');
+  try {
+    const app = workbench({ db: { directory: owned, name: 'app', mode: 'file' } });
+    await app.ddl();
+    try {
+      assert.ok(app.blobs, 'the blob store is constructed with no blobs config');
+      assert.equal(
+        path.resolve(app.blobs._pathFor('any-id')).startsWith(path.join(owned, 'blobs')),
+        true,
+        'the default byte root sits under the owned directory\'s managed blobs/',
+      );
+      assert.equal(
+        path.resolve(app.blobs._pathFor('any-id', { pending: true })).startsWith(path.join(owned, 'staging')),
+        true,
+        'pending slots stage under the owned directory\'s managed staging/',
+      );
+    } finally {
+      await app.shutdown();
+    }
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
 });
 
 test('workbench({ env, viewsDir, session }) threads through to app.config', () => {

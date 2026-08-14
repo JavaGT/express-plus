@@ -46,6 +46,7 @@ import { runWorkbenchMigrations } from './workbench-migrations.ts';
 import { validateSchemaOwnedEntityTable } from './schema-entity-validation.ts';
 import { frameworkTableNames, declaredTableNames } from './schema-table-census.ts';
 import { createBlobStore } from './blob-store.ts';
+import { memoryBlobs } from './memory-blobs.ts';
 import { createJobQueue } from './job-queue.ts';
 import { createSearchPluginRegistry, type SearchPlugin } from './search-plugin.ts';
 import { createPostCommitEffectRunner } from './post-commit-effects.ts';
@@ -111,6 +112,9 @@ interface BoundDbAdapter {
   open(): Promise<OpenedDatabase>;
   readMirror(): ReadMirrorDescription;
   isManagedPath?(p: string): boolean;
+  // The owned directory root (file mode) or null (memory) — the sqlite adapter
+  // exposes it so the blob-root guard resolves before the deferred open (S6/A2).
+  readonly root?: string | null;
 }
 
 function isDbAdapter(value: unknown): value is BoundDbAdapter {
@@ -150,21 +154,28 @@ function refuseBlobOverlap(ownedDirectory: string, blobRoot: string | null): voi
   }
 }
 
-// Resolve the blob root against an owned directory (S1/A2 managed-path guard).
-// An EXPLICIT `blobs.root` that overlaps the owned directory is refused — the
-// app opted into the guard and gets a loud construction error. The framework
-// DEFAULT (cwd/.blobs) instead AUTO-PLACES into the owned directory's managed
-// `blobs/` subdirectory when the owned directory overlaps it (e.g. a cwd-owned
-// database, where cwd/.blobs would sit inside managed storage). Refuse-vs-place
-// was chosen in review of #81: replacement keeps default-config examples working
-// while refusing stays the explicit-root behavior. Called before the adapter
-// opens so a refusal never leaks the OS-backed ownership lock.
-function resolveBlobRoot(ownedDirectory: string, current: string, explicitRoot: string | null): string {
+// Resolve the blob root (S6/A2 relocation). The DEFAULT is ALWAYS the owned
+// directory's managed `blobs/` subdirectory for a file-mode database — never
+// cwd (the old `process.cwd()/.blobs` default was flagged by the S7 audit and
+// is removed by this ticket). An EXPLICIT `blobs.root` is the override, still
+// refused on overlap with the owned directory (refuse-vs-place preserved from
+// S1/A2). Memory databases resolve NO disk root at all — they use the in-memory
+// fake byte store (S6/A1). Called before the adapter opens so a refusal never
+// leaks the OS-backed ownership lock.
+function resolveBlobRoot(ownedDirectory: string, explicitRoot: string | null): string {
   if (explicitRoot) {
     refuseBlobOverlap(ownedDirectory, explicitRoot);
-    return current;
+    return explicitRoot;
   }
-  return pathsOverlap(current, ownedDirectory) ? path.join(ownedDirectory, 'blobs') : current;
+  return path.join(ownedDirectory, 'blobs');
+}
+
+// The managed staging directory for pending slots (S1/A2 vocabulary: `blobs/`
+// and `staging/` are siblings under the owned directory). Only the managed
+// DEFAULT uses it; an explicit root keeps the legacy single-root
+// `<root>/<id>.pending` layout so existing deployments keep their on-disk files.
+function managedStagingRoot(ownedDirectory: string, explicitRoot: string | null): string | null {
+  return explicitRoot ? null : path.join(ownedDirectory, 'staging');
 }
 
 // workbench() — the default export. A chainable app. `.mount(path, Entity)`
@@ -204,19 +215,21 @@ export default function workbench({
       throw new Error(`missing required env: ${v}`);
     }
   }
-  // The blob root the app will use (a conforming byte store has no root we can
-  // see). Computed once up front so the managed-path guard can refuse an
-  // EXPLICIT blobs.root overlap BEFORE the adapter opens — an overlap thrown
-  // after opening would leak the OS-backed ownership lock (S1/A2). The
-  // framework default (cwd/.blobs) is historical and unguarded at this point: a
-  // db option that owns an overlapping directory re-places it (resolveBlobRoot
-  // below) before the adapter opens.
+  // The blob-root layout the app will use (a conforming injected byte store has
+  // no root we can see). Computed once up front so the managed-path guard can
+  // refuse an EXPLICIT blobs.root overlap BEFORE the adapter opens — an overlap
+  // thrown after opening would leak the OS-backed ownership lock (S1/A2). For a
+  // FILE-mode database the DEFAULT is ALWAYS the owned directory's managed
+  // `blobs/` (+ `staging/` for pending slots) — never cwd (S6/A2 relocation).
+  // `blobRoot` stays null only for a memory database with no explicit blobs
+  // config: those get the in-memory fake byte store (S6/A1).
   const explicitBlobRoot = blobOpts
     && typeof blobOpts.writePending !== 'function'
     && blobOpts?.root
     ? blobOpts.root as string
     : null;
-  let blobRoot = explicitBlobRoot ?? path.join(process.cwd(), '.blobs');
+  let blobRoot: string | null = explicitBlobRoot;
+  let blobStagingRoot: string | null = null;
   // `db` is opened through the sqlite adapter unless a raw DatabaseSync/DbHandle
   // was supplied (or a conforming DbAdapter — A1 contract — whose async open is
   // deferred to the first boot boundary). A string is a path (or ':memory:') the
@@ -235,17 +248,25 @@ export default function workbench({
   let installPendingDb: (() => Promise<unknown>) | null = null;
   try {
     if (typeof db === 'string') {
-      if (db !== ':memory:') blobRoot = resolveBlobRoot(path.dirname(db), blobRoot, explicitBlobRoot);
-      openedDb = db === ':memory:'
-        ? openMemoryAdapter()
-        : openSqliteAdapter({ directory: path.dirname(db), name: path.basename(db), mode: 'file' });
+      if (db === ':memory:') {
+        openedDb = openMemoryAdapter();
+      } else {
+        blobRoot = resolveBlobRoot(path.dirname(db), explicitBlobRoot);
+        blobStagingRoot = managedStagingRoot(path.dirname(db), explicitBlobRoot);
+        openedDb = openSqliteAdapter({ directory: path.dirname(db), name: path.basename(db), mode: 'file' });
+      }
       openedHere = true;
       db = openedDb.handle;
     } else if (isDbAdapterConfig(db)) {
-      if (db.mode !== 'memory' && db.directory) blobRoot = resolveBlobRoot(db.directory, blobRoot, explicitBlobRoot);
-      openedDb = db.mode === 'memory'
-        ? openMemoryAdapter()
-        : openSqliteAdapter({ ...db, mode: db.mode ?? 'file' });
+      if (db.mode === 'memory') {
+        openedDb = openMemoryAdapter();
+      } else {
+        if (db.directory) {
+          blobRoot = resolveBlobRoot(db.directory, explicitBlobRoot);
+          blobStagingRoot = managedStagingRoot(db.directory, explicitBlobRoot);
+        }
+        openedDb = openSqliteAdapter({ ...db, mode: db.mode ?? 'file' });
+      }
       openedHere = true;
       db = openedDb.handle;
     } else if (isDbAdapter(db)) {
@@ -256,12 +277,35 @@ export default function workbench({
       // boundary (prepareSchema / app.ready / route boot) and installs the
       // handle plus the handle-bound resources. Adapter-backed apps should
       // await `app.ready` (or call start()/prepareSchema()) before listen() so
-      // the transport captures a real db handle.
+      // the transport captures a real db handle. The sqlite adapter exposes its
+      // owned root (`root`, null for memory) so the blob-root guard still runs
+      // before the deferred open.
       pendingDbAdapter = db;
+      const adapterRoot = (db as BoundDbAdapter).root ?? null;
+      if (adapterRoot) {
+        blobRoot = resolveBlobRoot(adapterRoot, explicitBlobRoot);
+        blobStagingRoot = managedStagingRoot(adapterRoot, explicitBlobRoot);
+      }
       db = null;
     } else if (isOpenedAdapter(db)) {
       openedDb = db;
+      if (openedDb.root) {
+        blobRoot = resolveBlobRoot(openedDb.root, explicitBlobRoot);
+        blobStagingRoot = managedStagingRoot(openedDb.root, explicitBlobRoot);
+      }
       db = db.handle;
+    } else if (db && typeof (db as { location?: unknown }).location === 'function') {
+      // A raw DatabaseSync handle: classify memory vs file by its location()
+      // (:memory: → null). A raw FILE handle has no adapter-owned directory, so
+      // the default root sits beside the db file — never cwd. A raw MEMORY
+      // handle keeps only an explicit blobs.root (blobRoot is already null
+      // otherwise) — the in-memory fake byte store (S6/A1).
+      const location = (db as { location(): string | null }).location();
+      if (location != null) {
+        const owned = path.dirname(location);
+        blobRoot = resolveBlobRoot(owned, explicitBlobRoot);
+        blobStagingRoot = managedStagingRoot(owned, explicitBlobRoot);
+      }
     }
     // Wrap the raw handle with the driver contract helpers (txn/begin/commit/
     // rollback/upsert) and run the thin PRAGMA bootstrap. A conforming custom
@@ -453,18 +497,20 @@ export default function workbench({
     app._principalSnapshotRuntime = principalSnapshotRuntime;
     // The blob store is an app-level resource, constructed when a db is engaged
     // (blobs are adopted by dispatch commits — no db, no durable kernel, no
-    // blobs). The root defaults to a `.blobs` dir under cwd, durable across
-    // restarts (an adopted blob's final file must survive a reboot); `blobs:
-    // { root }` overrides. One store, reached by the /blobs upload route AND the
-    // kernel's blob adopter — not a second persistence path.
+    // blobs). With no blobs config, a FILE-mode app's byte store roots under
+    // the owned directory's managed `blobs/` + `staging/` pair — never cwd
+    // (S6/A2 relocation; the old cwd/.blobs default was retired). A MEMORY
+    // database gets the in-memory fake byte store (S6/A1). One store, reached
+    // by the /blobs upload route AND the kernel's blob adopter — not a second
+    // persistence path.
     //
     // SEAM (seam-review §2.2): `blobs` may be either an options bag (`{ root }`,
-    // back-compat — the framework builds fsBlobs({root}) internally) OR a
-    // conforming byte-store object (e.g. `fsBlobs({root})` or a future
-    // `s3Blobs({...})`). Detection is by SHAPE, not type: a byte store exposes
-    // `writePending` (the signature method of the byte-store interface); an
-    // options bag does not. The framework OWNS metadata + lifecycle; only the
-    // byte half swaps.
+    // back-compat — the framework builds fsBlobs internally; the root is
+    // refused on overlap with the owned directory) OR a conforming byte-store
+    // object (e.g. `fsBlobs({...})` or a future `s3Blobs({...})`). Detection is
+    // by SHAPE, not type: a byte store exposes `writePending` (the signature
+    // method of the byte-store interface); an options bag does not. The
+    // framework OWNS metadata + lifecycle; only the byte half swaps.
     //
     // attachHandleResources builds the handle-bound resources (blob store,
     // post-commit effects, job queue). It runs at construction for a
@@ -473,12 +519,22 @@ export default function workbench({
     const attachHandleResources = (handle: any): void => {
       if (blobOpts && typeof blobOpts.writePending === 'function') {
         app.blobs = createBlobStore({ db: handle, bytes: blobOpts });
-      } else {
-        // `blobRoot` was already refused (explicit) or re-placed (default)
-        // against the owned directory before the adapter opened (managed-path
-        // guard, S1/A2). A re-placed default (ownedDir/blobs) already exists.
+      } else if (blobRoot) {
+        // `blobRoot` was already refused (explicit) or resolved to the owned
+        // directory's managed `blobs/` before the adapter opened (managed-path
+        // guard, S1/A2; relocation, S6/A2). A managed default also carries the
+        // owned directory's `staging/` root for pending slots.
         mkdirSync(blobRoot, { recursive: true });
-        app.blobs = createBlobStore({ root: blobRoot, db: handle });
+        if (blobStagingRoot) mkdirSync(blobStagingRoot, { recursive: true });
+        app.blobs = createBlobStore({
+          root: blobRoot,
+          ...(blobStagingRoot ? { stagingRoot: blobStagingRoot } : {}),
+          db: handle,
+        });
+      } else {
+        // Memory database with no explicit blobs config: the in-memory fake
+        // byte store (S6/A1) — never a disk root, never cwd/.blobs.
+        app.blobs = createBlobStore({ db: handle, bytes: memoryBlobs() });
       }
       app.postCommitEffects = createPostCommitEffectRunner({ db: handle });
       // The queue routes its multi-statement mutations through the ONE write
