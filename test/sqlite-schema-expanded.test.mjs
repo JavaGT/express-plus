@@ -536,6 +536,39 @@ test('prepare fails closed on cross-namespace version collisions under the legac
   }
 });
 
+test('prepare({ skipMigrations: true }) still refuses cross-namespace version collisions under the legacy global ledger', () => {
+  let ran = 0;
+  const schema = defineSqliteSchema({
+    name: 'collide-skip',
+    tables: [{ name: 'T', columns: [{ name: 'id', type: 'text', primaryKey: true }] }],
+    migrations: [
+      { namespace: 'workbench', name: 'base', version: 5, up() { ran += 1; } },
+      { namespace: 'app', name: 'seed', version: 5, up() { ran += 1; } },
+    ],
+  });
+  const db = new DatabaseSync(':memory:');
+  try {
+    assert.throws(
+      () => schema.prepare(db, { skipMigrations: true }),
+      /version 5 in namespaces "workbench" and "app".*legacy global migration ledger.*#90/,
+      'prepare with skipMigrations still refuses the legacy-ledger version collision',
+    );
+    assert.equal(ran, 0, 'no migration executed');
+    assert.equal(
+      db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'T'").get(),
+      undefined,
+      'no table DDL executed before the refusal',
+    );
+    assert.equal(
+      db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_Migration'").get(),
+      undefined,
+      'migration ledger not touched',
+    );
+  } finally {
+    db.close();
+  }
+});
+
 test('namespaced migrations with distinct versions still run under the legacy global ledger', () => {
   const applied = [];
   const schema = defineSqliteSchema({

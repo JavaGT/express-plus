@@ -40,6 +40,39 @@ test('schema owns an entity main table while Workbench generates only framework 
   }
 });
 
+test('app boot refuses a schema whose namespaced migrations collide under the legacy ledger — before executing any migration', async () => {
+  const db = new DatabaseSync(':memory:');
+  let ran = 0;
+  try {
+    const schema = defineSqliteSchema({
+      name: 'boot-collide',
+      tables: [{ name: 'T', columns: [{ name: 'id', type: 'text', primaryKey: true }] }],
+      migrations: [
+        { namespace: 'workbench', name: 'base', version: 5, up() { ran += 1; } },
+        { namespace: 'app', name: 'seed', version: 5, up() { ran += 1; } },
+      ],
+    });
+    assert.throws(
+      () => workbench({ db, schema }),
+      /duplicate migration version 5|legacy global migration ledger/i,
+      'the app boot path refuses the colliding-namespace schema',
+    );
+    assert.equal(ran, 0, 'no migration executed');
+    assert.equal(
+      db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'T'").get(),
+      undefined,
+      'no schema table DDL executed before the refusal',
+    );
+    assert.equal(
+      db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_Migration'").get(),
+      undefined,
+      'migration ledger not touched',
+    );
+  } finally {
+    db.close();
+  }
+});
+
 test('schema-owned entity table validation rejects incompatible declared physical shape', async () => {
   const db = new DatabaseSync(':memory:');
   try {

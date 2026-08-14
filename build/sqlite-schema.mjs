@@ -917,7 +917,12 @@ export function defineSqliteSchema(spec                   )                     
     virtualTableDdl: Object.freeze(virtualTableDdl),
     triggerDdl: Object.freeze(triggerDdl),
     prepare(db, options) {
-      if (!options?.skipMigrations) assertLegacyLedgerSafe(migrations, validated.name);
+      // The legacy-ledger guard is a declaration-safety check, not a migration
+      // runner: it must refuse colliding namespaces even when the caller defers
+      // migration execution (skipMigrations) — the app boot path prepares with
+      // skipMigrations and then runs the lane directly via runMigrations, so a
+      // skip here would let migrations execute unguarded. Always fail closed.
+      assertLegacyLedgerSafe(migrations, validated.name);
       if (tableDdl.length > 0) {
         begin(db);
         try {
