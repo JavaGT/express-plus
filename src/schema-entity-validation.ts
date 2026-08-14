@@ -1,7 +1,12 @@
 import { structCellColumn } from './field-strategy.ts';
+import { censusKey, type CensusEntry } from './schema-census.ts';
 
 function quoteIdent(name: string): string {
   return `"${name.replace(/"/g, '""')}"`;
+}
+
+function folded(name: string): string {
+  return name.toLowerCase();
 }
 
 function defaultValue(column: ColumnDeclaration): string | null {
@@ -151,18 +156,42 @@ interface TableDeclaration {
   primaryKey?: string[];
   foreignKeys?: ForeignKeyDeclaration[];
   indexes?: IndexDeclaration[];
+  triggers?: { name: string }[];
 }
 
-export function validateSchemaOwnedEntityTable(db: DbLike, entity: EntityRecord, declaration: TableDeclaration): void {
+// S2 consideration #9 trigger ownership: a trigger on the entity's main table
+// is permitted when it is declared by the owning schema's table declaration
+// AND (when a census is supplied) the S2/A2 census attributes it to that
+// schema or to an owning plugin. Without a census the declaring table's
+// trigger list is the ownership signal — the census would otherwise claim the
+// same trigger to the declaring schema, so the two views agree.
+export interface SchemaOwnedEntityOptions {
+  readonly schemaName?: string;
+  readonly census?: ReadonlyMap<string, CensusEntry>;
+}
+
+export function validateSchemaOwnedEntityTable(db: DbLike, entity: EntityRecord, declaration: TableDeclaration, options?: SchemaOwnedEntityOptions): void {
   const master = db.prepare("SELECT type, sql FROM sqlite_schema WHERE lower(name) = lower(?)").all(declaration.name);
   if (master.length !== 1 || master[0].type !== 'table') fail(entity, 'must exist as a real table');
   if (/^CREATE\s+VIRTUAL\s+TABLE/i.test((master[0].sql ?? '') as string)) fail(entity, 'must not be virtual');
   if (hasUnsupportedTableClause((master[0].sql ?? '') as string)) fail(entity, 'must not contain unsupported constraints or table options');
   const temp = db.prepare("SELECT type FROM sqlite_temp_schema WHERE lower(name) = lower(?)").all(declaration.name);
   if (temp.length > 0) fail(entity, 'must not have a TEMP shadow');
+  const declaredTriggers = new Set((declaration.triggers ?? []).map((trigger) => folded(trigger.name)));
   for (const schema of ['sqlite_schema', 'sqlite_temp_schema']) {
     const triggers = db.prepare(`SELECT name FROM ${schema} WHERE type = 'trigger' AND lower(tbl_name) = lower(?)`).all(declaration.name);
-    if (triggers.length > 0) fail(entity, `must not have trigger "${triggers[0].name}"`);
+    for (const trigger of triggers) {
+      const name = String(trigger.name);
+      if (!declaredTriggers.has(folded(name))) fail(entity, `has undeclared trigger "${name}"`);
+      if (options?.census) {
+        const owner = options.census.get(censusKey('trigger', name));
+        const ownedBySchema = owner?.kind === 'schema' && folded(owner.owner) === folded(options.schemaName ?? '');
+        const ownedByPlugin = owner?.kind === 'plugin';
+        if (!ownedBySchema && !ownedByPlugin) {
+          fail(entity, `has trigger "${name}" not owned by schema "${options.schemaName ?? '(none)'}" or a plugin`);
+        }
+      }
+    }
   }
 
   const actual = db.prepare(`PRAGMA table_xinfo(${quoteIdent(declaration.name)})`).all();

@@ -1,7 +1,12 @@
 import { structCellColumn } from './field-strategy.mjs';
+import { censusKey,                  } from './schema-census.mjs';
 
 function quoteIdent(name        )         {
   return `"${name.replace(/"/g, '""')}"`;
+}
+
+function folded(name        )         {
+  return name.toLowerCase();
 }
 
 function defaultValue(column                   )                {
@@ -10,21 +15,21 @@ function defaultValue(column                   )                {
   return typeof column.default === 'number' ? String(column.default) : `'${column.default.replace(/'/g, "''")}'`;
 }
 
-                           
-                
-                
-                
-                                  
-                     
-                     
- 
 
-                        
-               
-                                           
- 
 
-                                                         
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function entityColumns(entity              )                              {
   const columns = new Map                                                   ([['id', { type: 'TEXT', notNull: false, primaryKey: true }]]);
@@ -49,13 +54,13 @@ function fail(entity              , message        )        {
   throw new Error(`schema-owned entity table "${entity.name}" ${message}`);
 }
 
-                           
-                
-                    
-                              
-                   
-                   
- 
+
+
+
+
+
+
+
 
 function canonicalForeignKey(foreignKey                 )         {
   return JSON.stringify([
@@ -115,54 +120,78 @@ function hasUnsupportedTableClause(sql        )          {
   return ['ASC', 'CHECK', 'COLLATE', 'CONFLICT', 'DEFERRABLE', 'DESC', 'MATCH', 'STRICT', 'WITHOUT'].some((keyword) => hasSqlKeyword(sql, keyword));
 }
 
-                     
-                                                            
- 
 
-                  
-                                  
- 
 
-                             
-               
-                
-                    
-                       
-                             
-                            
- 
 
-                                 
-                                                   
-                    
-                    
-                    
- 
 
-                            
-               
-                   
-                    
- 
 
-                            
-               
-                               
-                        
-                                        
-                               
- 
 
-export function validateSchemaOwnedEntityTable(db        , entity              , declaration                  )       {
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// S2 consideration #9 trigger ownership: a trigger on the entity's main table
+// is permitted when it is declared by the owning schema's table declaration
+// AND (when a census is supplied) the S2/A2 census attributes it to that
+// schema or to an owning plugin. Without a census the declaring table's
+// trigger list is the ownership signal — the census would otherwise claim the
+// same trigger to the declaring schema, so the two views agree.
+
+
+
+
+
+export function validateSchemaOwnedEntityTable(db        , entity              , declaration                  , options                           )       {
   const master = db.prepare("SELECT type, sql FROM sqlite_schema WHERE lower(name) = lower(?)").all(declaration.name);
   if (master.length !== 1 || master[0].type !== 'table') fail(entity, 'must exist as a real table');
   if (/^CREATE\s+VIRTUAL\s+TABLE/i.test((master[0].sql ?? '')          )) fail(entity, 'must not be virtual');
   if (hasUnsupportedTableClause((master[0].sql ?? '')          )) fail(entity, 'must not contain unsupported constraints or table options');
   const temp = db.prepare("SELECT type FROM sqlite_temp_schema WHERE lower(name) = lower(?)").all(declaration.name);
   if (temp.length > 0) fail(entity, 'must not have a TEMP shadow');
+  const declaredTriggers = new Set((declaration.triggers ?? []).map((trigger) => folded(trigger.name)));
   for (const schema of ['sqlite_schema', 'sqlite_temp_schema']) {
     const triggers = db.prepare(`SELECT name FROM ${schema} WHERE type = 'trigger' AND lower(tbl_name) = lower(?)`).all(declaration.name);
-    if (triggers.length > 0) fail(entity, `must not have trigger "${triggers[0].name}"`);
+    for (const trigger of triggers) {
+      const name = String(trigger.name);
+      if (!declaredTriggers.has(folded(name))) fail(entity, `has undeclared trigger "${name}"`);
+      if (options?.census) {
+        const owner = options.census.get(censusKey('trigger', name));
+        const ownedBySchema = owner?.kind === 'schema' && folded(owner.owner) === folded(options.schemaName ?? '');
+        const ownedByPlugin = owner?.kind === 'plugin';
+        if (!ownedBySchema && !ownedByPlugin) {
+          fail(entity, `has trigger "${name}" not owned by schema "${options.schemaName ?? '(none)'}" or a plugin`);
+        }
+      }
+    }
   }
 
   const actual = db.prepare(`PRAGMA table_xinfo(${quoteIdent(declaration.name)})`).all();
