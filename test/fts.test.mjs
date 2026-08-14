@@ -13,10 +13,11 @@ import { text, ref, scope, grant, deny, read, write, subscribe, everyone, anyOf 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
+import { randomUUID } from 'node:crypto';
 
-import {
+import workbench, {
   entity, NonCompilableError, bindReadScope,
-  generateDDL,
+  generateDDL, generateFrameworkDDL,
 } from '../build/internal.mjs';
 import { principal } from '../build/principal.mjs';
 import { FTS_STRATEGY } from '../build/fts-strategy.mjs';
@@ -342,7 +343,7 @@ test('.matches() integrated in scope with anyOf and other predicates', () => {
 
 // ---- projectionApply unit tests ----
 
-test('FTS projectionApply handles created event', () => {
+test('FTS projectionApply handles created event (syncs side table, does not claim)', () => {
   const db = new DatabaseSync(':memory:');
   db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS Doc_title_fts USING fts5(title, Doc_id UNINDEXED)`);
 
@@ -359,14 +360,14 @@ test('FTS projectionApply handles created event', () => {
     event,
     db,
   });
-  assert.equal(applied, true);
+  assert.equal(applied, false, 'created must not claim the event so the main row materializes');
 
   const ftsRow = db.prepare('SELECT * FROM Doc_title_fts WHERE Doc_id = :id').get({ id: 'abc' });
   assert.ok(ftsRow);
   assert.equal(ftsRow.title, 'Synced Title');
 });
 
-test('FTS projectionApply handles updated event', () => {
+test('FTS projectionApply handles updated event (syncs side table, does not claim)', () => {
   const db = new DatabaseSync(':memory:');
   db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS Doc_title_fts USING fts5(title, Doc_id UNINDEXED)`);
   db.prepare(`INSERT INTO Doc_title_fts (title, Doc_id) VALUES (:title, :id)`)
@@ -385,7 +386,7 @@ test('FTS projectionApply handles updated event', () => {
     event,
     db,
   });
-  assert.equal(applied, true);
+  assert.equal(applied, false, 'updated must not claim the event so the main row updates');
 
   const ftsRow = db.prepare('SELECT * FROM Doc_title_fts WHERE Doc_id = :id').get({ id: 'xyz' });
   assert.ok(ftsRow);
@@ -515,4 +516,99 @@ test('FTS fields are ignored by scope SQL when .matches() not used', () => {
   const s = Doc.readScope.sql.replace(/\s+/g, ' ').trim();
   assert.equal(s, '1 = 1');
   assert.deepEqual(Doc.readScope.params, {});
+});
+
+// ---- main-row materialization through full dispatch (issue #86) ----
+//
+// FTS projectionApply must sync the side table AND return false so the CRUD
+// projection still materializes the main entity row. Previously it returned
+// true for created/updated, short-circuiting the main row and failing the
+// post-projection admission, which denied/rolled back the dispatch.
+
+function ftsDispatchDb() {
+  const db = new DatabaseSync(':memory:');
+  for (const sql of generateFrameworkDDL()) db.exec(sql);
+
+  const Note = entity('Note', {
+    body: text({ indexed: 'fts' }),
+    owner: ref('User', { role: 'owner', readonly: true }),
+    grant: () => [
+      scope(({ is }) => is.owner()).can(async ({ is }) =>
+        (await is.owner()) ? grant(read, write) : grant(read)),
+    ],
+  });
+
+  for (const sql of Note.generateDDL()) db.exec(sql);
+  const app = workbench({ db, entities: [Note] });
+  const Note_b = app.entity(Note);
+  return { db, Note_b };
+}
+
+test('dispatch: create FTS-indexed entity materializes main row and commits', async () => {
+  const { db, Note_b } = ftsDispatchDb();
+
+  const { createServer, durableMutationVariant } = await import('../build/pipeline.mjs');
+  const server = createServer({
+    handlers: {
+      'Note.create': ({ payload, principal }) => {
+        const data = { ...payload };
+        data.id = randomUUID();
+        data.owner = principal.id;
+        return [{ type: 'Note.created', scope: 'Note:new', data }];
+      },
+    },
+    authorize: () => true,
+    db,
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Note_b.projection],
+    }),
+  });
+
+  const result = await server.dispatch({
+    actionId: 'fts-create-1',
+    type: 'Note.create',
+    payload: { body: 'searchable body' },
+    principal: { id: 'u1' },
+  });
+
+  assert.equal(result.ok, true, 'dispatch must commit');
+  const row = db.prepare('SELECT * FROM Note WHERE body = ?').get('searchable body');
+  assert.ok(row, 'main entity row must be materialized by the projection');
+  assert.equal(row.owner, 'u1');
+  const ftsRow = db.prepare('SELECT * FROM Note_body_fts WHERE Note_id = ?').get(row.id);
+  assert.ok(ftsRow, 'FTS side-table row must be synced');
+  assert.equal(ftsRow.body, 'searchable body');
+});
+
+test('dispatch: update FTS-indexed entity materializes main row update and commits', async () => {
+  const { db, Note_b } = ftsDispatchDb();
+  const row = Note_b.create({ body: 'original' });
+
+  const { createServer, durableMutationVariant } = await import('../build/pipeline.mjs');
+  const server = createServer({
+    handlers: {
+      'Note.update': ({ payload }) => [
+        { type: 'Note.updated', scope: `Note:${row.id}`, data: { id: row.id, ...payload } },
+      ],
+    },
+    authorize: () => true,
+    db,
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Note_b.projection],
+    }),
+  });
+
+  const result = await server.dispatch({
+    actionId: 'fts-update-1',
+    type: 'Note.update',
+    payload: { body: 'updated body' },
+    principal: { id: 'u1' },
+  });
+
+  assert.equal(result.ok, true, 'dispatch must commit');
+  const updated = Note_b.findById(row.id);
+  assert.equal(updated.body, 'updated body', 'main row must be updated by the projection');
+  const ftsRow = db.prepare('SELECT * FROM Note_body_fts WHERE Note_id = ?').get(row.id);
+  assert.ok(ftsRow, 'FTS side-table row must be re-indexed');
+  assert.equal(ftsRow.body, 'updated body');
 });

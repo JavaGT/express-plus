@@ -46,7 +46,6 @@ function ftsProjectionApply({ entityName, fieldEntries, handle, event, db }: Fts
   if (id === undefined || id === null) return false;
 
   if (handle.kind === eventHandle.EventKind.created) {
-    let applied = false;
     for (const [fieldName] of fieldEntries) {
       const value = event.data?.[fieldName];
       if (value === undefined) continue;
@@ -54,13 +53,13 @@ function ftsProjectionApply({ entityName, fieldEntries, handle, event, db }: Fts
       const ownerCol = ftsOwnerCol(entityName);
       db.prepare(`INSERT INTO ${table} (${fieldName}, ${ownerCol}) VALUES (:field_val, :entity_id)`)
         .run({ field_val: value, entity_id: String(id) });
-      applied = true;
     }
-    return applied;
+    // FTS only syncs a side table — the main entity row is still materialized
+    // by the CRUD projection, so don't claim the lifecycle event.
+    return false;
   }
 
   if (handle.kind === eventHandle.EventKind.updated) {
-    let applied = false;
     for (const [fieldName] of fieldEntries) {
       if (!Object.prototype.hasOwnProperty.call(event.data ?? {}, fieldName)) continue;
       const table = ftsTableName(entityName, fieldName);
@@ -73,9 +72,9 @@ function ftsProjectionApply({ entityName, fieldEntries, handle, event, db }: Fts
         db.prepare(`INSERT INTO ${table} (${fieldName}, ${ownerCol}) VALUES (:field_val, :entity_id)`)
           .run({ field_val: value, entity_id: String(id) });
       }
-      applied = true;
     }
-    return applied;
+    // Same as created: side-table sync only, main-row projection must proceed.
+    return false;
   }
 
   if (handle.kind === eventHandle.EventKind.removed) {
