@@ -1,16 +1,108 @@
 // Lightweight package-table census for security-sensitive code that cannot
 // import the auth compile graph without introducing an initialization cycle.
+// This module is ALSO the reserved-framework-namespace registry: it derives the
+// framework-owned object names (tables, indexes, triggers, virtual tables) so
+// schema/entity/plugin declarations can be refused pre-touch when they claim a
+// name the framework reserves (S2/A2, consideration #5).
 import { generateFrameworkDDL } from './ddl.ts';
 import { MIGRATION_DDL } from './migrations.ts';
 
 const AUTH_TABLE_NAMES = ['User', 'Session', 'Inbox', 'Credential', 'Invitation', 'ApiKey', 'TwoFactor'];
 const CREATE_TABLE_NAME = /CREATE\s+(?:VIRTUAL\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?("(?:""|[^"])+"|`(?:``|[^`])+`|\[(?:]]|[^\]])+]|[A-Za-z_][A-Za-z0-9_]*)/iy;
 
+// The physical object kinds a CREATE statement can declare. 'virtual-table' is
+// a virtual table (a table in sqlite_master, but declared via CREATE VIRTUAL
+// TABLE); it shares SQLite's relation namespace with tables and indexes.
+export type ObjectKind = 'table' | 'index' | 'trigger' | 'virtual-table';
+
+// A derived set of owned object names, grouped by kind.
+export interface OwnedObjectSet {
+  tables: string[];
+  indexes: string[];
+  triggers: string[];
+  virtualTables: string[];
+}
+
+// CREATE [UNIQUE|VIRTUAL|TEMP] INDEX|TABLE|TRIGGER [IF NOT EXISTS] <name>.
+const CREATE_OBJECT_NAME = /CREATE\s+(?:(UNIQUE|VIRTUAL|TEMP)\s+)?(INDEX|TABLE|TRIGGER)\s+(?:IF\s+NOT\s+EXISTS\s+)?("(?:""|[^"])+"|`(?:``|[^`])+`|\[(?:]]|[^\]])+]|[A-Za-z_][A-Za-z0-9_]*)/iy;
+
 function unquoteIdentifier(name: string): string {
   if (name.startsWith('"')) return name.slice(1, -1).replaceAll('""', '"');
   if (name.startsWith('`')) return name.slice(1, -1).replaceAll('``', '`');
   if (name.startsWith('[')) return name.slice(1, -1).replaceAll(']]', ']');
   return name;
+}
+
+function objectKindLabel(kind: keyof OwnedObjectSet): string {
+  if (kind === 'virtualTables') return 'virtual table';
+  return kind.slice(0, -1);
+}
+
+// Collect object names from DDL entries for the requested kinds, skipping SQL
+// comments and quoted regions (the same scanner contract as
+// collectTableNamesFromDdl, generalized to indexes/triggers/virtual tables).
+// Within one call, a name repeated for the same kind is a hard error (a
+// participant cannot declare one object twice).
+export function collectObjectNamesFromDdl(
+  entries: readonly DdlEntry[],
+  kinds: { tables?: boolean; indexes?: boolean; triggers?: boolean; virtualTables?: boolean } = {},
+): OwnedObjectSet {
+  const want = {
+    tables: kinds.tables ?? false,
+    indexes: kinds.indexes ?? false,
+    triggers: kinds.triggers ?? false,
+    virtualTables: kinds.virtualTables ?? false,
+  };
+  const out: OwnedObjectSet = { tables: [], indexes: [], triggers: [], virtualTables: [] };
+  const seen = new Map<string, string>();
+  const push = (kind: keyof OwnedObjectSet, name: string, source: string): void => {
+    const key = `${kind}\u0000${name.toLowerCase()}`;
+    const prior = seen.get(key);
+    if (prior !== undefined) {
+      throw new Error(`duplicate ${objectKindLabel(kind)} declaration: ${name} (from ${prior} and ${source})`);
+    }
+    seen.set(key, source);
+    out[kind].push(name);
+  };
+  for (const { source, sql } of entries) {
+    const uncommented = stripSqlComments(sql);
+    for (let index = 0; index < uncommented.length;) {
+      const quote = uncommented[index];
+      if (quote === "'" || quote === '"' || quote === '`' || quote === '[') {
+        const closing = quote === '[' ? ']' : quote;
+        index += 1;
+        while (index < uncommented.length) {
+          if (uncommented[index] === closing) {
+            if (uncommented[index + 1] === closing) index += 2;
+            else { index += 1; break; }
+          } else index += 1;
+        }
+        continue;
+      }
+      CREATE_OBJECT_NAME.lastIndex = index;
+      const match = CREATE_OBJECT_NAME.exec(uncommented);
+      if (!match || (index > 0 && /[A-Za-z0-9_]/.test(uncommented[index - 1]))) {
+        index += 1;
+        continue;
+      }
+      const modifier = match[1];
+      const keyword = match[2];
+      const name = unquoteIdentifier(match[3]);
+      if (keyword === 'TABLE') {
+        if (modifier === 'VIRTUAL') {
+          if (want.virtualTables) push('virtualTables', name, source);
+        } else if (want.tables) {
+          push('tables', name, source);
+        }
+      } else if (keyword === 'INDEX') {
+        if (want.indexes) push('indexes', name, source);
+      } else if (want.triggers) {
+        push('triggers', name, source);
+      }
+      index = CREATE_OBJECT_NAME.lastIndex;
+    }
+  }
+  return out;
 }
 
 export function stripSqlComments(sql: string): string {
@@ -101,3 +193,28 @@ export const frameworkTableNamesWithoutAuthCompile = Object.freeze([
     ...AUTH_TABLE_NAMES,
   ]),
 ]) as readonly string[];
+
+// The reserved-framework-namespace registry (S2/A2, consideration #5): every
+// object name the package may physically create — framework DDL tables and
+// indexes, the migration table, and the auth entity main tables. Folded
+// lower-case, like all SQLite identifier comparisons. The FULL registry
+// (including the auth entities' generated indexes/triggers, which require the
+// auth compile graph) is derived in schema-table-census.ts.
+export const frameworkReservedNamesWithoutAuthCompile: ReadonlySet<string> = Object.freeze(
+  (() => {
+    const all = collectObjectNamesFromDdl(
+      [
+        ...generateFrameworkDDL().map((sql: string) => ({ source: 'framework DDL', sql })),
+        { source: 'migration DDL', sql: MIGRATION_DDL },
+      ],
+      { tables: true, indexes: true, triggers: true, virtualTables: true },
+    );
+    return new Set([
+      ...all.tables,
+      ...all.indexes,
+      ...all.triggers,
+      ...all.virtualTables,
+      ...AUTH_TABLE_NAMES,
+    ].map((name) => name.toLowerCase()));
+  })(),
+);
