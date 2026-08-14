@@ -15,8 +15,15 @@ import workbench, {
   annotatedText, annotation, annotationAction, entity, everyone, executeDDL,
   executeFrameworkDDL, grant, number as numberField, read, ref, scope, write,
 } from '../build/internal.mjs';
+import { defineSqliteSchema } from '../build/server.mjs';
 import { annotatedTextAnnotationAction } from '../build/annotated-text-public.mjs';
 import { withAuthoringBinding } from './annotated-text-authoring-fixture.mjs';
+
+const externalReferences = defineSqliteSchema({
+  name: 'annotated-text-declaration-actions',
+  tables: [],
+  externalTables: [{ name: 'Project', columns: ['id'] }],
+});
 
 function timingAnnotation({ change, authorize = null, input = {} } = {}) {
   return annotation('timing', {
@@ -68,7 +75,7 @@ async function appFor(declaration, { ranges } = {}) {
   executeFrameworkDDL(db);
   db.exec("CREATE TABLE Project (id TEXT PRIMARY KEY); CREATE TABLE User (id TEXT PRIMARY KEY); INSERT INTO Project VALUES ('p1'); INSERT INTO User VALUES ('u1'), ('u2')");
   executeDDL(declaration, db);
-  const app = workbench({ db, entities: [declaration] });
+  const app = workbench({ db, schema: externalReferences, entities: [declaration] });
   app.start();
   await app.ready;
   const created = await app.dispatch({ actionId: 'create', type: 'ActionDoc.create', scope: 'Project:p1', principal: { id: 'u1' }, payload: { id: 'd1', project: 'p1', owner: 'u1', body: { version: 1, blocks: [{ text: 'hello world' }], ...(ranges ? { ranges } : {}) } } });

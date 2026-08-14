@@ -6,6 +6,7 @@ import workbench, {
   annotatedText, annotation, entity, everyone, executeDDL, executeFrameworkDDL, grant, measurement,
   read, ref, scope, write, registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension,
 } from '../build/internal.mjs';
+import { defineSqliteSchema } from '../build/server.mjs';
 import { materializeText, restoreTextFamily } from '../build/annotated-text-continuous.mjs';
 import { annotatedTextCreateAction } from '../build/annotated-text-public.mjs';
 import { frozenJsonSnapshot } from '../build/frozen-json.mjs';
@@ -20,6 +21,12 @@ registerAnnotatedTextStructuralExtension('sourceInit', Object.freeze({
   },
   combine({ left, right }) { return Object.freeze({ version: 1, payload: Object.freeze({ text: `${left?.payload.text ?? ''}${right?.payload.text ?? ''}` }) }); },
 }));
+
+const externalReferences = defineSqliteSchema({
+  name: 'annotated-text-initialization',
+  tables: [],
+  externalTables: [{ name: 'Project', columns: ['id'] }],
+});
 
 function doc(fieldAccess = () => grant(read, write)) {
   return entity('InitDoc', {
@@ -40,7 +47,7 @@ async function appFor(fieldAccess) {
   executeFrameworkDDL(db);
   db.exec("CREATE TABLE Project (id TEXT PRIMARY KEY); CREATE TABLE User (id TEXT PRIMARY KEY); INSERT INTO Project VALUES ('p1'); INSERT INTO User VALUES ('u1'); INSERT INTO User VALUES ('u2')");
   executeDDL(Document, db);
-  const app = workbench({ db, entities: [Document] });
+  const app = workbench({ db, schema: externalReferences, entities: [Document] });
   app.start(); await app.ready;
   return { app, db, Document };
 }

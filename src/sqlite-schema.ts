@@ -836,6 +836,8 @@ export interface SqliteSchemaDescription {
   name: string;
   tableNames: readonly string[];
   tables: readonly SqliteTableSpec[];
+  /** Tables supplied outside this schema's lifecycle, retained for startup census validation. */
+  externalTables: readonly { name: string; columns: readonly string[] }[];
   virtualTables: readonly SqliteVirtualTableSpec[];
   triggers: readonly SqliteTriggerSpec[];
   migrations: readonly SqliteMigrationSpec[];
@@ -872,6 +874,10 @@ export function defineSqliteSchema(spec: SqliteSchemaInput): SqliteSchemaDescrip
     }))),
     ...(table.primaryKey === undefined ? {} : { primaryKey: Object.freeze([...table.primaryKey]) }),
   })));
+  const externalTables = Object.freeze((validated.externalTables ?? []).map((table) => Object.freeze({
+    name: table.name,
+    columns: Object.freeze([...table.columns]),
+  })));
   const virtualTables = Object.freeze((validated.virtualTables ?? []).map((virtualTable) => Object.freeze({
     ...virtualTable,
     options: Object.freeze([...virtualTable.options]),
@@ -895,6 +901,7 @@ export function defineSqliteSchema(spec: SqliteSchemaInput): SqliteSchemaDescrip
     name: validated.name,
     tableNames: Object.freeze(tableNames),
     tables,
+    externalTables,
     virtualTables,
     triggers,
     migrations: Object.freeze(migrations),

@@ -13,11 +13,18 @@ import workbench, {
   annotatedText, annotation, entity, everyone, executeDDL, executeFrameworkDDL,
   grant, native, parseEventType, read, ref, scope, text, write,
 } from '../build/internal.mjs';
+import { defineSqliteSchema } from '../build/server.mjs';
 import { rowToEvent } from '../build/committed-log.mjs';
 import { txn } from '../build/driver.mjs';
 import { materializeText, restoreTextFamily, projectEndpointToOffset, textFamilyCheckpoint } from '../build/annotated-text-continuous.mjs';
 import { projectAnnotatedTextSnapshot } from '../build/annotated-text-snapshot.mjs';
 import { withAuthoringBinding } from './annotated-text-authoring-fixture.mjs';
+
+const externalReferences = defineSqliteSchema({
+  name: 'annotated-text-operated-replay',
+  tables: [],
+  externalTables: [{ name: 'Project', columns: ['id'] }],
+});
 
 function declaredEntity() {
   return entity('ReplayDoc', {
@@ -111,7 +118,7 @@ async function seedV13LiveLog(t) {
   const live = new DatabaseSync(':memory:');
   installSchema(live);
   const ReplayDoc = declaredEntity();
-  const app = workbench({ db: live, entities: [ReplayDoc] });
+  const app = workbench({ db: live, schema: externalReferences, entities: [ReplayDoc] });
   app.start();
   await app.ready;
   t.after(async () => { await app.shutdown().catch(() => {}); live.close(); });
@@ -260,7 +267,7 @@ test('one-cardinality exclusive trim survives replay through the real projector 
   const live = new DatabaseSync(':memory:');
   installSchema(live);
   const ReplayDoc = declaredEntity();
-  const app = workbench({ db: live, entities: [ReplayDoc] });
+  const app = workbench({ db: live, schema: externalReferences, entities: [ReplayDoc] });
   app.start();
   await app.ready;
   t.after(async () => { await app.shutdown().catch(() => {}); live.close(); });

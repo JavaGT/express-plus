@@ -297,6 +297,7 @@ test('foreign keys may target explicitly-declared external tables without claimi
   });
 
   assert.deepEqual(schema.tableNames, ['Comment']);
+  assert.deepEqual(schema.externalTables, [{ name: 'Project', columns: ['id'] }]);
   assert.doesNotMatch(schema.ddl.join('\n'), /CREATE TABLE IF NOT EXISTS "Project"/);
   assert.match(schema.ddl.join('\n'), /REFERENCES "Project" \("id"\)/);
 });

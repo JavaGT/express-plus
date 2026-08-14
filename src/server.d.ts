@@ -481,6 +481,8 @@ export interface SqliteSchemaResult {
   readonly tableNames: readonly string[];
   /** Immutable declarations used to verify schema-owned entity tables at startup. */
   readonly tables: readonly Readonly<TableDeclaration>[];
+  /** Tables supplied outside this schema's lifecycle, used for startup census validation. */
+  readonly externalTables: readonly { readonly name: string; readonly columns: readonly string[] }[];
   readonly virtualTables: readonly Readonly<VirtualTableDeclaration>[];
   readonly triggers: readonly Readonly<TriggerDeclaration>[];
   readonly migrations: readonly NamespacedMigration[];
