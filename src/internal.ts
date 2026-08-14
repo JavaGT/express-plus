@@ -55,3 +55,19 @@ export { generateTypes } from './generate-types.ts';
 export { parsePrincipalSnapshotScope } from './principal-snapshot-scope.ts';
 export { createPrincipalSnapshotTransaction } from './principal-snapshot-transaction.ts';
 export { WORKBENCH_MIGRATIONS, ensureWorkbenchMigrationTable, appliedWorkbenchVersion, runWorkbenchMigrations } from './workbench-migrations.ts';
+export {
+  createBackupManager,
+  BACKUP_FORMAT_VERSION,
+  DEFAULT_RETENTION,
+  type BackupManager,
+  type BackupManagerOptions,
+  type BackupSource,
+  type BackupBlobSource,
+  type BackupRetentionConfig,
+  type BackupManifest,
+  type BackupMigrationLedgerState,
+  type BackupDiagnostic,
+  type BackupResult,
+  type BackupListing,
+  type TrimResult,
+} from './backup.ts';

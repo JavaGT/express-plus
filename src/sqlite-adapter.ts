@@ -14,7 +14,7 @@
 // and a teardown that removes ONLY the db file, -wal/-shm, and lock sidecar —
 // backups/, quarantine/, and recycle/ are owned by S1/A3/A4/A6 and survive.
 
-import { DatabaseSync } from 'node:sqlite';
+import { backup, DatabaseSync } from 'node:sqlite';
 import { chmodSync, mkdirSync, realpathSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import {
@@ -57,6 +57,15 @@ const TEARDOWN_FILENAMES = Object.freeze([
   'lock.sqlite',
 ]);
 
+// Options for the online-backup hook (S1/A3). Mirrors node:sqlite's BackupOptions:
+// `source`/`target` name ATTACHed databases; `rate` is pages per step.
+export type SqliteBackupOptions = {
+  readonly source?: string;
+  readonly target?: string;
+  readonly rate?: number;
+  readonly progress?: (info: { totalPages: number; remainingPages: number }) => void;
+};
+
 export interface OpenedSqliteDatabase extends OpenedDatabase {
   readonly mode: 'file' | 'memory';
   // The owned directory root (file mode) or null (memory). Exposed because the
@@ -67,6 +76,12 @@ export interface OpenedSqliteDatabase extends OpenedDatabase {
   // (db file, -wal/-shm, lock sidecar, blobs/, staging/, backups/, quarantine/,
   // recycle/). Always false for the memory adapter.
   isManagedPath(p: string): boolean;
+  // WAL-safe online snapshot (S1/A3) via node:sqlite's backup() API — copies
+  // the main database PLUS WAL content into a NEW file at `destPath`, never a
+  // plain main-file copy. Resolves with the number of pages transferred and
+  // throws on failure (the backup manager quarantines). Works for file AND
+  // memory databases (backing up :memory: to a file is a valid use).
+  backupTo(destPath: string, options?: SqliteBackupOptions): Promise<number>;
   // Remove the db file, -wal/-shm, and lock sidecar. backups/, quarantine/,
   // recycle/ (S1/A3/A4/A6) and blobs//staging/ are left untouched. Closes the
   // adapter first if it is still open.
@@ -254,6 +269,15 @@ function makeOpenedSqliteDatabase(
     if (mode === 'file') db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
   };
 
+  // Online WAL-safe snapshot (S1/A3) — additive wiring only. The S1/A3 backup
+  // manager runs this inside its single write-coordinator turn (the capture
+  // barrier); the hook itself is a plain node:sqlite backup() call, never a
+  // raw main-file copy, and works for file and memory sources alike. An
+  // explicit `options: undefined` would be refused by node:sqlite, so the
+  // third argument is passed only when the caller supplied options.
+  const backupTo = (destPath: string, options?: SqliteBackupOptions): Promise<number> =>
+    options === undefined ? backup(db, destPath) : backup(db, destPath, options);
+
   // Checkpoint-then-close: clean shutdown truncates the WAL into the main db
   // file before the handle (and then the ownership lock) goes away. Idempotent.
   // Failures are NOT swallowed: an explicit close() propagates a failed
@@ -310,6 +334,7 @@ function makeOpenedSqliteDatabase(
     mode,
     root,
     isManagedPath: (p) => isUnderRoot(realRoot, p),
+    backupTo,
     close,
     checkpoint,
     integrityCheck,

@@ -14,7 +14,7 @@
 // and a teardown that removes ONLY the db file, -wal/-shm, and lock sidecar —
 // backups/, quarantine/, and recycle/ are owned by S1/A3/A4/A6 and survive.
 
-import { DatabaseSync } from 'node:sqlite';
+import { backup, DatabaseSync } from 'node:sqlite';
 import { chmodSync, mkdirSync, realpathSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import {
@@ -57,6 +57,15 @@ const TEARDOWN_FILENAMES = Object.freeze([
   'lock.sqlite',
 ]);
 
+// Options for the online-backup hook (S1/A3). Mirrors node:sqlite's BackupOptions:
+// `source`/`target` name ATTACHed databases; `rate` is pages per step.
+                                   
+                           
+                           
+                         
+                                                                                     
+  
+
                                                               
                                    
                                                                                
@@ -67,6 +76,12 @@ const TEARDOWN_FILENAMES = Object.freeze([
                                                                                 
                                                     
                                     
+                                                                             
+                                                                              
+                                                                            
+                                                                           
+                                                                     
+                                                                             
                                                                             
                                                                               
                                        
@@ -254,6 +269,15 @@ function makeOpenedSqliteDatabase(
     if (mode === 'file') db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
   };
 
+  // Online WAL-safe snapshot (S1/A3) — additive wiring only. The S1/A3 backup
+  // manager runs this inside its single write-coordinator turn (the capture
+  // barrier); the hook itself is a plain node:sqlite backup() call, never a
+  // raw main-file copy, and works for file and memory sources alike. An
+  // explicit `options: undefined` would be refused by node:sqlite, so the
+  // third argument is passed only when the caller supplied options.
+  const backupTo = (destPath        , options                      )                  =>
+    options === undefined ? backup(db, destPath) : backup(db, destPath, options);
+
   // Checkpoint-then-close: clean shutdown truncates the WAL into the main db
   // file before the handle (and then the ownership lock) goes away. Idempotent.
   // Failures are NOT swallowed: an explicit close() propagates a failed
@@ -310,6 +334,7 @@ function makeOpenedSqliteDatabase(
     mode,
     root,
     isManagedPath: (p) => isUnderRoot(realRoot, p),
+    backupTo,
     close,
     checkpoint,
     integrityCheck,

@@ -55,3 +55,19 @@ export { generateTypes } from './generate-types.mjs';
 export { parsePrincipalSnapshotScope } from './principal-snapshot-scope.mjs';
 export { createPrincipalSnapshotTransaction } from './principal-snapshot-transaction.mjs';
 export { WORKBENCH_MIGRATIONS, ensureWorkbenchMigrationTable, appliedWorkbenchVersion, runWorkbenchMigrations } from './workbench-migrations.mjs';
+export {
+  createBackupManager,
+  BACKUP_FORMAT_VERSION,
+  DEFAULT_RETENTION,
+                     
+                            
+                    
+                        
+                             
+                      
+                                  
+                        
+                    
+                     
+                  
+} from './backup.mjs';

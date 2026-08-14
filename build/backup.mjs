@@ -1,0 +1,672 @@
+// backup.ts — S1/A3 backup: SQLite snapshot + manifest + retention (epic
+// scope#23, library/API + tests only — no scheduler, no timer, no cron).
+//
+// CONTRACT: `createBackupManager` produces a manager whose `backup()` performs
+// ONE backup into the adapter-owned layout `backups/<timestamp>-<id>/` with
+// `snapshot.sqlite`, `manifest.json`, and `blobs/`. The snapshot is taken via
+// node:sqlite's online `backup(sourceDb, destPath)` API (WAL-safe); a plain
+// copy of the main database file is NEVER an acceptable snapshot and a
+// non-WAL source is refused fail-closed. A single consistency boundary runs
+// through the platform write coordinator: inside ONE coordinated turn we
+// capture the committed DB state (the snapshot) and the referenced blob set
+// (the pluggable census seam); blob BYTES are copied outside the turn (they
+// are immutable/content-addressed, so the boundary is the capture, never the
+// byte copy).
+//
+// The manifest is written LAST, after the snapshot and every blob byte: a
+// directory with a `complete` manifest is complete by construction, and
+// anything else (a crash mid-creation/manifest/byte-copy, a missing blob, a
+// failed integrity check) becomes a PARTIAL that is immediately quarantined —
+// never a false-complete backup. `reconcile()` quarantines crash leftovers on
+// the next run. Retention trims to N daily + M recent hourly (defaults 7/3,
+// configurable) and fails closed: a trim that cannot remove every selected
+// directory rejects instead of reporting success.
+//
+// The blob census seam is DELIBERATELY pluggable (S6 owns blob enumeration):
+// the module only records whatever `census()` returns and materializes each
+// referenced generation through `materialize(generation, destBlobDir)`. No
+// blob enumeration lives here.
+
+import { DatabaseSync } from 'node:sqlite';
+import { createHash, randomBytes } from 'node:crypto';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import path from 'node:path';
+import { frameworkTableNames } from './schema-table-census.mjs';
+import { getLog } from './log.mjs';
+                                            
+                                                                         
+
+export const BACKUP_FORMAT_VERSION = 1         ;
+
+                                                                                        
+
+export const DEFAULT_RETENTION                                  = Object.freeze({
+  daily: 7,
+  hourly: 3,
+});
+
+// The pluggable blob census seam (S6 implements it against the real backend).
+// `census()` returns the content-addressed blob generations referenced by the
+// committed DB state captured at the barrier; `materialize` writes the
+// immutable bytes of ONE generation into the backup's blobs/ directory and
+// must THROW when the generation's bytes are pending finalization or missing
+// (the caller then marks the backup partial — never complete).
+                                
+                                                           
+                                                                             
+  
+
+                                          
+                 
+                                 
+                                                
+                                
+    
+                       
+                                          
+                                                
+                                
+    
+  
+
+// The concretely enumerated manifest fields (issue #82 spec §2). `encryption`
+// is recorded explicitly per owner decision #3 — the platform encrypts at the
+// volume (macOS FileVault) layer, never inside the backup.
+                              
+                                                       
+                                          
+                                                
+                                                            
+                                            
+                                              
+                             
+                               
+                                          
+                              
+  
+
+// Diagnostics are retained for failure forensics WITHOUT data content: stage,
+// error message, and identifiers (generation ids, backup ids) only — never row
+// data and never blob bytes.
+                                
+                      
+                                                                                                
+                         
+                                            
+  
+
+                          
+              
+                        
+                                  
+                                
+                                 
+                                        
+      
+              
+                         
+                                            
+                                
+                                 
+                                    
+                                         
+                                            
+       
+
+                                      
+                            
+                             
+                                    
+                             
+   
+
+                                                                                                      
+
+// The snapshot source. The SQLite adapter's opened database satisfies this
+// shape: `root` is the owned directory (backups/ + quarantine/ live under it),
+// `handle` carries the live connection for the WAL probe, and `backupTo` is the
+// adapter's online-backup hook (node:sqlite, never a raw file copy).
+                            
+                               
+                                             
+                                              
+  
+
+                                    
+                                
+                                                                             
+                                                                         
+                                                                              
+                                           
+                                                      
+                            
+  
+
+                             
+                                  
+                                   
+                              
+                                                            
+                                                      
+                        
+  
+
+// `backups/<timestamp>-<id>/` — the stable directory naming (spec §6). The
+// fixed-width ISO timestamp sorts lexicographically; `:` is replaced with `-`
+// so the name is filesystem-friendly on every platform.
+const BACKUP_NAME = /^(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}Z)-([0-9a-f]+)$/;
+
+const WORKBENCH_LEDGER = '_WorkbenchMigration';
+const APP_LEDGER = '_Migration';
+
+function sha256hex(value        )         {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function messageOf(err         )         {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function formatTimestamp(date      )         {
+  return date.toISOString().replace(/:/g, '-');
+}
+
+function parseBackupTimestamp(name        )              {
+  const match = BACKUP_NAME.exec(name);
+  if (!match) return null;
+  const [datePart, timePart] = match[1].split('T');
+  const parsed = new Date(`${datePart}T${timePart.replace(/-/g, ':')}`);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function isDirectory(p        )          {
+  try {
+    return statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+export function createBackupManager(options                      )                {
+  if (!options || typeof options !== 'object') {
+    throw new TypeError('createBackupManager requires an options object');
+  }
+  const source = options.source;
+  if (!source || typeof source.backupTo !== 'function' || !source.handle || typeof source.handle.prepare !== 'function') {
+    throw new TypeError('backup manager requires a source exposing an owned root, a live handle, and backupTo(destPath)');
+  }
+  if (typeof source.root !== 'string') {
+    throw new TypeError('backup manager requires a FILE-mode source with an owned directory (memory databases cannot be backed up into the managed layout)');
+  }
+  if (!options.writeCoordinator || typeof options.writeCoordinator.run !== 'function') {
+    throw new TypeError('backup manager requires the single write coordinator (writeCoordinator.run) for the capture barrier');
+  }
+  const writeCoordinator = options.writeCoordinator;
+  const retention = validateRetention(options.retention);
+  const blobs = options.blobs ?? null;
+  if (blobs !== null) validateBlobSource(blobs);
+  const now = options.now ?? (() => new Date());
+
+  const root = path.resolve(source.root);
+  const backupsDir = path.join(root, 'backups');
+  const quarantineDir = path.join(root, 'quarantine');
+
+  function backupIdFor(date      )         {
+    return `${formatTimestamp(date)}-${randomBytes(6).toString('hex')}`;
+  }
+
+  // Move a directory (complete or partial) out of backups/ into quarantine/,
+  // keeping its name so the failure remains traceable.
+  function moveToQuarantine(dir        )         {
+    let target = path.join(quarantineDir, path.basename(dir));
+    let suffix = 0;
+    while (existsSync(target)) {
+      suffix += 1;
+      target = path.join(quarantineDir, `${path.basename(dir)}.q${suffix}`);
+    }
+    renameSync(dir, target);
+    return target;
+  }
+
+  function writeDiagnostic(dir        , diagnostic                  )       {
+    writeFileSync(path.join(dir, 'diagnostic.json'), `${JSON.stringify(diagnostic, null, 2)}\n`, { mode: 0o600 });
+  }
+
+  // A backup dir is genuinely complete iff its manifest exists, parses, and
+  // records a complete status — the manifest is written LAST, so this is the
+  // false-complete guard.
+  function isCompleteBackupDir(dir        )          {
+    try {
+      if (!existsSync(path.join(dir, 'snapshot.sqlite'))) return false;
+      const manifest = JSON.parse(readFileSync(path.join(dir, 'manifest.json'), 'utf8'))     
+                         
+                                
+       ;
+      return manifest.formatVersion === BACKUP_FORMAT_VERSION && manifest.status === 'complete';
+    } catch {
+      return false;
+    }
+  }
+
+  function readCompleteManifest(dir        )                        {
+    try {
+      const manifest = JSON.parse(readFileSync(path.join(dir, 'manifest.json'), 'utf8'))                  ;
+      if (manifest.formatVersion !== BACKUP_FORMAT_VERSION || manifest.status !== 'complete') return null;
+      return manifest;
+    } catch {
+      return null;
+    }
+  }
+
+  // Quarantine sweep: crash leftovers (a dir without a valid complete
+  // manifest) move to quarantine/. Failures on individual entries are logged
+  // and skipped — one broken leftover must not stop the sweep.
+  function reconcileNow()                            {
+    const quarantined           = [];
+    for (const entry of readdirSync(backupsDir)) {
+      const dir = path.join(backupsDir, entry);
+      if (!isDirectory(dir)) continue;
+      if (isCompleteBackupDir(dir)) continue;
+      try {
+        if (!existsSync(path.join(dir, 'diagnostic.json'))) {
+          writeDiagnostic(dir, {
+            at: now().toISOString(),
+            stage: 'quarantine',
+            error: 'incomplete backup directory quarantined by reconcile',
+            detail: { dir: entry },
+          });
+        }
+        quarantined.push(moveToQuarantine(dir));
+      } catch (err) {
+        getLog().warn('system', 'reconcile failed to quarantine an incomplete backup', { err, dir });
+      }
+    }
+    return { quarantined };
+  }
+
+  // The hard-failure path: snapshot/manifest stage threw. The partial directory
+  // is quarantined with a diagnostic and the failure is reported — never a
+  // complete marker.
+  function quarantineFailed(
+    stage                           ,
+    backupId        ,
+    dir        ,
+    err         ,
+    detail                         ,
+  )               {
+    const diagnostic                   = { at: now().toISOString(), stage, error: messageOf(err), detail };
+    let quarantinePath                = null;
+    try {
+      writeDiagnostic(dir, diagnostic);
+      quarantinePath = moveToQuarantine(dir);
+    } catch (moveErr) {
+      getLog().error('system', 'backup failed closed and could not be quarantined', { err: moveErr, stage, backupId, dir });
+    }
+    getLog().error('system', 'backup failed closed', { err, stage, backupId, quarantinePath });
+    return {
+      ok: false,
+      status: 'failed',
+      backupId,
+      directory: quarantinePath ?? dir,
+      quarantined: quarantinePath !== null,
+      diagnostic,
+    };
+  }
+
+  function creationFailed(backupId        , err         )               {
+    const diagnostic                   = { at: now().toISOString(), stage: 'creation', error: messageOf(err), detail: { backupId } };
+    let quarantinePath                = null;
+    try {
+      // The backup dir was never created — the diagnostic lands directly in
+      // quarantine so the failure is retained without a data-bearing backup.
+      quarantinePath = path.join(quarantineDir, `${backupId}.diagnostic.json`);
+      writeFileSync(quarantinePath, `${JSON.stringify(diagnostic, null, 2)}\n`, { mode: 0o600 });
+    } catch {
+      /* the quarantine write itself failed (e.g. disk-full everywhere) — the log entry below is all we have */
+    }
+    getLog().error('system', 'backup creation failed closed', { backupId, err, quarantinePath });
+    return {
+      ok: false,
+      status: 'failed',
+      backupId,
+      directory: quarantinePath ?? path.join(backupsDir, backupId),
+      quarantined: quarantinePath !== null,
+      diagnostic,
+    };
+  }
+
+  async function backup()                        {
+    const startedAt = now();
+    const backupId = backupIdFor(startedAt);
+    const dir = path.join(backupsDir, backupId);
+    const snapshotPath = path.join(dir, 'snapshot.sqlite');
+    const blobsDir = path.join(dir, 'blobs');
+    const manifestPath = path.join(dir, 'manifest.json');
+
+    // Quarantine crash leftovers first so backups/ only ever holds complete
+    // backups (best-effort: a leftover that refuses to move is logged, never
+    // allowed to fail the fresh backup).
+    try {
+      reconcileNow();
+    } catch (err) {
+      getLog().warn('system', 'backup reconcile sweep failed', { err, backupId });
+    }
+
+    try {
+      mkdirSync(dir, { recursive: false, mode: 0o700 });
+    } catch (err) {
+      return creationFailed(backupId, err);
+    }
+    try {
+      chmodSync(dir, 0o700);
+    } catch {
+      /* best-effort tightening */
+    }
+
+    // ---- THE single consistency boundary: committed DB state + referenced
+    // blob set, inside ONE coordinated turn. The snapshot and the census
+    // observe the same committed prefix; nothing can write between them. ----
+    let capture               ;
+    try {
+      capture = await writeCoordinator.run(() => captureCommittedState(snapshotPath));
+    } catch (err) {
+      return quarantineFailed('snapshot', backupId, dir, err, { backupId });
+    }
+
+    // ---- Byte copy OUTSIDE the barrier. Blob bytes are immutable and
+    // content-addressed; a referenced generation is never reaped while it is
+    // referenced, so the copy cannot race a writer. A generation whose bytes
+    // are pending finalization or missing makes materialize throw — partial.
+    // The `blobs/` directory is part of the mandated layout (§6) even when no
+    // blob seam is configured. ----
+    const missingGenerations           = [];
+    try {
+      mkdirSync(blobsDir, { recursive: true, mode: 0o700 });
+    } catch (err) {
+      return quarantineFailed('blob-copy', backupId, dir, err, { backupId, blobGenerations: capture.blobGenerations });
+    }
+    try {
+      chmodSync(blobsDir, 0o700);
+    } catch {
+      /* best-effort tightening */
+    }
+    for (const generation of capture.blobGenerations) {
+      try {
+        // `blobGenerations` is [] when no blob seam is configured, so the
+        // optional call never fires in that case.
+        await blobs?.materialize(generation, blobsDir);
+      } catch (err) {
+        missingGenerations.push(generation);
+        getLog().warn('system', 'backup blob materialization failed', { backupId, generation, err });
+      }
+    }
+
+    const complete = capture.integrityResult.ok && missingGenerations.length === 0;
+    const manifest                 = {
+      formatVersion: BACKUP_FORMAT_VERSION,
+      platformSchemaIdentity: capture.platformSchemaIdentity,
+      appSchemaIdentity: capture.appSchemaIdentity,
+      migrationLedgerState: capture.migrationLedgerState,
+      integrityResult: capture.integrityResult,
+      blobGenerations: capture.blobGenerations,
+      createdAt: startedAt.toISOString(),
+      completedAt: now().toISOString(),
+      status: complete ? 'complete' : 'partial',
+      encryption: 'none',
+    };
+
+    // Manifest LAST: a `complete` manifest implies the snapshot and every
+    // blob byte already landed. A crash before this point leaves no manifest,
+    // so the next reconcile quarantines the dir.
+    try {
+      writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+    } catch (err) {
+      return quarantineFailed('manifest', backupId, dir, err, { backupId, snapshotWritten: true });
+    }
+
+    if (!complete) {
+      const diagnostic                   = {
+        at: now().toISOString(),
+        stage: 'blob-copy',
+        error:
+          missingGenerations.length > 0
+            ? `referenced blob generations unavailable: ${missingGenerations.join(', ')}`
+            : 'snapshot integrity check failed',
+        detail:
+          missingGenerations.length > 0
+            ? { missingGenerations }
+            : { integrityFindings: capture.integrityResult.findings.map((finding) => finding.message) },
+      };
+      try {
+        writeDiagnostic(dir, diagnostic);
+      } catch {
+        /* the partial is quarantined regardless */
+      }
+      const quarantinePath = moveToQuarantine(dir);
+      getLog().warn('system', 'backup completed partial and was quarantined', { backupId, quarantinePath });
+      return {
+        ok: false,
+        status: 'partial',
+        backupId,
+        directory: quarantinePath,
+        quarantined: true,
+        manifest,
+        diagnostic,
+      };
+    }
+
+    getLog().info('system', 'backup completed', { backupId, directory: dir, pages: capture.pages });
+    return { ok: true, status: 'complete', backupId, directory: dir, manifest };
+  }
+
+  async function captureCommittedState(snapshotPath        )                         {
+    // WAL fail-closed probe: the ticket's snapshot is WAL-safe by contract, and
+    // a plain copy of the main database file would silently drop WAL content —
+    // so a non-WAL source is refused outright instead of being approximated.
+    const modeRow = source.handle.prepare('PRAGMA journal_mode').get()                                         ;
+    if (modeRow?.journal_mode !== 'wal') {
+      throw new Error(
+        `backup requires a WAL-mode source (journal_mode=${modeRow?.journal_mode ?? 'unknown'}); a raw main-file copy is not a valid snapshot`,
+      );
+    }
+    const pages = await source.backupTo(snapshotPath);
+    const state = readSnapshotState(snapshotPath);
+    const blobGenerations = blobs === null ? [] : Array.from(await blobs.census());
+    return { pages, blobGenerations, ...state };
+  }
+
+  function list()                           {
+    return readdirSync(backupsDir)
+      .filter((entry) => isDirectory(path.join(backupsDir, entry)))
+      .map((entry) => {
+        const dir = path.join(backupsDir, entry);
+        const manifest = readCompleteManifest(dir);
+        return manifest === null ? null : { backupId: entry, directory: dir, manifest, createdAt: manifest.createdAt };
+      })
+      .filter((entry)                         => entry !== null)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  function backupTimeOf(name        , manifest                )       {
+    const parsed = parseBackupTimestamp(name);
+    if (parsed) return parsed;
+    const fromManifest = new Date(manifest.createdAt);
+    if (!Number.isNaN(fromManifest.getTime())) return fromManifest;
+    return new Date(0);
+  }
+
+  async function trim()                      {
+    // Sweep first so retention only ever counts genuinely complete backups.
+    // reconcileNow throws on an unreadable backups/ dir — trim fails closed.
+    reconcileNow();
+
+    const entries = readdirSync(backupsDir)
+      .map((name) => ({ name, dir: path.join(backupsDir, name) }))
+      .filter((entry) => isDirectory(entry.dir))
+      .map((entry) => {
+        const manifest = readCompleteManifest(entry.dir);
+        return manifest === null ? null : { ...entry, manifest, at: backupTimeOf(entry.name, manifest) };
+      })
+      .filter((entry)                     => entry !== null)
+      .sort((a, b) => a.at.getTime() - b.at.getTime());
+
+    const keep = new Set        ();
+    // An undateable backup is never deleted (fail-safe: retention must not
+    // over-delete what it cannot date).
+    for (const entry of entries) {
+      if (entry.at.getTime() === 0) keep.add(entry.name);
+    }
+
+    // Daily keepers: the newest backup of each of the N most recent days.
+    const byDay = new Map                     ();
+    for (const entry of entries) {
+      const day = entry.at.toISOString().slice(0, 10);
+      const group = byDay.get(day) ?? [];
+      group.push(entry);
+      byDay.set(day, group);
+    }
+    const days = [...byDay.keys()].sort().reverse().slice(0, retention.daily);
+    for (const day of days) {
+      const newest = byDay.get(day) .slice().sort((a, b) => b.at.getTime() - a.at.getTime())[0];
+      keep.add(newest.name);
+    }
+
+    // Hourly keepers: the M most recent backups not already kept.
+    const unkept = entries.filter((entry) => !keep.has(entry.name)).slice().sort((a, b) => b.at.getTime() - a.at.getTime());
+    for (const entry of unkept.slice(0, retention.hourly)) keep.add(entry.name);
+
+    // Fail closed: rmSync is non-force so a permission/disk error THROWS — a
+    // trim that could not remove every selected backup rejects instead of
+    // reporting success.
+    const removed           = [];
+    for (const entry of entries) {
+      if (keep.has(entry.name)) continue;
+      rmSync(entry.dir, { recursive: true, force: false });
+      removed.push(entry.name);
+    }
+    return { retained: keep.size, removed };
+  }
+
+  return Object.freeze({
+    backup,
+    list,
+    trim,
+    reconcile: reconcileNow,
+    retention,
+    root,
+  });
+}
+
+// ---- internals -----------------------------------------------------------
+
+                      
+                
+                            
+                                   
+                                 
+                              
+                                                   
+  
+
+                                                                                   
+
+function validateRetention(retention                                            )                                  {
+  const daily = retention?.daily ?? DEFAULT_RETENTION.daily;
+  const hourly = retention?.hourly ?? DEFAULT_RETENTION.hourly;
+  if (!Number.isInteger(daily) || daily < 1) {
+    throw new TypeError('backup retention daily must be a positive integer');
+  }
+  if (!Number.isInteger(hourly) || hourly < 0) {
+    throw new TypeError('backup retention hourly must be a non-negative integer');
+  }
+  return Object.freeze({ daily, hourly });
+}
+
+function validateBlobSource(blobs                  )       {
+  if (typeof blobs.census !== 'function' || typeof blobs.materialize !== 'function') {
+    throw new TypeError('backup blobs source must expose census() and materialize(generation, destBlobDir)');
+  }
+}
+
+// Snapshot-side capture: integrity (quick_check), schema identity, and the
+// applied migration ledgers — all read from the snapshot file (the consistent
+// committed state), never from the live connection. The snapshot inherits the
+// source's WAL mode, so a READ-ONLY open without a -shm can block while SQLite
+// retries shared-memory creation; the snapshot is our own freshly-written file,
+// so the inspection opens it read-WRITE (no external reader is affected) and
+// then removes the `-shm`/`-wal` sidecars a clean read leaves behind — the
+// backup directory holds exactly `snapshot.sqlite` + `manifest.json` + `blobs/`.
+function readSnapshotState(snapshotPath        )                                                   {
+  const snapshot = new DatabaseSync(snapshotPath);
+  try {
+    return {
+      integrityResult: quickCheckOf(snapshot),
+      ...schemaIdentityOf(snapshot),
+      migrationLedgerState: migrationLedgerOf(snapshot),
+    };
+  } finally {
+    try {
+      snapshot.close();
+    } finally {
+      for (const sidecar of ['-shm', '-wal']) {
+        try {
+          rmSync(`${snapshotPath}${sidecar}`, { force: true });
+        } catch {
+          /* best-effort: a leftover sidecar is cosmetic, never data-bearing */
+        }
+      }
+    }
+  }
+}
+
+function quickCheckOf(db              )                  {
+  const rows = db.prepare('PRAGMA quick_check').all()                                  ;
+  const findings                     = [];
+  for (const row of rows) {
+    if (row.quick_check !== 'ok') findings.push({ severity: 'error', message: row.quick_check });
+  }
+  return { ok: findings.length === 0, checkedAt: new Date().toISOString(), findings };
+}
+
+// Schema identity: the platform schema is ONE fingerprint over every
+// framework-owned table (the schema-table census); the app schema is one
+// fingerprint per remaining table (sorted by name). Ledger tables are handled
+// by migrationLedgerState, not here.
+function schemaIdentityOf(db              )                                                                  {
+  const rows = db
+    .prepare("SELECT name, sql FROM sqlite_master WHERE type = 'table' AND sql IS NOT NULL")
+    .all()                                        ;
+  const sqlByName = new Map(rows.map((row) => [row.name, row.sql]));
+  const framework = new Set(frameworkTableNames);
+  const platformTables = frameworkTableNames.filter((name) => sqlByName.has(name)).slice().sort();
+  const platformSchemaIdentity = sha256hex(platformTables.map((name) => `${name}:${sqlByName.get(name) }`).join('\n'));
+  const appSchemaIdentity = rows
+    .filter((row) => !framework.has(row.name) && row.name !== WORKBENCH_LEDGER)
+    .map((row) => `${row.name}:${sha256hex(row.sql)}`)
+    .sort();
+  return { platformSchemaIdentity, appSchemaIdentity };
+}
+
+function migrationLedgerOf(db              )                             {
+  const hasTable = (name        ) => Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
+  const versionsOf = (table        )                                                    => {
+    if (!hasTable(table)) return { appliedVersions: [], maxVersion: 0 };
+    const rows = db.prepare(`SELECT version FROM ${table} ORDER BY version`).all()                              ;
+    const appliedVersions = rows.map((row) => Number(row.version));
+    return { appliedVersions, maxVersion: appliedVersions.length ? appliedVersions[appliedVersions.length - 1] : 0 };
+  };
+  return {
+    app: { table: APP_LEDGER, ...versionsOf(APP_LEDGER) },
+    workbench: { table: WORKBENCH_LEDGER, ...versionsOf(WORKBENCH_LEDGER) },
+  };
+}
