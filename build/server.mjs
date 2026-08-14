@@ -44,6 +44,7 @@ export { operationalConsumerAdmin } from './operational-consumer.mjs';
 // export is for custom wiring only.
 export { createPostCommitEffectRunner } from './post-commit-effects.mjs';
 export { pendingBlobStager, declaredBlobField, readClaimedBlob, claimedBlobLifecycle } from './pending-blob.mjs';
+export { readBlob, BlobReadDeniedError,                   } from './authorized-blob-read.mjs';
 export { createHistoryReader } from './history-read.mjs';
 // Search plugins are server-only: they receive constrained source and
 // index capabilities, never a raw application database handle.

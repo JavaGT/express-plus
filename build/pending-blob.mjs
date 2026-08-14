@@ -242,6 +242,21 @@ export function createPendingBlobLifecycle(app                , options         
     app.db.prepare(`UPDATE _PendingBlob SET recoveryFailure = ?, status = CASE WHEN ? THEN 'recovery-failed' ELSE status END
       WHERE pendingKey = ?`).run(String((error                         )?.message ?? error), expired ? 1 : 0, row.pendingKey);
   }
+  // The claim-gated byte read (S6/A4 #1): a CLAIMED generation's bytes live in
+  // the pending slot until reconcile finalizes them, then in the final slot.
+  // The byte store serves no generic pending→final fallback for unclaimed
+  // reads, so this resolves the slot explicitly — pending first (the common
+  // claimed-but-not-yet-finalized case), final when the pending slot is already
+  // gone (finalized, or finalized-but-status-update-lost). The caller has
+  // already admitted the claim; this is never a public escape hatch.
+  function readGeneration(blobId        , range                                 )         {
+    try {
+      return app.blobs.readPending(blobId, range);
+    } catch (error) {
+      if ((error                        )?.message !== 'blob not found') throw error;
+      return app.blobs.readRange(blobId, range);
+    }
+  }
   async function reconcile()                {
     const deleting = app.db.prepare("SELECT * FROM _PendingBlob WHERE status = 'delete-requested'").all()                               ;
     for (const row of deleting) {
@@ -255,7 +270,7 @@ export function createPendingBlobLifecycle(app                , options         
     const claimed = app.db.prepare("SELECT * FROM _PendingBlob WHERE status = 'claimed'").all()                               ;
     for (const row of claimed) {
       try {
-        const bytes = app.blobs.readRange(row.blobId);
+        const bytes = readGeneration(row.blobId);
         if (bytes.length !== row.byteLength || createHash('sha256').update(bytes).digest('hex') !== row.contentDigest) {
           markRecoveryFailure(row, 'BLOB_UNAVAILABLE');
           continue;
@@ -280,18 +295,23 @@ export function createPendingBlobLifecycle(app                , options         
       }
     });
   }
+  // Claim admission for reads (S6/A4): pending bytes are served ONLY to the
+  // uploader's claim, and only once the claim was admitted (the row is
+  // 'claimed'/'finalized'). A staged-but-unclaimed blob id, a missing blob, or
+  // a read whose bytes fail the digest attestation all yield the SAME generic
+  // BLOB_UNAVAILABLE — never a distinguishable existence signal.
   function readClaimed(blobId        , range                                 )         {
     const row = app.db.prepare("SELECT * FROM _PendingBlob WHERE blobId = ? AND status IN ('claimed', 'finalized')").get(blobId)                              ;
     if (!row) failure('BLOB_UNAVAILABLE');
     let bytes        ;
     try {
-      bytes = app.blobs.readRange(blobId);
+      bytes = readGeneration(blobId);
       if (bytes.length !== row.byteLength || createHash('sha256').update(bytes).digest('hex') !== row.contentDigest) throw new Error('BLOB_UNAVAILABLE');
     } catch (error) {
       markRecoveryFailure(row, error);
       failure('BLOB_UNAVAILABLE');
     }
-    return range === undefined ? bytes : app.blobs.readRange(blobId, range);
+    return range === undefined ? bytes : readGeneration(blobId, range);
   }
   function status(blobId        )                {
     const row = app.db.prepare('SELECT status FROM _PendingBlob WHERE blobId = ?').get(blobId)                                  ;

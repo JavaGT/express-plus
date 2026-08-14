@@ -21,7 +21,10 @@
 // in-process restart) or start a fresh backing (a process boundary). NOT a
 // production store: bytes never survive a process exit.
 
+import { Readable } from 'node:stream';
+
 import type { ByteStore, ByteStoreCapabilities, ByteStoreTestDebugHandle } from './fs-blobs.ts';
+import { abortError, validateBlobRange } from './fs-blobs.ts';
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -80,31 +83,46 @@ export function memoryBlobs({ backing }: MemoryBlobsOptions = {}): ByteStore & B
     return pathFor(id);
   }
 
-  function readRange(id: string, [start, end]: [start?: number, end?: number] = []): Buffer {
+  function readRange(id: string, range?: [start?: number, end?: number]): Buffer {
     safeId(id);
-    const buf = final.get(id) ?? pending.get(id);
+    const buf = final.get(id);
     if (!buf) throw new Error('blob not found');
+    return readSlot(buf, range);
+  }
 
-    const startValue = start ?? 0;
-    if (!Number.isFinite(startValue) || startValue < 0 || !Number.isInteger(startValue)) {
-      throw new Error('invalid blob range: start');
-    }
-    const endValue = end == null ? buf.length : Math.min(end, buf.length);
-    // `Infinity` end (or an absent/null end) is the accepted EOF sentinel:
-    // Math.min clamps it to the byte length, so an open-ended range reads to
-    // EOF. `start` remains strictly validated below (non-finite start throws).
-    if (!Number.isFinite(endValue) || endValue < 0 || !Number.isInteger(endValue)) {
-      throw new Error('invalid blob range: end');
-    }
-    if (endValue < startValue) {
-      throw new Error('invalid blob range: end < start');
-    }
+  function readPending(id: string, range?: [start?: number, end?: number]): Buffer {
+    safeId(id);
+    const buf = pending.get(id);
+    if (!buf) throw new Error('blob not found');
+    return readSlot(buf, range);
+  }
 
-    const length = endValue - startValue;
-    if (length === 0) return Buffer.alloc(0);
+  function readSlot(buf: Buffer, range: [start?: number, end?: number] | undefined): Buffer {
+    const { start, end } = validateBlobRange(buf.length, range ?? []);
     // Copy, never a live view: mutating the returned buffer must not corrupt
     // the stored bytes (fsBlobs returns a fresh Buffer on every read).
-    return Buffer.from(buf.subarray(startValue, endValue));
+    return Buffer.from(buf.subarray(start, end));
+  }
+
+  function readRangeStream(
+    id: string,
+    range?: [start?: number, end?: number],
+    { signal }: { signal?: AbortSignal } = {},
+  ): Readable {
+    safeId(id);
+    const buf = final.get(id);
+    if (!buf) throw new Error('blob not found');
+    const { start, end } = validateBlobRange(buf.length, range ?? []);
+    if (signal?.aborted) {
+      const stream = Readable.from([]);
+      stream.destroy(abortError());
+      return stream;
+    }
+    const stream = Readable.from([Buffer.from(buf.subarray(start, end))]);
+    if (signal) {
+      signal.addEventListener('abort', () => stream.destroy(abortError()), { once: true });
+    }
+    return stream;
   }
 
   function remove(id: string, { pending: p }: { pending: boolean } = { pending: false }): void {
@@ -123,6 +141,8 @@ export function memoryBlobs({ backing }: MemoryBlobsOptions = {}): ByteStore & B
     writePending,
     finalizePending,
     readRange,
+    readPending,
+    readRangeStream,
     remove,
     exists,
     pathFor,

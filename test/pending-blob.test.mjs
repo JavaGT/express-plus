@@ -132,7 +132,7 @@ test('a failed duplicate staging request leaves an unrelated pending blob intact
   await stager.stage({ scopeId: 'project:p1', resourceId: 'second', bytes: new Uint8Array([2]) });
   await assert.rejects(stager.stage({ scopeId: 'project:p1', resourceId: 'second', bytes: new Uint8Array([3]) }), /PENDING_KEY_EXISTS/);
   assert.equal(app.db.prepare('SELECT COUNT(*) AS count FROM _PendingBlob').get().count, 2);
-  assert.deepEqual(app.blobs.readRange(app.db.prepare('SELECT blobId FROM _PendingBlob WHERE pendingKey = ?').get(first.pendingKey).blobId), Buffer.from([1]));
+  assert.deepEqual(app.blobs.readPending(app.db.prepare('SELECT blobId FROM _PendingBlob WHERE pendingKey = ?').get(first.pendingKey).blobId), Buffer.from([1]));
 });
 
 test('declared deletion is authorized, idempotent, and makes claimed bytes unavailable', async (t) => {
@@ -429,4 +429,75 @@ test('blob declarations reject policy callbacks and other unknown keys', () => {
   assert.throws(() => declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable', canonicalEventMetadata: { byteLength: ['file', '__proto__'] } }), /requires actionName, field, resourceField, owningResource, and erasureCategory/);
   // S6 #4: a declared blob field without an owning resource or erasure category fails validation.
   assert.throws(() => declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id' }), /requires actionName, field, resourceField, owningResource, and erasureCategory/);
+});
+
+test('pending bytes are served only through the uploader claim — no generic fallback (S6/A4)', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const root = mkdtempSync(path.join(tmpdir(), 'workbench-pending-'));
+  const app = workbench({
+    db, blobs: { root },
+    actions: [{ type: 'File.upload', authorize: () => true, projections: [{ eventTypes: ['File.created'], apply: () => {} }], handler: ({ payload, scope }) => [{ type: 'File.created', scope, data: { blob: payload.blob } }] }],
+    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 },
+  });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
+  const actor = principal({ type: 'user', id: 'u1' });
+  const staged = await pendingBlobStager(app, actor).stage({ scopeId: 'project:p1', resourceId: 'f1', bytes: new Uint8Array([7, 8]), mediaType: 'application/octet-stream' });
+  const blobId = db.prepare('SELECT blobId FROM _PendingBlob WHERE pendingKey = ?').get(staged.pendingKey).blobId;
+
+  // Unclaimed: the blob id alone never serves bytes at the framework seam — the
+  // generic read must not fall back to pending, and the claim reader refuses
+  // a generation the claim was never admitted for.
+  assert.throws(() => app.blobs.readRange(blobId), /blob not found/, 'no generic final-slot read of pending bytes');
+  assert.throws(() => readClaimedBlob(app, blobId), /BLOB_UNAVAILABLE/, 'the claim reader refuses an unclaimed generation');
+
+  // The claim IS the admission: after validateClaim the uploader previews the
+  // still-pending bytes through the claim-gated reader.
+  const claimed = await app.pendingBlobLifecycle.validateClaim({
+    claim: staged.claim, field: 'blob', resourceId: 'f1', actionName: 'File.upload',
+    actionId: 'upload-1', authenticatedPrincipal: actor, scopeId: 'project:p1', committedEventId: 'event-1',
+  });
+  assert.equal(claimed.blobId, blobId);
+  assert.deepEqual(readClaimedBlob(app, blobId), Buffer.from([7, 8]), 'the uploader previews pending bytes through the claim');
+  assert.deepEqual(app.pendingBlobLifecycle.readClaimed(blobId, [1, 2]), Buffer.from([8]), 'ranged claim reads work pre-finalize');
+
+  // Finalized: the claim-gated reader serves the promoted final bytes.
+  await app.pendingBlobLifecycle.reconcile();
+  assert.deepEqual(readClaimedBlob(app, blobId), Buffer.from([7, 8]), 'finalized bytes still serve through the claim reader');
+});
+
+test('a content hash is never an access token (S6/A4 #4)', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const root = mkdtempSync(path.join(tmpdir(), 'workbench-pending-'));
+  const app = workbench({
+    db, blobs: { root },
+    actions: [{ type: 'File.upload', authorize: () => true, projections: [{ eventTypes: ['File.created'], apply: () => {} }], handler: ({ payload, scope }) => [{ type: 'File.created', scope, data: { blob: payload.blob } }] }],
+    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 },
+  });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
+  const actor = principal({ type: 'user', id: 'u1' });
+  const staged = await pendingBlobStager(app, actor).stage({ scopeId: 'project:p1', resourceId: 'f1', bytes: new Uint8Array([7, 8]) });
+
+  // The sha256 digest (and the pending key) are integrity/locator metadata, not
+  // credentials: submitting a digest where the claim token belongs fails
+  // admission exactly like any forged claim.
+  const digestAsToken = await app.dispatch({
+    actionId: 'digest-as-token', type: 'File.upload', scope: 'project:p1',
+    payload: { id: 'f1', blob: { pendingKey: staged.pendingKey, claimToken: staged.contentDigest } }, principal: actor,
+  });
+  assert.equal(digestAsToken.ok, false, 'the content digest never acts as a claim token');
+  const pendingKeyAsToken = await app.dispatch({
+    actionId: 'pendingkey-as-token', type: 'File.upload', scope: 'project:p1',
+    payload: { id: 'f1', blob: { pendingKey: staged.claimToken, claimToken: staged.claimToken } }, principal: actor,
+  });
+  assert.equal(pendingKeyAsToken.ok, false, 'a hash/locator never admits a claim on its own');
+  assert.equal(db.prepare('SELECT status FROM _PendingBlob WHERE pendingKey = ?').get(staged.pendingKey).status, 'pending', 'nothing was claimed with a forged credential');
+
+  // The genuine claim still works — the digest did not corrupt or expose the row.
+  const genuine = await app.dispatch({
+    actionId: 'genuine', type: 'File.upload', scope: 'project:p1',
+    payload: { id: 'f1', blob: staged.claim }, principal: actor,
+  });
+  assert.equal(genuine.ok, true, JSON.stringify(genuine));
 });

@@ -58,7 +58,7 @@ test('writePending copies its input — mutating the caller buffer does not corr
   const input = Buffer.from('original');
   store.writePending('in', input);
   input.fill(0);
-  assert.deepStrictEqual(store.readRange('in'), Buffer.from('original'), 'stored bytes untouched by the input buffer');
+  assert.deepStrictEqual(store.readPending('in'), Buffer.from('original'), 'stored bytes untouched by the input buffer');
 });
 
 test('pathFor is synthetic and test/debug-only', () => {

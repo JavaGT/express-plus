@@ -81,8 +81,11 @@ test('the /blobs route and app surface read bytes by id — pathFor is retired (
     body: bytes,
   }));
   // The upload route and the kernel blob adopter locate/read bytes through the
-  // injected byte store's methods by blob id — never a physical path.
-  assert.deepStrictEqual(app.blobs.readRange(up.id), bytes, 'bytes are read by blob id, not by path');
+  // injected byte store's methods by blob id — never a physical path. A pending
+  // upload is NOT readable through the generic final-slot read: its bytes are
+  // served only through the claim-gated pending read (S6/A4).
+  assert.throws(() => app.blobs.readRange(up.id), /blob not found/, 'an unclaimed pending blob id never serves bytes via the generic read');
+  assert.deepStrictEqual(app.blobs.readPending(up.id), bytes, 'pending bytes are reachable only through the explicit pending read');
 });
 
 test('POST /blobs is fail-closed for anonymous', async (t) => {

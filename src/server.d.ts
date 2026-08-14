@@ -269,6 +269,46 @@ export type DeclaredBlobField = import('../index.d.ts').DeclaredBlobField;
 export function declaredBlobField(field: DeclaredBlobField): DeclaredBlobField;
 
 // ---------------------------------------------------------------------------
+// Authorized blob reads (S6/A4)
+// ---------------------------------------------------------------------------
+
+export interface ReadBlobArgs {
+  /** The requesting principal — a user principal (S5/A1) or a machine principal (S5/A5). The read is attributed to it. */
+  principal: Principal;
+  /**
+   * The OWNING resource row (the entity whose blob field holds the bytes), in
+   * stored cell form. Null/absent when the owning row is gone — admission
+   * denies, never a distinguishable "blob missing".
+   */
+  resource: unknown;
+  /** The declared blob field; names the resource registered on the adapter. */
+  field: string;
+  /** The operation category; defaults to the `blob-read` category. */
+  operation?: string | { readonly operation: string };
+  /** Optional half-open byte range `[start, end)`; passed through to `read`. */
+  range?: [start?: number, end?: number];
+  /** The S5 authorization adapter — the ONE admission engine. */
+  authorize: import('../index.d.ts').AuthorizationAdapter;
+  /** The claim-gated byte reader the app wires to the byte store / pending-blob claim machinery. */
+  read: (range?: [start?: number, end?: number]) => Buffer;
+}
+
+/** The generic denial every blob-read failure collapses to — a plain 403 'forbidden', never an existence signal. */
+export class BlobReadDeniedError extends Error {
+  readonly status: 403;
+  readonly failure: { readonly category: 'denied'; readonly message: string };
+  readonly reasonCode: string;
+}
+
+/**
+ * Authorized blob read seam (S6/A4): admits through the S5 adapter under the
+ * `blob` resource category, then serves bytes through the supplied claim-gated
+ * reader. Every failure — denial, missing owning resource, missing bytes —
+ * collapses into one generic BlobReadDeniedError.
+ */
+export function readBlob(args: ReadBlobArgs): Promise<Buffer>;
+
+// ---------------------------------------------------------------------------
 // Framework table names (derived from DDL generators)
 // ---------------------------------------------------------------------------
 
@@ -387,14 +427,37 @@ export interface ByteStore {
   finalizePending(id: string): string;
 
   /**
-   * Return the bytes in `[start, end)` as a Buffer. Falls back to the pending
-   * slot when no final slot exists (a blob is readable while still pending).
-   * `end` clamps to the byte length; `Infinity` (or an absent/null `end`) is
-   * the accepted EOF sentinel — an open-ended range reads to EOF. `start`
-   * stays strictly validated: negative / non-finite / inverted bounds throw,
-   * never handed to the underlying store to misbehave with.
+   * Return the FINAL-slot bytes in `[start, end)` as a Buffer. There is NO
+   * fallback to the pending slot (S6/A4): an unclaimed blob id must never
+   * serve bytes. `end` clamps to the byte length; `Infinity` (or an
+   * absent/null `end`) is the accepted EOF sentinel — an open-ended range
+   * reads to EOF. `start` stays strictly validated: negative / non-finite /
+   * inverted bounds throw, never handed to the underlying store to misbehave
+   * with.
    */
   readRange(id: string, range?: [start?: number, end?: number]): Buffer;
+
+  /**
+   * Return the PENDING-slot bytes in `[start, end)` as a Buffer. The ONLY path
+   * to pending bytes — its only caller is the pending-blob claim machinery
+   * after its durable state transition selected a claimed generation. A claim
+   * is the admission; there is no generic pending read. Same strict bounds as
+   * readRange.
+   */
+  readPending(id: string, range?: [start?: number, end?: number]): Buffer;
+
+  /**
+   * Stream the FINAL-slot range `[start, end)` as a Node Readable, for large
+   * media. Cancellable: an AbortSignal abort destroys the stream instead of
+   * delivering the rest. Same strict bounds as readRange. A conforming backend
+   * may serve the range as one chunk (memory) or stream it from real storage
+   * (fs); the guarantee is the same bytes + cancellation.
+   */
+  readRangeStream(
+    id: string,
+    range?: [start?: number, end?: number],
+    options?: { signal?: AbortSignal },
+  ): Readable;
 
   /**
    * Delete the pending (`pending: true`) or final (`pending: false`) slot.
@@ -467,6 +530,8 @@ export interface BlobStore {
   ): { adopted: number };
   finalize(id: string): string;
   readRange(id: string, range?: [start?: number, end?: number]): Buffer;
+  readPending(id: string, range?: [start?: number, end?: number]): Buffer;
+  readRangeStream(id: string, range?: [start?: number, end?: number], options?: { signal?: AbortSignal }): Readable;
   discardPending(id: string): void;
   discard(id: string): void;
   reap(options: {
@@ -958,6 +1023,44 @@ export type LiveDeliveryEnvelope =
       readonly id: string;
       readonly seq: number;
       readonly reason: 'recipient-snapshot-required' | 'annotated-text-snapshot-required';
+    }
+  | {
+      // S3/A7: replacement projection for a live resource. `seq` is the live
+      // revision. A live row carries the projected declared-field view under
+      // `state`; a live collection carries its bounded membership replacement
+      // (additions/removals/reorderings/rows).
+      readonly type: 'state';
+      readonly entity: string;
+      readonly id: string;
+      readonly seq: number;
+      readonly state?: Readonly<Record<string, unknown>>;
+      readonly additions?: readonly Record<string, unknown>[];
+      readonly removals?: readonly string[];
+      readonly reorderings?: readonly { id: string; from: number; to: number }[];
+      readonly rows?: readonly Record<string, unknown>[];
+    }
+  | {
+      // S3/A7: bounded-overflow / resnapshot-required boundary for a live
+      // resource. The client must resnapshot/refresh instead of trusting its
+      // cached state. A bounded collection's truncated membership view is
+      // carried (informational) but never reconciles by itself.
+      readonly type: 'state-invalidate';
+      readonly entity: string;
+      readonly id: string;
+      readonly seq: number;
+      readonly reason: string;
+      readonly additions?: readonly Record<string, unknown>[];
+      readonly removals?: readonly string[];
+      readonly reorderings?: readonly { id: string; from: number; to: number }[];
+      readonly rows?: readonly Record<string, unknown>[];
+    }
+  | {
+      // S3/A7: a derived/operational notification. NEVER authoritative — clients
+      // must reject it as a domain mutation and never reconcile optimistic state
+      // from it.
+      readonly type: 'notification';
+      readonly kind: string;
+      readonly seq?: number;
     };
 
 export interface LiveDeliverySubscription {

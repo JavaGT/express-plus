@@ -119,7 +119,7 @@ test('a memory database gets the in-memory fake byte store — no disk root', as
     try {
       assert.equal(app.blobs.capabilities.durability, 'ephemeral', 'the in-memory fake store (S6/A1)');
       const up = app.blobs.upload({ bytes: Buffer.from('in-memory') });
-      assert.deepStrictEqual(app.blobs.readRange(up.id), Buffer.from('in-memory'));
+      assert.deepStrictEqual(app.blobs.readPending(up.id), Buffer.from('in-memory'), 'pending bytes via the explicit pending read (no generic fallback, S6/A4)');
       assert.match(app.blobs._pathFor(up.id), /^mem:\/\/blobs\//, 'the synthetic key handle');
       assert.equal(existsSync(path.join(base, '.blobs')), false, 'a memory app never touches cwd/.blobs');
     } finally {

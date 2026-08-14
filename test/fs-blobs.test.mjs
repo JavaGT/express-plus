@@ -32,7 +32,7 @@ function freshRoot() {
   return mkdtempSync(path.join(tmpdir(), 'express-fsblobs-'));
 }
 
-test('writePending → exists → readRange roundtrip', () => {
+test('writePending → exists → readPending roundtrip', () => {
   const root = freshRoot();
   const store = fsBlobs({ root });
   const bytes = Buffer.from('hello bytes');
@@ -42,10 +42,13 @@ test('writePending → exists → readRange roundtrip', () => {
   assert.ok(store.exists('b1', { pending: true }), 'pending slot written');
   assert.ok(!store.exists('b1', { pending: false }), 'no final slot yet');
 
-  const full = store.readRange('b1');
-  assert.deepStrictEqual(full, bytes, 'open-ended read returns all bytes');
+  // Pending bytes are reachable ONLY through the explicit pending read — the
+  // generic final-slot read never falls back (S6/A4).
+  assert.throws(() => store.readRange('b1'), /blob not found/, 'no generic final-slot read of pending bytes');
+  const full = store.readPending('b1');
+  assert.deepStrictEqual(full, bytes, 'open-ended pending read returns all bytes');
 
-  const slice = store.readRange('b1', [2, 7]);
+  const slice = store.readPending('b1', [2, 7]);
   assert.deepStrictEqual(slice, Buffer.from('llo b'), 'range [2,7) slices correctly');
 
   rmSync(root, { recursive: true, force: true });
@@ -105,12 +108,83 @@ test('remove is idempotent — a missing slot is a no-op', () => {
   rmSync(root, { recursive: true, force: true });
 });
 
-test('readRange falls back to the pending slot when no final exists', () => {
+test('readRange serves final bytes only — no pending fallback (S6/A4)', () => {
   const root = freshRoot();
   const store = fsBlobs({ root });
   store.writePending('pend', Buffer.from('still-pending'));
-  // No finalize — readRange must still serve the pending bytes.
-  assert.deepStrictEqual(store.readRange('pend'), Buffer.from('still-pending'));
+  // No finalize — the final-slot read must NOT serve pending bytes.
+  assert.throws(() => store.readRange('pend'), /blob not found/, 'an unclaimed blob id never serves bytes');
+  assert.deepStrictEqual(store.readPending('pend'), Buffer.from('still-pending'), 'the explicit pending read serves the claim-gated bytes');
+  store.finalizePending('pend');
+  assert.deepStrictEqual(store.readRange('pend'), Buffer.from('still-pending'), 'final bytes served after promotion');
+  assert.throws(() => store.readPending('pend'), /blob not found/, 'the pending slot is gone after finalize');
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('readRangeStream streams final bytes with the same range semantics as readRange', async () => {
+  const root = freshRoot();
+  const store = fsBlobs({ root });
+  const bytes = Buffer.from('0123456789');
+  store.writePending('s', bytes);
+  store.finalizePending('s');
+
+  const collect = async (stream) => { const chunks = []; for await (const chunk of stream) chunks.push(chunk); return Buffer.concat(chunks); };
+  assert.deepStrictEqual(await collect(store.readRangeStream('s')), bytes, 'open-ended stream reads to EOF');
+  assert.deepStrictEqual(await collect(store.readRangeStream('s', [2, 7])), Buffer.from('23456'), 'range [2,7) streams');
+  assert.deepStrictEqual(await collect(store.readRangeStream('s', [0, Infinity])), bytes, 'Infinity end streams to EOF');
+  assert.deepStrictEqual(await collect(store.readRangeStream('s', [5, 5])), Buffer.alloc(0), 'empty range is a valid empty stream');
+
+  // Streaming an unclaimed blob id fails the read, never falls back to pending.
+  store.writePending('pend', Buffer.from('still-pending'));
+  assert.throws(() => store.readRangeStream('pend'), /blob not found/, 'no generic pending fallback for streaming reads');
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('readRangeStream validates bounds identically to readRange', () => {
+  const root = freshRoot();
+  const store = fsBlobs({ root });
+  store.writePending('rng', Buffer.from('0123456789'));
+  store.finalizePending('rng');
+
+  assert.throws(() => store.readRangeStream('rng', [-1, 5]), /invalid blob range/);
+  assert.throws(() => store.readRangeStream('rng', [5, 2]), /invalid blob range/);
+  assert.throws(() => store.readRangeStream('rng', [0, -5]), /invalid blob range/);
+  assert.throws(() => store.readRangeStream('rng', [NaN, 5]), /invalid blob range/);
+  assert.throws(() => store.readRangeStream('rng', [0, NaN]), /invalid blob range/);
+  assert.throws(() => store.readRangeStream('rng', [Infinity, Infinity]), /invalid blob range/);
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('readRangeStream cancels on abort — a cancelled read stops delivering bytes', async () => {
+  const root = freshRoot();
+  const store = fsBlobs({ root });
+  store.writePending('big', Buffer.alloc(5_000_000, 7));
+  store.finalizePending('big');
+
+  const settle = (stream) => new Promise((resolve) => {
+    let ended = false;
+    stream.on('data', () => {});
+    stream.on('end', () => { ended = true; resolve({ kind: 'end' }); });
+    stream.on('error', (error) => { if (!ended) resolve({ kind: 'error', error }); });
+  });
+
+  // Abort immediately after creation: the stream must error, never report clean
+  // completion — cancellation stops the read mid-flight.
+  const controller = new AbortController();
+  const live = store.readRangeStream('big', [0, 5_000_000], { signal: controller.signal });
+  controller.abort();
+  const aborted = await settle(live);
+  assert.equal(aborted.kind, 'error', 'an aborted stream errors instead of ending');
+  assert.match(aborted.error.message, /abort/i, 'the error is the AbortError shape');
+
+  // A pre-aborted signal errors the stream deterministically too.
+  const pre = new AbortController();
+  pre.abort();
+  const doomed = store.readRangeStream('big', [0, 5_000_000], { signal: pre.signal });
+  assert.equal((await settle(doomed)).kind, 'error', 'a pre-aborted signal errors the stream');
+
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -118,6 +192,7 @@ test('readRange rejects bogus ranges cleanly', () => {
   const root = freshRoot();
   const store = fsBlobs({ root });
   store.writePending('rng', Buffer.from('0123456789'));
+  store.finalizePending('rng');
 
   assert.throws(() => store.readRange('rng', [-1, 5]), /invalid blob range/);
   assert.throws(() => store.readRange('rng', [5, 2]), /invalid blob range/);

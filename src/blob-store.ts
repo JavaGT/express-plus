@@ -37,6 +37,7 @@
 // that case). A memory database uses the in-memory fake store (S6/A1).
 
 import { createHash, randomUUID } from 'node:crypto';
+import type { Readable } from 'node:stream';
 import { fsBlobs, hasPathFor, type ByteStore, type ByteStoreCapabilities } from './fs-blobs.ts';
 import type { BlobCensus } from './blob-census.ts';
 import type { DbHandle } from './driver.ts';
@@ -84,7 +85,23 @@ export interface BlobStore {
   upload(options?: BlobUploadOptions): UploadedBlob;
   adopt(dbOrTxn: Pick<DbHandle, 'prepare'>, id: string): { adopted: number };
   finalize(id: string): string;
+  /**
+   * FINAL-slot bytes only (S6/A4): an unclaimed blob id never serves bytes.
+   * Pending bytes are reachable ONLY through the pending-blob claim machinery
+   * (readPending), never through this generic read.
+   */
   readRange(id: string, range?: [start?: number, end?: number]): Buffer;
+  /**
+   * Pending-slot bytes, reachable ONLY through the pending-blob claim
+   * machinery after its durable state transition selected a claimed
+   * generation. Not an application escape hatch.
+   */
+  readPending(id: string, range?: [start?: number, end?: number]): Buffer;
+  /**
+   * Stream a FINAL-slot range as a Node Readable (large media), cancellable via
+   * an AbortSignal. Same strict bounds as readRange.
+   */
+  readRangeStream(id: string, range?: [start?: number, end?: number], options?: { signal?: AbortSignal }): Readable;
   discardPending(id: string): void;
   discard(id: string): void;
   reap(options: BlobReapOptions): { orphans: number; danglers: number };
@@ -122,7 +139,7 @@ export function createBlobStore({ root, stagingRoot, db, bytes }: BlobStoreOptio
   // be passed directly as `root`'s replacement once a caller hands a store in.
   const store: ByteStore = bytes
     ?? fsBlobs(stagingRoot ? { root: root as string, stagingRoot } : { root: root as string });
-  const { writePending, finalizePending, readRange, remove } = store;
+  const { writePending, finalizePending, readRange, readPending, readRangeStream, remove } = store;
 
   function upload({ bytes: uploadBytes, mime, id }: BlobUploadOptions = { bytes: undefined as never }) {
     let blobId = id ?? randomUUID();
@@ -173,6 +190,20 @@ export function createBlobStore({ root, stagingRoot, db, bytes }: BlobStoreOptio
   function readRangeBytes(id: string, range?: [start?: number, end?: number]): Buffer {
     safeId(id);
     return readRange(id, range);
+  }
+
+  // Pending-slot reads funnel to the byte store, but the ONLY production caller
+  // is the pending-blob claim machinery (its durable state transition has
+  // already selected a claimed generation). Not an application escape hatch —
+  // the /blobs upload route returns the id, and that alone never admits a read.
+  function readPendingBytes(id: string, range?: [start?: number, end?: number]): Buffer {
+    safeId(id);
+    return readPending(id, range);
+  }
+
+  function readRangeStreamBytes(id: string, range?: [start?: number, end?: number], options?: { signal?: AbortSignal }): Readable {
+    safeId(id);
+    return readRangeStream(id, range, options);
   }
 
   // Pending-blob lifecycle owns removal of staged generations. This is not an
@@ -262,6 +293,8 @@ export function createBlobStore({ root, stagingRoot, db, bytes }: BlobStoreOptio
     adopt,
     finalize,
     readRange: readRangeBytes,
+    readPending: readPendingBytes,
+    readRangeStream: readRangeStreamBytes,
     discardPending,
     discard,
     reap,

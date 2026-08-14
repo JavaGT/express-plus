@@ -37,6 +37,7 @@
 // that case). A memory database uses the in-memory fake store (S6/A1).
 
 import { createHash, randomUUID } from 'node:crypto';
+
 import { fsBlobs, hasPathFor,                                            } from './fs-blobs.mjs';
 
 
@@ -93,6 +94,22 @@ function safeId(id         )       {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 // The retired `pathFor` (S6/A2), kept ONLY behind this explicit internal/test
 // handle: absent from the portable BlobStore surface, present on the concrete
 // store only when the underlying byte store exposes a path key (fs path or
@@ -122,7 +139,7 @@ export function createBlobStore({ root, stagingRoot, db, bytes }                
   // be passed directly as `root`'s replacement once a caller hands a store in.
   const store            = bytes
     ?? fsBlobs(stagingRoot ? { root: root          , stagingRoot } : { root: root           });
-  const { writePending, finalizePending, readRange, remove } = store;
+  const { writePending, finalizePending, readRange, readPending, readRangeStream, remove } = store;
 
   function upload({ bytes: uploadBytes, mime, id }                    = { bytes: undefined          }) {
     let blobId = id ?? randomUUID();
@@ -173,6 +190,20 @@ export function createBlobStore({ root, stagingRoot, db, bytes }                
   function readRangeBytes(id        , range                                 )         {
     safeId(id);
     return readRange(id, range);
+  }
+
+  // Pending-slot reads funnel to the byte store, but the ONLY production caller
+  // is the pending-blob claim machinery (its durable state transition has
+  // already selected a claimed generation). Not an application escape hatch —
+  // the /blobs upload route returns the id, and that alone never admits a read.
+  function readPendingBytes(id        , range                                 )         {
+    safeId(id);
+    return readPending(id, range);
+  }
+
+  function readRangeStreamBytes(id        , range                                 , options                           )           {
+    safeId(id);
+    return readRangeStream(id, range, options);
   }
 
   // Pending-blob lifecycle owns removal of staged generations. This is not an
@@ -262,6 +293,8 @@ export function createBlobStore({ root, stagingRoot, db, bytes }                
     adopt,
     finalize,
     readRange: readRangeBytes,
+    readPending: readPendingBytes,
+    readRangeStream: readRangeStreamBytes,
     discardPending,
     discard,
     reap,

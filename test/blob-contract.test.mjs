@@ -65,22 +65,33 @@ export function blobContractSuite(session, { label }) {
         s.dispose();
       }
     });
+  const runAsync = (name, fn) =>
+    test(`${label}: ${name}`, async () => {
+      const s = session();
+      try {
+        await fn(s.store, s);
+      } finally {
+        s.dispose();
+      }
+    });
 
   run('capabilities is queryable and honest', (store) => {
     assert.deepEqual(store.capabilities, expectedCaps);
   });
 
-  run('writePending → exists → readRange roundtrip', (store) => {
+  run('writePending → exists → readPending roundtrip', (store) => {
     const bytes = Buffer.from('hello bytes');
     store.writePending('b1', bytes);
 
     assert.ok(store.exists('b1', { pending: true }), 'pending slot written');
     assert.ok(!store.exists('b1', { pending: false }), 'no final slot yet');
 
-    const full = store.readRange('b1');
-    assert.deepStrictEqual(full, bytes, 'open-ended read returns all bytes');
-
-    const slice = store.readRange('b1', [2, 7]);
+    // Pending bytes are reachable ONLY through the explicit pending read — the
+    // generic final-slot read must never fall back (S6/A4).
+    assert.throws(() => store.readRange('b1'), /blob not found/, 'no generic final-slot read of pending bytes');
+    const full = store.readPending('b1');
+    assert.deepStrictEqual(full, bytes, 'open-ended pending read returns all bytes');
+    const slice = store.readPending('b1', [2, 7]);
     assert.deepStrictEqual(slice, Buffer.from('llo b'), 'range [2,7) slices correctly');
   });
 
@@ -149,13 +160,54 @@ export function blobContractSuite(session, { label }) {
     assert.ok(!store.exists('x', { pending: true }), 'pending-targeted remove clears it');
   });
 
-  run('readRange falls back to the pending slot when no final exists', (store) => {
+  run('readRange serves final bytes only — no pending fallback (S6/A4)', (store) => {
     store.writePending('pend', Buffer.from('still-pending'));
-    assert.deepStrictEqual(store.readRange('pend'), Buffer.from('still-pending'));
+    // No finalize — the final-slot read must NOT serve pending bytes: an
+    // unclaimed blob id never serves bytes.
+    assert.throws(() => store.readRange('pend'), /blob not found/, 'an unclaimed blob id never serves bytes');
+    assert.deepStrictEqual(store.readPending('pend'), Buffer.from('still-pending'), 'the explicit pending read serves the claim-gated bytes');
+    // After promotion, readRange serves the final bytes and readPending no longer does.
+    store.finalizePending('pend');
+    assert.deepStrictEqual(store.readRange('pend'), Buffer.from('still-pending'), 'final bytes served after promotion');
+    assert.throws(() => store.readPending('pend'), /blob not found/, 'the pending slot is gone after finalize');
+  });
+
+  run('readPending validates bounds identically to readRange', (store) => {
+    store.writePending('pendrng', Buffer.from('0123456789'));
+
+    assert.throws(() => store.readPending('pendrng', [-1, 5]), /invalid blob range/);
+    assert.throws(() => store.readPending('pendrng', [5, 2]), /invalid blob range/);
+    assert.throws(() => store.readPending('pendrng', [0, NaN]), /invalid blob range/);
+    assert.throws(() => store.readPending('pendrng', [0, 1.5]), /invalid blob range/);
+    assert.deepStrictEqual(store.readPending('pendrng', [5, 5]), Buffer.alloc(0), 'empty range is valid');
+  });
+
+  runAsync('readRangeStream streams final bytes for full and ranged reads', async (store) => {
+    store.writePending('stream', Buffer.from('0123456789'));
+    store.finalizePending('stream');
+    const full = await collect(store.readRangeStream('stream'));
+    assert.deepStrictEqual(Buffer.concat(full), Buffer.from('0123456789'), 'full stream matches readRange');
+    const slice = await collect(store.readRangeStream('stream', [2, 7]));
+    assert.deepStrictEqual(Buffer.concat(slice), Buffer.from('23456'), 'range stream matches readRange');
+    // A missing final slot fails the stream's start, never falls back to pending.
+    store.writePending('stream-pending', Buffer.from('never final'));
+    assert.throws(() => store.readRangeStream('stream-pending'), /blob not found/, 'streaming an unclaimed blob id throws');
+  });
+
+  runAsync('readRangeStream cancels on abort', async (store) => {
+    store.writePending('cancel', Buffer.alloc(1_000_000, 7));
+    store.finalizePending('cancel');
+    const controller = new AbortController();
+    const stream = store.readRangeStream('cancel', undefined, { signal: controller.signal });
+    controller.abort();
+    const outcome = await settled(stream);
+    assert.equal(outcome.kind, 'error', 'the aborted stream errors instead of ending');
+    assert.match(outcome.error.message, /abort/i, 'the error is the AbortError shape');
   });
 
   run('readRange rejects bogus ranges cleanly', (store) => {
     store.writePending('rng', Buffer.from('0123456789'));
+    store.finalizePending('rng');
 
     assert.throws(() => store.readRange('rng', [-1, 5]), /invalid blob range/);
     assert.throws(() => store.readRange('rng', [5, 2]), /invalid blob range/);
@@ -168,6 +220,7 @@ export function blobContractSuite(session, { label }) {
 
   run('readRange treats Infinity end as the EOF sentinel (clamped to the byte length)', (store) => {
     store.writePending('eof', Buffer.from('0123456789'));
+    store.finalizePending('eof');
 
     assert.deepStrictEqual(store.readRange('eof', [0, Infinity]), Buffer.from('0123456789'), 'Infinity end reads to EOF from 0');
     assert.deepStrictEqual(store.readRange('eof', [5, Infinity]), Buffer.from('56789'), 'Infinity end clamps to EOF from a mid offset');
@@ -198,3 +251,20 @@ export function blobContractSuite(session, { label }) {
 
 blobContractSuite(fsSession, { label: 'fsBlobs' });
 blobContractSuite(memSession, { label: 'memoryBlobs' });
+
+async function collect(stream) {
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  return chunks;
+}
+
+// Resolve once a stream reaches a terminal state: 'end' (clean) or 'error'
+// (the error object). 'close' always follows a terminal state and never wins.
+function settled(stream) {
+  return new Promise((resolve) => {
+    let done = false;
+    stream.on('data', () => {});
+    stream.on('end', () => { done = true; resolve({ kind: 'end' }); });
+    stream.on('error', (error) => { if (!done) resolve({ kind: 'error', error }); });
+  });
+}

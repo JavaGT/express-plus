@@ -59,6 +59,7 @@ import {
   type AnnotatedTextRange, type AnnotatedTextRedactionMarker,
 } from 'workbench/annotated-text-coords';
 import { DatabaseSync } from 'node:sqlite';
+import { Readable } from 'node:stream';
 
 // ── S3/A1 live-data tier vocabulary (published surface) ────────────────────
 const allTiers: readonly DataTier[] = DATA_TIERS;
@@ -504,6 +505,8 @@ const customByteStore: ByteStore = {
   writePending: (id, bytes) => void [id, bytes],
   finalizePending: () => '',
   readRange: () => Buffer.alloc(0),
+  readPending: () => Buffer.alloc(0),
+  readRangeStream: () => new Readable(),
   remove: () => {},
   exists: () => false,
 };
@@ -541,6 +544,8 @@ const liveActivation: Promise<LiveDeliveryActivation> = live.subscribe({
   deliver: async (batch) => {
     for (const envelope of batch) {
       if (envelope.type === 'event') void envelope.event.data;
+      else if (envelope.type === 'state') void [envelope.state, envelope.rows];
+      else if (envelope.type === 'notification') void envelope.kind;
       else void envelope.reason;
     }
   },

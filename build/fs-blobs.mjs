@@ -33,13 +33,28 @@
 //     missing-pending case rather than treating it as an error).
 //
 //   readRange(id, [start, end])
-//     Return the bytes in `[start, end)` as a Buffer. If no final slot exists,
-//     fall back to the pending slot (a blob is readable while still pending —
-//     the upload route hands back the id before adoption). `end` clamps to the
+//     Return the FINAL-slot bytes in `[start, end)` as a Buffer. There is NO
+//     fallback to the pending slot (S6/A4): an unclaimed blob id must never
+//     serve bytes — pending bytes are readable ONLY through the uploader's
+//     claim (src/pending-blob.mjs), via readPending below. `end` clamps to the
 //     byte length; `Infinity` (or an absent/null `end`) is the accepted EOF
 //     sentinel — an open-ended range reads to EOF. `start` stays strictly
 //     validated: negative / non-finite / inverted bounds are rejected cleanly
 //     (→ throw), never passed to the underlying store to misbehave with.
+//
+//   readPending(id, [start, end])
+//     Return the PENDING-slot bytes in `[start, end)` as a Buffer. This is the
+//     ONLY path to pending bytes; its only caller is the pending-blob claim
+//     machinery after its durable state transition selected a claimed
+//     generation — a claim is the admission, there is no generic pending read.
+//     Same strict bounds as readRange.
+//
+//   readRangeStream(id, [start, end], { signal })
+//     Stream the FINAL-slot range `[start, end)` as a Node Readable, for large
+//     media. Cancellable: an AbortSignal abort destroys the stream instead of
+//     delivering the rest. Same strict bounds as readRange. A conforming
+//     backend may serve the whole range as one chunk (memory) or stream it
+//     from real storage (fs); the guarantee is the same bytes + cancellation.
 //
 //   remove(id, { pending })
 //     Delete the pending (`pending: true`) or final (`pending: false`) slot.
@@ -90,7 +105,9 @@ import {
   closeSync,
   existsSync,
   statSync,
+  createReadStream,
 } from 'node:fs';
+import { Readable } from 'node:stream';
 import path from 'node:path';
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
@@ -154,7 +171,30 @@ const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
 
 
-                                
+                                                      
+
+
+
+
+
+
+
+
+                       
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -196,6 +236,16 @@ function safeId(id         )       {
   }
 }
 
+// The error a cancelled stream surfaces, shaped like Node's AbortError (name
+// 'AbortError', message 'The operation was aborted') so callers and tests treat
+// cancellation uniformly whether the backend is fs or memory.
+function abortError()        {
+  const error = new Error('The operation was aborted');
+  error.name = 'AbortError';
+  return error;
+}
+
+export { abortError };
 
 
 
@@ -211,6 +261,32 @@ function safeId(id         )       {
 
 
 
+
+
+// Range validation shared by every byte read (buffered and streaming) across
+// conforming backends, so the strict-bound guarantees are ONE code path. Reads
+// reject negative / non-finite / non-integer / inverted bounds cleanly (→
+// throw) rather than handing a bogus position to the underlying store; the
+// upper bound clamps to the byte length, so `null`/`undefined` end (and
+// open-ended → EOF via Infinity) mean "to the end". Infinity stays an EOF
+// sentinel ONLY for `end` — an Infinity `start` is rejected.
+export function validateBlobRange(
+  size        ,
+  [start, end]                                ,
+)                                                 {
+  const startValue = start ?? 0;
+  if (!Number.isFinite(startValue) || startValue < 0 || !Number.isInteger(startValue)) {
+    throw new Error('invalid blob range: start');
+  }
+  const endValue = end == null ? size : Math.min(end, size);
+  if (!Number.isFinite(endValue) || endValue < 0 || !Number.isInteger(endValue)) {
+    throw new Error('invalid blob range: end');
+  }
+  if (endValue < startValue) {
+    throw new Error('invalid blob range: end < start');
+  }
+  return { start: startValue, end: endValue, length: endValue - startValue };
+}
 
 export function fsBlobs({ root, stagingRoot }                )                                       {
   mkdirSync(root, { recursive: true });
@@ -253,37 +329,15 @@ export function fsBlobs({ root, stagingRoot }                )                  
     return finalPath;
   }
 
-  function resolveSlot(id        )         {
+  function resolveFinalSlot(id        )         {
     const finalPath = pathFor(id);
-    if (existsSync(finalPath)) return finalPath;
-    const pendingPath = pathFor(id, { pending: true });
-    if (existsSync(pendingPath)) return pendingPath;
-    throw new Error('blob not found');
+    if (!existsSync(finalPath)) throw new Error('blob not found');
+    return finalPath;
   }
 
-  function readRange(id        , [start, end]                                 = [])         {
-    safeId(id);
-    const filePath = resolveSlot(id);
+  function readSlot(filePath        , range                                )         {
     const fileSize = statSync(filePath).size;
-
-    const startValue = start ?? 0;
-    // Reject bogus bounds cleanly rather than handing a negative position to
-    // readSync (which reads from the current offset instead of throwing) or a
-    // negative / non-finite length to Buffer.alloc. The upper bound still
-    // clamps to the file size, so `null`/`undefined` end (and open-ended → EOF
-    // via Infinity) mean "to the end".
-    if (!Number.isFinite(startValue) || startValue < 0 || !Number.isInteger(startValue)) {
-      throw new Error('invalid blob range: start');
-    }
-    const endValue = end == null ? fileSize : Math.min(end, fileSize);
-    if (!Number.isFinite(endValue) || endValue < 0 || !Number.isInteger(endValue)) {
-      throw new Error('invalid blob range: end');
-    }
-    if (endValue < startValue) {
-      throw new Error('invalid blob range: end < start');
-    }
-
-    const length = endValue - startValue;
+    const { start: startValue, length } = validateBlobRange(fileSize, range);
     if (length === 0) return Buffer.alloc(0);
     const buffer = Buffer.alloc(length);
     const fd = openSync(filePath, 'r');
@@ -294,6 +348,39 @@ export function fsBlobs({ root, stagingRoot }                )                  
       closeSync(fd);
     }
     return buffer;
+  }
+
+  function readRange(id        , range                                 )         {
+    safeId(id);
+    return readSlot(resolveFinalSlot(id), range ?? []);
+  }
+
+  function readPending(id        , range                                 )         {
+    safeId(id);
+    const pendingPath = pathFor(id, { pending: true });
+    if (!existsSync(pendingPath)) throw new Error('blob not found');
+    return readSlot(pendingPath, range ?? []);
+  }
+
+  // The streaming final-slot read. createReadStream uses an INCLUSIVE `end`, so
+  // the half-open range's exclusive end is lowered by one; an empty range (or
+  // an already-aborted signal) yields a stream that errors instead of reading.
+  function readRangeStream(
+    id        ,
+    range                                 ,
+    { signal }                           = {},
+  )           {
+    safeId(id);
+    const filePath = resolveFinalSlot(id);
+    const fileSize = statSync(filePath).size;
+    const { start: startValue, end: endValue, length } = validateBlobRange(fileSize, range ?? []);
+    if (length === 0) return Readable.from([]);
+    if (signal?.aborted) {
+      const stream = Readable.from([]);
+      stream.destroy(abortError());
+      return stream;
+    }
+    return createReadStream(filePath, { start: startValue, end: endValue - 1, signal });
   }
 
   function remove(id        , { pending }                       = { pending: false })       {
@@ -317,6 +404,8 @@ export function fsBlobs({ root, stagingRoot }                )                  
     writePending,
     finalizePending,
     readRange,
+    readPending,
+    readRangeStream,
     remove,
     exists,
     pathFor,
