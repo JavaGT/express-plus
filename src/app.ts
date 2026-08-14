@@ -49,6 +49,7 @@ import { createBlobStore } from './blob-store.ts';
 import { memoryBlobs } from './memory-blobs.ts';
 import { createJobQueue } from './job-queue.ts';
 import { createSearchPluginRegistry, type SearchPlugin } from './search-plugin.ts';
+import { createSearchStalenessBridge } from './search-staleness.ts';
 import { createPostCommitEffectRunner } from './post-commit-effects.ts';
 import { createClock } from './clock.ts';
 import { createWriteQueue } from './write-queue.ts';
@@ -422,6 +423,14 @@ export default function workbench({
       if (app.db) app.searchPlugins.bindSource(app.db);
       return app;
     };
+    // The search staleness + invalidation bridge (S4/A2): the durable,
+    // coalescible ledger and priority dispatch that turns registered source
+    // changes and S5/A5 revocations into post-commit invalidation work. S3 owns
+    // the post-commit plumbing in this file that FEEDS the bridge (kernel post-
+    // commit consumers call app.searchStaleness.notifySourceChange / register
+    // the onRevocation listener); this hunk registers the surface and engages
+    // it with the app handle (attachHandleResources below).
+    app.searchStaleness = createSearchStalenessBridge({ registry: app.searchPlugins });
     // Coarse recovery scopes (for example `project:p1`) must resolve to a normal
     // entity row. Snapshot, replay, and later live admission can then share the
     // existing row-scope + grant engine instead of trusting transport callbacks.
@@ -499,6 +508,10 @@ export default function workbench({
     // reference it) — one mutex, never a second one.
     app.writeQueue = createWriteQueue();
     app.writeCoordinator = app.writeQueue;
+    // Reconciliation materialization (S4/A2 drain) routes through the ONE write
+    // coordinator, serializing plugin-owned index writes with authoritative
+    // writes (consideration #9).
+    app.searchStaleness.bindWriteQueue(app.writeCoordinator);
     // OWNERSHIP BINDING (S1/A3 backup, review #82 finding 2): the adapter-opened
     // source declares the SAME coordinator as the app — so a backup manager
     // built over `app.writeCoordinator` + the app's opened source
@@ -564,6 +577,9 @@ export default function workbench({
         app.blobs = createBlobStore({ db: handle, bytes: memoryBlobs() });
       }
       app.postCommitEffects = createPostCommitEffectRunner({ db: handle });
+      // The staleness ledger (S4/A2) is engaged with the SAME handle: durable
+      // pending-staleness survives restart and re-processes via drain().
+      app.searchStaleness.engage(handle);
       // The queue routes its multi-statement mutations through the ONE write
       // coordinator (job-queue.ts's writeQueue option); a post-commit consumer
       // calling enqueue from inside a dispatch turn joins that turn.
