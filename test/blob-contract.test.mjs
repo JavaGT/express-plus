@@ -93,12 +93,30 @@ export function blobContractSuite(session, { label }) {
     assert.deepStrictEqual(store.readRange('b2'), Buffer.from('durable'), 'final bytes readable');
     assert.equal(finalKey, store.pathFor('b2'), 'finalize returns the final slot key');
 
-    // Durability within the backend's scope: a NEW store bound to the same
-    // backing sees the finalized bytes (fs: same root / new instance, i.e. a
-    // process restart; memory: same backing / new instance, i.e. an in-process
-    // restart — ephemeral durability extends that far and no further).
+    // Durability within the backend's declared scope: a NEW store bound to the
+    // same backing sees the finalized bytes (fs: same root / new instance, i.e.
+    // a process restart; memory: same backing / new instance, i.e. an
+    // in-process restart — ephemeral durability extends that far and no
+    // further, see the boundary test below).
     const reopened = s.reopen();
     assert.deepStrictEqual(reopened.readRange('b2'), Buffer.from('durable'), 'bytes survive a reopened store');
+  });
+
+  run('finalize durability conforms to the declared durability — durable backends survive a process boundary on the same storage', (store, s) => {
+    // memoryBlobs declares `ephemeral`: its loss across a FRESH backing (a
+    // process boundary) is proven in memory-blobs.test.mjs — this shared
+    // suite's reopen() only models an in-process restart, which ephemeral
+    // durability does not claim to beat. Only the declared-durable backend is
+    // held to the full restart MUST here.
+    if (store.capabilities.durability !== 'durable') return;
+    store.writePending('boundary', Buffer.from('across-restart'));
+    store.finalizePending('boundary');
+    const restarted = s.reopen();
+    assert.deepStrictEqual(
+      restarted.readRange('boundary'),
+      Buffer.from('across-restart'),
+      'a durable backend keeps finalized bytes across a store/process boundary on the same storage',
+    );
   });
 
   run('finalizePending is idempotent — a missing pending slot is a no-op', (store) => {
@@ -146,6 +164,18 @@ export function blobContractSuite(session, { label }) {
     assert.throws(() => store.readRange('rng', [0, NaN]), /invalid blob range/);
     assert.throws(() => store.readRange('rng', [0, 1.5]), /invalid blob range/);
     assert.deepStrictEqual(store.readRange('rng', [5, 5]), Buffer.alloc(0), 'empty range is valid');
+  });
+
+  run('readRange treats Infinity end as the EOF sentinel (clamped to the byte length)', (store) => {
+    store.writePending('eof', Buffer.from('0123456789'));
+
+    assert.deepStrictEqual(store.readRange('eof', [0, Infinity]), Buffer.from('0123456789'), 'Infinity end reads to EOF from 0');
+    assert.deepStrictEqual(store.readRange('eof', [5, Infinity]), Buffer.from('56789'), 'Infinity end clamps to EOF from a mid offset');
+    assert.deepStrictEqual(store.readRange('eof', [8, Number.MAX_SAFE_INTEGER]), Buffer.from('89'), 'a huge-but-finite end clamps to EOF');
+    // Infinity remains an EOF sentinel ONLY for `end`: an Infinity `start` is
+    // still rejected, because no finite blob has bytes starting at Infinity.
+    assert.throws(() => store.readRange('eof', [Infinity, Infinity]), /invalid blob range/);
+    assert.throws(() => store.readRange('eof', [Infinity, 5]), /invalid blob range/);
   });
 
   run('readRange on a missing blob throws blob not found', (store) => {

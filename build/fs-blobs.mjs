@@ -20,20 +20,26 @@
 //     handler, already async — see app.mjs/serve.mjs).
 //
 //   finalizePending(id)
-//     Promote the pending slot to the final slot, durably. After this returns,
-//     the bytes MUST survive a process restart (an adopted blob's final bytes
-//     are the product of a committed dispatch). Idempotent: if there is no
-//     pending slot (already finalized, or never uploaded), it is a no-op — the
-//     reaper and the post-commit finalize consumer both rely on this (they
-//     swallow the missing-pending case rather than treating it as an error).
+//     Promote the pending slot to the final slot. The durability MUST of this
+//     call is scoped by `capabilities.durability`: on a `durable` backend,
+//     after this returns the bytes MUST survive a process restart (an adopted
+//     blob's final bytes are the product of a committed dispatch). An
+//     `ephemeral` backend (memoryBlobs) conforms STRUCTURALLY — atomic
+//     promotion, idempotence, readable final bytes — and documents that its
+//     bytes live only in the owning process; losing them at a process boundary
+//     is the declared price of `ephemeral`. Idempotent: if there is no pending
+//     slot (already finalized, or never uploaded), it is a no-op — the reaper
+//     and the post-commit finalize consumer both rely on this (they swallow the
+//     missing-pending case rather than treating it as an error).
 //
 //   readRange(id, [start, end])
 //     Return the bytes in `[start, end)` as a Buffer. If no final slot exists,
 //     fall back to the pending slot (a blob is readable while still pending —
 //     the upload route hands back the id before adoption). `end` clamps to the
-//     byte length; an open-ended range reads to EOF. Bounds are validated by
-//     the implementation and rejected cleanly (negative / non-finite / inverted
-//     → throw), never passed to the underlying store to misbehave with.
+//     byte length; `Infinity` (or an absent/null `end`) is the accepted EOF
+//     sentinel — an open-ended range reads to EOF. `start` stays strictly
+//     validated: negative / non-finite / inverted bounds are rejected cleanly
+//     (→ throw), never passed to the underlying store to misbehave with.
 //
 //   remove(id, { pending })
 //     Delete the pending (`pending: true`) or final (`pending: false`) slot.
@@ -128,20 +134,26 @@ const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
                                                     
 
      
+                                                                              
+                                                                             
                                                                                 
-                                                                                
-                                                                         
-                                                                           
-                                                     
+                                                                               
+                                                                          
+                                                                          
+                                                                            
+                                                                              
+                                                                               
+          
      
                                       
 
      
                                                                               
                                                                              
-                                                                              
-                                                                              
-                                                                      
+                                                                             
+                                                                          
+                                                                             
+                                                            
      
                                                                         
 

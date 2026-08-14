@@ -26,6 +26,7 @@ import {
   type BlobStore, type SqliteStorageDescription,
   type Invitation, type JobQueue, type JobRow, type LiveDelivery, type LiveDeliveryActivation, type LiveDeliveryBootstrap, type LiveDeliveryCatchup, type LiveDeliveryEnvelope as ServerLiveDeliveryEnvelope, type Migration, type UserPrincipal,
   type ClaimedBlobLifecycle, type ClaimedBlobLifecycleState, type WorkbenchDatabase, type OperationalConsumerAdmin, type OperationalFailure, type PostCommitEffectRunner,
+  type ByteStore, type ByteStoreCapabilities, type ByteStoreDurability,
 } from 'workbench/server';
 import {
   LiveChannel, LiveList, WorkbenchFailureError, createAuthClient, createLiveStore,
@@ -437,8 +438,33 @@ const adminFailures: Promise<readonly OperationalFailure[]> = consumerAdmin.list
 void adminFailures;
 const queue: JobQueue = createJobQueue({ db, sharedSecret: 'secret' });
 const job: JobRow = queue.enqueue({ kind: 'index', payload: { projectId: 'project-1' } });
-const blobs: BlobStore = createBlobStore({ db, bytes: {} as never });
-void [job, blobs, runMigrations(db, [migration]), readCommittedCursor(db, 'Project:project-1')];
+// A conforming byte store is constructible against the published ByteStore
+// type and pluggable into createBlobStore by shape.
+const customByteStore: ByteStore = {
+  capabilities: {
+    durability: 'durable', atomicPromotion: true, rangeSupport: true,
+    deleteVerification: true, consistency: 'single-node-strong',
+  },
+  writePending: (id, bytes) => void [id, bytes],
+  finalizePending: () => '',
+  readRange: () => Buffer.alloc(0),
+  remove: () => {},
+  exists: () => false,
+  pathFor: () => '',
+};
+const blobs: BlobStore = createBlobStore({ db, bytes: customByteStore });
+// @ts-expect-error a capability declaration is closed: no extra members allowed
+customByteStore.capabilities.purgeOnStart;
+// @ts-expect-error an ephemeral durability string is not a durability literal
+const bogusDurability: ByteStoreDurability = 'volatile';
+const surfacedCapabilities: ByteStoreCapabilities = blobs.capabilities;
+const declaredDurability: ByteStoreDurability = surfacedCapabilities.durability;
+const orphanDanglerCounts: { orphans: number; danglers: number } = blobs.reap({ ttl: 60_000, blobColumns: [] });
+blobs.discardPending('pending-1');
+blobs.discard('final-1');
+// pathFor remains callable but is documented test/debug-only introspection
+const blobPath: string = blobs.pathFor('id');
+void [job, blobs, customByteStore, surfacedCapabilities, declaredDurability, bogusDurability, orphanDanglerCounts, blobPath, runMigrations(db, [migration]), readCommittedCursor(db, 'Project:project-1')];
 const live: LiveDelivery = createLiveDelivery({ db, entities: new Map(), mayVerb: () => true });
 createLiveDelivery({ db, entities: new Map(), mayVerb: () => true, snapshots: [] });
 const liveAbort = new AbortController();

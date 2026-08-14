@@ -9,6 +9,13 @@
 // so a failed erasure is never reported complete), and consistency match
 // fsBlobs.
 //
+// The shared contract's durability MUST (finalizePending's bytes survive a
+// process restart) is scoped to `durability: 'durable'` backends. This backend
+// conforms STRUCTURALLY — finalizePending atomically promotes pending → final
+// within the process, is idempotent, and leaves readable final bytes — and
+// documents its loss semantics honestly: the final bytes do NOT survive a
+// process boundary, which is the declared price of `ephemeral`.
+//
 // The backing Maps are injectable, so the shared contract suite and later
 // crash-point/replacement tests can recreate a store over the SAME backing (an
 // in-process restart) or start a fresh backing (a process boundary). NOT a
@@ -81,6 +88,9 @@ export function memoryBlobs({ backing }                     = {})            {
       throw new Error('invalid blob range: start');
     }
     const endValue = end == null ? buf.length : Math.min(end, buf.length);
+    // `Infinity` end (or an absent/null end) is the accepted EOF sentinel:
+    // Math.min clamps it to the byte length, so an open-ended range reads to
+    // EOF. `start` remains strictly validated below (non-finite start throws).
     if (!Number.isFinite(endValue) || endValue < 0 || !Number.isInteger(endValue)) {
       throw new Error('invalid blob range: end');
     }

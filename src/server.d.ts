@@ -115,18 +115,90 @@ export interface Migration {
 // Blob store
 // ---------------------------------------------------------------------------
 
-interface ByteStore {
+/** Durability of a byte store: `durable` bytes survive a process restart; `ephemeral` bytes live only within the owning process. */
+export type ByteStoreDurability = 'durable' | 'ephemeral';
+
+/** Consistency tag a backend declares for its byte storage. `single-node-strong` is the only tag shipped. */
+export type ByteStoreConsistency = 'single-node-strong';
+
+/** A byte store's closed, queryable declaration of what it guarantees. A backend must declare honestly and never overstate it. */
+export interface ByteStoreCapabilities {
+  readonly durability: ByteStoreDurability;
+  readonly atomicPromotion: boolean;
+  readonly rangeSupport: boolean;
+  readonly deleteVerification: boolean;
+  readonly consistency: ByteStoreConsistency;
+}
+
+/**
+ * The byte-store contract — what `createBlobStore`'s `bytes` option must
+ * provide, and what any conforming backend (fs, memory, or a future S3
+ * adapter) guarantees. Each method's guarantee is PART OF THE TYPE: the blob
+ * lifecycle in `createBlobStore` depends on these semantics. See
+ * `src/fs-blobs.ts` for the same contract at the implementation boundary.
+ */
+export interface ByteStore {
+  /** Queryable, honest capability declaration. A backend must not overstate it. */
+  readonly capabilities: ByteStoreCapabilities;
+
+  /**
+   * Write `bytes` to the pending slot for `id`. Atomic enough that a crash
+   * mid-write leaves NO partial FINAL blob — a torn pending write is fine (the
+   * reaper sweeps it); a torn final write is not. Callers normalize strings to
+   * Buffers before calling.
+   */
   writePending(id: string, bytes: Uint8Array): void;
+
+  /**
+   * Promote the pending slot to the final slot. The durability MUST is scoped
+   * by `capabilities.durability`: on a `durable` backend, after this returns
+   * the bytes MUST survive a process restart (an adopted blob's final bytes are
+   * the product of a committed dispatch). An `ephemeral` backend (memoryBlobs)
+   * conforms structurally — atomic promotion, idempotence, readable final
+   * bytes — and documents that its bytes live only in the owning process;
+   * losing them at a process boundary is the declared price of `ephemeral`.
+   * Idempotent: a missing pending slot (already finalized, or never uploaded)
+   * is a no-op — the reaper and the post-commit finalize consumer both rely on
+   * that.
+   */
   finalizePending(id: string): string;
-  readRange(id: string, range?: [number, number]): Buffer;
+
+  /**
+   * Return the bytes in `[start, end)` as a Buffer. Falls back to the pending
+   * slot when no final slot exists (a blob is readable while still pending).
+   * `end` clamps to the byte length; `Infinity` (or an absent/null `end`) is
+   * the accepted EOF sentinel — an open-ended range reads to EOF. `start`
+   * stays strictly validated: negative / non-finite / inverted bounds throw,
+   * never handed to the underlying store to misbehave with.
+   */
+  readRange(id: string, range?: [start?: number, end?: number]): Buffer;
+
+  /**
+   * Delete the pending (`pending: true`) or final (`pending: false`) slot.
+   * Idempotent: a missing slot is a no-op (ENOENT-equivalent swallowed). Any
+   * OTHER failure MUST throw — a delete-verification-capable backend never
+   * reports success for an erasure that did not happen.
+   */
   remove(id: string, options: { pending: boolean }): void;
+
+  /**
+   * True iff the pending / final slot has bytes. Used by the reaper to
+   * reconcile (an adopted blob whose pending slot still exists needs
+   * finalizing) and by tests.
+   */
   exists(id: string, options: { pending: boolean }): boolean;
+
+  /**
+   * The physical path of a slot — TEST/DEBUG-ONLY introspection, NOT part of
+   * the portable contract (an S3 implementation has no path; it may return a
+   * synthetic key or throw if called). Driver-portable callers must not use it.
+   */
   pathFor(id: string, options?: { pending?: boolean }): string;
 }
 
 export interface BlobStore {
-  safeId(id: string): void;
-  upload(options: {
+  safeId(id: unknown): void;
+  upload(options?: {
     bytes: string | Uint8Array;
     mime?: string;
     id?: string;
@@ -136,11 +208,13 @@ export interface BlobStore {
     id: string,
   ): { adopted: number };
   finalize(id: string): string;
-  readRange(id: string, range?: [number, number]): Buffer;
+  readRange(id: string, range?: [start?: number, end?: number]): Buffer;
+  discardPending(id: string): void;
+  discard(id: string): void;
   reap(options: {
     ttl: number;
     blobColumns: Array<{ table: string; column: string }>;
-  }): { orphans: number; danglers: number; reconciled: number };
+  }): { orphans: number; danglers: number };
   stat(
     id: string,
   ):
@@ -154,7 +228,14 @@ export interface BlobStore {
         createdAt: string;
       }
     | undefined;
+  /**
+   * TEST/DEBUG-ONLY introspection, NOT part of the portable contract — the
+   * byte-store backend owns what it means (an fs path, or a synthetic key for
+   * an in-memory/S3 backend). Driver-portable callers must not use it.
+   */
   pathFor(id: string, options?: { pending?: boolean }): string;
+  /** The injected byte store's honest capability declaration, surfaced. */
+  readonly capabilities: ByteStoreCapabilities;
 }
 
 // ---------------------------------------------------------------------------
@@ -269,6 +350,10 @@ export interface ColumnDeclaration {
   notNull?: boolean;
   default?: string | number;
   defaultExpression?: 'CURRENT_DATE' | 'CURRENT_TIME' | 'CURRENT_TIMESTAMP' | "(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))";
+  /** Column collation (e.g. `NOCASE`). */
+  collation?: string;
+  /** Raw CHECK expression for the column. */
+  check?: string;
 }
 
 export interface ForeignKeyDeclaration {
@@ -278,10 +363,50 @@ export interface ForeignKeyDeclaration {
   onUpdate?: 'cascade' | 'set null' | 'set default' | 'restrict' | 'no action';
 }
 
+export interface UniqueConstraintDeclaration {
+  /** Optional name; named unique constraints occupy SQLite's index namespace. */
+  name?: string;
+  columns: readonly string[];
+}
+
+export interface CheckConstraintDeclaration {
+  name?: string;
+  /** Raw CHECK expression. */
+  expression: string;
+}
+
 export interface IndexDeclaration {
   name: string;
-  columns: readonly string[];
+  /** Column terms. Optional when `expression` terms are declared instead. */
+  columns?: readonly string[];
+  /** Raw expression terms (e.g. `lower("title")`), emitted after column terms. */
+  expression?: readonly string[];
   unique?: boolean;
+  /** Partial-index predicate (raw boolean expression). */
+  where?: string;
+}
+
+export interface TriggerDeclaration {
+  name: string;
+  timing: 'before' | 'after' | 'instead of';
+  event: 'insert' | 'update' | 'delete';
+  /** `UPDATE OF` column list — only valid for `event: 'update'`. */
+  columnNames?: readonly string[];
+  /** Raw WHEN predicate; `NEW.`/`OLD.` references must resolve to declared columns. */
+  when?: string;
+  /** Raw semicolon-terminated statements inside `BEGIN … END`. */
+  body: string;
+}
+
+export interface VirtualTableDeclaration {
+  name: string;
+  /** Only `fts5` is available in this cut; other modules are rejected. */
+  module: 'fts5';
+  /** Raw module arguments, e.g. `title`, `content='articles'`, `tokenize='porter'`. */
+  options: readonly string[];
+  ownerPluginId: string;
+  /** Shadow tables (e.g. FTS `_data`/`_idx`) this plugin owns — attributed in the census. */
+  shadowTables: readonly string[];
 }
 
 export interface TableDeclaration {
@@ -290,6 +415,24 @@ export interface TableDeclaration {
   foreignKeys?: readonly ForeignKeyDeclaration[];
   indexes?: readonly IndexDeclaration[];
   primaryKey?: readonly string[];
+  /** Table-level UNIQUE constraints. */
+  unique?: readonly UniqueConstraintDeclaration[];
+  /** Table-level CHECK constraints. */
+  check?: readonly CheckConstraintDeclaration[];
+  /** Emit the STRICT table policy. */
+  strict?: boolean;
+  /** Emit WITHOUT ROWID; requires a declared primary key. */
+  withoutRowid?: boolean;
+  /** Declared triggers — compiled to DDL but never created at prepare time. */
+  triggers?: readonly TriggerDeclaration[];
+}
+
+export interface NamespacedMigration extends Migration {
+  /** Per-namespace migration ledger identity (A4 owns the runtime). */
+  namespace: string;
+  name: string;
+  /** Cross-namespace dependencies, e.g. `"workbench@5"`. */
+  dependencies?: readonly string[];
 }
 
 export interface SqliteSchemaResult {
@@ -297,16 +440,24 @@ export interface SqliteSchemaResult {
   readonly tableNames: readonly string[];
   /** Immutable declarations used to verify schema-owned entity tables at startup. */
   readonly tables: readonly Readonly<TableDeclaration>[];
-  readonly migrations: readonly Migration[];
+  readonly virtualTables: readonly Readonly<VirtualTableDeclaration>[];
+  readonly triggers: readonly Readonly<TriggerDeclaration>[];
+  readonly migrations: readonly NamespacedMigration[];
+  /** Executed by `prepare`: CREATE TABLE / CREATE INDEX (IF NOT EXISTS). */
   readonly ddl: readonly string[];
-  prepare(db: WorkbenchDatabase, options?: { now?: () => string }): void;
+  /** Plugin-owned virtual tables — compiled but NOT executed by `prepare`. */
+  readonly virtualTableDdl: readonly string[];
+  /** Declared triggers — compiled but NEVER created/dropped by `prepare`. */
+  readonly triggerDdl: readonly string[];
+  prepare(db: WorkbenchDatabase, options?: { skipMigrations?: boolean; skipIndexes?: boolean; now?: () => string }): void;
 }
 
 export function defineSqliteSchema(spec: {
   name: string;
   externalTables?: readonly { name: string; columns: readonly string[] }[];
+  virtualTables?: readonly VirtualTableDeclaration[];
   tables: readonly TableDeclaration[];
-  migrations?: readonly Migration[];
+  migrations?: readonly NamespacedMigration[];
 }): SqliteSchemaResult;
 
 export interface SqliteStorageColumnDescription {
