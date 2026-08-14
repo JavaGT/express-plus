@@ -27,7 +27,8 @@ import { declarePostCommitEffectsInTxn } from './post-commit-effects.mjs';
 import { protectedArtefactCapability } from './protected-artefact-store.mjs';
 
 
-import { isAtomicOperation } from './atomic-operations.mjs';
+import { executeAtomicOperations, isAtomicOperation,                                                   } from './atomic-operations.mjs';
+import { admitRowTransition } from './field-admission.mjs';
 
 // `action(type)` — declare an imperative request type. The handler that turns it
 // into events is attached later by the entity/dispatch wiring.
@@ -510,8 +511,7 @@ export function liveMutationVariant({
         }
       }
 
-      // Revision bump per touched resource, then the minimized receipt. The
-      // receipt records the FIRST resource's key and THAT resource's new
+      // The receipt records the FIRST resource's key and THAT resource's new
       // revision (single-resource actions are the live norm; multi-resource
       // atomicity is the S3/A6 surface).
       const touched = new Map                ();
@@ -633,6 +633,38 @@ function checkHandlers(handlers                     , actions       )         {
   return -1;
 }
 
+function atomicOperationsFor(payload         )                                                                     {
+  if (!isPlainObject(payload)) return null;
+  const operations = (payload                           ).atomicOperations;
+  if (operations === undefined) return null;
+  if (!Array.isArray(operations) || !operations.every(isAtomicOperation)) {
+    throw new ValidationError('atomicOperations must be an array of known atomic operations');
+  }
+  return operations;
+}
+
+async function resolveAtomicOperation(handler     , context                                                                          )                                       {
+  const registration = handler.atomicOperation;
+  if (!registration) return undefined;
+  const operations = atomicOperationsFor(context.payload);
+  if (!operations) throw new ValidationError('atomic operation requires atomicOperations');
+  const before = await registration.read(context);
+  if (!isPlainObject(before)) throw new ValidationError('atomic operation target row was not found');
+  const resolved = executeAtomicOperations(before, operations);
+  for (const operation of operations) {
+    requireAdmission(await admitRowTransition({
+      entity: registration.entity,
+      verb: 'update',
+      before,
+      after: resolved.row,
+      fieldName: operation.field,
+      principal: context.principal,
+      authorization: context.authorization,
+    }));
+  }
+  return resolved;
+}
+
 // Returns deniedOutcome(details) when `result` is falsy, or null when authorized.
 function authorizedOrDenied(result         , details          ) {
   if (!result) return deniedOutcome(details);
@@ -734,6 +766,23 @@ function handleOfEvent(event     )      {
   }
 }
 
+// A raw DatabaseSync has no async transaction mutex. Pipeline stages may await
+// admission or projections, so serialize transaction entry per handle rather
+// than allowing a second dispatch to begin inside the first transaction.
+const transactionTails = new WeakMap                       ();
+async function coordinatedTxn   (db          , fn                  )             {
+  let release                          ;
+  const previous = transactionTails.get(db          ) ?? Promise.resolve();
+  const tail = new Promise      ((resolve) => { release = resolve; });
+  transactionTails.set(db          , previous.then(() => tail));
+  await previous;
+  try {
+    return await txn(db, fn)     ;
+  } finally {
+    release ();
+  }
+}
+
 // commitEvents — the durable transaction brace shared by `dispatch` and
 // `dispatchBatch`: BEGIN IMMEDIATE → durable variant applyInTxn → COMMIT →
 // post-commit fan-out, with ROLLBACK on execution error. Expected failures are
@@ -790,7 +839,7 @@ async function commitEvents(db     , events     , {
     //
     // A denied action rolls back the entire transaction — no partial state.
     // Post-commit consumers (afterCommit) remain outside the txn as before.
-    committed = await txn(db, async () => {
+    committed = await coordinatedTxn(db, async () => {
       if (authorize) {
         if (Array.isArray(payload)) {
           for (const action of payload) {
@@ -822,8 +871,13 @@ async function commitEvents(db     , events     , {
           ? protectedArtefactCapability(db, handler.protectedArtefactTables)
           : null;
         try {
+          atomicOperationsFor(payload);
+          const atomic = await resolveAtomicOperation(handler, {
+            payload, principal, db, now, scope, actionId, authorization,
+          });
           events = await handler({
             payload, principal, db, now, scope, actionId,
+            ...(atomic ? { atomic } : {}),
             ...(authorization !== undefined && authorization !== null ? { authorization } : {}),
             ...(protectedArtefact ? { protectedArtefact } : {}),
             ...(historyCommit?.handlerInputs ? { history: historyCommit.handlerInputs[0] } : {}),
@@ -1352,8 +1406,10 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
 
     // Run every handler, concatenating their emitted events. Handlers are pure
     // (events only, no DB writes — Fork A), so the batch runs them in order and
-    // folds all events into one commitEvents pass below. Authorization runs
-    // INSIDE commitEvents's txn (Wave 4.4), before applyInTxn.
+    // folds all events into one commitEvents pass below. Atomic handlers are
+    // resolved and admitted in that same transaction before receiving their
+    // framework-owned atomic context. Authorization runs INSIDE commitEvents's
+    // txn (Wave 4.4), before applyInTxn.
     //
     // Registered actions mark `inTransaction` so they receive db/now/scope inside
     // the write brace — same contract as single `dispatch`. Running them early
@@ -1378,9 +1434,21 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
         const action = actions[actionIndex];
         try {
           const historyInput = historyCommit?.handlerInputs?.[actionIndex];
+          const atomic = transactionContext?.db
+            ? await resolveAtomicOperation(handlers[action.type], {
+              payload: action.payload,
+              principal,
+              db: transactionContext.db,
+              now: transactionContext.now,
+              scope: transactionContext.scope,
+              actionId: transactionContext.actionId,
+              authorization,
+            })
+            : undefined;
           const emitted = await handlers[action.type]({
             payload: action.payload, principal,
             ...handlerContext,
+            ...(atomic ? { atomic } : {}),
             ...(historyInput ? { history: historyInput } : {}),
           });
           const commit = Array.isArray(emitted) ? { events: emitted } : emitted;
@@ -1397,7 +1465,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
       return { events: allEmitted, canonicalPayload: actions };
     };
     const runInTxn = Boolean(historyCommit?.handlerInputs)
-      || actions.some((action) => handlers[action.type].inTransaction);
+      || actions.some((action) => handlers[action.type].inTransaction || handlers[action.type].atomicOperation);
     let batchCommit = null;
     if (!runInTxn) {
       try { batchCommit = await runHandlers(); }

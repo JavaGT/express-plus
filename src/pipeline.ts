@@ -1417,8 +1417,10 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
 
     // Run every handler, concatenating their emitted events. Handlers are pure
     // (events only, no DB writes — Fork A), so the batch runs them in order and
-    // folds all events into one commitEvents pass below. Authorization runs
-    // INSIDE commitEvents's txn (Wave 4.4), before applyInTxn.
+    // folds all events into one commitEvents pass below. Atomic handlers are
+    // resolved and admitted in that same transaction before receiving their
+    // framework-owned atomic context. Authorization runs INSIDE commitEvents's
+    // txn (Wave 4.4), before applyInTxn.
     //
     // Registered actions mark `inTransaction` so they receive db/now/scope inside
     // the write brace — same contract as single `dispatch`. Running them early
@@ -1443,9 +1445,21 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
         const action = actions[actionIndex];
         try {
           const historyInput = historyCommit?.handlerInputs?.[actionIndex];
+          const atomic = transactionContext?.db
+            ? await resolveAtomicOperation(handlers[action.type], {
+              payload: action.payload,
+              principal,
+              db: transactionContext.db,
+              now: transactionContext.now,
+              scope: transactionContext.scope,
+              actionId: transactionContext.actionId,
+              authorization,
+            })
+            : undefined;
           const emitted = await handlers[action.type]({
             payload: action.payload, principal,
             ...handlerContext,
+            ...(atomic ? { atomic } : {}),
             ...(historyInput ? { history: historyInput } : {}),
           });
           const commit = Array.isArray(emitted) ? { events: emitted } : emitted;
@@ -1462,7 +1476,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
       return { events: allEmitted, canonicalPayload: actions };
     };
     const runInTxn = Boolean(historyCommit?.handlerInputs)
-      || actions.some((action) => handlers[action.type].inTransaction);
+      || actions.some((action) => handlers[action.type].inTransaction || handlers[action.type].atomicOperation);
     let batchCommit = null;
     if (!runInTxn) {
       try { batchCommit = await runHandlers(); }

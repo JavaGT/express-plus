@@ -150,6 +150,72 @@ test('field admission denies an atomic operation before its projection', async (
   db.close();
 });
 
+test('a batch resolves and admits an atomic operation inside its shared transaction', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE Note (id TEXT PRIMARY KEY, enabled INTEGER NOT NULL)');
+  db.prepare('INSERT INTO Note (id, enabled) VALUES (?, ?)').run('n1', 0);
+  let handlerCalls = 0;
+  const toggle = atomicOperation({
+    entity: { fields: { enabled: {} } },
+    read: ({ db: transactionDb }) => ({
+      id: 'n1',
+      enabled: transactionDb.prepare('SELECT enabled FROM Note WHERE id = ?').get('n1').enabled === 1,
+    }),
+  }, ({ atomic }) => {
+    handlerCalls += 1;
+    return [{ type: 'Note.updated', scope: 'Note:n1', data: { id: 'n1', enabled: atomic.row.enabled } }];
+  });
+  const server = createServer({
+    db,
+    handlers: { 'Note.toggle': toggle },
+    pipeline: durableMutationVariant(),
+    livePipeline: liveMutationVariant({
+      projectionConsumers: [{
+        eventTypes: ['Note.updated'],
+        apply: (event, txn) => txn.prepare('UPDATE Note SET enabled = ? WHERE id = ?').run(event.data.enabled ? 1 : 0, event.data.id),
+      }],
+    }),
+    tierOfEvent: () => 'live',
+    authorize: async () => true,
+    authorization: { admit: async ({ fieldName }) => ({ admitted: fieldName !== 'enabled' }) },
+  });
+
+  const denied = await server.dispatchBatch({
+    actionId: 'batch-denied',
+    actions: [{ type: 'Note.toggle', payload: { atomicOperations: [toggleTo('enabled', true)] } }],
+    principal: { id: 'alice' },
+  });
+  assert.equal(denied.ok, false);
+  assert.equal(denied.failure.category, 'denied');
+  assert.equal(denied.failure.details.actionIndex, 0);
+  assert.equal(handlerCalls, 0, 'the handler does not run when field admission denies its atomic update');
+
+  const admittedServer = createServer({
+    db,
+    handlers: { 'Note.toggle': toggle },
+    pipeline: durableMutationVariant(),
+    livePipeline: liveMutationVariant({
+      projectionConsumers: [{
+        eventTypes: ['Note.updated'],
+        apply: (event, txn) => txn.prepare('UPDATE Note SET enabled = ? WHERE id = ?').run(event.data.enabled ? 1 : 0, event.data.id),
+      }],
+    }),
+    tierOfEvent: () => 'live',
+    authorize: async () => true,
+    authorization: { admit: async () => ({ admitted: true }) },
+  });
+  const committed = await admittedServer.dispatchBatch({
+    actionId: 'batch-admitted',
+    actions: [{ type: 'Note.toggle', payload: { atomicOperations: [toggleTo('enabled', true)] } }],
+    principal: { id: 'alice' },
+  });
+  assert.equal(committed.ok, true);
+  assert.equal(handlerCalls, 1);
+  assert.equal(db.prepare('SELECT enabled FROM Note WHERE id = ?').get('n1').enabled, 1);
+  db.close();
+});
+
 test('concurrent atomic operations resolve against the latest row without losing either change', async () => {
   const db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);
