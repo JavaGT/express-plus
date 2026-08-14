@@ -679,6 +679,19 @@ export function createRecoveryManager(options                        )          
     return { ok: true, manifest };
   }
 
+  // Manifests record timestamps as the canonical UTC ISO-8601 instant the
+  // backup side writes (`Date.prototype.toISOString()`: YYYY-MM-DDTHH:mm:ss.sssZ).
+  // Both the format AND the round-trip must hold: `Date.parse` normalizes
+  // impossible dates (2026-02-30T00:00:00.000Z silently becomes March 2) and
+  // lenient forms ('yesterday', no-millis, +00:00), so re-serializing the
+  // parsed instant must reproduce the recorded string exactly.
+  function isValidIsoUtcTimestamp(value         )                  {
+    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) return false;
+    const instant = Date.parse(value);
+    if (Number.isNaN(instant)) return false;
+    return new Date(instant).toISOString() === value;
+  }
+
   function validateManifestShape(manifest                )           {
     const failures           = [];
     if (typeof manifest !== 'object' || manifest === null) return ['manifest is not an object'];
@@ -705,11 +718,11 @@ export function createRecoveryManager(options                        )          
     ) {
       failures.push('manifest appSchemaIdentity is not an array of non-empty strings');
     }
-    if (typeof manifest.createdAt !== 'string' || Number.isNaN(Date.parse(manifest.createdAt))) {
-      failures.push('manifest createdAt is not a valid timestamp');
+    if (!isValidIsoUtcTimestamp(manifest.createdAt)) {
+      failures.push('manifest createdAt is not a valid ISO-8601 UTC timestamp');
     }
-    if (typeof manifest.completedAt !== 'string' || Number.isNaN(Date.parse(manifest.completedAt))) {
-      failures.push('manifest completedAt is not a valid timestamp');
+    if (!isValidIsoUtcTimestamp(manifest.completedAt)) {
+      failures.push('manifest completedAt is not a valid ISO-8601 UTC timestamp');
     }
     if (
       !Array.isArray(manifest.blobGenerations) ||
@@ -723,8 +736,8 @@ export function createRecoveryManager(options                        )          
     } else {
       const ir = integrity                            ;
       if (typeof ir.ok !== 'boolean') failures.push('manifest integrityResult.ok is not a boolean');
-      if (typeof ir.checkedAt !== 'string' || Number.isNaN(Date.parse(ir.checkedAt))) {
-        failures.push('manifest integrityResult.checkedAt is not a valid timestamp');
+      if (!isValidIsoUtcTimestamp(ir.checkedAt)) {
+        failures.push('manifest integrityResult.checkedAt is not a valid ISO-8601 UTC timestamp');
       }
       if (!Array.isArray(ir.findings)) {
         failures.push('manifest integrityResult.findings is not an array');

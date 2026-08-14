@@ -92,6 +92,16 @@ test('a complete healthy backup passes every gate and restores', { timeout: 1200
   const dir = join(root, 'owned');
   try {
     const backup = await makeBackup(dir);
+    // The writer's canonical UTC ISO-8601 timestamps round-trip exactly and are
+    // therefore accepted by the manifest shape gate.
+    for (const field of ['createdAt', 'completedAt']) {
+      assert.equal(new Date(backup.manifest[field]).toISOString(), backup.manifest[field], `${field} is canonical`);
+    }
+    assert.equal(
+      new Date(backup.manifest.integrityResult.checkedAt).toISOString(),
+      backup.manifest.integrityResult.checkedAt,
+      'integrityResult.checkedAt is canonical',
+    );
     const result = await managerFor(dir).recover({ backupId: backup.backupId });
     assert.equal(result.ok, true, 'a healthy backup restores');
     assert.equal(result.status, 'restored');
@@ -425,6 +435,84 @@ test('a manifest with a malformed (falsified) platformSchemaIdentity is refused'
     assert.equal(result.ok, false);
     assert.equal(result.status, 'rejected');
     assert.match(result.reason, /platformSchemaIdentity/);
+    assert.equal(existsSync(join(dir, 'backups', backup.backupId)), true, 'the backup stays in backups/');
+    assert.deepEqual(quarantineNames(dir), [], 'quarantine is untouched');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a manifest with a rolled-over (impossible) createdAt is refused', { timeout: 120000 }, async () => {
+  const root = tempRoot();
+  const dir = join(root, 'owned');
+  try {
+    const backup = await makeBackup(dir);
+    const manifest = readManifest(dir, backup.backupId);
+    // 2026-02-30T00:00:00.000Z satisfies the ISO-8601 UTC SHAPE, but Date.parse
+    // silently normalizes it to March 2 — only the round-trip check refuses the
+    // rollover (Date.parse alone would accept it).
+    writeFileSync(
+      manifestPath(dir, backup.backupId),
+      JSON.stringify({ ...manifest, createdAt: '2026-02-30T00:00:00.000Z' }, null, 2),
+    );
+
+    const result = await managerFor(dir).recover({ backupId: backup.backupId });
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 'rejected');
+    assert.match(result.reason, /createdAt is not a valid ISO-8601 UTC timestamp/);
+    assert.equal(existsSync(join(dir, 'backups', backup.backupId)), true, 'the backup stays in backups/');
+    assert.deepEqual(quarantineNames(dir), [], 'quarantine is untouched');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a manifest with a non-ISO createdAt is refused', { timeout: 120000 }, async () => {
+  const root = tempRoot();
+  const dir = join(root, 'owned');
+  try {
+    const backup = await makeBackup(dir);
+    const manifest = readManifest(dir, backup.backupId);
+    writeFileSync(
+      manifestPath(dir, backup.backupId),
+      JSON.stringify({ ...manifest, createdAt: 'yesterday' }, null, 2),
+    );
+
+    const result = await managerFor(dir).recover({ backupId: backup.backupId });
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 'rejected');
+    assert.match(result.reason, /createdAt is not a valid ISO-8601 UTC timestamp/);
+    assert.equal(existsSync(join(dir, 'backups', backup.backupId)), true, 'the backup stays in backups/');
+    assert.deepEqual(quarantineNames(dir), [], 'quarantine is untouched');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a manifest with rolled-over completedAt and integrityResult.checkedAt is refused', { timeout: 120000 }, async () => {
+  const root = tempRoot();
+  const dir = join(root, 'owned');
+  try {
+    const backup = await makeBackup(dir);
+    const manifest = readManifest(dir, backup.backupId);
+    writeFileSync(
+      manifestPath(dir, backup.backupId),
+      JSON.stringify(
+        {
+          ...manifest,
+          completedAt: '2026-02-30T00:00:00.000Z',
+          integrityResult: { ...manifest.integrityResult, checkedAt: '2026-02-30T00:00:00.000Z' },
+        },
+        null,
+        2,
+      ),
+    );
+
+    const result = await managerFor(dir).recover({ backupId: backup.backupId });
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 'rejected');
+    assert.match(result.reason, /completedAt is not a valid ISO-8601 UTC timestamp/);
+    assert.match(result.reason, /checkedAt is not a valid ISO-8601 UTC timestamp/);
     assert.equal(existsSync(join(dir, 'backups', backup.backupId)), true, 'the backup stays in backups/');
     assert.deepEqual(quarantineNames(dir), [], 'quarantine is untouched');
   } finally {
