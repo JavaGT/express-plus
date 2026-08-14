@@ -586,7 +586,6 @@ test('a foreign same-text fold never consumes a local pending edit', async () =>
   let number = 0;
   let actionCounter = 0;
   const session = createAnnotatedTextHttpSession({
-    typingBurstIdleMs: 0,
     baseUrl: 'https://example.test/live-delivery',
     context: { entity: Document, field: Document.body, documentId: 'd1' },
     historySession: 'tab-a', createActionId: () => `action-${++actionCounter}`,
@@ -645,6 +644,86 @@ test('a foreign same-text fold never consumes a local pending edit', async () =>
   assert.equal(session.document.text, 'a');
   assert.equal(publicMaterializeText(session.family), session.document.text);
   session.close();
+});
+
+test('a foreign same-text fold never consumes a pending burst insert', async () => {
+  const A = 'a'.repeat(32);
+  const B = 'b'.repeat(32);
+  const seedOp = ['workbench.text', 1, [A, 1], 1, [], ['insert', ['root'], 'hello world']];
+  const baseFamily = createTextFamily('d1', textCheckpoint(applyTextOp(createTextState(), seedOp)));
+  // Foreign insert of 'x' at offset 0 produces the same text transition as the
+  // local pending insert, so text equality alone cannot tell them apart.
+  const foreignInsertOp = textOperationForOffsetEdit(
+    baseFamily, { kind: 'text.insert', at: { offset: 0, affinity: 'right' }, text: 'x' }, B, 2,
+  );
+  const foreignFamily = applyTextOperation(baseFamily, foreignInsertOp);
+  assert.equal(materializeText(foreignFamily), 'xhello world');
+
+  const sources = [];
+  let number = 0;
+  let actionCounter = 0;
+  const session = createAnnotatedTextHttpSession({
+    // DEFAULT burst path — deliberately no typingBurstIdleMs: 0, so the local
+    // insert stays a pending, un-dispatched typing burst when the fold arrives.
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: Document, field: Document.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => `action-${++actionCounter}`,
+    fetchImpl: async (url, options) => {
+      if (options?.method === 'POST') {
+        if (url.includes('/authoring/ack')) return { ok: true, status: 200, json: async () => ({ ok: true, acknowledgedThrough: number }) };
+        return new Promise(() => {}); // the local insert never confirms
+      }
+      const cursor = ++number;
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          kind: 'snapshot',
+          snapshot: {
+            body: {
+              kind: 'workbench.annotatedText.recipient', version: 2,
+              text: 'hello world', ranges: [], annotations: [], orphans: [], measurements: [],
+            },
+          },
+          cursor,
+          authoring: authoringEnvelope(cursor, textFamilyCheckpoint(baseFamily)),
+        }),
+      };
+    },
+    eventSourceFactory: () => {
+      const source = { close() {}, onmessage: null, onerror: null };
+      sources.push(source);
+      return source;
+    },
+  });
+  await session.ready;
+  const pending = session.insert({ at: { offset: 0, affinity: 'right' }, text: 'x' });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(session.document.text, 'xhello world');
+
+  sources[0].onmessage({ data: JSON.stringify([{
+    type: 'event', entity: 'Project', id: 'p1', seq: 2, seqSpan: [2, 2],
+    event: { type: 'FoldDoc.body.operated', scope: 'annotated-text:d1', seq: 2, actionId: 'foreign' },
+    fold: {
+      kind: 'annotatedText', version: 5, field: 'body', baseCursor: 1, fence: 2,
+      text: { reducer: 'workbench.text', operations: [foreignInsertOp] },
+      projection: { text: 'xhello world' },
+      dispositions: [],
+      familyElementCount: Object.keys(foreignFamily.checkpoint.elements).length,
+      authoring: {
+        acknowledgementFence: 2,
+        stream: token('stream'), lease: token('lease'), snapshot: token('snapshot2'),
+        positionFrames: [{ positionToken: token('position2') }],
+      },
+    },
+  }]) });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  // Foreign 'x' plus the still-pending local 'x' materializes 'xxhello world'.
+  // Had the foreign fold consumed the local insert, the text would wrongly stay
+  // 'xhello world'.
+  assert.equal(session.document.text, 'xxhello world');
+  assert.equal(publicMaterializeText(session.family), session.document.text);
+  session.close();
+  await pending;
 });
 
 test('a typing-burst insert that splits a surrogate pair is rejected without dispatch', async () => {
