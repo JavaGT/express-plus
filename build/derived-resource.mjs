@@ -5,48 +5,48 @@
 // overlap another reconciler or an authoritative writer.
 
 import { constants } from 'node:sqlite';
-import type { DbHandle } from './driver.ts';
+
 
 export const DERIVED_RESOURCE_TABLE = '_DerivedResource';
-export type DerivedResourceStatus = 'absent' | 'preparing' | 'current' | 'stale' | 'rebuilding' | 'failed';
 
-export type DerivedResourceState = Readonly<{
-  id: string;
-  state: DerivedResourceStatus;
-  attempts: number;
-  lastError: string | null;
-  updatedAt: string;
-}>;
 
-export type DerivedResourceStatement = Readonly<{ sql: string; params?: readonly unknown[] }>;
-export type DerivedResourceContext = Readonly<{
-  state: DerivedResourceState;
-  query(statement: DerivedResourceStatement): readonly Record<string, unknown>[];
-  write(statement: DerivedResourceStatement): { changes: number };
-}>;
 
-export type DerivedResource = Readonly<{
-  id: string;
-  // Every object a callback may mutate. Source tables remain read-only.
-  ownedObjects: readonly string[];
-  prepare?: (context: DerivedResourceContext) => void | Promise<void>;
-  rebuild: (context: DerivedResourceContext) => void | Promise<void>;
-  onTransition?: (state: DerivedResourceState) => void;
-}>;
 
-export type DerivedResourceRegistry = Readonly<{
-  register(resource: DerivedResource): void;
-  engage(): Promise<void>;
-  stateOf(id: string): DerivedResourceState;
-  states(): readonly DerivedResourceState[];
-  markStale(id: string): Promise<DerivedResourceState>;
-  prepareAll(): Promise<readonly DerivedResourceState[]>;
-  reconcileBatches(options?: { readonly batchSize?: number }): Promise<Readonly<{ processed: number; remaining: number }>>;
-}>;
 
-type AuthorizerHandle = DbHandle & {
-  setAuthorizer(callback: ((action: number, arg1: string | null, arg2: string | null, dbName: string | null) => number) | null): void;
-};
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 const DDL = `CREATE TABLE IF NOT EXISTS ${DERIVED_RESOURCE_TABLE} (
   id TEXT PRIMARY KEY,
@@ -55,23 +55,23 @@ const DDL = `CREATE TABLE IF NOT EXISTS ${DERIVED_RESOURCE_TABLE} (
   lastError TEXT,
   updatedAt TEXT NOT NULL
 )`;
-const STATUSES = new Set<DerivedResourceStatus>(['absent', 'preparing', 'current', 'stale', 'rebuilding', 'failed']);
-const TRANSITIONS: Readonly<Record<DerivedResourceStatus, readonly DerivedResourceStatus[]>> = {
+const STATUSES = new Set                       (['absent', 'preparing', 'current', 'stale', 'rebuilding', 'failed']);
+const TRANSITIONS                                                                            = {
   absent: ['preparing'], preparing: ['current', 'failed'], current: ['stale'],
   stale: ['rebuilding'], rebuilding: ['rebuilding', 'current', 'failed'], failed: ['rebuilding'],
 };
 
-function messageOf(error: unknown): string {
+function messageOf(error         )         {
   return error instanceof Error ? error.message : String(error);
 }
 
-function stateFrom(row: Record<string, unknown>): DerivedResourceState {
+function stateFrom(row                         )                       {
   const state = String(row.state);
-  if (!STATUSES.has(state as DerivedResourceStatus)) throw new Error(`derived resource '${String(row.id)}' has corrupt durable state '${state}'`);
+  if (!STATUSES.has(state                         )) throw new Error(`derived resource '${String(row.id)}' has corrupt durable state '${state}'`);
   const attempts = Number(row.attempts);
   if (!Number.isSafeInteger(attempts) || attempts < 0) throw new Error(`derived resource '${String(row.id)}' has corrupt durable attempts`);
   if (typeof row.updatedAt !== 'string' || row.updatedAt.length === 0) throw new Error(`derived resource '${String(row.id)}' has corrupt durable timestamp`);
-  return Object.freeze({ id: String(row.id), state: state as DerivedResourceStatus, attempts, lastError: row.lastError == null ? null : String(row.lastError), updatedAt: row.updatedAt });
+  return Object.freeze({ id: String(row.id), state: state                         , attempts, lastError: row.lastError == null ? null : String(row.lastError), updatedAt: row.updatedAt });
 }
 
 export function createDerivedResourceRegistry({
@@ -79,30 +79,30 @@ export function createDerivedResourceRegistry({
   writeCoordinator,
   batchSize = 100,
   now = () => new Date().toISOString(),
-}: {
-  readonly db: DbHandle | (() => DbHandle | null | undefined);
-  readonly writeCoordinator: { run<T>(fn: () => T | Promise<T>): Promise<T> };
-  readonly batchSize?: number;
-  readonly now?: () => string;
-}): DerivedResourceRegistry {
-  const resources = new Map<string, DerivedResource>();
-  const resolveDb = (): DbHandle => {
+}
+
+
+
+
+ )                          {
+  const resources = new Map                         ();
+  const resolveDb = ()           => {
     const handle = typeof db === 'function' ? db() : db;
     if (!handle) throw new Error('derived resources require a database');
     return handle;
   };
-  const validate = (resource: DerivedResource): void => {
+  const validate = (resource                 )       => {
     if (!resource || typeof resource.id !== 'string' || resource.id.length === 0 || typeof resource.rebuild !== 'function') throw new TypeError('derived resources require a non-empty id and rebuild function');
     if (!Array.isArray(resource.ownedObjects) || resource.ownedObjects.some((name) => typeof name !== 'string' || name.length === 0)) throw new TypeError(`derived resource '${resource.id}' ownedObjects must be non-empty names`);
     if (resource.prepare !== undefined && typeof resource.prepare !== 'function') throw new TypeError(`derived resource '${resource.id}' prepare must be a function`);
     if (resource.onTransition !== undefined && typeof resource.onTransition !== 'function') throw new TypeError(`derived resource '${resource.id}' onTransition must be a function`);
   };
-  const read = (id: string): DerivedResourceState => {
+  const read = (id        )                       => {
     const row = resolveDb().prepare(`SELECT id, state, attempts, lastError, updatedAt FROM ${DERIVED_RESOURCE_TABLE} WHERE id = ?`).get(id);
     if (!row) throw new Error(`derived resource '${id}' is not engaged`);
     return stateFrom(row);
   };
-  const transition = (id: string, expected: DerivedResourceStatus, next: DerivedResourceStatus, lastError: string | null = null, incrementAttempts = false): DerivedResourceState | null => {
+  const transition = (id        , expected                       , next                       , lastError                = null, incrementAttempts = false)                              => {
     if (!TRANSITIONS[expected].includes(next)) throw new Error(`derived resource '${id}' cannot transition from '${expected}' to '${next}'`);
     const result = resolveDb().prepare(`UPDATE ${DERIVED_RESOURCE_TABLE} SET state = ?, attempts = attempts + ?, lastError = ?, updatedAt = ? WHERE id = ? AND state = ?`)
       .run(next, incrementAttempts ? 1 : 0, lastError, now(), id, expected);
@@ -111,11 +111,11 @@ export function createDerivedResourceRegistry({
     resources.get(id)?.onTransition?.(state);
     return state;
   };
-  const contextFor = (resource: DerivedResource, state: DerivedResourceState): DerivedResourceContext => {
-    const handle = resolveDb() as AuthorizerHandle;
+  const contextFor = (resource                 , state                      )                         => {
+    const handle = resolveDb()                    ;
     if (typeof handle.setAuthorizer !== 'function') throw new Error('derived resources require a SQLite statement authorizer');
     const owned = new Set(resource.ownedObjects.map((name) => name.toLowerCase()));
-    const execute = <T>(statement: DerivedResourceStatement, write: boolean, run: () => T): T => {
+    const execute =    (statement                          , write         , run         )    => {
       if (!statement || typeof statement.sql !== 'string' || statement.sql.length === 0 || (statement.params !== undefined && !Array.isArray(statement.params))) throw new TypeError('derived resource statement requires SQL and optional array params');
       handle.setAuthorizer((action, arg1, _arg2, dbName) => {
         if (dbName !== null && dbName !== 'main') return constants.SQLITE_DENY;
@@ -132,7 +132,7 @@ export function createDerivedResourceRegistry({
     });
   };
 
-  async function engage(): Promise<void> {
+  async function engage()                {
     if (resources.size === 0) return;
     await writeCoordinator.run(() => {
       const handle = resolveDb(); handle.exec(DDL);
@@ -144,34 +144,34 @@ export function createDerivedResourceRegistry({
       }
     });
   }
-  function register(resource: DerivedResource): void { validate(resource); if (resources.has(resource.id)) throw new Error(`derived resource '${resource.id}' is already registered`); resources.set(resource.id, resource); }
-  function stateOf(id: string): DerivedResourceState { if (!resources.has(id)) throw new Error(`derived resource '${id}' is not registered`); return read(id); }
-  function states(): readonly DerivedResourceState[] {
+  function register(resource                 )       { validate(resource); if (resources.has(resource.id)) throw new Error(`derived resource '${resource.id}' is already registered`); resources.set(resource.id, resource); }
+  function stateOf(id        )                       { if (!resources.has(id)) throw new Error(`derived resource '${id}' is not registered`); return read(id); }
+  function states()                                  {
     if (resources.size === 0) return [];
     return resolveDb().prepare(`SELECT id, state, attempts, lastError, updatedAt FROM ${DERIVED_RESOURCE_TABLE} ORDER BY id`).all().filter((row) => resources.has(String(row.id))).map(stateFrom);
   }
-  async function markStale(id: string): Promise<DerivedResourceState> {
+  async function markStale(id        )                                {
     if (!resources.has(id)) throw new Error(`derived resource '${id}' is not registered`); await engage();
     return writeCoordinator.run(() => {
       const current = read(id);
-      return current.state === 'current' ? transition(id, 'current', 'stale')! : current;
+      return current.state === 'current' ? transition(id, 'current', 'stale')  : current;
     });
   }
-  async function materialize(id: string, kind: 'prepare' | 'rebuild'): Promise<DerivedResourceState | null> {
-    const resource = resources.get(id)!; const expected = kind === 'prepare' ? 'absent' : (['stale', 'failed', 'rebuilding'] as const);
+  async function materialize(id        , kind                       )                                       {
+    const resource = resources.get(id) ; const expected = kind === 'prepare' ? 'absent' : (['stale', 'failed', 'rebuilding']         );
     return writeCoordinator.run(async () => {
       const prior = read(id); const from = kind === 'prepare' ? 'absent' : prior.state;
-      if (!(kind === 'prepare' ? prior.state === expected : expected.includes(from as 'stale' | 'failed' | 'rebuilding'))) return null;
+      if (!(kind === 'prepare' ? prior.state === expected : expected.includes(from                                     ))) return null;
       const active = transition(id, from, kind === 'prepare' ? 'preparing' : 'rebuilding');
       if (!active) return null;
       try {
         if (kind === 'prepare') await resource.prepare?.(contextFor(resource, active)); else await resource.rebuild(contextFor(resource, active));
-        return transition(id, active.state, 'current')!;
-      } catch (error) { return transition(id, active.state, 'failed', messageOf(error), true)!; }
+        return transition(id, active.state, 'current') ;
+      } catch (error) { return transition(id, active.state, 'failed', messageOf(error), true) ; }
     });
   }
-  async function prepareAll(): Promise<readonly DerivedResourceState[]> { await engage(); for (const [id] of resources) await materialize(id, 'prepare'); return states(); }
-  async function reconcileBatches(options: { readonly batchSize?: number } = {}): Promise<Readonly<{ processed: number; remaining: number }>> {
+  async function prepareAll()                                           { await engage(); for (const [id] of resources) await materialize(id, 'prepare'); return states(); }
+  async function reconcileBatches(options                                  = {})                                                              {
     await engage(); const limit = Math.max(1, Math.floor(options.batchSize ?? batchSize)); let processed = 0;
     for (const id of [...resources.keys()]) { if (processed >= limit) break; if (await materialize(id, 'rebuild')) processed++; }
     const remaining = states().filter((entry) => entry.state === 'stale' || entry.state === 'failed' || entry.state === 'rebuilding').length;

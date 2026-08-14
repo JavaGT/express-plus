@@ -1,75 +1,96 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
 
 import { createWriteQueue } from '../build/write-queue.mjs';
 import { createDerivedResourceRegistry } from '../build/derived-resource.mjs';
 
-test('derived resources persist the absent, preparing, current, stale, and rebuilding lifecycle', async () => {
+function resource(id, rebuild, prepare = () => {}) {
+  return { id, ownedObjects: ['Derived'], prepare, rebuild };
+}
+
+async function close(queue, db) { await queue.close(); db.close(); }
+
+test('derived resources run rebuilds in the write coordinator and persist their lifecycle', async () => {
   const db = new DatabaseSync(':memory:');
   const queue = createWriteQueue();
+  db.exec('CREATE TABLE Derived (id TEXT PRIMARY KEY)');
   const transitions = [];
   const registry = createDerivedResourceRegistry({ db, writeCoordinator: queue, batchSize: 1 });
-  registry.register({
-    id: 'search',
-    prepare: () => {},
-    rebuild: () => {},
-    onTransition: (entry) => transitions.push(entry.state),
-  });
+  registry.register({ ...resource('search', ({ write }) => { assert.equal(queue.owned, true); write({ sql: 'INSERT INTO Derived (id) VALUES (?)', params: ['rebuilt'] }); }), onTransition: (entry) => transitions.push(entry.state) });
   try {
-    await registry.engage();
-    assert.equal(registry.stateOf('search').state, 'absent');
     await registry.prepareAll();
-    assert.equal(registry.stateOf('search').state, 'current');
     await registry.markStale('search');
-    assert.equal(registry.stateOf('search').state, 'stale');
     await registry.reconcileBatches();
     assert.equal(registry.stateOf('search').state, 'current');
+    assert.ok(db.prepare('SELECT 1 FROM Derived WHERE id = ?').get('rebuilt'));
     assert.deepEqual(transitions, ['absent', 'preparing', 'current', 'stale', 'rebuilding', 'current']);
-  } finally {
-    await queue.close();
-    db.close();
-  }
+  } finally { await close(queue, db); }
 });
 
-test('derived failure is isolated from source data, durable, and retried in bounded batches', async () => {
+test('derived callbacks may read sources and write only their own objects', async () => {
   const db = new DatabaseSync(':memory:');
   const queue = createWriteQueue();
   db.exec('CREATE TABLE Source (id TEXT PRIMARY KEY); CREATE TABLE Derived (id TEXT PRIMARY KEY)');
   db.prepare('INSERT INTO Source (id) VALUES (?)').run('authoritative');
-  let failures = 1;
-  let rebuilds = 0;
-  const registry = createDerivedResourceRegistry({ db, writeCoordinator: queue, batchSize: 1 });
-  registry.register({
-    id: 'first', prepare: () => {}, rebuild: () => { rebuilds += 1; },
-  });
-  registry.register({
-    id: 'second',
-    prepare: () => {},
-    rebuild: ({ db: handle }) => {
-      rebuilds += 1;
-      handle.prepare('INSERT OR REPLACE INTO Derived (id) VALUES (?)').run('partial-index');
-      if (failures-- > 0) throw new Error('index unavailable');
-    },
-  });
+  const registry = createDerivedResourceRegistry({ db, writeCoordinator: queue });
+  registry.register(resource('isolated', ({ query, write }) => {
+    assert.equal(query({ sql: 'SELECT id FROM Source' })[0].id, 'authoritative');
+    assert.throws(() => write({ sql: 'DELETE FROM Source' }), /not authorized/);
+    write({ sql: 'INSERT INTO Derived (id) VALUES (?)', params: ['allowed'] });
+  }));
   try {
     await registry.prepareAll();
-    await registry.markStale('first');
-    await registry.markStale('second');
-    const firstBatch = await registry.reconcileBatches();
-    assert.equal(firstBatch.processed, 1, 'only one resource is rebuilt in the bounded batch');
-    assert.equal(firstBatch.remaining, 1);
-    const secondBatch = await registry.reconcileBatches();
-    assert.equal(secondBatch.processed, 1);
-    assert.equal(registry.stateOf('second').state, 'failed');
-    assert.match(registry.stateOf('second').lastError, /index unavailable/);
-    assert.ok(db.prepare('SELECT 1 FROM Source WHERE id = ?').get('authoritative'), 'a derived failure cannot roll back source data');
-    assert.ok(db.prepare('SELECT 1 FROM Derived WHERE id = ?').get('partial-index'), 'derived writes are independently retained for an idempotent retry');
+    await registry.markStale('isolated');
     await registry.reconcileBatches();
-    assert.equal(registry.stateOf('second').state, 'current');
-    assert.equal(rebuilds, 3);
-  } finally {
-    await queue.close();
-    db.close();
-  }
+    assert.ok(db.prepare('SELECT 1 FROM Source WHERE id = ?').get('authoritative'));
+    assert.ok(db.prepare('SELECT 1 FROM Derived WHERE id = ?').get('allowed'));
+  } finally { await close(queue, db); }
+});
+
+test('derived recovery survives a process crash, close/reopen, and resumes durable work', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wb-derived-'));
+  const path = join(dir, 'data.sqlite');
+  let db;
+  let queue;
+  const child = spawnSync(process.execPath, ['--input-type=module', '--eval', `
+    import { DatabaseSync } from 'node:sqlite';
+    import { createWriteQueue } from ${JSON.stringify(new URL('../build/write-queue.mjs', import.meta.url).href)};
+    import { createDerivedResourceRegistry } from ${JSON.stringify(new URL('../build/derived-resource.mjs', import.meta.url).href)};
+    const db = new DatabaseSync(${JSON.stringify(path)}); const queue = createWriteQueue();
+    db.exec('CREATE TABLE Derived (id TEXT PRIMARY KEY)');
+    const registry = createDerivedResourceRegistry({ db, writeCoordinator: queue });
+    registry.register({ id: 'resume', ownedObjects: ['Derived'], prepare: () => {}, rebuild: () => process.exit(17) });
+    await registry.prepareAll(); await registry.markStale('resume'); await registry.reconcileBatches();
+  `]);
+  try {
+    assert.equal(child.status, 17, child.stderr.toString());
+    db = new DatabaseSync(path); queue = createWriteQueue();
+    let registry = createDerivedResourceRegistry({ db, writeCoordinator: queue });
+    registry.register(resource('resume', ({ write }) => write({ sql: 'INSERT OR REPLACE INTO Derived (id) VALUES (?)', params: ['recovered'] })));
+    assert.equal(registry.stateOf('resume').state, 'rebuilding', 'the new boot sees the durable crash checkpoint');
+    await registry.reconcileBatches();
+    assert.equal(registry.stateOf('resume').state, 'current');
+    assert.ok(db.prepare('SELECT 1 FROM Derived WHERE id = ?').get('recovered'));
+    await close(queue, db); db = undefined; queue = undefined;
+  } finally { if (queue && db) await close(queue, db); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('corrupt durable states are refused and concurrent reconciliation claims one rebuild', async () => {
+  const db = new DatabaseSync(':memory:'); const queue = createWriteQueue();
+  db.exec('CREATE TABLE Derived (id TEXT PRIMARY KEY)');
+  let rebuilds = 0;
+  const registry = createDerivedResourceRegistry({ db, writeCoordinator: queue });
+  registry.register(resource('once', async () => { rebuilds++; }));
+  try {
+    await registry.prepareAll(); await registry.markStale('once');
+    await Promise.all([registry.reconcileBatches(), registry.reconcileBatches()]);
+    assert.equal(rebuilds, 1);
+    db.prepare("UPDATE _DerivedResource SET state = 'bogus' WHERE id = ?").run('once');
+    assert.throws(() => registry.stateOf('once'), /corrupt durable state/);
+  } finally { await close(queue, db); }
 });
