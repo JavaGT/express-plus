@@ -2,7 +2,10 @@
 // deletion path for content whose bytes exist in a retained backup. delete →
 // bin → backup re-mark; force-delete-earlier purge by backupId/generation;
 // default/configurable recovery-period expiry; operator list/restore;
-// fail-closed binning (disk-full/permission never reports the backup cleaned).
+// fail-closed binning (disk-full/permission never reports the backup cleaned,
+// and a failed bin MOVES already-moved bytes back, never deletes them);
+// unreadable backups are reported failed, never silently skipped;
+// restore refuses tampered bytes or stale bin metadata.
 // The uniform erasure-vs-ordinary path is structural: `bin()` takes ONLY the
 // deleted generations (one bin, no erasure flag, no per-backup markers).
 
@@ -495,6 +498,175 @@ test('recycle/ is covered by the S1/A2 managed-path guard, and the recycle API i
       assert.equal(typeof internal.createRecycleManager, 'function', 'the recycle manager is re-exported from the internal API');
       assert.equal(internal.RECYCLE_FORMAT_VERSION, RECYCLE_FORMAT_VERSION);
       assert.equal(internal.DEFAULT_RECYCLE_RETENTION_DAYS, DEFAULT_RECYCLE_RETENTION_DAYS);
+    } finally {
+      opened.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a mid-bin failure after bytes moved rolls the backup back — bytes returned, bin dir removed, backup reported failed (review #85 finding 1)', { timeout: 120000 }, async () => {
+  const root = tempRoot();
+  const dir = join(root, 'owned');
+  try {
+    const opened = openSqliteAdapter({ directory: dir, name: 'app' });
+    try {
+      opened.handle.exec('CREATE TABLE note (id TEXT PRIMARY KEY)');
+      const result = await managerFor(opened, { blobs: blobSeam(['gen-a', 'gen-b']) }).backup();
+      assert.equal(result.ok, true);
+      const backupDir = result.directory;
+
+      // Fault injection: the clock throws on the SECOND generation's bin, so
+      // gen-a has already been moved (bytes + entry.json) when binning dies —
+      // a genuine mid-bin failure after the first generation moved.
+      let calls = 0;
+      const ticking = () => {
+        calls += 1;
+        if (calls === 2) throw new Error('simulated clock failure');
+        return new Date('2026-01-01T00:00:00.000Z');
+      };
+      const recycle = createRecycleManager({ root: dir, blobs: resolveSeam, now: ticking });
+      const binResult = await recycle.bin({ generations: ['gen-a', 'gen-b'] });
+      assert.equal(binResult.ok, false);
+      assert.equal(binResult.failed.length, 1);
+      assert.equal(binResult.failed[0].backupId, result.backupId);
+      assert.deepEqual(binResult.failed[0].generations.sort(), ['gen-a', 'gen-b']);
+      assert.match(binResult.failed[0].error, /simulated clock failure/);
+
+      // TRUE ROLLBACK: every moved generation's bytes came BACK to the backup
+      // (moved, not deleted) — backup + bytes exactly as before the bin.
+      assert.equal(readFileSync(join(backupDir, 'blobs', 'gen-a.blob'), 'utf8'), 'bytes-gen-a', 'gen-a bytes were returned to the backup, not deleted');
+      assert.equal(readFileSync(join(backupDir, 'blobs', 'gen-b.blob'), 'utf8'), 'bytes-gen-b', 'gen-b bytes were never moved');
+      assert.equal(existsSync(join(dir, 'recycle', result.backupId)), false, 'the bin entry directories were removed');
+      assert.equal(recycle.list().length, 0, 'no binned entry was reported');
+      assert.equal(manifestOf(backupDir).binnedGenerations, undefined, 'the backup was never re-marked cleaned');
+
+      // The identical delete succeeds once binning can complete.
+      assert.equal((await recycle.bin({ generations: ['gen-a', 'gen-b'] })).ok, true);
+      assert.equal(recycle.list().length, 2);
+
+      // A manifest re-mark write that fails also rolls the bytes back.
+      assert.equal((await recycle.restore({ backupId: result.backupId, generation: 'gen-a' })).ok, true);
+      assert.equal((await recycle.restore({ backupId: result.backupId, generation: 'gen-b' })).ok, true);
+      assert.equal(manifestOf(backupDir).binnedGenerations, undefined);
+      chmodSync(backupDir, 0o500);
+      const remarkFailure = await recycle.bin({ generations: ['gen-a'] });
+      chmodSync(backupDir, 0o700);
+      assert.equal(remarkFailure.ok, false, 'a failed re-mark write reports the backup failed');
+      assert.match(remarkFailure.failed[0].error, /EACCES|EPERM/, `re-mark failure surfaced: ${remarkFailure.failed[0].error}`);
+      assert.equal(readFileSync(join(backupDir, 'blobs', 'gen-a.blob'), 'utf8'), 'bytes-gen-a', 'the re-mark failure also returns the bytes');
+      assert.equal(existsSync(join(dir, 'recycle', result.backupId)), false);
+      assert.equal(manifestOf(backupDir).binnedGenerations, undefined, 'the failed re-mark never landed');
+    } finally {
+      opened.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('an unreadable or unparseable backup manifest makes bin() report the backup failed, never ok (review #85 finding 2)', { timeout: 120000 }, async () => {
+  const root = tempRoot();
+  const dir = join(root, 'owned');
+  try {
+    const opened = openSqliteAdapter({ directory: dir, name: 'app' });
+    try {
+      opened.handle.exec('CREATE TABLE note (id TEXT PRIMARY KEY)');
+      const result = await managerFor(opened, { blobs: blobSeam(['gen-a']) }).backup();
+      assert.equal(result.ok, true);
+      const backupDir = result.directory;
+      const manifestPath = join(backupDir, 'manifest.json');
+      const validManifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+
+      const recycle = createRecycleManager({ root: dir, blobs: resolveSeam });
+
+      // Corrupt the manifest: the backup may still hold the deleted bytes, so
+      // bin() must report it failed — never a silent skip, never ok:true.
+      writeFileSync(manifestPath, '{ this is not json ');
+      const corrupt = await recycle.bin({ generations: ['gen-a'] });
+      assert.equal(corrupt.ok, false, 'bin() does not claim success while a backup may hold the deleted generation');
+      assert.equal(corrupt.binned.length, 0, 'nothing was reported binned');
+      assert.equal(corrupt.failed.length, 1);
+      assert.equal(corrupt.failed[0].backupId, result.backupId);
+      assert.deepEqual(corrupt.failed[0].generations, ['gen-a'], 'every deletion generation is unverifiable in the unreadable backup');
+      assert.match(corrupt.failed[0].error, /unparseable/);
+      assert.equal(existsSync(join(backupDir, 'blobs', 'gen-a.blob')), true, 'the bytes were untouched');
+      assert.equal(existsSync(join(dir, 'recycle', result.backupId)), false, 'nothing was binned');
+
+      // An unreadable manifest (permissions) is the same fail-closed answer.
+      writeFileSync(manifestPath, `${JSON.stringify(validManifest, null, 2)}\n`);
+      chmodSync(manifestPath, 0o000);
+      const denied = await recycle.bin({ generations: ['gen-a'] });
+      chmodSync(manifestPath, 0o600);
+      assert.equal(denied.ok, false);
+      assert.equal(denied.failed.length, 1);
+      assert.match(denied.failed[0].error, /unreadable/);
+      assert.equal(existsSync(join(backupDir, 'blobs', 'gen-a.blob')), true, 'the bytes were untouched');
+      assert.equal(existsSync(join(dir, 'recycle', result.backupId)), false);
+    } finally {
+      opened.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('restore refuses tampered or truncated binned bytes — the entry size must match (review #85 finding 3)', { timeout: 120000 }, async () => {
+  const root = tempRoot();
+  const dir = join(root, 'owned');
+  try {
+    const opened = openSqliteAdapter({ directory: dir, name: 'app' });
+    try {
+      opened.handle.exec('CREATE TABLE note (id TEXT PRIMARY KEY)');
+      const result = await managerFor(opened, { blobs: blobSeam(['gen-a']) }).backup();
+      assert.equal(result.ok, true);
+      const backupDir = result.directory;
+      const recycle = createRecycleManager({ root: dir, blobs: resolveSeam });
+      await recycle.bin({ generations: ['gen-a'] });
+      const entryDir = join(dir, 'recycle', result.backupId, 'gen-a');
+
+      // Truncate the binned bytes: the entry records the original size, the bin
+      // holds fewer — restore must refuse rather than return a partial blob.
+      writeFileSync(join(entryDir, 'gen-a.blob'), 'bytes-');
+      const restored = await recycle.restore({ backupId: result.backupId, generation: 'gen-a' });
+      assert.equal(restored.ok, false);
+      assert.match(restored.error, /corrupted/);
+      assert.equal(existsSync(join(backupDir, 'blobs', 'gen-a.blob')), false, 'the truncated bytes were not moved into the backup');
+      assert.equal(recycle.list().length, 1, 'the bin entry stays for inspection');
+      assert.equal(manifestOf(backupDir).binnedGenerations[0].generation, 'gen-a', 'the backup was not un-marked');
+    } finally {
+      opened.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('restore fails closed when the origin manifest has no matching binned-generation record (review #85 finding 4)', { timeout: 120000 }, async () => {
+  const root = tempRoot();
+  const dir = join(root, 'owned');
+  try {
+    const opened = openSqliteAdapter({ directory: dir, name: 'app' });
+    try {
+      opened.handle.exec('CREATE TABLE note (id TEXT PRIMARY KEY)');
+      const result = await managerFor(opened, { blobs: blobSeam(['gen-a']) }).backup();
+      assert.equal(result.ok, true);
+      const backupDir = result.directory;
+      const recycle = createRecycleManager({ root: dir, blobs: resolveSeam });
+      await recycle.bin({ generations: ['gen-a'] });
+
+      // The origin manifest lost its binned-generation record (stale or
+      // inconsistent bin metadata): restoring must fail closed, not move bytes
+      // back and rewrite a manifest that never marked them binned.
+      const m = manifestOf(backupDir);
+      writeFileSync(join(backupDir, 'manifest.json'), `${JSON.stringify({ ...m, binnedGenerations: [] }, null, 2)}\n`);
+      const restored = await recycle.restore({ backupId: result.backupId, generation: 'gen-a' });
+      assert.equal(restored.ok, false);
+      assert.match(restored.error, /no matching binned-generation record|disagree/);
+      assert.equal(existsSync(join(backupDir, 'blobs', 'gen-a.blob')), false, 'the bytes were not moved into the backup');
+      assert.equal(existsSync(join(dir, 'recycle', result.backupId, 'gen-a')), true, 'the bin entry stays');
+      assert.deepEqual(manifestOf(backupDir).binnedGenerations, [], 'the manifest was not rewritten');
     } finally {
       opened.close();
     }

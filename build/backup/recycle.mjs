@@ -24,11 +24,14 @@
 // FAIL-CLOSED BINNING: per backup, bytes move first and the re-marked manifest
 // is written LAST — the manifest is the commit marker, mirroring backup
 // creation (src/backup.ts). A disk-full/permission failure, a generation whose
-// bytes cannot be located, or a manifest write that throws rolls the backup
-// back (moved bytes returned, no re-mark written) and the backup is reported
-// FAILED, never cleaned. A backup carrying blob bytes whose generation files
-// cannot be resolved refuses fail-closed (a recycle manager without the
-// optional resolution seam never guesses at file names).
+// bytes cannot be located, or a manifest write that throws ROLLS THE BACKUP
+// BACK: every generation whose bytes already moved is MOVED BACK to its origin
+// blobs/ path (the same atomic rename in reverse, never a delete), no re-mark
+// is written, and the backup is reported FAILED — a failed bin leaves the
+// backup + bytes exactly as before, never cleaned. A backup carrying blob
+// bytes whose generation files cannot be resolved refuses fail-closed (a
+// recycle manager without the optional resolution seam never guesses at file
+// names).
 //
 // CRASH WINDOW (documented, not defended against — same stance as backup.ts):
 // between the byte rename into `recycle/<backupId>/<generation>/` and the
@@ -241,17 +244,55 @@ export function createRecycleManager(options                       )            
     }
   }
 
-  // A backup is genuinely complete and bin-eligible iff its manifest exists,
-  // parses, and records a complete status — the same gate the backup module
-  // uses (manifest written last).
-  function readCompleteManifest(dir        )                        {
+  // The result of reading a backup's manifest. A backup is genuinely complete
+  // and bin-eligible iff its manifest exists, parses, and records a complete
+  // status — the same gate the backup module uses (manifest written last). The
+  // READ is FAIL-CLOSED (review #85 finding 2): a missing, unreadable, or
+  // unparseable manifest cannot prove a backup does NOT hold the deleted
+  // content, so binning reports it as a per-backup failure rather than
+  // silently skipping it. `incomplete` is the one honest exception — the
+  // manifest parsed and is a known format, but the backup never committed
+  // (status !== 'complete'), so it is not a retained backup (the backup module
+  // quarantines it) and binning skips it rather than binning from it.
+                     
+                                                              
+                                                                                                  
+
+  function readManifestState(dir        )               {
+    let raw        ;
     try {
-      const manifest = JSON.parse(readFileSync(path.join(dir, 'manifest.json'), 'utf8'))                  ;
-      if (manifest.formatVersion !== BACKUP_FORMAT_VERSION || manifest.status !== 'complete') return null;
-      return manifest;
-    } catch {
-      return null;
+      raw = readFileSync(path.join(dir, 'manifest.json'), 'utf8');
+    } catch (err) {
+      if ((err                         ).code === 'ENOENT') {
+        return { ok: false, kind: 'unreadable', reason: 'the backup has no manifest.json — its contents cannot be verified' };
+      }
+      return { ok: false, kind: 'unreadable', reason: `the backup manifest.json is unreadable: ${sanitizeError(err)}` };
     }
+    let parsed         ;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return { ok: false, kind: 'unreadable', reason: 'the backup manifest.json is unparseable — its contents cannot be verified' };
+    }
+    if (typeof parsed !== 'object' || parsed === null) {
+      return { ok: false, kind: 'unreadable', reason: 'the backup manifest.json does not hold a manifest object — its contents cannot be verified' };
+    }
+    const manifest = parsed                  ;
+    if (manifest.formatVersion !== BACKUP_FORMAT_VERSION) {
+      return {
+        ok: false,
+        kind: 'unreadable',
+        reason: `the backup manifest has an unsupported format (${typeof manifest.formatVersion === 'number' ? manifest.formatVersion : 'unknown'}) — its contents cannot be verified`,
+      };
+    }
+    if (manifest.status !== 'complete') {
+      return {
+        ok: false,
+        kind: 'incomplete',
+        reason: `the backup manifest declares status '${typeof manifest.status === 'string' ? manifest.status : 'unknown'}' — not a retained backup`,
+      };
+    }
+    return { ok: true, manifest };
   }
 
   // Re-marking writes the manifest last (the commit marker) via temp+rename so
@@ -369,19 +410,51 @@ export function createRecycleManager(options                       )            
     return { ok: true, size: stat.size };
   }
 
-  // Put back every bin entry created so far (best-effort, on the failure path):
-  // each entry directory is removed with the moved bytes inside it. A directory
-  // created but never filled (the byte rename failed) is removed the same way,
-  // and a now-empty per-backup parent is tidied. Whatever survives a rollback
-  // failure stays in the operator-visible bin.
-  function rollbackBinDirs(createdDirs                   )       {
-    for (const dir of [...createdDirs].reverse()) {
+  // TRUE ROLLBACK (review #85 finding 1): every generation whose bytes were
+  // already moved out of the backup is MOVED BACK to its origin blobs/ path —
+  // the same atomic rename in reverse (source and target live on one
+  // filesystem, so renameSync is the safe primitive; a failed bin must leave
+  // the backup + bytes exactly as before, so moved bytes are NEVER deleted
+  // here). A bin entry dir created but never filled (the byte rename failed)
+  // is removed once empty, the dropped entry.json of a successfully-returned
+  // generation is removed (stale — its bytes are back in the backup), and the
+  // now-empty per-backup parent is tidied. Whatever survives a rollback
+  // failure keeps its entry.json and stays in the operator-visible bin so it
+  // can be restored or purged by hand. Returns a short description of any
+  // rollback failure for the caller's diagnostic.
+  function rollbackBin(
+    backupId        ,
+    blobsDir        ,
+    createdDirs                   ,
+    moved                                                 ,
+  )         {
+    const failures           = [];
+    const returned = new Set        ();
+    for (const { generation, name } of [...moved].reverse()) {
+      const dir = entryDir(backupId, generation);
       try {
-        rmSync(dir, { recursive: true, force: false });
+        renameSync(path.join(dir, name), path.join(blobsDir, name));
+        returned.add(dir);
       } catch (err) {
-        getLog().warn('system', 'recycle rollback could not remove a partial bin entry', {
-          error: err instanceof Error ? err.message : String(err),
-        });
+        // The bytes stay in the bin (WITH their entry.json, so they remain
+        // listable); the manifest was never re-marked, so the backup still
+        // claims them reachable — an operator can restore by hand.
+        failures.push(`could not return ${generation} bytes to ${backupId}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    for (const dir of [...createdDirs].reverse()) {
+      if (returned.has(dir)) {
+        try {
+          rmSync(path.join(dir, 'entry.json'), { force: true });
+        } catch {
+          /* nothing to drop */
+        }
+      }
+      try {
+        rmdirSync(dir);
+      } catch {
+        /* not empty — the generation's bytes could not be returned, so the
+           entry stays in the bin for manual recovery */
       }
       try {
         rmdirSync(path.dirname(dir));
@@ -389,6 +462,7 @@ export function createRecycleManager(options                       )            
         /* not empty — another entry still lives there */
       }
     }
+    return failures.join('; ');
   }
 
   // BIN ONE BACKUP. Returns the generations actually binned, or the failure
@@ -460,8 +534,13 @@ export function createRecycleManager(options                       )            
         writeFileSync(path.join(dir, 'entry.json'), `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
       }
     } catch (err) {
-      rollbackBinDirs(createdDirs);
-      return { ok: false, generations: todo, error: sanitizeError(err) };
+      const rollbackFailures = rollbackBin(backupId, blobsDir, createdDirs, moved);
+      const base = sanitizeError(err);
+      return {
+        ok: false,
+        generations: todo,
+        error: rollbackFailures === '' ? base : `${base}; rollback incomplete: ${rollbackFailures}`,
+      };
     }
 
     // RE-MARK the manifest LAST — the commit marker. A re-mark write that
@@ -474,8 +553,13 @@ export function createRecycleManager(options                       )            
     try {
       writeManifest(backupDir, remarkManifest(manifest, records));
     } catch (err) {
-      rollbackBinDirs(createdDirs);
-      return { ok: false, generations: todo, error: sanitizeError(err) };
+      const rollbackFailures = rollbackBin(backupId, blobsDir, createdDirs, moved);
+      const base = sanitizeError(err);
+      return {
+        ok: false,
+        generations: todo,
+        error: rollbackFailures === '' ? base : `${base}; rollback incomplete: ${rollbackFailures}`,
+      };
     }
 
     return { ok: true, generations: todo };
@@ -493,11 +577,22 @@ export function createRecycleManager(options                       )            
       const dir = path.join(backupsDir, entry);
       if (!isDirectory(dir)) continue;
       if (!backupIdPattern.test(entry)) continue;
-      const manifest = readCompleteManifest(dir);
-      if (manifest === null) continue;
-      const present = generations.filter((generation) => manifest.blobGenerations.includes(generation));
+      const state = readManifestState(dir);
+      if (!state.ok) {
+        // FAIL-CLOSED (review #85 finding 2): a backup whose manifest cannot
+        // be read or understood may still hold the deleted generation — it is
+        // reported failed, never silently skipped and never ok:true. The one
+        // exception is a parsed-but-incomplete backup: it is not a retained
+        // backup (the backup module quarantines it), so it is skipped, never
+        // binned from.
+        if (state.kind === 'unreadable') {
+          failed.push({ backupId: entry, generations, error: state.reason });
+        }
+        continue;
+      }
+      const present = generations.filter((generation) => state.manifest.blobGenerations.includes(generation));
       if (present.length === 0) continue;
-      const outcome = binBackup(entry, dir, manifest, present);
+      const outcome = binBackup(entry, dir, state.manifest, present);
       if (outcome.ok) {
         binned.push({ backupId: entry, generations: outcome.generations });
       } else {
@@ -520,9 +615,25 @@ export function createRecycleManager(options                       )            
       return { ok: false, error: `no binned entry for ${backupId}/${generation}` };
     }
     const backupDir = path.join(backupsDir, backupId);
-    const manifest = readCompleteManifest(backupDir);
-    if (manifest === null) {
-      return { ok: false, error: `origin backup '${backupId}' no longer exists or is not complete — cannot restore into it` };
+    const state = readManifestState(backupDir);
+    if (!state.ok) {
+      return {
+        ok: false,
+        error: `origin backup '${backupId}' no longer exists or cannot be verified (${state.reason}) — refusing to restore into it`,
+      };
+    }
+    const manifest = state.manifest;
+    // FAIL CLOSED on stale/inconsistent bin metadata (review #85 finding 4):
+    // the origin manifest must actually record this generation as binned (with
+    // the same file name the entry claims), or the un-mark would rewrite a
+    // manifest that never marked it — moving bytes back while the backup still
+    // claims them binned.
+    const binnedRecord = (manifest.binnedGenerations ?? []).find((record) => record.generation === generation);
+    if (binnedRecord === undefined || binnedRecord.name !== entry.name) {
+      return {
+        ok: false,
+        error: `origin backup '${backupId}' has no matching binned-generation record for '${generation}' (entry '${entry.name}') — the bin entry and the backup manifest disagree; refusing to restore`,
+      };
     }
     const sourcePath = path.join(dir, entry.name);
     if (!existsSync(sourcePath)) {
@@ -535,6 +646,14 @@ export function createRecycleManager(options                       )            
     const verified = verifyBinnedFile(generation, path.dirname(sourcePath), entry.name);
     if (!verified.ok) {
       return { ok: false, error: `binned bytes for ${backupId}/${generation} cannot be restored: ${verified.reason}` };
+    }
+    if (verified.size !== entry.size) {
+      // The entry records the canonical size; tampered/truncated bin bytes are
+      // refused rather than returned as a partial blob (review #85 finding 3).
+      return {
+        ok: false,
+        error: `binned bytes for ${backupId}/${generation} are corrupted: the entry records ${entry.size} bytes but the bin holds ${verified.size} — refusing to restore`,
+      };
     }
     try {
       mkdirSync(path.dirname(destPath), { recursive: true, mode: 0o700 });
@@ -622,8 +741,9 @@ export function createRecycleManager(options                       )            
   // already be gone (retention trim) — then there is nothing to re-mark.
   function markPurged(entry                 )       {
     const backupDir = path.join(backupsDir, entry.backupId);
-    const manifest = readCompleteManifest(backupDir);
-    if (manifest === null) return;
+    const state = readManifestState(backupDir);
+    if (!state.ok) return;
+    const manifest = state.manifest;
     const purgedAt = now().toISOString();
     const records = (manifest.binnedGenerations ?? []).map((record) =>
       record.generation === entry.generation ? { ...record, purgedAt } : record,
