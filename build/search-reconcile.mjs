@@ -20,8 +20,8 @@
 //      activation fence, atomically activates the shadow, and retires the old
 //      generation. The build phase runs OUTSIDE the coordinator — a long rebuild
 //      must not hold the one write mutex (the bounded-transaction red line);
-//      only the atomic commit + registry stamp runs inside a single coordinated
-//      turn.
+//      plugin callbacks never run inside a coordinator turn. Each callback uses
+//      its owned-index capability for its own bounded, atomic write batch.
 //   3. FENCE — the plugin's invalidation fence is captured before the rebuild
 //      scan and re-verified at activation. A bump (a source change committed
 //      during the scan) proves the shadow missed changes and ABORTS activation
@@ -296,9 +296,9 @@ export function createSearchReconcileEngine(options                        )    
     writeQueue = queue;
   }
 
-  // Route a ledger write or plugin materialization through the ONE write
-  // coordinator (S1/A5): inside a coordinated turn a nested call joins the
-  // turn (write-queue reentrancy).
+  // Framework-owned ledger writes go through the one coordinator. Plugin
+  // lifecycle callbacks deliberately do not: their ctx.index.write() capability
+  // performs admission, fence validation, and bounded transaction execution.
   function coordinated   (fn                      )             {
     return writeQueue.run(fn);
   }
@@ -356,7 +356,10 @@ export function createSearchReconcileEngine(options                        )    
           throw new Error(state.lastError ? state.lastError.message : `reconcile failed for '${affected.pluginId}'`);
         }
       }
-      deleteIfUnchanged(record, row);
+      // Plugin lifecycle callbacks run outside the coordinator. The capability
+      // they may call schedules only host statement execution into it; ledger
+      // deletion remains the small framework-owned coordinated write.
+      await coordinated(() => deleteIfUnchanged(record, row));
       return 'reconcile';
     }
     if (row.kind !== 'revocation' && row.kind !== 'erasure') {
@@ -372,7 +375,7 @@ export function createSearchReconcileEngine(options                        )    
         throw new Error(state.lastError ? state.lastError.message : `rebuild failed for '${affected.pluginId}'`);
       }
     }
-    deleteIfUnchanged(record, row);
+    await coordinated(() => deleteIfUnchanged(record, row));
     return 'rebuild';
   }
 
@@ -421,7 +424,7 @@ export function createSearchReconcileEngine(options                        )    
     const failures                           = [];
     for (const record of slice) {
       try {
-        const kind = await coordinated(() => processRecord(record));
+        const kind = await processRecord(record);
         if (kind === 'reconcile') reconciled += 1;
         else if (kind === 'rebuild') rebuilt += 1;
       } catch (err) {
@@ -456,6 +459,7 @@ export function createSearchReconcileEngine(options                        )    
       id,
       version: plugin.version,
       reader: registry.sourceReader(id),
+      index: registry.ownedIndex(id),
       generation,
       fence,
     };
@@ -532,17 +536,23 @@ export function createSearchReconcileEngine(options                        )    
 
   // Best-effort shadow discard: a throwing abort must never corrupt the active
   // generation or mask the underlying failure.
-  async function safeAbort(plugin                    , ctx                     )                {
+  async function safeAbort(plugin                    , id        )                {
     try {
-      await plugin.abortShadow(ctx);
+      const state = registry.stateOf(id);
+      await plugin.abortShadow(contextOf(id, state.generation, state.fence));
     } catch {
       // the active generation survives a throwing abort by construction
     }
   }
 
-  async function rollbackActivation(plugin                    , ctx                     )                {
-    await plugin.rollbackShadow(ctx);
-    await safeAbort(plugin, ctx);
+  async function rollbackActivation(plugin                    , id        )                {
+    // A failed stamp may have changed the registry fence. Re-read it before the
+    // plugin restores its durable active-generation pointer; the capability
+    // checks this fresh fence inside its own coordinator turn.
+    const state = registry.stateOf(id);
+    const rollbackCtx = contextOf(id, state.generation, state.fence);
+    await plugin.rollbackShadow(rollbackCtx);
+    await safeAbort(plugin, id);
   }
 
   function failedOutcome(
@@ -590,8 +600,8 @@ export function createSearchReconcileEngine(options                        )    
   // when the source census is unchanged across the scan, the shadow's index
   // census matches the source census, and the fence has not moved. The build
   // phase deliberately runs OUTSIDE the coordinator (a long rebuild must not
-  // hold the one write mutex); the atomic commit + registry stamp run inside a
-  // single coordinated turn.
+  // hold the one write mutex). Every plugin lifecycle hook runs outside that
+  // mutex and writes only through its owned-index capability.
   async function rebuildShadow(id        )                                      {
     const plugin = registry.get(id);
     if (plugin === undefined) {
@@ -624,21 +634,21 @@ export function createSearchReconcileEngine(options                        )    
     try {
       await plugin.rebuild(ctx);
     } catch (err) {
-      await safeAbort(plugin, ctx);
+      await safeAbort(plugin, id);
       return failedOutcome(id, messageOf(err, 'shadow rebuild failed'), true, null, fenceAtStart, before);
     }
     let sourceAfter              ;
     try {
       sourceAfter = computeSourceCensus(ctx.reader);
     } catch (err) {
-      await safeAbort(plugin, ctx);
+      await safeAbort(plugin, id);
       return failedOutcome(id, messageOf(err, 'source census re-read failed'), true, null, fenceAtStart, before);
     }
     let index              ;
     try {
       index = plugin.indexCensus(ctx);
     } catch (err) {
-      await safeAbort(plugin, ctx);
+      await safeAbort(plugin, id);
       return failedOutcome(id, messageOf(err, 'shadow index census failed'), true, null, fenceAtStart, before);
     }
     const fenceAfter = registry.stateOf(id).fence;
@@ -652,37 +662,32 @@ export function createSearchReconcileEngine(options                        )    
         : !sourceUnchanged
           ? 'source census changed during the rebuild scan — activation aborted'
           : 'shadow index census does not match the source census — activation aborted';
-      await safeAbort(plugin, ctx);
+      await safeAbort(plugin, id);
       return failedOutcome(id, reason, true, parityReport, fenceAtStart, before);
     }
-    let committed = false;
+    let promoted = false;
     try {
-      await coordinated(async () => {
-        // The source commit and its fence bump enter this same coordinator. Read
-        // it again immediately before promotion so a queued source write cannot
-        // activate a shadow that missed that committed change.
-        if (registry.stateOf(id).fence !== fenceAtStart) {
-          throw new Error('fence moved before shadow activation (a source change committed mid-build)');
-        }
-        // Validate the shadow before it becomes active. The registry performs
-        // the same validation while recording the authoritative stamp below;
-        // this preflight keeps a throwing plugin validator from consuming a
-        // registry generation or exposing the shadow at all.
-        await plugin.validate(ctx);
-        await plugin.commitShadow(ctx);
-        committed = true;
-        // The authoritative stamp: the registry (single source of truth for
-        // generation/state/counts) discloses the activated generation as ready
-        // through the SAME ledger that serves searches. A fence bump that lands
-        // during the stamp leaves it honestly stale (materialize's CAS guard).
-        const stamp = await registry.validate(id);
-        if (!stamp.ok) {
-          throw new Error(stamp.lastError ? stamp.lastError.message : `activation stamp failed for '${id}'`);
-        }
-      });
+      // Check immediately before invoking the plugin, then rely on its
+      // capability to repeat the check atomically with the durable promotion.
+      // No callback itself is enclosed by the host coordinator.
+      if (registry.stateOf(id).fence !== fenceAtStart) {
+        throw new Error('fence moved before shadow activation (a source change committed mid-build)');
+      }
+      await plugin.validate(ctx);
+      await plugin.commitShadow(ctx);
+      promoted = true;
+      // The authoritative stamp remains registry-owned. It is invoked outside
+      // the coordinator too, so a plugin validator can use ctx.index.write().
+      const stamp = await registry.validate(id);
+      if (!stamp.ok) {
+        throw new Error(stamp.lastError ? stamp.lastError.message : `activation stamp failed for '${id}'`);
+      }
     } catch (err) {
-      if (committed) await rollbackActivation(plugin, ctx);
-      else await safeAbort(plugin, ctx);
+      // commitShadow retains the prior durable pointer until the stamp succeeds.
+      // Only a completed promotion needs the fresh-fence rollback; failures
+      // before it merely discard the disposable shadow.
+      if (promoted) await rollbackActivation(plugin, id);
+      else await safeAbort(plugin, id);
       return failedOutcome(
         id,
         `shadow activation failed: ${messageOf(err, 'unknown error')}`,

@@ -38,7 +38,9 @@ import {
 import { createSearchStalenessBridge } from '../build/search-staleness.mjs';
 import { createWriteQueue } from '../build/write-queue.mjs';
 
-// A search plugin over the Note source whose index is an in-memory Map. It
+// A search plugin over the Note source whose index is persisted by generation
+// and mirrored in an in-memory Map. A newly constructed fake reloads the map
+// selected by the durable active pointer, just as a fresh plugin process must.
 // implements the A3 shadow hooks (beginShadow/indexCensus/commitShadow/abortShadow)
 // exactly as a real FTS5/vector plugin would for its own tables:
 //   - beginShadow      starts building a FRESH target; the active index is
@@ -53,14 +55,22 @@ import { createWriteQueue } from '../build/write-queue.mjs';
 // The hooks record `owned` at each lifecycle point. The strict owned-index
 // facade in makeFakeKit separately records host statement execution, proving
 // callbacks never hold the coordinator even though their writes do.
-export function makeShadowIndexedPlugin({ id = 'notes-fts', version = '1.0.0' } = {}) {
-  let active = new Map();
+export function makeShadowIndexedPlugin({ db, id = 'notes-fts', version = '1.0.0' } = {}) {
+  function generationRows(generation) {
+    return db.prepare('SELECT id, title, body FROM notes_fts_document WHERE generation = ? ORDER BY id').all(generation);
+  }
+
+  function generationMap(generation) {
+    return new Map(generationRows(generation).map((row) => [row.id, row]));
+  }
+
+  let active = generationMap(db.prepare("SELECT generation FROM notes_fts_state WHERE slot = 'active'").get().generation);
   let shadow = null;
+  let shadowGeneration = null;
   let mode = 'active'; // 'active' | 'shadow'
   let rebuilder = null;
   let commitFails = false;
   let validateFails = false;
-  let retired = null;
   let ownedProbe = null;
   const calls = [];
 
@@ -91,6 +101,7 @@ export function makeShadowIndexedPlugin({ id = 'notes-fts', version = '1.0.0' } 
         ddl: [`CREATE VIRTUAL TABLE IF NOT EXISTS ${id.replace(/[^A-Za-z0-9_]/g, '_')}_fts USING fts5(title);`],
       },
       { kind: 'table', name: 'notes_fts_state', ddl: ['CREATE TABLE IF NOT EXISTS notes_fts_state (slot TEXT PRIMARY KEY, generation INTEGER NOT NULL);'] },
+      { kind: 'table', name: 'notes_fts_document', ddl: ['CREATE TABLE IF NOT EXISTS notes_fts_document (generation INTEGER NOT NULL, id TEXT NOT NULL, title TEXT, body TEXT, PRIMARY KEY (generation, id));'] },
     ],
     sourceInterests: [{ entity: 'Note' }],
     stalenessKey: (change) => (change.entity === 'Note' ? `${change.entity}:${change.rowId}` : null),
@@ -115,20 +126,31 @@ export function makeShadowIndexedPlugin({ id = 'notes-fts', version = '1.0.0' } 
       calls.push({ op: 'rebuild', mode, owned });
       if (rebuilder) return rebuilder(ctx);
       const target = mode === 'shadow' ? shadow : active;
+      const rows = ctx.reader.rows('Note');
+      await ctx.index.write({
+        expectedFence: ctx.fence,
+        statements: [
+          { sql: 'DELETE FROM notes_fts_document WHERE generation = ?', params: [ctx.generation] },
+          ...rows.map((row) => ({
+            sql: 'INSERT INTO notes_fts_document (generation, id, title, body) VALUES (?, ?, ?, ?)',
+            params: [ctx.generation, row.id, row.title ?? null, row.body ?? null],
+          })),
+        ],
+      });
       target.clear();
-      for (const row of ctx.reader.rows('Note')) target.set(String(row.id), { ...row });
-      await ctx.index.write({ expectedFence: ctx.fence, statements: [{ sql: "UPDATE notes_fts_state SET generation = generation WHERE slot = 'active'" }] });
+      for (const row of rows) target.set(String(row.id), { ...row });
       return { counts: { documents: target.size } };
     },
     search: (ctx) => {
       const activeGeneration = ctx.index.query({ sql: "SELECT generation FROM notes_fts_state WHERE slot = 'active'" })[0]?.generation;
       calls.push({ op: 'search', owned: probeOwned(), activeGeneration });
-      return { hits: [...active.keys()].map((rowId) => ({ id: rowId })) };
+      return { hits: ctx.index.query({ sql: 'SELECT id FROM notes_fts_document WHERE generation = ? ORDER BY id', params: [activeGeneration] }) };
     },
     async beginShadow(ctx) {
       calls.push({ op: 'beginShadow', owned: probeOwned() });
       await ctx.index.write({ expectedFence: ctx.fence, statements: [{ sql: "INSERT OR REPLACE INTO notes_fts_state (slot, generation) VALUES ('shadow', ?)", params: [ctx.generation] }] });
       shadow = new Map();
+      shadowGeneration = ctx.generation;
       mode = 'shadow';
     },
     async commitShadow(ctx) {
@@ -140,22 +162,25 @@ export function makeShadowIndexedPlugin({ id = 'notes-fts', version = '1.0.0' } 
         { sql: "INSERT OR REPLACE INTO notes_fts_state (slot, generation) VALUES ('active', ?) ", params: [ctx.generation] },
       ] });
       if (result.changes === 0) throw new Error('fence moved before durable shadow activation');
-      retired = active;
       active = shadow;
       shadow = null;
+      shadowGeneration = null;
       mode = 'active';
     },
     async rollbackShadow(ctx) {
-      calls.push({ op: 'rollbackShadow', owned: probeOwned() });
+      calls.push({ op: 'rollbackShadow', fence: ctx.fence, owned: probeOwned() });
       await ctx.index.write({ expectedFence: ctx.fence, statements: [{ sql: "UPDATE notes_fts_state SET generation = (SELECT generation FROM notes_fts_state WHERE slot = 'prior') WHERE slot = 'active'" }] });
-      active = retired;
-      retired = null;
+      active = generationMap(db.prepare("SELECT generation FROM notes_fts_state WHERE slot = 'active'").get().generation);
       mode = 'active';
     },
     async abortShadow(ctx) {
       calls.push({ op: 'abortShadow', owned: probeOwned() });
-      await ctx.index.write({ expectedFence: ctx.fence, statements: [{ sql: "DELETE FROM notes_fts_state WHERE slot = 'shadow'" }] });
+      await ctx.index.write({ expectedFence: ctx.fence, statements: [
+        { sql: 'DELETE FROM notes_fts_document WHERE generation = ?', params: [shadowGeneration] },
+        { sql: "DELETE FROM notes_fts_state WHERE slot = 'shadow'" },
+      ] });
       shadow = null;
+      shadowGeneration = null;
       mode = 'active';
     },
     indexCensus: () => ({
@@ -195,12 +220,12 @@ export function makeShadowIndexedPlugin({ id = 'notes-fts', version = '1.0.0' } 
 // bridge (A2) + write coordinator (S1/A5) + reconcile engine (A3). `db` defaults
 // to a fresh in-memory Note database; pass a file-backed handle to simulate
 // restarts.
-export function makeFakeKit(db = null) {
+export function makeFakeKit(db = null, { maxStatements = 128, maxRows = 10_000 } = {}) {
   const handle = db ?? new DatabaseSync(':memory:');
   if (db === null) {
-    handle.exec("CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT, body TEXT); CREATE TABLE notes_fts_state (slot TEXT PRIMARY KEY, generation INTEGER NOT NULL); INSERT INTO notes_fts_state (slot, generation) VALUES ('active', 0);");
+    handle.exec("CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT, body TEXT); CREATE TABLE notes_fts_state (slot TEXT PRIMARY KEY, generation INTEGER NOT NULL); CREATE TABLE notes_fts_document (generation INTEGER NOT NULL, id TEXT NOT NULL, title TEXT, body TEXT, PRIMARY KEY (generation, id)); INSERT INTO notes_fts_state (slot, generation) VALUES ('active', 0);");
   }
-  const owned = makeShadowIndexedPlugin();
+  const owned = makeShadowIndexedPlugin({ db: handle });
   const registry = createSearchPluginRegistry();
   registry.register(owned.plugin);
   registry.bindSource(handle);
@@ -208,19 +233,36 @@ export function makeFakeKit(db = null) {
   bridge.engage(handle);
   const queue = createWriteQueue();
   const hostCalls = [];
+  let failIndexWriteAt = null;
   registry.bindIndex(() => ({
     query({ sql, params = [] }) {
       return handle.prepare(sql).all(...params);
     },
     async write({ expectedFence, statements }) {
+      if (!Array.isArray(statements) || statements.length === 0 || statements.length > maxStatements) {
+        throw new Error(`owned-index write requires 1 to ${maxStatements} statements`);
+      }
       return queue.run(() => {
         if (registry.stateOf('notes-fts').fence !== expectedFence) return { changes: 0 };
-        let changes = 0;
-        for (const statement of statements) {
-          hostCalls.push({ sql: statement.sql, owned: queue.owned });
-          changes += handle.prepare(statement.sql).run(...(statement.params ?? [])).changes;
+        const before = Number(handle.prepare('SELECT total_changes() AS changes').get().changes);
+        handle.exec('BEGIN');
+        try {
+          for (const [position, statement] of statements.entries()) {
+            if (failIndexWriteAt === position + 1) {
+              failIndexWriteAt = null;
+              throw new Error(`owned-index write failed at statement ${position + 1} (injected)`);
+            }
+            hostCalls.push({ sql: statement.sql, owned: queue.owned });
+            handle.prepare(statement.sql).run(...(statement.params ?? []));
+            const changes = Number(handle.prepare('SELECT total_changes() AS changes').get().changes) - before;
+            if (changes > maxRows) throw new Error(`owned-index write exceeds the ${maxRows}-row batch limit`);
+          }
+          handle.exec('COMMIT');
+          return { changes: Number(handle.prepare('SELECT total_changes() AS changes').get().changes) - before };
+        } catch (error) {
+          handle.exec('ROLLBACK');
+          throw error;
         }
-        return { changes };
       });
     },
   }));
@@ -234,6 +276,9 @@ export function makeFakeKit(db = null) {
     engine,
     plugin: owned,
     hostCalls,
+    setIndexWriteFailure(statement) {
+      failIndexWriteAt = statement;
+    },
     close: async () => {
       await queue.close();
       handle.close();
@@ -296,7 +341,7 @@ export function searchReconcileContractScenarios(_makeKit) {
         assert.equal(baseline.ok, true);
         const fenceAtStart = registry.stateOf('notes-fts').fence;
         const commitsBefore = plugin.calls.filter((call) => call.op === 'commitShadow').length;
-        const activationStatementsBefore = hostCalls.filter((call) => call.sql.includes("'prior'")).length;
+        const activationStatementsBefore = hostCalls.filter((call) => call.sql.includes("'prior'") || call.sql.includes("VALUES ('active', ?)")).length;
         assert.equal(fenceAtStart, 0);
 
         // The next rebuild's SCAN is interrupted: a committed source change
@@ -327,9 +372,9 @@ export function searchReconcileContractScenarios(_makeKit) {
           'nothing from the aborted rebuild was committed',
         );
         assert.equal(
-          hostCalls.filter((call) => call.sql.includes("'prior'")).length,
+          hostCalls.filter((call) => call.sql.includes("'prior'") || call.sql.includes("VALUES ('active', ?)")).length,
           activationStatementsBefore,
-          'a moved fence admits zero durable activation statements',
+          'a moved fence admits neither durable promotion statement',
         );
 
         // The ACTIVE generation is untouched — the old index still serves.
@@ -454,7 +499,13 @@ export function searchReconcileContractScenarios(_makeKit) {
         db.prepare('INSERT INTO Note (id, title) VALUES (?, ?)').run('n2', 'two');
         const rejectingRegistry = {
           ...registry,
-          validate: async () => ({ ok: false, lastError: null }),
+          validate: async () => {
+            bridge.notifySourceChange({
+              entity: 'Note', rowId: 'n2', kind: 'created', data: { id: 'n2', title: 'two' },
+              committedAt: '2026-08-15T00:00:00.000Z',
+            });
+            return { ok: false, lastError: null };
+          },
         };
         const rejectingEngine = createSearchReconcileEngine({
           registry: rejectingRegistry,
@@ -468,6 +519,7 @@ export function searchReconcileContractScenarios(_makeKit) {
         assert.equal(failed.activated, false);
         assert.equal(plugin.calls.some((call) => call.op === 'rollbackShadow'), true);
         assert.equal(plugin.calls.some((call) => call.op === 'abortShadow'), true);
+        assert.equal(plugin.calls.findLast((call) => call.op === 'rollbackShadow').fence, 1, 'rollback receives the registry fence moved by the failed stamp');
         assert.deepEqual(plugin.index.content().map((row) => row.id), ['n1']);
         assert.equal(db.prepare("SELECT generation FROM notes_fts_state WHERE slot = 'active'").get().generation, 1, 'rollback restored the real prior durable generation pointer');
       },
@@ -566,7 +618,7 @@ export function searchReconcileContractScenarios(_makeKit) {
         const path = join(directory, 'search.sqlite');
         try {
           const firstDb = new DatabaseSync(path);
-          firstDb.exec("CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT, body TEXT); CREATE TABLE notes_fts_state (slot TEXT PRIMARY KEY, generation INTEGER NOT NULL); INSERT INTO notes_fts_state (slot, generation) VALUES ('active', 0);");
+          firstDb.exec("CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT, body TEXT); CREATE TABLE notes_fts_state (slot TEXT PRIMARY KEY, generation INTEGER NOT NULL); CREATE TABLE notes_fts_document (generation INTEGER NOT NULL, id TEXT NOT NULL, title TEXT, body TEXT, PRIMARY KEY (generation, id)); INSERT INTO notes_fts_state (slot, generation) VALUES ('active', 0);");
           const first = makeFakeKit(firstDb);
           firstDb.prepare('INSERT INTO Note (id, title) VALUES (?, ?)').run('n1', 'one');
           first.plugin.setRebuilder(() => {
@@ -605,6 +657,132 @@ test('census canonicalizes nested object keys before hashing', () => {
   const left = censusOfRows([{ id: 'n1', metadata: { first: 'a', second: 'b' } }]);
   const right = censusOfRows([{ metadata: { second: 'b', first: 'a' }, id: 'n1' }]);
   assert.deepEqual(left, right);
+});
+
+test('rebuild refuses an index write beyond the owned capability row bound and rolls back the shadow', async () => {
+  const kit = makeFakeKit(null, { maxRows: 1 });
+  try {
+    kit.db.prepare('INSERT INTO Note (id, title) VALUES (?, ?)').run('n1', 'one');
+    kit.db.prepare('INSERT INTO Note (id, title) VALUES (?, ?)').run('n2', 'two');
+
+    const outcome = await kit.engine.rebuildShadow('notes-fts');
+    assert.equal(outcome.ok, false);
+    assert.match(outcome.lastError, /batch limit/);
+    assert.equal(kit.db.prepare('SELECT count(*) AS count FROM notes_fts_document').get().count, 0, 'the over-limit rebuild write was atomic');
+    assert.equal(kit.db.prepare("SELECT generation FROM notes_fts_state WHERE slot = 'active'").get().generation, 0, 'the active pointer was not promoted');
+  } finally {
+    await kit.close();
+  }
+});
+
+test('rebuild refuses an index write beyond the owned capability statement bound', async () => {
+  const kit = makeFakeKit(null, { maxStatements: 2 });
+  try {
+    kit.db.prepare('INSERT INTO Note (id, title) VALUES (?, ?)').run('n1', 'one');
+    kit.db.prepare('INSERT INTO Note (id, title) VALUES (?, ?)').run('n2', 'two');
+
+    const outcome = await kit.engine.rebuildShadow('notes-fts');
+    assert.equal(outcome.ok, false);
+    assert.match(outcome.lastError, /requires 1 to 2 statements/);
+    assert.equal(kit.db.prepare('SELECT count(*) AS count FROM notes_fts_document').get().count, 0);
+  } finally {
+    await kit.close();
+  }
+});
+
+test('a failed second promotion statement rolls back the whole durable activation batch', async () => {
+  const kit = makeFakeKit();
+  try {
+    kit.db.prepare('INSERT INTO Note (id, title) VALUES (?, ?)').run('n1', 'one');
+    assert.equal((await kit.engine.rebuildShadow('notes-fts')).ok, true);
+    kit.setIndexWriteFailure(2);
+
+    const outcome = await kit.engine.rebuildShadow('notes-fts');
+    assert.equal(outcome.ok, false);
+    assert.equal(kit.db.prepare("SELECT generation FROM notes_fts_state WHERE slot = 'active'").get().generation, 1);
+    assert.equal(kit.db.prepare("SELECT generation FROM notes_fts_state WHERE slot = 'prior'").get().generation, 0, 'the first promotion statement was rolled back too');
+  } finally {
+    await kit.close();
+  }
+});
+
+test('an index-write failure retains the ledger while the committed source mutation survives', async () => {
+  const kit = makeFakeKit();
+  try {
+    kit.db.prepare('INSERT INTO Note (id, title) VALUES (?, ?)').run('n1', 'one');
+    kit.bridge.notifySourceChange({
+      entity: 'Note', rowId: 'n1', kind: 'created', data: { id: 'n1', title: 'one' },
+      committedAt: '2026-08-15T00:00:00.000Z',
+    });
+    kit.setIndexWriteFailure(1);
+
+    const summary = await kit.engine.reconcileBatches({ batchSize: 1 });
+    assert.equal(summary.retained, 1);
+    assert.equal(kit.db.prepare('SELECT title FROM Note WHERE id = ?').get('n1').title, 'one');
+    assert.equal(kit.bridge.pending().length, 1, 'ledger deletion remains host-coordinated after plugin failure');
+  } finally {
+    await kit.close();
+  }
+});
+
+test('a fresh plugin instance selects and serves the durable generation after activation', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'workbench-search-reconcile-'));
+  const path = join(directory, 'search.sqlite');
+  try {
+    const firstDb = new DatabaseSync(path);
+    firstDb.exec("CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT, body TEXT); CREATE TABLE notes_fts_state (slot TEXT PRIMARY KEY, generation INTEGER NOT NULL); CREATE TABLE notes_fts_document (generation INTEGER NOT NULL, id TEXT NOT NULL, title TEXT, body TEXT, PRIMARY KEY (generation, id)); INSERT INTO notes_fts_state (slot, generation) VALUES ('active', 0);");
+    const first = makeFakeKit(firstDb);
+    firstDb.prepare('INSERT INTO Note (id, title) VALUES (?, ?)').run('n1', 'one');
+    assert.equal((await first.engine.rebuildShadow('notes-fts')).ok, true);
+    await first.close();
+
+    const secondDb = new DatabaseSync(path);
+    const second = makeFakeKit(secondDb);
+    try {
+      const search = await second.registry.search('notes-fts', { query: {} });
+      assert.deepEqual(search.result.hits.map((hit) => ({ ...hit })), [{ id: 'n1' }]);
+      assert.equal(second.plugin.calls.at(-1).activeGeneration, 1, 'the fresh instance selected durable generation 1');
+    } finally {
+      await second.close();
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a fresh plugin instance serves the restored durable generation after a failed stamp rollback', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'workbench-search-reconcile-'));
+  const path = join(directory, 'search.sqlite');
+  try {
+    const firstDb = new DatabaseSync(path);
+    firstDb.exec("CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT, body TEXT); CREATE TABLE notes_fts_state (slot TEXT PRIMARY KEY, generation INTEGER NOT NULL); CREATE TABLE notes_fts_document (generation INTEGER NOT NULL, id TEXT NOT NULL, title TEXT, body TEXT, PRIMARY KEY (generation, id)); INSERT INTO notes_fts_state (slot, generation) VALUES ('active', 0);");
+    const first = makeFakeKit(firstDb);
+    firstDb.prepare('INSERT INTO Note (id, title) VALUES (?, ?)').run('n1', 'one');
+    assert.equal((await first.engine.rebuildShadow('notes-fts')).ok, true);
+    firstDb.prepare('INSERT INTO Note (id, title) VALUES (?, ?)').run('n2', 'two');
+    const rejectingEngine = createSearchReconcileEngine({
+      registry: { ...first.registry, validate: async () => ({ ok: false, lastError: null }) },
+      staleness: first.bridge,
+      db: firstDb,
+      writeQueue: first.queue,
+      now: () => 't',
+    });
+    assert.equal((await rejectingEngine.rebuildShadow('notes-fts')).ok, false);
+    assert.equal(firstDb.prepare("SELECT generation FROM notes_fts_state WHERE slot = 'active'").get().generation, 1);
+    await first.close();
+
+    const secondDb = new DatabaseSync(path);
+    const second = makeFakeKit(secondDb);
+    try {
+      const search = await second.registry.search('notes-fts', { query: {} });
+      assert.deepEqual(search.result.hits.map((hit) => ({ ...hit })), [{ id: 'n1' }]);
+      assert.equal(second.plugin.calls.at(-1).activeGeneration, 1, 'the fresh instance served the restored generation');
+    } finally {
+      await second.close();
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('engine refuses to run without the application write queue', async () => {
