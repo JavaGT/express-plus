@@ -47,6 +47,7 @@ import { validateSchemaOwnedEntityTable } from './schema-entity-validation.mjs';
 import { frameworkTableNames, declaredTableNames } from './schema-table-census.mjs';
 import { createBlobStore } from './blob-store.mjs';
 import { createJobQueue } from './job-queue.mjs';
+import { createSearchPluginRegistry,                   } from './search-plugin.mjs';
 import { createPostCommitEffectRunner } from './post-commit-effects.mjs';
 import { createClock } from './clock.mjs';
 import { createWriteQueue } from './write-queue.mjs';
@@ -337,6 +338,18 @@ export default function workbench({
       if (!declarationsByName.has(frameworkEntity.name)) runtime.entityOf(frameworkEntity);
     }
     app.entities = bindingsByName;
+    // The search plugin registry (S4/A1): declarations are validated at
+    // registration (duplicate id, unknown owned-object kind, non-compilable
+    // source scope, contract-version compatibility). Plugins never receive a
+    // raw handle — only a scoped source reader over their declared interests.
+    // S2 owns the schema-lifecycle wiring (binding the source + owned-object
+    // DDL) in this file; this hunk registers the surface only.
+    app.searchPlugins = createSearchPluginRegistry();
+    app.registerSearchPlugin = (plugin              ) => {
+      app.searchPlugins.register(plugin);
+      if (app.db) app.searchPlugins.bindSource(app.db);
+      return app;
+    };
     // Coarse recovery scopes (for example `project:p1`) must resolve to a normal
     // entity row. Snapshot, replay, and later live admission can then share the
     // existing row-scope + grant engine instead of trusting transport callbacks.
