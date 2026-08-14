@@ -2,7 +2,7 @@
 // authorization, projection, and cursor semantics; adapters only deliver the
 // recipient-safe batch and acknowledge it by resolving their callback.
 
-import { createLiveDeliveryCore } from './live-delivery-core.ts';
+import { classifyLiveScope, createLiveDeliveryCore } from './live-delivery-core.ts';
 import type { CoreProjectContext, LiveDeliveryCore } from './live-delivery-core.ts';
 import { createLiveEnvelopeBuilder } from './live-delivery-envelope.ts';
 import { tryBuildAnnotatedTextFoldEnvelopes } from './annotated-text-fold-envelope.ts';
@@ -172,11 +172,6 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, authorization, 
     ? createPrincipalSnapshotDelivery({ db: db as never, declarations: principalSnapshots as never })
     : null;
   const requiredEntities = composites.requiredEntities ?? new Set();
-
-  function isLiveScope(scope: string): boolean {
-    const handle = tryParseScopeKey(scope);
-    return !!handle && resolveEntity(handle.entity)?.tier === 'live';
-  }
 
   // A composite snapshot output reads a bounded set of member fields. Resync is
   // only warranted when a committed event can change one of those fields (or the
@@ -451,14 +446,19 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, authorization, 
       if ((input.document && requiredEntities.has(input.document.entity.name)) || (handle && requiredEntities.has(handle.entity))) {
         return { kind: 'revoked' };
       }
-      if (isLiveScope(input.scope)) {
+      const liveScope = classifyLiveScope(input.scope, resolveEntity);
+      if (liveScope) {
         const after = typeof input.after === 'number' ? input.after : 0;
         // A live revision has no replay payload. The bounded ledger can only
         // establish that this revision is current; every other result converges
         // through the same authorized snapshot used for bootstrap.
-        if (invalidationRecovery(db as never, input.scope, 'resource', after).status !== 'current') {
+        if (invalidationRecovery(db as never, input.scope, liveScope.kind, after).status !== 'current') {
           return this.bootstrap({ principal: input.principal, scope: input.scope, document: input.document });
         }
+        // Collection identity and its revision cursor are now carried through
+        // recovery. Its authorized materialization/delivery remains #103's
+        // implementation, so do not route it through the row-only core.
+        if (liveScope.kind === 'collection') return { kind: 'revoked' };
       }
       if (input.document) {
         // Document-bound catch-up may still fold sequential text envelopes when

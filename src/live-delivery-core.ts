@@ -155,6 +155,26 @@ export interface LiveDeliveryCore {
   exceedsCatchupLimit(scope: string, after: number, limit: number): boolean;
 }
 
+export type LiveScope =
+  | Readonly<{ kind: 'resource'; entity: LiveEntityRecord; handle: ScopeHandle }>
+  | Readonly<{ kind: 'collection'; entity: LiveEntityRecord }>;
+
+// Classifies the two live revision key shapes. Collection delivery is added by
+// #103; carrying its identity here keeps cursor and recovery callers from
+// accidentally parsing a collection key as a row scope.
+export function classifyLiveScope(
+  scope: string,
+  resolveEntity: (name: string) => LiveEntityRecord | undefined | null,
+): LiveScope | null {
+  const handle = tryParseScopeKey(scope);
+  if (handle) {
+    const entity = resolveEntity(handle.entity);
+    return entity?.tier === 'live' ? Object.freeze({ kind: 'resource', entity, handle }) : null;
+  }
+  const entity = resolveEntity(scope);
+  return entity?.tier === 'live' ? Object.freeze({ kind: 'collection', entity }) : null;
+}
+
 export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, projectRecipient, scopeVisible = () => true, log = null }: LiveDeliveryCoreOptions): LiveDeliveryCore {
   if (!db) throw new Error('live-delivery-core: db is required');
   if (!entities) throw new Error('live-delivery-core: entities is required');

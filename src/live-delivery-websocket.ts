@@ -24,8 +24,10 @@ import { createLiveFanout } from './live-fanout.ts';
 import type { LiveEntityRecord, LiveFanoutHandle, MayVerb } from './live-fanout.ts';
 import type { LiveDeliveryCore } from './live-delivery-core.ts';
 import { LiveConnection } from './live-connection.ts';
+import { classifyLiveScope } from './live-delivery-core.ts';
 import { createAnnotatedTextCaretLive } from './annotated-text-caret-live.ts';
 import { readSeq } from './cursor.ts';
+import { readRevision } from './live-revision.ts';
 import type { AuthorizationAdapter } from './authorization-adapter.ts';
 import { anonymous, type Principal } from './principal.ts';
 import type { FrameworkLog } from './log.ts';
@@ -66,7 +68,10 @@ export function createLiveDeliveryWebSocket(httpServer: Server, {
   let closed = false;
   let closePromise: Promise<void> | null = null;
 
-  const currentSeq = (scope: string) => readSeq(db, scope);
+  const currentSeq = (scope: string) => {
+    const liveScope = resolveEntity && classifyLiveScope(scope, resolveEntity);
+    return liveScope ? readRevision(db as never, scope) : readSeq(db, scope);
+  };
 
   async function close(): Promise<void> {
     if (closePromise) return closePromise;
