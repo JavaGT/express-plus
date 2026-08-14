@@ -83,6 +83,12 @@ type JobStatus = (typeof STATES)[keyof typeof STATES];
 
 const TERMINAL = new Set<JobStatus>([STATES.COMPLETED, STATES.FAILED, STATES.CANCELLED]);
 
+// Sentinel denial reason for a durable job attribution that is malformed or
+// missing (principalKey present, operations not a valid non-empty allowlist).
+// Distinct from every closed-vocabulary operation name, so it can never be
+// confused with a real ungranted operation in a denial report.
+const ATTRIBUTION_INVALID = '<attribution-invalid>';
+
 export interface JobRow {
   id: string;
   kind: string;
@@ -104,6 +110,12 @@ export interface JobRow {
   // available for audit. Both are null for an unattributed job.
   principalKey: string | null;
   operations: readonly string[] | null;
+  // Fail-closed marker: the row claims a machine attribution (principalKey
+  // non-null) but the durable allowlist is malformed/missing (not a valid
+  // non-empty JSON array of operation names). Such a job is DENIED at work()
+  // dispatch — it is never downgraded to "unattributed" (workbench#75 review
+  // fix: a broken attribution must fail closed, not run unenforced).
+  attributionInvalid: boolean;
 }
 
 export interface JobQueueOptions {
@@ -265,8 +277,29 @@ export function createJobQueue({
 
   function parseJob(row: Record<string, unknown> | undefined): JobRow | null {
     if (!row) return null;
+    const principalKey = row.principalKey != null ? String(row.principalKey) : null;
+    // Fail closed (workbench#75 review fix): an attributed row (principalKey
+    // non-null) REQUIRES a valid non-empty allowlist. Malformed or missing
+    // operations on an attributed row are an integrity violation — the job is
+    // marked attributionInvalid so dispatch DENIES it; it is never treated as
+    // unattributed (which would run it unenforced in a fresh queue).
     let operations: readonly string[] | null = null;
-    if (row.operations != null) {
+    let attributionInvalid = false;
+    if (principalKey != null) {
+      try {
+        const parsed = row.operations != null ? JSON.parse(row.operations as string) : null;
+        operations = Array.isArray(parsed) && parsed.length > 0 && parsed.every((op) => typeof op === 'string' && op.length > 0)
+          ? parsed
+          : null;
+        if (operations === null) attributionInvalid = true;
+      } catch {
+        operations = null;
+        attributionInvalid = true;
+      }
+    } else if (row.operations != null) {
+      // An unattributed row with a stray operations value: read it leniently
+      // (attribution keys on principalKey only) — it never makes the job
+      // attributed.
       try {
         const parsed = JSON.parse(row.operations as string);
         operations = Array.isArray(parsed) ? parsed : null;
@@ -288,8 +321,9 @@ export function createJobQueue({
       progress: row.progress as number | null,
       stage: row.stage as string | null,
       scope: row.scope as string | null,
-      principalKey: row.principalKey as string | null,
+      principalKey,
       operations,
+      attributionInvalid,
     };
   }
 
@@ -690,8 +724,11 @@ export function createJobQueue({
 
     // The DURABLE job attribution: a stored allowlist (normalized names) that
     // must also cover every handler-declared operation. Null when the job was
-    // enqueued without an attribution.
+    // enqueued without an attribution. An attributed row whose allowlist is
+    // malformed/missing is an integrity violation (attributionInvalid) and is
+    // denied with the sentinel — never downgraded to unattributed (fail closed).
     function deniedAttributedOperation(job: JobRow): string | undefined {
+      if (job.attributionInvalid) return ATTRIBUTION_INVALID;
       if (!job.operations || job.operations.length === 0) return undefined;
       return declared.find((operation) => !job.operations!.includes(operation));
     }
@@ -705,14 +742,20 @@ export function createJobQueue({
       if (denied !== undefined) {
         // Fail closed: the fn is never invoked. Record the denial as a failed
         // result so the job cannot linger claimed (the substrate's uniform
-        // retry/dead-letter policy applies to the recorded failure).
+        // retry/dead-letter policy applies to the recorded failure). A
+        // malformed durable attribution is denied with its own diagnostic — an
+        // attributed row is NEVER run unenforced (workbench#75 review fix).
+        const malformed = job.attributionInvalid;
         const result = await submitResult(job.id, workerId, {
           status: STATES.FAILED,
-          output: { denied: true, operation: denied, error: `machine operation '${denied}' not granted to the executing principal` },
+          output: malformed
+            ? { denied: true, attributionInvalid: true, error: 'durable job attribution is malformed (principalKey present, operations is not a valid non-empty allowlist) — refusing to run the job unenforced' }
+            : { denied: true, operation: denied, error: `machine operation '${denied}' not granted to the executing principal` },
         });
-        getLog().warn('system', 'job worker denied: operation not in the executing machine principal allowlist', {
-          kind, jobId: job.id, operation: denied,
-        });
+        getLog().warn('system', malformed
+          ? 'job worker denied: durable job attribution is malformed — refusing to run unenforced'
+          : 'job worker denied: operation not in the executing machine principal allowlist',
+          { kind, jobId: job.id, operation: denied });
         return { job, result, denied };
       }
       let result: SubmitResult;

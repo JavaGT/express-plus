@@ -108,6 +108,31 @@ test('isMachinePrincipal rejects a hand-rolled object that mimics EVERY readable
   assert.equal(machineOperations(forged), null, 'a forged machine principal has no allowlist');
 });
 
+test('the brand cannot be lifted via Object.getOwnPropertySymbols and copied onto a forgery (WeakSet brand)', () => {
+  // The WeakSet brand leaves no extractable symbol on a minted principal — the
+  // old symbol brand's attack surface (lift the symbol, re-stamp a hand-rolled
+  // object) is gone by construction.
+  const minted = machinePrincipal({ id: 'worker:1', operations: ['update'] });
+  assert.deepEqual(Object.getOwnPropertySymbols(minted), [], 'a WeakSet brand leaves no extractable symbol on the object');
+
+  // Attempt the attack anyway: copy every symbol the minted object exposes onto
+  // a hand-rolled principal-shaped object, then ask the admission seams.
+  const forged = { type: 'system', id: 'worker:1', attributes: { source: 'worker:1', machine: true, operations: ['update'] }, status: 'active' };
+  for (const symbol of Object.getOwnPropertySymbols(minted)) {
+    forged[symbol] = minted[symbol];
+  }
+  assert.equal(isMachinePrincipal(forged), false, 'copied symbols cannot mint WeakSet membership');
+
+  const { db, Blog, now } = admitSetup();
+  const granted = admitSystemMutation({
+    entity: Blog, verb: 'update', rowId: 'row1',
+    payload: { published: true },
+    principal: forged, db, now,
+  });
+  assert.equal(granted, false, 'admitSystemMutation denies the symbol-copied forgery (brand is not copyable)');
+  db.close();
+});
+
 test('admitSystemMutation DENIES a hand-rolled machine-shaped principal with matching id/source/operations (finding 2)', () => {
   const { db, Blog, now, source } = admitSetup();
   const forged = { type: 'system', id: source, attributes: { source, machine: true, operations: ['update'] }, status: 'active' };
@@ -736,5 +761,86 @@ test('an unattributed job has a null durable attribution (no invented identity)'
   const row = db.prepare('SELECT principalKey, operations FROM _Job WHERE kind = ?').get('plain');
   assert.equal(row.principalKey, null, 'no attribution persisted');
   assert.equal(row.operations, null, 'no allowlist persisted');
+  db.close();
+});
+
+// ---- corrupted durable attribution fails closed (finding 2 re-verification) ----
+
+test('a durable attribution with corrupted/missing operations is DENIED — never run unenforced (fail closed)', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  let t = 1000;
+  const now = () => t;
+  const queue1 = createJobQueue({ db, sharedSecret: JOB_SECRET, now });
+  const malformedJob = queue1.enqueue({
+    kind: 'corrupt-attribution',
+    payload: { case: 'malformed' },
+    principal: machinePrincipal({ id: 'job-owner', operations: ['read'] }),
+  });
+  t += 1;
+  const missingJob = queue1.enqueue({
+    kind: 'corrupt-attribution',
+    payload: { case: 'missing' },
+    principal: machinePrincipal({ id: 'job-owner', operations: ['read'] }),
+  });
+
+  // Corrupt the durable allowlists: both rows still CLAIM an attribution
+  // (principalKey non-null) but the operations column is no longer a valid
+  // non-empty allowlist — one malformed JSON, one outright missing (NULL).
+  db.prepare('UPDATE _Job SET operations = ? WHERE id = ?').run('not-json', malformedJob.id);
+  db.prepare('UPDATE _Job SET operations = NULL WHERE id = ?').run(missingJob.id);
+  const row = db.prepare('SELECT principalKey, operations FROM _Job WHERE id = ?').get(malformedJob.id);
+  assert.equal(row.principalKey, 'system:job-owner', 'the corrupted row still claims the attribution');
+  assert.equal(row.operations, 'not-json');
+
+  // A FRESH queue over the same db is a restarted worker: an attributed row with
+  // a broken allowlist must be DENIED at dispatch, never downgraded to
+  // unattributed (which would run the job unenforced).
+  const queue2 = createJobQueue({ db, sharedSecret: JOB_SECRET, maxAttempts: 1, now });
+  const ran = [];
+  const worker = queue2.work('corrupt-attribution', async (job) => { ran.push(job.payload.case); return {}; }, {
+    principal: machinePrincipal({ id: 'worker:restart', operations: ['execute', 'update'] }),
+    operations: ['update'],
+    pollIntervalMs: Infinity,
+  });
+  const res = await worker.once();
+  assert.ok(res.denied, 'the corrupted-attribution job is denied at dispatch');
+  assert.deepEqual(ran, [], 'fn never invoked');
+  const corrupted = db.prepare('SELECT status, payload FROM _Job WHERE id = ?').get(malformedJob.id);
+  assert.equal(corrupted.status, 'failed', 'the corrupted-attribution job is recorded as failed (fail closed)');
+  assert.equal(JSON.parse(corrupted.payload).attributionInvalid, true, 'the denial records the malformed attribution');
+
+  const res2 = await worker.once();
+  assert.ok(res2.denied, 'the missing-attribution job is denied at dispatch');
+  assert.deepEqual(ran, [], 'fn never invoked for the missing attribution either');
+  const missing = db.prepare('SELECT status, payload FROM _Job WHERE id = ?').get(missingJob.id);
+  assert.equal(missing.status, 'failed', 'the missing-attribution job is recorded as failed (fail closed)');
+  assert.equal(JSON.parse(missing.payload).attributionInvalid, true, 'the denial records the missing attribution');
+  worker.stop();
+  db.close();
+});
+
+test('an attributed job with a valid allowlist still runs after a fresh-queue restart (control)', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const queue1 = createJobQueue({ db, sharedSecret: JOB_SECRET });
+  queue1.enqueue({
+    kind: 'intact-attribution',
+    payload: { n: 1 },
+    principal: machinePrincipal({ id: 'job-owner', operations: ['read', 'update'] }),
+  });
+
+  const queue2 = createJobQueue({ db, sharedSecret: JOB_SECRET, maxAttempts: 1 });
+  const seen = [];
+  const worker = queue2.work('intact-attribution', async (job) => { seen.push(job.payload.n); return {}; }, {
+    principal: machinePrincipal({ id: 'worker:restart', operations: ['execute', 'update'] }),
+    operations: ['update'],
+    pollIntervalMs: Infinity,
+  });
+  const res = await worker.once();
+  assert.equal(res.denied, undefined, 'an intact durable allowlist covering the handler operations is not denied');
+  assert.deepEqual(seen, [1], 'the handler ran');
+  assert.equal(db.prepare('SELECT status FROM _Job WHERE kind = ?').get('intact-attribution').status, 'completed');
+  worker.stop();
   db.close();
 });

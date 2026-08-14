@@ -20,12 +20,15 @@
 import { principal, type Principal } from './principal.ts';
 import { operationCategory, type OperationCategory } from './operation.ts';
 
-// The machine-principal brand. A MODULE-PRIVATE symbol minted only inside
-// machinePrincipal() below and stamped onto the returned object BEFORE it is
-// frozen, so a machine principal is UNFORGEABLE: no caller can construct a
-// principal-shaped object (matching id/source/operations) that isMachinePrincipal
-// accepts — the brand is the only admission key, and it never leaves this module.
-const MACHINE_BRAND = Symbol('workbench.machinePrincipal');
+// The machine-principal brand. A MODULE-PRIVATE WeakSet; membership in it is the
+// only admission key isMachinePrincipal reads. A WeakSet brand CANNOT be copied:
+// unlike a symbol property (which Object.getOwnPropertySymbols could lift off a
+// minted object and re-stamp onto a forgery), the set is unreachable from outside
+// this module and membership is not an attribute of the object — a caller can
+// never add a hand-built object to it. A machine principal is therefore
+// UNFORGEABLE: a principal-shaped object (matching id/source/operations) is
+// admitted ONLY if machinePrincipal() minted it.
+const MACHINE_BRAND = new WeakSet<object>();
 
 export type MachinePrincipal = Principal & {
   readonly type: 'system';
@@ -77,7 +80,7 @@ export function machinePrincipal({ id, operations }: MachinePrincipalInput): Mac
       return operationCategory(operation).operation;
     }),
   );
-  return Object.freeze({
+  const minted = Object.freeze({
     ...principal({
       type: 'system',
       id,
@@ -88,20 +91,22 @@ export function machinePrincipal({ id, operations }: MachinePrincipalInput): Mac
       }),
       status: 'active',
     }),
-    // The unforgeable brand: stamped here (before the freeze above) so only this
-    // constructor ever produces a principal isMachinePrincipal accepts.
-    [MACHINE_BRAND]: true,
   }) as unknown as MachinePrincipal;
+  // The unforgeable brand: register the freshly-minted frozen object in the
+  // module-private WeakSet. Membership is the one admission key every runtime
+  // seam reads, and no caller can reach the set to add a forgery.
+  MACHINE_BRAND.add(minted);
+  return minted;
 }
 
 // Type guard — true ONLY for a machine principal minted by machinePrincipal()
-// (carrying the module-private brand). A hand-rolled object that mimics every
-// readable field (type:'system', id, source, machine:true, a matching
-// operations allowlist) still lacks the brand and is NOT a machine principal —
+// (a member of the module-private brand set). A hand-rolled object that mimics
+// every readable field (type:'system', id, source, machine:true, a matching
+// operations allowlist) still lacks membership and is NOT a machine principal —
 // fail closed. This is the sole admission key every runtime seam reads.
 export function isMachinePrincipal(principalLike: unknown): principalLike is MachinePrincipal {
   if (!principalLike || typeof principalLike !== 'object') return false;
-  return (principalLike as { [MACHINE_BRAND]?: unknown })[MACHINE_BRAND] === true;
+  return MACHINE_BRAND.has(principalLike);
 }
 
 // The explicit allowlist of a machine principal, or null when the principal is
