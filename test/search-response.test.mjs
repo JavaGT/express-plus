@@ -43,6 +43,7 @@ import {
   tieBreakSearchHits,
   searchWithDeadline,
   SearchCancelledError,
+  SearchDuplicateKeyError,
   buildSearchResponse,
 } from '../build/search-response.mjs';
 
@@ -56,8 +57,8 @@ const bobRow = { id: 'n2', title: 'secret', owner: 'bob' };
 
 function ownerAdapter(trace = false) {
   const adapter = createAuthorizationAdapter({ trace });
-  const registry = createSearchSourceRegistry();
-  registry.register(adapter, {
+  const registry = createSearchSourceRegistry(adapter);
+  registry.register({
     pluginId: 'notes-fts',
     scope: ({ is }) => is.owner(),
     fields: { owner: ref('User', { role: 'owner' }) },
@@ -298,21 +299,24 @@ describe('search response contract — cancellation and timeout', () => {
 describe('search authorization — pre-scope admission', () => {
   test('registration compiles the source scope at registration (S5/A2 mirror)', () => {
     const adapter = createAuthorizationAdapter();
-    const registry = createSearchSourceRegistry();
-    registry.register(adapter, {
+    const registry = createSearchSourceRegistry(adapter);
+    registry.register({
       pluginId: 'notes-fts',
       scope: ({ is }) => is.owner(),
       fields: { owner: ref('User', { role: 'owner' }) },
     });
+    assert.equal(registry.adapter, adapter, 'the registry is bound to the adapter it was created against');
     assert.equal(registry.has('notes-fts'), true);
     assert.deepEqual(registry.ids(), ['notes-fts']);
     assert.equal(registry.size, 1);
 
     // a raw boolean is not an AST → refused at registration
-    assert.throws(() => registry.register(adapter, { pluginId: 'bad', scope: () => true }), NonCompilableError);
+    assert.throws(() => registry.register({ pluginId: 'bad', scope: () => true }), NonCompilableError);
     // a scope-less resource would load every row and filter in JS → refused
-    assert.throws(() => registry.register(adapter, { pluginId: 'noless' }), /scope predicate/);
-    assert.throws(() => registry.register(adapter, { pluginId: '', scope: () => true }), /pluginId/);
+    assert.throws(() => registry.register({ pluginId: 'noless' }), /scope predicate/);
+    assert.throws(() => registry.register({ pluginId: '', scope: () => true }), /pluginId/);
+    // a registry is never created without a real adapter
+    assert.throws(() => createSearchSourceRegistry(null), /adapter/);
     // nothing is recorded for a refused registration
     assert.equal(registry.has('bad'), false);
     assert.equal(registry.has('noless'), false);
@@ -336,10 +340,29 @@ describe('search authorization — pre-scope admission', () => {
     assert.equal(revokedDecision.reasonCode, anon.reasonCode, 'revoked collapses to anonymous on the decision surface');
   });
 
+  test('a registry created against one adapter refuses a different adapter (identity check)', async () => {
+    const { adapter: adapterA, registry } = ownerAdapter();
+    const adapterB = createAuthorizationAdapter();
+    // The same plugin/resource shape registered on B is still refused: the
+    // registry only admits through the adapter it was created against.
+    const bRegistry = createSearchSourceRegistry(adapterB);
+    bRegistry.register({
+      pluginId: 'notes-fts',
+      scope: ({ is }) => is.owner(),
+      fields: { owner: ref('User', { role: 'owner' }) },
+    });
+    assert.notEqual(registry.adapter, adapterB);
+    const wrong = await admitSearchSourceScope(adapterB, registry, { pluginId: 'notes-fts', principal: alice });
+    assert.deepEqual(wrong, { admitted: false, reasonCode: 'no-resource' });
+    // the bound adapter still admits through its own registry
+    const right = await admitSearchSourceScope(adapterA, registry, { pluginId: 'notes-fts', principal: alice });
+    assert.deepEqual(right, { admitted: true, reasonCode: null });
+  });
+
   test('a caller serving public search opts into allowAnonymous(); the scope still constrains every row', async () => {
     const adapter = createAuthorizationAdapter();
-    const registry = createSearchSourceRegistry();
-    registry.register(adapter, {
+    const registry = createSearchSourceRegistry(adapter);
+    registry.register({
       pluginId: 'public-notes',
       scope: ({ fields }) => fields.visibility.is('public'),
       fields: { visibility: text() },
@@ -358,8 +381,13 @@ describe('search authorization — pre-scope admission', () => {
   });
 
   test('a throwing adapter is a fail-closed policy-error, never a throw', async () => {
-    const { registry } = ownerAdapter();
     const throwing = { admit: async () => { throw new Error('boom'); }, registerResource: () => {} };
+    const registry = createSearchSourceRegistry(throwing);
+    registry.register({
+      pluginId: 'notes-fts',
+      scope: ({ is }) => is.owner(),
+      fields: { owner: ref('User', { role: 'owner' }) },
+    });
     const decision = await admitSearchSourceScope(throwing, registry, { pluginId: 'notes-fts', principal: alice });
     assert.deepEqual(decision, { admitted: false, reasonCode: 'policy-error' });
   });
@@ -435,8 +463,8 @@ describe('search authorization — per-result admission', () => {
 
   test('a field-scoped resource admits per row through the same seam', async () => {
     const adapter = createAuthorizationAdapter();
-    const registry = createSearchSourceRegistry();
-    registry.register(adapter, {
+    const registry = createSearchSourceRegistry(adapter);
+    registry.register({
       pluginId: 'articles',
       scope: ({ fields }) => fields.status.is('published'),
       fields: { status: text() },
@@ -502,6 +530,36 @@ describe('search authorization — per-excerpt admission', () => {
     const throwing = await admitSearchExcerpt(adapter, { entity: ThrowingNote, row: aliceRow, fieldName: 'secret', principal: alice });
     assert.deepEqual(throwing, { admitted: false, reasonCode: 'policy-error' });
   });
+
+  test('an unknown/mismatched field name on the source entity denies the excerpt', async () => {
+    const { adapter } = ownerAdapter();
+    const Note = noteWithSecret();
+    // 'snippet' is not a declared field on Note — the strong-inherit row-grant
+    // default must NOT be reachable through a fabricated field name (fail
+    // closed: an excerpt is only ever carved from a field the entity declares).
+    const unknown = await admitSearchExcerpt(adapter, { entity: Note, row: aliceRow, fieldName: 'snippet', principal: alice });
+    assert.deepEqual(unknown, { admitted: false, reasonCode: 'no-field-access' });
+    // even a field the ROW grant could read must not admit under a name the
+    // entity does not declare
+    const wrongCase = await admitSearchExcerpt(adapter, { entity: Note, row: aliceRow, fieldName: 'Owner', principal: alice });
+    assert.deepEqual(wrongCase, { admitted: false, reasonCode: 'no-field-access' });
+    // a declared field still admits through the entity field seam
+    const declared = await admitSearchExcerpt(adapter, { entity: Note, row: aliceRow, fieldName: 'owner', principal: alice });
+    assert.equal(declared.admitted, true);
+  });
+
+  test('admitSearchHits withholds an excerpt carved from an undeclared field', async () => {
+    const { adapter } = ownerAdapter();
+    const Note = noteWithSecret();
+    const outcome = await admitSearchHits(adapter, {
+      pluginId: 'notes-fts', generation: 4, staleness: 'stale', principal: alice,
+      candidates: [
+        { hit: { id: 'n1' }, key: 'n1', rank: 1, row: aliceRow, excerpt: { entity: Note, fieldName: 'nope', text: 'forged snippet' } },
+      ],
+    });
+    assert.equal(outcome.hits.length, 1, 'the row admits; only the excerpt is withheld');
+    assert.equal('excerpt' in outcome.hits[0], false);
+  });
 });
 
 // ---- composed: an authorized search response ----------------------------------
@@ -539,5 +597,33 @@ describe('search authorization — composed response', () => {
     assert.equal(response.ok, false);
     assert.equal(response.error, 'denied');
     assert.deepEqual(response.hits, []);
+  });
+
+  test('the composition ties every ok response by (rank, key) — never the plugin’s return order', () => {
+    const response = buildSearchResponse({
+      pluginId: 'notes-fts', generation: 2, staleness: 'fresh',
+      hits: [
+        { key: 'z', rank: 1, hit: { id: 'z' } },
+        { key: 'a', rank: 1, hit: { id: 'a' } },
+        { key: 'm', rank: 0, hit: { id: 'm' } },
+      ],
+    });
+    assert.deepEqual(response.hits.map((hit) => hit.key), ['m', 'a', 'z'], 'equal ranks fall back to the stable key order');
+  });
+
+  test('a duplicate tie-break key rejects the whole response fail-closed', () => {
+    assert.throws(
+      () => buildSearchResponse({
+        pluginId: 'notes-fts', generation: 2, staleness: 'fresh',
+        hits: [
+          { key: 'dup', rank: 1, hit: { id: 'x' } },
+          { key: 'dup', rank: 2, hit: { id: 'y' } },
+        ],
+      }),
+      SearchDuplicateKeyError,
+    );
+    // a non-ok response never assembles hits, so it can never trip the key check
+    const closed = buildSearchResponse({ pluginId: 'x', generation: 0, staleness: 'rebuilding', error: 'denied' });
+    assert.deepEqual(closed.hits, []);
   });
 });

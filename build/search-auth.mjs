@@ -61,18 +61,31 @@ import { requireUser,           } from './route-gate.mjs';
 // The seam's own ledger of registered search resources. The adapter does not
 // expose a registration query, so the seam tracks what IT registered — a
 // search whose plugin was never registered here is refused ('no-resource')
-// without ever calling the adapter, and a registration against one adapter
-// instance can never admit through another (both directions fail closed).
+// without ever calling the adapter. The registry is BOUND to the adapter
+// instance it was created against: registration and every admission run
+// through that adapter and only that adapter — a registry created against
+// adapter A can never admit through adapter B (identity check, fail closed),
+// because a resource registered on one adapter is never presumed present on
+// another.
                                        
                         
-                                                                                   
+                                                                             
+                                                          
+                                         
+                                                    
                                  
                            
  
 
-export function createSearchSourceRegistry()                       {
+export function createSearchSourceRegistry(adapter                      )                       {
+  if (
+    adapter === null || typeof adapter !== 'object' ||
+    typeof adapter.admit !== 'function' || typeof adapter.registerResource !== 'function'
+  ) {
+    throw new Error('createSearchSourceRegistry requires an authorization adapter (admit + registerResource)');
+  }
   const registered = new Set        ();
-  function register(adapter                      , input                            )       {
+  function register(input                            )       {
     if (input === null || typeof input !== 'object') {
       throw new Error('search resource registration requires an object');
     }
@@ -94,6 +107,9 @@ export function createSearchSourceRegistry()                       {
   return Object.freeze({
     get size() {
       return registered.size;
+    },
+    get adapter() {
+      return adapter;
     },
     register,
     has: (pluginId        ) => registered.has(pluginId),
@@ -121,6 +137,13 @@ export async function admitSearchSourceScope(
                          
    ,
 )                           {
+  // The registry is bound to the adapter it was created against: a DIFFERENT
+  // adapter instance is refused even when it appears to carry the same
+  // resource (identity check, fail closed — a resource registered on one
+  // adapter is never presumed present on another).
+  if (adapter !== registry.adapter) {
+    return { admitted: false, reasonCode: 'no-resource' };
+  }
   if (!registry.has(input.pluginId)) {
     return { admitted: false, reasonCode: 'no-resource' };
   }
@@ -185,6 +208,14 @@ export async function admitSearchExcerpt(
                                      
    ,
 )                           {
+  // Fail closed on a field the source entity does not DECLARE: an unknown or
+  // mismatched fieldName would otherwise route to the row grant's strong-
+  // inherit default and could admit an excerpt for a field that does not exist
+  // on the entity. Only a declared field may yield an excerpt.
+  const declared = input.entity.fields;
+  if (declared === undefined || !Object.hasOwn(declared, input.fieldName)) {
+    return { admitted: false, reasonCode: 'no-field-access' };
+  }
   let decision;
   try {
     decision = await adapter.admit({

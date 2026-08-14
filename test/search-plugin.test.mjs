@@ -18,6 +18,10 @@ import {
   createSearchSourceReader,
   SUPPORTED_SEARCH_PLUGIN_CONTRACT_VERSION,
 } from '../build/search-plugin.mjs';
+import {
+  SEARCH_DEFAULT_LIMIT,
+  SEARCH_MAX_PAGE_SIZE,
+} from '../build/search-response.mjs';
 import { collectTableNamesFromDdl } from '../build/schema-table-census.mjs';
 import { createSqliteAdapter } from '../build/sqlite-adapter.mjs';
 import workbench from '../build/app.mjs';
@@ -475,6 +479,112 @@ describe('search plugin registry — failure isolation', () => {
     state = registry.stateOf('throwy-key');
     assert.equal(state.state, 'ready');
     assert.equal(state.lastError, null);
+  });
+});
+
+// ---- S4/A6 search composition: bounds, cancellation, start-stamp -----------
+
+describe('search plugin registry — search composition', () => {
+  test('the registry bounds the plugin request and windows the plugin output (cap + page)', async () => {
+    let received = null;
+    const registry = createSearchPluginRegistry();
+    registry.register(makePlugin({
+      id: 'windowed',
+      search: (_ctx, request) => {
+        received = request;
+        return { hits: Array.from({ length: 300 }, (_, i) => ({ id: `n${i}`, rank: i })) };
+      },
+    }));
+    await registry.rebuild('windowed');
+    // a page size past the cap is CLAMPED at the boundary, never honored
+    const outcome = await registry.search('windowed', { page: 3, pageSize: 5000 });
+    assert.equal(outcome.ok, true);
+    assert.equal(received.limit, SEARCH_MAX_PAGE_SIZE, 'the plugin was asked for the clamped window');
+    assert.equal(received.offset, 200);
+    assert.equal(outcome.result.hits.length, SEARCH_MAX_PAGE_SIZE, 'nothing beyond the page window escapes the registry');
+    assert.equal(outcome.result.hits[0].id, 'n200');
+  });
+
+  test('a bound-less search is windowed to the default limit', async () => {
+    let received = null;
+    const registry = createSearchPluginRegistry();
+    registry.register(makePlugin({
+      id: 'default-window',
+      search: (_ctx, request) => {
+        received = request;
+        return { hits: Array.from({ length: 300 }, (_, i) => ({ id: `n${i}`, rank: i })) };
+      },
+    }));
+    await registry.rebuild('default-window');
+    const outcome = await registry.search('default-window', {});
+    assert.equal(received.limit, SEARCH_DEFAULT_LIMIT);
+    assert.equal(received.offset, 0);
+    assert.equal(outcome.result.hits.length, SEARCH_DEFAULT_LIMIT);
+  });
+
+  test('an already-aborted search is a closed non-ok outcome and never queries the plugin', async () => {
+    let invoked = false;
+    const registry = createSearchPluginRegistry();
+    registry.register(makePlugin({
+      id: 'cancellable',
+      search: () => {
+        invoked = true;
+        return { hits: [{ id: 'n1' }] };
+      },
+    }));
+    await registry.rebuild('cancellable');
+    const controller = new AbortController();
+    controller.abort();
+    const outcome = await registry.search('cancellable', { query: 'x', signal: controller.signal });
+    assert.equal(invoked, false, 'an already-aborted search never queries the plugin');
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.cancelled, true);
+    assert.equal(outcome.timedOut, false);
+    assert.equal(outcome.result, null);
+    // a query-side interruption never touches index health
+    assert.equal(registry.stateOf('cancellable').state, 'ready');
+  });
+
+  test('a search that exceeds the registry deadline times out closed and the run signal is aborted', async () => {
+    let receivedSignal = null;
+    const registry = createSearchPluginRegistry({ searchTimeoutMs: 20 });
+    registry.register(makePlugin({
+      id: 'hangy',
+      search: (_ctx, request) => {
+        receivedSignal = request.signal;
+        return new Promise(() => {}); // never resolves, ignores the signal
+      },
+    }));
+    await registry.rebuild('hangy');
+    const outcome = await registry.search('hangy', { query: 'x' });
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.timedOut, true);
+    assert.equal(outcome.cancelled, false);
+    assert.equal(outcome.result, null);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(receivedSignal.aborted, true, 'the plugin received an aborted signal at the deadline');
+    assert.equal(registry.stateOf('hangy').state, 'ready');
+  });
+
+  test('generation/fence/state are stamped at search START, not after the await', async () => {
+    let registry;
+    const plugin = makePlugin({
+      id: 'stampy',
+      search: async () => {
+        // a mid-run rebuild advances the generation while this search is in flight
+        await registry.rebuild('stampy');
+        return { hits: [{ id: 'n1', rank: 1 }] };
+      },
+    });
+    registry = createSearchPluginRegistry();
+    registry.register(plugin);
+    await registry.rebuild('stampy');
+    const before = registry.stateOf('stampy').generation;
+    const outcome = await registry.search('stampy', { query: 'x' });
+    assert.equal(registry.stateOf('stampy').generation, before + 1, 'the mid-run rebuild actually advanced the index');
+    // the run labeled its hits with the generation that existed when it STARTED
+    assert.equal(outcome.generation, before);
+    assert.equal(outcome.result.generation, before);
   });
 });
 

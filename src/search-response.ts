@@ -16,11 +16,17 @@
 //   3. CANCELLATION + TIMEOUT — searchWithDeadline races a plugin's search
 //      against the caller's AbortSignal and a hard deadline, returning a closed
 //      cancelled/timed-out/completed outcome instead of a thrown state leak.
+//      The registry's search composition (search-plugin.ts) runs every plugin
+//      search through it, so an uncooperative plugin can never hang a search.
 //   4. DETERMINISTIC TIE-BREAKING — equal ranks are ordered by a stable key;
 //      the shared comparator is what the A4/A5 plugin implementations import.
+//      buildSearchResponse ties EVERY response's hits by (rank, key), and
+//      rejects a duplicate key fail-closed (the tie-break is total only over a
+//      unique key set).
 //   5. FAIL CLOSED — a denied/policy-error/cancelled/timed-out search is a
-//      response with ok:false and a closed reason, never a 500 leak (S5/A2
-//      mirror).
+//      response with ok:false, a closed reason, and ALWAYS an empty hit set,
+//      never a 500 leak and never result content from a search that did not
+//      complete authorized and in time (S5/A2 mirror).
 
 import type { SearchPluginState } from './search-plugin.ts';
 
@@ -56,6 +62,10 @@ export const SEARCH_MAX_PAGE_SIZE = 100;
 export const SEARCH_DEFAULT_LIMIT = 50;
 // The default page size when a request pages without stating a size.
 export const SEARCH_DEFAULT_PAGE_SIZE = 25;
+// The default hard deadline for a search run, in milliseconds. The registry's
+// search composition applies this when the caller supplies no timeout, so a
+// search can never hang the registry regardless of the plugin's cooperation.
+export const SEARCH_DEFAULT_TIMEOUT_MS = 5000;
 
 // Clamp a requested result bound into the bounded range [1, cap]. A missing,
 // non-finite, zero, or negative request collapses to the fallback — a bound of
@@ -191,6 +201,18 @@ export class SearchCancelledError extends Error {
 export class SearchTimeoutError extends Error {
   readonly name = 'SearchTimeoutError';
   constructor(message = 'search timed out') {
+    super(message);
+  }
+}
+
+// A response assembly refused the result set: two hits shared a tie-break key.
+// The deterministic tie-break is a TOTAL order only over a unique key set — a
+// duplicate key makes the ordering (and any pagination over it) unstable, so
+// the response builder rejects it fail-closed instead of silently returning a
+// non-deterministic order.
+export class SearchDuplicateKeyError extends Error {
+  readonly name = 'SearchDuplicateKeyError';
+  constructor(message = 'duplicate search tie-break key in the response') {
     super(message);
   }
 }
@@ -349,15 +371,42 @@ export interface SearchResponseBuild<THit> {
   readonly cancelled?: boolean;
   readonly timedOut?: boolean;
   readonly error?: SearchResponseError | null;
+  // The primary-rank direction of the plugin that produced the hits. The
+  // builder orders every response deterministically by (rank, key) in this
+  // direction; 'asc' is the default (FTS-style, lower is better).
+  readonly order?: SearchOrder;
 }
 
 // Build a frozen search response, stamping every hit with the response's
-// `{ pluginId, generation, staleness }`. `ok` is derived — a denied, cancelled,
-// timed-out, or error response is never `ok`. This is the one place the
-// response shape is assembled, so every search surface (HTTP handler, live
-// delivery, library callers) returns an identical contract.
+// `{ pluginId, generation, staleness }`. `ok` is derived FIRST — a denied,
+// cancelled, timed-out, or error response is never `ok` AND always carries an
+// EMPTY hit set (fail closed: a response for a search that did not complete
+// authorized and in time never surfaces result content). The hits of an ok
+// response are deterministically tie-broken by (rank, key) — the platform owns
+// the total order, never the plugin's return order — and a duplicate tie-break
+// key rejects the whole response (the order is total only over unique keys).
+// This is the one place the response shape is assembled, so every search
+// surface (HTTP handler, live delivery, library callers) returns an identical
+// contract.
 export function buildSearchResponse<THit>(input: SearchResponseBuild<THit>): SearchResponse<THit> {
-  const hits = Object.freeze((input.hits ?? []).map((entry) => Object.freeze({
+  const cancelled = input.cancelled ?? false;
+  const timedOut = input.timedOut ?? false;
+  const error = input.error ?? null;
+  const ok = error === null && !cancelled && !timedOut;
+  const ordered = tieBreakSearchHits(ok ? (input.hits ?? []) : [], {
+    rankOf: (entry) => entry.rank,
+    keyOf: (entry) => entry.key,
+    order: input.order ?? 'asc',
+  });
+  // Uniqueness invariant: two hits sharing a tie-break key make the ordering
+  // non-deterministic (and pagination unstable) — reject fail-closed rather
+  // than silently return a non-total order.
+  for (let i = 1; i < ordered.length; i++) {
+    if (ordered[i].key === ordered[i - 1].key) {
+      throw new SearchDuplicateKeyError(`duplicate search tie-break key '${ordered[i].key}' in the response`);
+    }
+  }
+  const hits = Object.freeze(ordered.map((entry) => Object.freeze({
     pluginId: input.pluginId,
     generation: input.generation,
     staleness: input.staleness,
@@ -366,11 +415,8 @@ export function buildSearchResponse<THit>(input: SearchResponseBuild<THit>): Sea
     hit: entry.hit,
     ...(entry.excerpt !== undefined ? { excerpt: entry.excerpt } : {}),
   })));
-  const cancelled = input.cancelled ?? false;
-  const timedOut = input.timedOut ?? false;
-  const error = input.error ?? null;
   return Object.freeze({
-    ok: error === null && !cancelled && !timedOut,
+    ok,
     pluginId: input.pluginId,
     generation: input.generation,
     staleness: input.staleness,

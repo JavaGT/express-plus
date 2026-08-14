@@ -41,6 +41,11 @@
 
 import { buildCheckRegistry } from './registry.mjs';
 import { compileReadScope, NonCompilableError } from './scope-sql.mjs';
+import {
+  SEARCH_DEFAULT_TIMEOUT_MS,
+  searchPageWindow,
+  searchWithDeadline,
+} from './search-response.mjs';
 
 // The contract version this package's registry supports. A plugin declares the
 // version it was built against; anything else fails registration (version
@@ -102,6 +107,11 @@ export const SUPPORTED_SEARCH_PLUGIN_CONTRACT_VERSION = 1;
                                
                           
                            
+                                                                                
+                                                                             
+                                                                             
+                                                                        
+                                
  
 
 // The materialization summary a reconcile/rebuild reports; `counts` becomes the
@@ -189,6 +199,12 @@ export const SUPPORTED_SEARCH_PLUGIN_CONTRACT_VERSION = 1;
                                       
                                                                                                                                                         
                                              
+                                                                              
+                                                                             
+                                                                              
+                                                     
+                              
+                             
  
 
                                      
@@ -238,6 +254,11 @@ export const SUPPORTED_SEARCH_PLUGIN_CONTRACT_VERSION = 1;
 
                                               
                      
+                                                                             
+                                                                               
+                                                                           
+                                                                
+                           
  
 
                                        
@@ -450,6 +471,9 @@ function retryableOf(err         )          {
 
 export function createSearchPluginRegistry(options                              = {})                       {
   const now = options.now ?? (() => new Date().toISOString());
+  // The composition's hard search deadline: bounded by default, disabled only
+  // by an explicit non-positive registry option (unbounded search).
+  const searchTimeoutMs = options.searchTimeoutMs ?? SEARCH_DEFAULT_TIMEOUT_MS;
   const plugins = new Map                      ();
   const ledger = new Map                      ();
   const ownedNames = new Set        ();
@@ -727,22 +751,63 @@ export function createSearchPluginRegistry(options                              
 
   async function search(id        , request               )                               {
     const entry = ledgerOf(id);
+    // The S4/A6 search composition seam. The registry — never the plugin —
+    // owns bounded limits, cancellation/timeout, and the authoritative index
+    // metadata:
+    //   - START-STAMP: generation/fence/state are captured BEFORE the run. A
+    //     search may take arbitrarily long; labeling old-index hits with
+    //     post-await metadata would stamp them newer than they are.
+    //   - BOUNDED WINDOW: the request's result bound is clamped here and the
+    //     plugin's OUTPUT is windowed against it (cap + page window respected),
+    //     so nothing unbounded ever reaches or escapes the plugin.
+    //   - DEADLINE + ABORT: the run races the caller's signal and the hard
+    //     deadline, so an uncooperative plugin can never hang the search; the
+    //     plugin additionally receives the combined signal on its request so a
+    //     cooperative plugin can stop work early.
+    const generation = entry.generation;
+    const fence = entry.fence;
+    const state = entry.state;
     const ctx = contextOf(id);
+    const { offset, limit } = searchPageWindow(request);
+    const boundedRequest                = { ...request, offset, limit };
     try {
-      const result = await entry.plugin.search(ctx, request);
+      const run = await searchWithDeadline(
+        (signal) => entry.plugin.search(ctx, { ...boundedRequest, signal }),
+        { timeoutMs: searchTimeoutMs, signal: request.signal },
+      );
+      if (run.kind !== 'completed') {
+        // A cancelled or timed-out search is a closed non-ok outcome with no
+        // result and no hits. A query-side interruption does not invalidate
+        // the index: state/fence/metadata are untouched and lastError stays
+        // as it was — the closed flags are the disclosure.
+        return {
+          ok: false,
+          generation,
+          fence,
+          state,
+          counts: entry.counts,
+          result: null,
+          lastError: entry.lastError,
+          cancelled: run.kind === 'cancelled',
+          timedOut: run.kind === 'timed-out',
+        };
+      }
+      const hits = run.value.hits.slice(offset, offset + limit);
       return {
         ok: true,
-        generation: entry.generation,
-        fence: entry.fence,
-        state: entry.state,
+        generation,
+        fence,
+        state,
         counts: entry.counts,
         result: {
-          hits: result.hits,
-          generation: entry.generation,
-          fence: entry.fence,
-          state: entry.state,
+          hits,
+          generation,
+          fence,
+          state,
         },
         lastError: null,
+        cancelled: false,
+        timedOut: false,
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -758,12 +823,14 @@ export function createSearchPluginRegistry(options                              
       // untouched, the failure is recorded for disclosure and retry accounting.
       return {
         ok: false,
-        generation: entry.generation,
-        fence: entry.fence,
-        state: entry.state,
+        generation,
+        fence,
+        state,
         counts: entry.counts,
         result: null,
         lastError,
+        cancelled: false,
+        timedOut: false,
       };
     }
   }
