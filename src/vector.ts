@@ -21,6 +21,24 @@ export function cosineSimilarity(a: unknown, b: unknown): number {
   return denom === 0 ? 0 : dot / denom;
 }
 
+// Rank already-owned vector entries without coupling the comparator to storage.
+// Equal scores use the stable entry id so results do not depend on insertion or
+// database scan order.
+export function nearestVectors<T extends { readonly id: string; readonly vector: unknown }>(
+  entries: readonly T[],
+  query: unknown,
+  limit: number,
+): readonly T[] {
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    throw new RangeError(`nearest vector limit must be a positive safe integer, got ${String(limit)}`);
+  }
+  return entries
+    .map((entry) => ({ entry, score: cosineSimilarity(query, entry.vector) }))
+    .sort((a, b) => b.score - a.score || a.entry.id.localeCompare(b.entry.id))
+    .slice(0, limit)
+    .map(({ entry }) => entry);
+}
+
 // nearest(db, entityName, fieldName, queryVec, k) — a standalone helper for
 // top-K nearest-neighbour search. Loads all rows from the entity table, computes
 // cosine similarity for the named field, and returns the top-K rows (hydrated).
