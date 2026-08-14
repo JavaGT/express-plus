@@ -832,12 +832,14 @@ export default function workbench({
           // Bind only after every plugin-owned object has been lifecycle-created
           // and the declaration census has succeeded. Plugin callbacks receive
           // this narrow capability, never the database handle.
-          app.searchPlugins.bindIndex(createSearchOwnedIndexCapability({
-            db: app.db,
-            census: ownership.census,
-            writeCoordinator: app.writeCoordinator,
-            fenceOf: (id) => app.searchPlugins.stateOf(id).fence,
-          }));
+          if (app.searchPlugins.size > 0) {
+            app.searchPlugins.bindIndex(createSearchOwnedIndexCapability({
+              db: app.db,
+              census: ownership.census,
+              writeCoordinator: app.writeCoordinator,
+              fenceOf: (id) => app.searchPlugins.stateOf(id).fence,
+            }));
+          }
           for (const id of app.searchPlugins.ids()) {
             const prepared = await app.searchPlugins.prepare(id);
             if (!prepared.ok) throw new Error(`plugin "${id}" preparation failed: ${prepared.lastError?.message ?? 'unknown error'}`);
