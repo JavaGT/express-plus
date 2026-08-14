@@ -72,7 +72,7 @@ test('live fanout re-authorizes delivery through the injected mayVerb engine', a
   assert.deepEqual(calls.map((call) => call.verb), ['subscribe', 'subscribe']);
   assert.deepEqual(alice.drain(), [{
     type: 'event', entity: 'Doc', id: 'd1', seq: 7,
-    seqSpan: [7, 7], event: { type: 'Doc.created', seq: 7, data: { id: 'd1', title: 'new' } },
+    seqSpan: [7, 7], event: { type: 'Doc.created', seq: 7, data: { id: 'd1' } },
   }]);
   assert.deepEqual(bob.drain(), []);
   assert.equal(fanout.hasSubscription(bob, 'Doc', 'd1'), true, 'denied subscriber remains registered');

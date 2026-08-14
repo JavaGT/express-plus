@@ -49,7 +49,7 @@ function makeCanvasRecord() {
   return {
     name: 'Canvas',
     fields: { activeStroke: { kind: 'ephemeral' } },
-    grant: () => [scope().can(() => true)],
+    grant: () => [scope().can(() => grant(read, write, subscribe))],
     findById: () => ({ id: 'c1', title: 'Drawing' }),
   };
 }

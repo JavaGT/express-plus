@@ -59,7 +59,7 @@ export function createLiveDeliveryWebSocket(httpServer        , {
   ready = () => Promise.resolve(),
   log = null,
 }                               = {})                        {
-  const fanout                   = createLiveFanout({ mayVerb });
+  const fanout                   = createLiveFanout({ mayVerb, authorization });
   const carets = createAnnotatedTextCaretLive({ db: db         , resolveEntity: resolveEntity         , mayVerb: mayVerb         , fanout });
   const connections = new Set                ();
   const pendingUpgrades = new Set        ();

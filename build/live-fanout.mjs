@@ -27,6 +27,9 @@ import { scopeOf, tryParseScopeKey } from './scope-handle.mjs';
                                                      
 import { createdTextReducerSeeds } from './text-reducer-transport.mjs';
 import { publicEvent } from './event-delivery.mjs';
+                                                                       
+import { readableFieldNames } from './field-admission.mjs';
+import { projectRowForRecipient } from './entity/projection.mjs';
 
 // ---- Shared live-delivery type vocabulary ---------------------------------
 
@@ -209,7 +212,43 @@ function hasAnnotatedText(entityRecord                  )          {
   return Object.values(entityRecord.fields ?? {}).some((field) => field?.kind === 'annotatedText');
 }
 
-export function createLiveFanout({ mayVerb = null }                               = {})                   {
+// S5/A3 field-read admission on the fan-out path. The committed lifecycle
+// payload is projected to the recipient's readable declared field subset
+// (projectRowForRecipient — unreadable fields are omitted, an unreadable
+// annotated-text field redacts to its explicit placeholder), so an unreadable
+// or undeclared field never reaches a subscriber. Native and field-set events
+// carry ONE field's operation payload and are gated at the field level by the
+// caller (an unreadable field resyncs instead); removed and scope-anchored
+// foreign events pass their identity / foreign payloads through untouched.
+async function projectRecipientEventData(
+  entityRecord                  ,
+  committed                      ,
+  handle                     ,
+  scopeAnchored         ,
+  principal           ,
+  readableFields                                 ,
+  authorization                             ,
+)                                               {
+  const data = committed.data;
+  if (readableFields === undefined || scopeAnchored) return data;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return data;
+  if (handle.kind === EventKind.native || handle.kind === EventKind.fieldSet || handle.kind === EventKind.removed) return data;
+  return projectRowForRecipient(entityRecord         , data, principal, { readable: readableFields, authorization });
+}
+
+// The recipient's slice of a shared delta. The projector keeps ONE raw baseline
+// per scope shared across subscribers; a per-subscriber delta is the shared diff
+// filtered to the readable field set — identical to diffing each projected row,
+// without corrupting the shared baseline for the other subscribers.
+function filterDeltaForRecipient(delta                         , readableFields                     )                          {
+  const filtered                          = {};
+  for (const [field, value] of Object.entries(delta)) {
+    if (readableFields.has(field)) filtered[field] = value;
+  }
+  return filtered;
+}
+
+export function createLiveFanout({ mayVerb = null, authorization = null }                                                                            = {})                   {
   const byScope = new Map                                             (); // Map<scopeKey, Map<conn, SubSpec>>
   const connSubs = new Map                       ();  // Map<conn, Set<scopeKey>>
   const paceBuffers = new Map                         ();
@@ -394,6 +433,14 @@ export function createLiveFanout({ mayVerb = null }                             
 
     if (!(await mayRow(entityRecord         , 'subscribe', authzRow, conn.principal ?? anonymous, mayVerb         ))) return;
 
+    // Field-read admission (S5/A3), re-checked at flush time — admission can
+    // change between emit and flush, mirroring the mayRow re-check above. An
+    // ephemeral field the principal cannot read is never drained to them.
+    if (entry.field !== null) {
+      const readableFields = await readableFieldNames(entityRecord         , authzRow, conn.principal ?? anonymous, authorization);
+      if (!readableFields.has(entry.field)) return;
+    }
+
     const kind = PACE_STRATEGIES.ephemeral;
     const coalescer = entry.by ? kind.coalescers[entry.by] : null;
     const coalesced = coalescer ? events.reduce(coalescer) : events[events.length - 1];
@@ -478,7 +525,8 @@ export function createLiveFanout({ mayVerb = null }                             
         scopeSubs.delete(conn);
         continue;
       }
-      if (!removed && !(await mayRow(entityRecord         , 'subscribe', authzRow, conn.principal ?? anonymous, mayVerb         ))) {
+      const principal = conn.principal ?? anonymous;
+      if (!removed && !(await mayRow(entityRecord         , 'subscribe', authzRow, principal, mayVerb         ))) {
         continue;
       }
 
@@ -495,9 +543,36 @@ export function createLiveFanout({ mayVerb = null }                             
         continue;
       }
 
+      // Field-read admission (S5/A3): the recipient's readable declared field
+      // set, computed per subscriber from the committed row. The lifecycle
+      // event payload, delta, and reducer seeds below are all confined to this
+      // set; an unreadable single-field payload resyncs instead.
+      let readableFields                                 ;
+      if (!removed && authzRow) {
+        readableFields = await readableFieldNames(entityRecord         , authzRow, principal, authorization);
+      }
+
       if (ephemeralField !== null) {
         const fields = subSpec?.fields;
         if (!fields || fields[ephemeralField] !== true) continue;
+        // A principal who cannot read the ephemeral field receives none of its
+        // cells — ephemeral delivery never carries an unreadable field.
+        if (readableFields !== undefined && !readableFields.has(ephemeralField)) continue;
+      }
+
+      // A native/field-set event is ONE field's operation payload (text op,
+      // annotation facts, ephemeral cells). A principal who cannot read that
+      // field must never receive the payload — the safe recipient grammar is
+      // the same opaque snapshot recovery the envelope builder emits.
+      if (!scopeAnchored && (handle.kind === EventKind.native || handle.kind === EventKind.fieldSet)
+          && readableFields !== undefined && !readableFields.has(handle.field)) {
+        const seq = committed.seq          ;
+        if (!Number.isSafeInteger(seq) || seq < 0) continue;
+        conn.send({
+          type: 'resync', entity: name, id, seq,
+          reason: hasAnnotatedText(entityRecord) ? 'annotated-text-snapshot-required' : 'recipient-snapshot-required',
+        });
+        continue;
       }
 
       let pace              = { window: 0, by: null };
@@ -506,17 +581,25 @@ export function createLiveFanout({ mayVerb = null }                             
       }
 
       if (pace.window === 0) {
+        const recipientData = await projectRecipientEventData(entityRecord, committed, handle, scopeAnchored, principal, readableFields, authorization);
+        const recipientEvent = recipientData === committed.data ? committed : { ...committed, data: recipientData };
         // Envelope identity (entity, id) is always the ANCHOR — matching the
         // subscription's scope — even for a scope-anchored foreign event;
         // the nested `event` carries its own type/data (e.g. Job.updated).
         const envelope                          = {
           type: 'event', entity: name, id, seq: committed.seq,
           seqSpan: [committed.seq, committed.seq],
-          event: publicEvent(committed),
+          event: publicEvent(recipientEvent                                     ),
         };
-        if (delta !== undefined) envelope.delta = delta;
+        if (delta !== undefined) {
+          envelope.delta = readableFields === undefined ? delta : filterDeltaForRecipient(delta, readableFields);
+        }
         const reducers = createdTextReducerSeeds(entityRecord, committed                                                 );
-        if (reducers) envelope.reducers = reducers;
+        if (reducers) {
+          const readable = readableFields;
+          const recipientReducers = readable === undefined ? reducers : reducers.filter((seed) => readable.has(seed.field));
+          if (recipientReducers.length > 0) envelope.reducers = recipientReducers;
+        }
         conn.send(envelope);
       } else {
         const bufKey = `${conn.id}|${eventScope}|${ephemeralField}`;
