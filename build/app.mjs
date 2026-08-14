@@ -47,6 +47,7 @@ import { validateSchemaOwnedEntityTable } from './schema-entity-validation.mjs';
 import { frameworkTableNames, declaredTableNames } from './schema-table-census.mjs';
 import { createBlobStore } from './blob-store.mjs';
 import { memoryBlobs } from './memory-blobs.mjs';
+import { createBlobSeams } from './blob-seams.mjs';
 import { createJobQueue } from './job-queue.mjs';
 import { createSearchPluginRegistry,                   } from './search-plugin.mjs';
 import { createSearchOwnedIndexCapability } from './index-capability.mjs';
@@ -658,6 +659,23 @@ export default function workbench({
       if (jobOpts) app.jobs = createJobQueue({ db: handle, clock, ...jobOpts, writeQueue: app.writeCoordinator });
     };
     if (db) attachHandleResources(db);
+    // The blob seams (S6/A6, workbench#97): backup, recovery, and recycle all
+    // consume the SAME concrete seam over the app's compiled census + blob
+    // store. Lazily constructed so the compiled census (kernel) and the
+    // handle-bound blob store exist by the time a manager is built. Fails
+    // closed without an opened database, blob store, or compiled census.
+    app.createBlobSeams = () => {
+      if (!app.db) {
+        throw new Error('createBlobSeams requires an opened database — await app.ready or call prepareSchema()/start() first');
+      }
+      if (!app.blobs) {
+        throw new Error('createBlobSeams requires the app blob store (app.blobs)');
+      }
+      if (!app.blobCensus) {
+        throw new Error('createBlobSeams requires the compiled blob census (app.blobCensus) — build the kernel first via prepareSchema()/start()');
+      }
+      return createBlobSeams({ db: app.db, blobs: app.blobs, census: app.blobCensus });
+    };
     if (pendingDbAdapter) {
       const adapter = pendingDbAdapter;
       installPendingDb = (() => {

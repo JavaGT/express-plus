@@ -112,3 +112,11 @@ export {
 
 
 } from './recovery.mjs';
+export {
+  createBlobSeams,
+  BLOB_GENERATION_LAYOUT_VERSION,
+  blobGenerationFileName,
+  blobGenerationDigestFileName,
+
+
+} from './blob-seams.mjs';

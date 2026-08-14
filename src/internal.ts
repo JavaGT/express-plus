@@ -112,3 +112,11 @@ export {
   type RecoveryCliAction,
   type RecoveryCliArgs,
 } from './recovery.ts';
+export {
+  createBlobSeams,
+  BLOB_GENERATION_LAYOUT_VERSION,
+  blobGenerationFileName,
+  blobGenerationDigestFileName,
+  type BlobSeams,
+  type BlobSeamsOptions,
+} from './blob-seams.ts';
