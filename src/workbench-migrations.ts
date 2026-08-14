@@ -267,10 +267,9 @@ export const WORKBENCH_MIGRATIONS: readonly Migration[] = Object.freeze([
   },
 ]);
 
-// The reserved `workbench` lane keeps its legacy entry-point names (internal.ts
-// and server.ts re-export them). `ensureWorkbenchMigrationTable` now ensures the
-// shared namespaced ledger table; `appliedWorkbenchVersion` reads the
-// `workbench` namespace of it.
+// The reserved `workbench` lane is internal-only via internal.ts.
+// `ensureWorkbenchMigrationTable` now ensures the shared namespaced ledger
+// table; `appliedWorkbenchVersion` reads the `workbench` namespace of it.
 
 export function ensureWorkbenchMigrationTable(db: DbHandle): void {
   // Alias of the shared namespaced-ledger ensure: the workbench lane lives in

@@ -894,7 +894,18 @@ function migrationLedgerOf(db              )                             {
   const rows = db
     .prepare(`SELECT namespace, version FROM ${MIGRATION_LEDGER} ORDER BY namespace, version`)
     .all()                                                 ;
-  const appliedVersions = rows.map((row) => ({ namespace: row.namespace, version: Number(row.version) }));
+  const appliedVersions = rows
+    .map((row) => ({ namespace: row.namespace, version: Number(row.version) }))
+    .sort(compareLedgerEntry);
   const maxVersion = appliedVersions.reduce((max, entry) => Math.max(max, entry.version), 0);
   return { table: MIGRATION_LEDGER, appliedVersions, maxVersion };
+}
+
+// Migration namespaces are case-insensitive identities. Keep manifest order
+// aligned with recovery validation rather than SQLite's raw text collation.
+function compareLedgerEntry(a             , b             )         {
+  const aNamespace = a.namespace.toLowerCase();
+  const bNamespace = b.namespace.toLowerCase();
+  if (aNamespace !== bNamespace) return aNamespace < bNamespace ? -1 : 1;
+  return a.version - b.version;
 }

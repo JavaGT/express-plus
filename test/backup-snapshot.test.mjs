@@ -288,6 +288,40 @@ test('migrationLedgerState and schema identity reflect the committed schema', { 
   }
 });
 
+test('migrationLedgerState orders namespaces by folded identity', { timeout: 120000 }, async () => {
+  const root = tempRoot();
+  const dir = join(root, 'owned');
+  try {
+    const opened = openSqliteAdapter({ directory: dir, name: 'app' });
+    try {
+      opened.handle.exec(`CREATE TABLE _SchemaMigration (
+        namespace TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        checksum TEXT NOT NULL,
+        appliedAt TEXT NOT NULL,
+        suppliedBy TEXT,
+        PRIMARY KEY (namespace, version)
+      )`);
+      const insert = opened.handle.prepare('INSERT INTO _SchemaMigration (namespace, version, name, checksum, appliedAt, suppliedBy) VALUES (?, ?, ?, ?, ?, ?)');
+      insert.run('Zulu', 1, 'z1', 'c1', '2026-01-01T00:00:00.000Z', null);
+      insert.run('alpha', 1, 'a1', 'c2', '2026-01-01T00:00:00.000Z', null);
+
+      const result = await managerFor(opened).backup();
+      assert.equal(result.ok, true);
+      assert.deepEqual(
+        result.manifest.migrationLedgerState.appliedVersions,
+        [{ namespace: 'alpha', version: 1 }, { namespace: 'Zulu', version: 1 }],
+        'backup order matches recovery validation of case-insensitive namespaces',
+      );
+    } finally {
+      opened.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('blob census: referenced generations are recorded and their bytes copied', { timeout: 120000 }, async () => {
   const root = tempRoot();
   const dir = join(root, 'owned');

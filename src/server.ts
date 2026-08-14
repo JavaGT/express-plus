@@ -27,7 +27,6 @@ export { createJobQueue } from './job-queue.ts';
 export { createBlobStore } from './blob-store.ts';
 export { compileBlobCensus } from './blob-census.ts';
 export { runMigrations } from './migrations.ts';
-export { WORKBENCH_MIGRATIONS, ensureWorkbenchMigrationTable, appliedWorkbenchVersion, runWorkbenchMigrations } from './workbench-migrations.ts';
 export { defineSqliteSchema } from './sqlite-schema.ts';
 export { describeEntityStorage, describeSqliteStorage } from './sqlite-storage-description.ts';
 export { readSeq as readCommittedCursor } from './committed-log.ts';

@@ -27,7 +27,6 @@ export { createJobQueue } from './job-queue.mjs';
 export { createBlobStore } from './blob-store.mjs';
 export { compileBlobCensus } from './blob-census.mjs';
 export { runMigrations } from './migrations.mjs';
-export { WORKBENCH_MIGRATIONS, ensureWorkbenchMigrationTable, appliedWorkbenchVersion, runWorkbenchMigrations } from './workbench-migrations.mjs';
 export { defineSqliteSchema } from './sqlite-schema.mjs';
 export { describeEntityStorage, describeSqliteStorage } from './sqlite-storage-description.mjs';
 export { readSeq as readCommittedCursor } from './committed-log.mjs';

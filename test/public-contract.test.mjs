@@ -115,6 +115,21 @@ test('the packed package exposes the supported runtime contract', () => {
         + `    throw new Error(entrypoint + ' has an unexpected export surface');\n`
         + `  }\n`
         + `}\n`
+        + `const prohibitedMigrationExports = ['WORKBENCH_MIGRATIONS', 'ensureWorkbenchMigrationTable', 'appliedWorkbenchVersion', 'runWorkbenchMigrations'];\n`
+        + `for (const entrypoint of Object.keys(manifest)) {\n`
+        + `  const module = await import(entrypoint);\n`
+        + `  for (const symbol of prohibitedMigrationExports) {\n`
+        + `    if (symbol in module) throw new Error(entrypoint + ' exposes package-owned migration runner ' + symbol);\n`
+        + `  }\n`
+        + `}\n`
+        + `const { DatabaseSync } = await import('node:sqlite');\n`
+        + `const { runMigrations } = await import('workbench/server');\n`
+        + `const migrationDb = new DatabaseSync(':memory:');\n`
+        + `try {\n`
+        + `  let rejected = false;\n`
+        + `  try { runMigrations(migrationDb, [{ namespace: 'WorkBench', name: 'impersonator', version: 1, up() {} }]); } catch { rejected = true; }\n`
+        + `  if (!rejected) throw new Error('workbench/server can run reserved-namespace migrations');\n`
+        + `} finally { migrationDb.close(); }\n`
         + `const root = await import('workbench');\n`
         + `const annotatedText = await import('workbench/annotated-text');\n`
         + `for (const symbol of ${JSON.stringify(['annotatedText', 'annotation', 'protectingAnnotation', 'measurement', 'annotationAction', 'registerAnnotatedTextContract', 'registerAnnotatedTextStructuralExtension', 'annotatedTextAction', 'annotatedTextCreateAction', 'annotatedTextRetireAction', 'exportAnnotatedText', 'readAnnotatedTextForRecipient'])}) {\n`
