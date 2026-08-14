@@ -25,7 +25,21 @@
 // The blob census seam is DELIBERATELY pluggable (S6 owns blob enumeration):
 // the module only records whatever `census()` returns and materializes each
 // referenced generation through `materialize(generation, destBlobDir)`. No
-// blob enumeration lives here.
+// blob enumeration lives here. A blob-capable source (its schema declares the
+// framework blob-metadata ledger, `BlobStore`) REQUIRES the seam: without a
+// census the manager could only record an empty blob set and falsely report
+// complete, so `backup()` refuses fail-closed instead. `materialize` must
+// return the files it wrote (name + byte size); the manager VERIFIES every
+// reported byte on disk before a manifest may say `complete` — a generation
+// that throws, reports nothing, or lands with the wrong size is MISSING →
+// partial, never complete.
+//
+// OWNERSHIP (review #82 finding 3): the capture barrier runs through the
+// platform write coordinator. `createBackupManager` verifies at construction
+// that the coordinator it is given is EXACTLY the coordinator the source
+// declares as its owner (`source.writeCoordinator`) — an unbound source or a
+// foreign coordinator is refused, because a capture that does not exclude
+// writes is no consistency boundary at all.
 
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomBytes } from 'node:crypto';
@@ -58,12 +72,23 @@ export const DEFAULT_RETENTION                                  = Object.freeze(
 // The pluggable blob census seam (S6 implements it against the real backend).
 // `census()` returns the content-addressed blob generations referenced by the
 // committed DB state captured at the barrier; `materialize` writes the
-// immutable bytes of ONE generation into the backup's blobs/ directory and
-// must THROW when the generation's bytes are pending finalization or missing
-// (the caller then marks the backup partial — never complete).
+// immutable bytes of ONE generation into the backup's blobs/ directory.
+//
+// Materialize is VERIFIED (review #82 finding 2): it must return the files it
+// wrote under `destBlobDir` (relative `name` + `size` in bytes) and must THROW
+// when the generation's bytes are pending finalization or missing. The manager
+// stats every reported file against the reported size before a backup may be
+// complete — an empty report, a reported-but-unwritten file, or a size
+// mismatch marks the generation missing (partial, quarantined, never
+// complete).
+                                                                                              
+
                                 
                                                            
-                                                                             
+              
+                       
+                        
+                                                                                
   
 
                                           
@@ -140,13 +165,33 @@ export const DEFAULT_RETENTION                                  = Object.freeze(
                                
                                              
                                               
+                                                                     
+                                                                         
+                                                                      
+                                                                           
+                                                                            
+                                                                               
+                                                                               
+            
+                                                     
+  
+
+// The platform write coordinator surface the capture barrier runs through.
+// `createBackupManager` requires the coordinator to be the source's declared
+// owner (identity, not shape): any object with a `run` method is a foreign
+// coordinator and is refused.
+                                      
+                                               
   
 
                                     
                                 
-                                                                             
-                                                                         
+                                                                            
                                                                               
+                                                                         
+                                                                         
+                                                    
+                                                    
                                            
                                                       
                             
@@ -169,12 +214,47 @@ const BACKUP_NAME = /^(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}Z)-([0-9a-f]+)$
 const WORKBENCH_LEDGER = '_WorkbenchMigration';
 const APP_LEDGER = '_Migration';
 
+// The framework blob-metadata ledger. Its presence in a schema means the source
+// is blob-capable: adopted blob generations MAY exist, so a backup without a
+// census seam cannot safely claim complete (it refuses fail-closed instead).
+const BLOB_METADATA_LEDGER = 'BlobStore';
+
+// Upper bound on any error message persisted in a diagnostic or written to the
+// log (review #82 finding 4). Errors raised by the blob seam (or anything else)
+// can carry content-bearing payloads; a bounded, control-character-stripped,
+// long-token-redacted message keeps diagnostics to stage + identifiers + a
+// short reason, never the data itself.
+export const MAX_DIAGNOSTIC_ERROR_LENGTH = 500;
+
+// Any whitespace-free run longer than this is treated as a content-bearing
+// payload (blob bytes, row data, keys) rather than an identifier, and is
+// redacted wholesale from messages before persistence/logging. Short tokens —
+// generation ids, file names, sha256 hashes — pass through untouched.
+const MAX_TOKEN_LENGTH = 128;
+
 function sha256hex(value        )         {
   return createHash('sha256').update(value).digest('hex');
 }
 
-function messageOf(err         )         {
-  return err instanceof Error ? err.message : String(err);
+// Sanitize a message for persistence/logging: control characters (incl.
+// newlines) collapsed, content-bearing long tokens redacted, and the result
+// length-bounded — so multi-line or long content payloads cannot leak through a
+// diagnostic or log line (review #82 finding 4).
+function sanitizeMessage(value        )         {
+  const singleLine = String(value)
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .trim();
+  const redacted = singleLine.replace(
+    new RegExp(`\\S{${MAX_TOKEN_LENGTH + 1},}`, 'g'),
+    (run) => `<redacted-${run.length}>`,
+  );
+  return redacted.slice(0, MAX_DIAGNOSTIC_ERROR_LENGTH);
+}
+
+function sanitizeError(err         )         {
+  if (err instanceof Error) return sanitizeMessage(err.message);
+  if (typeof err === 'string') return sanitizeMessage(err);
+  return sanitizeMessage(String(err));
 }
 
 function formatTimestamp(date      )         {
@@ -212,6 +292,21 @@ export function createBackupManager(options                      )              
     throw new TypeError('backup manager requires the single write coordinator (writeCoordinator.run) for the capture barrier');
   }
   const writeCoordinator = options.writeCoordinator;
+  // COORDINATOR OWNERSHIP (review #82 finding 3): the capture barrier is only a
+  // consistency boundary if the coordinator it runs through is the ONE that
+  // serializes writes to this source. Shape is not proof — any object with a
+  // `run` method would launder the barrier — so the source must declare its
+  // owner coordinator and the passed coordinator must be exactly it.
+  if (source.writeCoordinator === undefined) {
+    throw new TypeError(
+      'backup manager requires the source to declare the write coordinator that owns it: bind source.writeCoordinator to the coordinator that serializes writes to this connection (an unbound source cannot prove its capture barrier excludes writes)',
+    );
+  }
+  if (source.writeCoordinator !== writeCoordinator) {
+    throw new TypeError(
+      'backup manager refuses a foreign write coordinator: the passed writeCoordinator is not the source\'s declared owner (source.writeCoordinator) — its capture barrier would not exclude writes to this connection',
+    );
+  }
   const retention = validateRetention(options.retention);
   const blobs = options.blobs ?? null;
   if (blobs !== null) validateBlobSource(blobs);
@@ -288,7 +383,7 @@ export function createBackupManager(options                      )              
         }
         quarantined.push(moveToQuarantine(dir));
       } catch (err) {
-        getLog().warn('system', 'reconcile failed to quarantine an incomplete backup', { err, dir });
+        getLog().warn('system', 'reconcile failed to quarantine an incomplete backup', { error: sanitizeError(err), dir });
       }
     }
     return { quarantined };
@@ -304,15 +399,20 @@ export function createBackupManager(options                      )              
     err         ,
     detail                         ,
   )               {
-    const diagnostic                   = { at: now().toISOString(), stage, error: messageOf(err), detail };
+    const diagnostic                   = { at: now().toISOString(), stage, error: sanitizeError(err), detail };
     let quarantinePath                = null;
     try {
       writeDiagnostic(dir, diagnostic);
       quarantinePath = moveToQuarantine(dir);
     } catch (moveErr) {
-      getLog().error('system', 'backup failed closed and could not be quarantined', { err: moveErr, stage, backupId, dir });
+      getLog().error('system', 'backup failed closed and could not be quarantined', {
+        error: sanitizeError(moveErr),
+        stage,
+        backupId,
+        dir,
+      });
     }
-    getLog().error('system', 'backup failed closed', { err, stage, backupId, quarantinePath });
+    getLog().error('system', 'backup failed closed', { error: sanitizeError(err), stage, backupId, quarantinePath });
     return {
       ok: false,
       status: 'failed',
@@ -324,7 +424,7 @@ export function createBackupManager(options                      )              
   }
 
   function creationFailed(backupId        , err         )               {
-    const diagnostic                   = { at: now().toISOString(), stage: 'creation', error: messageOf(err), detail: { backupId } };
+    const diagnostic                   = { at: now().toISOString(), stage: 'creation', error: sanitizeError(err), detail: { backupId } };
     let quarantinePath                = null;
     try {
       // The backup dir was never created — the diagnostic lands directly in
@@ -334,7 +434,7 @@ export function createBackupManager(options                      )              
     } catch {
       /* the quarantine write itself failed (e.g. disk-full everywhere) — the log entry below is all we have */
     }
-    getLog().error('system', 'backup creation failed closed', { backupId, err, quarantinePath });
+    getLog().error('system', 'backup creation failed closed', { backupId, error: sanitizeError(err), quarantinePath });
     return {
       ok: false,
       status: 'failed',
@@ -359,7 +459,7 @@ export function createBackupManager(options                      )              
     try {
       reconcileNow();
     } catch (err) {
-      getLog().warn('system', 'backup reconcile sweep failed', { err, backupId });
+      getLog().warn('system', 'backup reconcile sweep failed', { error: sanitizeError(err), backupId });
     }
 
     try {
@@ -400,14 +500,27 @@ export function createBackupManager(options                      )              
     } catch {
       /* best-effort tightening */
     }
+    // Each referenced generation must land VERIFIED bytes before the backup can
+    // be complete (review #82 finding 2): materialize must report the files it
+    // wrote and the manager stats every reported file against the reported
+    // size. A generation that throws, reports nothing, or writes the wrong
+    // bytes is MISSING — partial, never complete.
     for (const generation of capture.blobGenerations) {
       try {
         // `blobGenerations` is [] when no blob seam is configured, so the
         // optional call never fires in that case.
-        await blobs?.materialize(generation, blobsDir);
+        const report = await blobs?.materialize(generation, blobsDir);
+        const verified = verifyMaterialization(generation, blobsDir, report);
+        if (verified.ok) continue;
+        missingGenerations.push(generation);
+        getLog().warn('system', 'backup blob materialization failed verification', {
+          backupId,
+          generation,
+          reason: sanitizeMessage(verified.reason),
+        });
       } catch (err) {
         missingGenerations.push(generation);
-        getLog().warn('system', 'backup blob materialization failed', { backupId, generation, err });
+        getLog().warn('system', 'backup blob materialization failed', { backupId, generation, error: sanitizeError(err) });
       }
     }
 
@@ -481,6 +594,15 @@ export function createBackupManager(options                      )              
     }
     const pages = await source.backupTo(snapshotPath);
     const state = readSnapshotState(snapshotPath);
+    // Blob census fail-closed (review #82 finding 1): a blob-capable schema
+    // (the framework blob-metadata ledger present) means adopted blob
+    // generations MAY exist, and a no-seam capture can only record an empty
+    // blob set — which would falsely report complete. Refuse instead.
+    if (blobs === null && state.blobCapableSchema) {
+      throw new Error(
+        `backup refuses a blob-capable database without a blob census seam: the schema declares ${BLOB_METADATA_LEDGER}, so adopted blob generations may exist — supply a census seam (backupManager blobs) or this backup would silently record an empty blob set`,
+      );
+    }
     const blobGenerations = blobs === null ? [] : Array.from(await blobs.census());
     return { pages, blobGenerations, ...state };
   }
@@ -572,11 +694,54 @@ export function createBackupManager(options                      )              
                       
                 
                             
+                             
                                    
                                  
                               
                                                    
   
+
+                                                                                          
+
+// Verify a materializer's report against what actually landed on disk (review
+// #82 finding 2): every reported file must exist under destBlobDir, be a
+// regular file, and match the reported byte size exactly. Any deviation — an
+// absent report, an empty one, a malformed entry, a path outside the blob dir,
+// or a size mismatch — fails the generation.
+function verifyMaterialization(
+  generation        ,
+  destBlobDir        ,
+  report                                             ,
+)                              {
+  if (!Array.isArray(report)) {
+    return { ok: false, reason: `materialize for ${generation} did not report the files it wrote` };
+  }
+  if (report.length === 0) {
+    return { ok: false, reason: `materialize for ${generation} reported no files — its bytes were not written` };
+  }
+  for (const entry of report) {
+    if (!entry || typeof entry.name !== 'string' || typeof entry.size !== 'number' || !Number.isInteger(entry.size) || entry.size < 0) {
+      return { ok: false, reason: `materialize for ${generation} reported a malformed file entry` };
+    }
+    const name = entry.name;
+    if (name === '' || name === '.' || name === '..' || name.includes('/') || name.includes('\\') || path.isAbsolute(name)) {
+      return { ok: false, reason: `materialize for ${generation} reported a path outside the blob directory` };
+    }
+    let stat                             ;
+    try {
+      stat = statSync(path.join(destBlobDir, name));
+    } catch {
+      return { ok: false, reason: `materialize for ${generation} reported a file that was not written: ${name}` };
+    }
+    if (!stat.isFile()) {
+      return { ok: false, reason: `materialize for ${generation} reported a non-file entry: ${name}` };
+    }
+    if (stat.size !== entry.size) {
+      return { ok: false, reason: `materialize for ${generation} reported ${entry.size} bytes but ${name} is ${stat.size} bytes` };
+    }
+  }
+  return { ok: true };
+}
 
                                                                                    
 
@@ -613,6 +778,7 @@ function readSnapshotState(snapshotPath        )                                
       integrityResult: quickCheckOf(snapshot),
       ...schemaIdentityOf(snapshot),
       migrationLedgerState: migrationLedgerOf(snapshot),
+      blobCapableSchema: hasBlobLedger(snapshot),
     };
   } finally {
     try {
@@ -627,6 +793,12 @@ function readSnapshotState(snapshotPath        )                                
       }
     }
   }
+}
+
+// A schema is blob-capable when it declares the framework blob-metadata ledger:
+// adopted blob generations may exist, so a census-less backup must refuse.
+function hasBlobLedger(db              )          {
+  return Boolean(db.prepare('SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?').get('table', BLOB_METADATA_LEDGER));
 }
 
 function quickCheckOf(db              )                  {

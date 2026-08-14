@@ -32,6 +32,7 @@ import {
   type ReadMirrorDescription,
 } from './db-adapter.ts';
 import { acquireDirectoryLock, type DirectoryLock } from './directory-lock.ts';
+import type { BackupWriteCoordinator } from './backup.ts';
 
 export { DB_OWNED_ERROR_CODE, DirectoryOwnedError } from './directory-lock.ts';
 
@@ -82,6 +83,15 @@ export interface OpenedSqliteDatabase extends OpenedDatabase {
   // throws on failure (the backup manager quarantines). Works for file AND
   // memory databases (backing up :memory: to a file is a valid use).
   backupTo(destPath: string, options?: SqliteBackupOptions): Promise<number>;
+  // OWNERSHIP BINDING (S1/A3 backup, review #82 finding 3): the ONE platform
+  // write coordinator (createWriteQueue) that serializes writes to this
+  // connection. The app fills this in when it opens the adapter under its
+  // coordinator; createBackupManager asserts the coordinator it is given is
+  // EXACTLY this object, so a foreign coordinator cannot launder the backup
+  // consistency boundary. Left unset until the app binds it (the adapter is
+  // opened before the coordinator exists) — an unbound source refuses
+  // backup-manager construction.
+  writeCoordinator?: BackupWriteCoordinator;
   // Remove the db file, -wal/-shm, and lock sidecar. backups/, quarantine/,
   // recycle/ (S1/A3/A4/A6) and blobs//staging/ are left untouched. Closes the
   // adapter first if it is still open.
@@ -339,5 +349,9 @@ function makeOpenedSqliteDatabase(
     checkpoint,
     integrityCheck,
     teardown,
+    // No default: the app binds the platform write coordinator before creating
+    // a backup manager (the adapter opens before the coordinator exists). An
+    // unbound source refuses backup-manager construction.
+    writeCoordinator: undefined,
   };
 }

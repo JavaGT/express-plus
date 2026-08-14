@@ -23,8 +23,12 @@ function tempRoot() {
   return mkdtempSync(join(tmpdir(), 'wb-backup-snapshot-'));
 }
 
+// Bind the freshly-created coordinator to the source (the ownership seam,
+// review #82 finding 3) and construct the manager with that same coordinator.
 function managerFor(opened, options = {}) {
-  return createBackupManager({ source: opened, writeCoordinator: createWriteQueue(), ...options });
+  const writeCoordinator = options.writeCoordinator ?? createWriteQueue();
+  opened.writeCoordinator = writeCoordinator;
+  return createBackupManager({ source: opened, writeCoordinator, ...options });
 }
 
 // The concretely enumerated manifest surface (issue #82 spec §2) — every field
@@ -53,19 +57,65 @@ test('createBackupManager validates its contract fail-closed', { timeout: 120000
   try {
     const opened = openSqliteAdapter({ directory: dir, name: 'app' });
     try {
+      const queue = createWriteQueue();
+      opened.writeCoordinator = queue;
       assert.throws(() => createBackupManager({ source: opened }), /write coordinator/);
-      assert.throws(() => createBackupManager({ source: opened, writeCoordinator: createWriteQueue(), retention: { daily: 0 } }), /daily/);
-      assert.throws(() => createBackupManager({ source: opened, writeCoordinator: createWriteQueue(), retention: { hourly: -1 } }), /hourly/);
-      assert.throws(() => createBackupManager({ source: opened, writeCoordinator: createWriteQueue(), blobs: {} }), /census/);
+      assert.throws(() => createBackupManager({ source: opened, writeCoordinator: queue, retention: { daily: 0 } }), /daily/);
+      assert.throws(() => createBackupManager({ source: opened, writeCoordinator: queue, retention: { hourly: -1 } }), /hourly/);
+      assert.throws(() => createBackupManager({ source: opened, writeCoordinator: queue, blobs: {} }), /census/);
       const memory = openMemoryAdapter();
       try {
+        memory.writeCoordinator = queue;
         assert.throws(
-          () => createBackupManager({ source: memory, writeCoordinator: createWriteQueue() }),
+          () => createBackupManager({ source: memory, writeCoordinator: queue }),
           /FILE-mode source/,
           'a memory source has no owned directory to back into',
         );
       } finally {
         memory.close();
+      }
+    } finally {
+      opened.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('createBackupManager enforces coordinator ownership — a foreign coordinator is refused', { timeout: 120000 }, () => {
+  const root = tempRoot();
+  const dir = join(root, 'owned');
+  try {
+    const opened = openSqliteAdapter({ directory: dir, name: 'app' });
+    try {
+      const owner = createWriteQueue();
+      opened.writeCoordinator = owner;
+
+      // The source's own coordinator is accepted.
+      assert.equal(typeof createBackupManager({ source: opened, writeCoordinator: owner }).backup, 'function');
+
+      // A different coordinator instance does not own this source → refused.
+      assert.throws(
+        () => createBackupManager({ source: opened, writeCoordinator: createWriteQueue() }),
+        /foreign write coordinator/,
+        'a different write queue is not the source owner',
+      );
+      // Any object shaped like a coordinator (no ownership) is refused.
+      assert.throws(
+        () => createBackupManager({ source: opened, writeCoordinator: { run: async (fn) => fn() } }),
+        /foreign write coordinator/,
+        'a run-shaped object without ownership is refused',
+      );
+      // An unbound source (no declared coordinator) fails closed at construction.
+      const unbound = openSqliteAdapter({ directory: join(root, 'unbound'), name: 'app' });
+      try {
+        assert.throws(
+          () => createBackupManager({ source: unbound, writeCoordinator: createWriteQueue() }),
+          /declare the write coordinator that owns it/,
+          'an unbound source cannot prove its barrier excludes writes',
+        );
+      } finally {
+        unbound.close();
       }
     } finally {
       opened.close();
@@ -137,6 +187,7 @@ test('round-trips under concurrent reads + queued writes (WAL mode) without corr
       // on a contended machine (the platform default maxWaitMs=5000 is for
       // interactive writes, not for the backup barrier's capture).
       const queue = createWriteQueue({ maxWaitMs: 60_000 });
+      opened.writeCoordinator = queue;
       const manager = createBackupManager({ source: opened, writeCoordinator: queue });
 
       const backupPromise = manager.backup();
@@ -234,7 +285,12 @@ test('blob census: referenced generations are recorded and their bytes copied', 
         census: async () => ['gen-a', 'gen-b'],
         materialize: async (generation, destDir) => {
           materialized.push(generation);
-          writeFileSync(join(destDir, `${generation}.blob`), `bytes-${generation}`);
+          const name = `${generation}.blob`;
+          const content = `bytes-${generation}`;
+          writeFileSync(join(destDir, name), content);
+          // Materialize must report the files it wrote (name + size) so the
+          // manager can verify the bytes landed before declaring complete.
+          return [{ name, size: content.length }];
         },
       };
       const result = await managerFor(opened, { blobs }).backup();
@@ -262,8 +318,11 @@ test('a missing referenced blob makes the backup partial + quarantined — never
       opened.handle.exec('CREATE TABLE t (id INTEGER PRIMARY KEY)');
       const blobs = {
         census: () => ['gen-a', 'gen-b'],
-        materialize: (generation) => {
+        materialize: (generation, destDir) => {
           if (generation === 'gen-b') throw new Error('BLOB_UNAVAILABLE: gen-b bytes pending finalization');
+          const name = `${generation}.blob`;
+          writeFileSync(join(destDir, name), 'bytes-a');
+          return [{ name, size: 7 }];
         },
       };
       const result = await managerFor(opened, { blobs }).backup();
@@ -280,6 +339,103 @@ test('a missing referenced blob makes the backup partial + quarantined — never
       assert.equal(existsSync(join(result.directory, 'diagnostic.json')), true, 'diagnostics retained');
       const disk = JSON.parse(readFileSync(join(result.directory, 'manifest.json'), 'utf8'));
       assert.equal(disk.status, 'partial', 'the on-disk manifest is not a false-complete marker');
+    } finally {
+      opened.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a blob-capable database without a census seam refuses fail-closed; a no-blob database completes without a seam', { timeout: 120000 }, async () => {
+  const root = tempRoot();
+  const dir = join(root, 'owned');
+  const plainDir = join(root, 'plain');
+  try {
+    // Blob-enabled source: the schema declares the framework blob-metadata
+    // ledger (BlobStore), so adopted blob generations MAY exist even when the
+    // table is empty — a no-seam backup must refuse, never claim complete
+    // (review #82 finding 1).
+    const opened = openSqliteAdapter({ directory: dir, name: 'app' });
+    try {
+      opened.handle.exec('CREATE TABLE BlobStore (id TEXT PRIMARY KEY, status TEXT NOT NULL, size INTEGER, createdAt TEXT NOT NULL)');
+      const result = await managerFor(opened).backup();
+      assert.equal(result.ok, false, 'no-seam backup of a blob-capable db refuses');
+      assert.equal(result.status, 'failed');
+      assert.equal(result.quarantined, true);
+      assert.equal(result.diagnostic.stage, 'snapshot');
+      assert.match(result.diagnostic.error, /census seam/);
+      assert.equal(readdirSync(join(dir, 'backups')).length, 0, 'backups/ holds nothing after the refusal');
+
+      // A supplied census seam is authoritative — even an empty census means
+      // "no generations referenced", which completes.
+      const withSeam = await managerFor(opened, { blobs: { census: () => [], materialize: async () => [] } }).backup();
+      assert.equal(withSeam.ok, true, 'an explicit (empty) census seam completes');
+      assert.equal(withSeam.status, 'complete');
+    } finally {
+      opened.close();
+    }
+
+    // A schema with no blob ledger cannot miss blob bytes — no seam completes.
+    const plain = openSqliteAdapter({ directory: plainDir, name: 'app' });
+    try {
+      plain.handle.exec('CREATE TABLE note (id TEXT PRIMARY KEY)');
+      const result = await managerFor(plain).backup();
+      assert.equal(result.ok, true);
+      assert.equal(result.status, 'complete');
+      assert.deepEqual(result.manifest.blobGenerations, []);
+    } finally {
+      plain.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a materializer that silently writes nothing makes the backup partial + quarantined — never complete', { timeout: 120000 }, async () => {
+  const root = tempRoot();
+  const dir = join(root, 'owned');
+  try {
+    const opened = openSqliteAdapter({ directory: dir, name: 'app' });
+    try {
+      const blobs = {
+        census: () => ['gen-silent'],
+        materialize: async () => [],
+      };
+      const result = await managerFor(opened, { blobs }).backup();
+      assert.equal(result.ok, false);
+      assert.equal(result.status, 'partial');
+      assert.equal(result.quarantined, true);
+      assert.equal(result.manifest.status, 'partial', 'a no-bytes materializer must never produce a complete manifest');
+      assert.deepEqual(result.diagnostic.detail.missingGenerations, ['gen-silent']);
+      assert.equal(readdirSync(join(result.directory, 'blobs')).length, 0, 'the quarantined partial holds no blob bytes');
+      assert.equal(readdirSync(join(dir, 'backups')).length, 0, 'backups/ holds nothing after the partial');
+    } finally {
+      opened.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a materializer reporting a size mismatch (wrong bytes on disk) makes the backup partial — never complete', { timeout: 120000 }, async () => {
+  const root = tempRoot();
+  const dir = join(root, 'owned');
+  try {
+    const opened = openSqliteAdapter({ directory: dir, name: 'app' });
+    try {
+      const blobs = {
+        census: () => ['gen-a'],
+        materialize: (generation, destDir) => {
+          writeFileSync(join(destDir, `${generation}.blob`), 'abc');
+          return [{ name: `${generation}.blob`, size: 999 }]; // lies about the size
+        },
+      };
+      const result = await managerFor(opened, { blobs }).backup();
+      assert.equal(result.ok, false);
+      assert.equal(result.status, 'partial');
+      assert.equal(result.manifest.status, 'partial', 'unverified bytes can never be complete');
+      assert.deepEqual(result.diagnostic.detail.missingGenerations, ['gen-a']);
     } finally {
       opened.close();
     }
@@ -339,15 +495,17 @@ test('a non-WAL source is refused fail-closed — a raw main-file copy never hap
       const nonWalHandle = new DatabaseSync(':memory:');
       nonWalHandle.exec('CREATE TABLE t (id INTEGER PRIMARY KEY)');
       let copyAttempted = false;
+      const queue = createWriteQueue();
       const fake = {
         root: dir,
         handle: nonWalHandle,
+        writeCoordinator: queue,
         backupTo: async () => {
           copyAttempted = true;
           throw new Error('should never be reached');
         },
       };
-      const result = await createBackupManager({ source: fake, writeCoordinator: createWriteQueue() }).backup();
+      const result = await createBackupManager({ source: fake, writeCoordinator: queue }).backup();
       assert.equal(result.ok, false);
       assert.equal(result.status, 'failed');
       assert.match(result.diagnostic.error, /WAL-mode source/);

@@ -32,6 +32,7 @@ import {
                              
 } from './db-adapter.mjs';
 import { acquireDirectoryLock,                    } from './directory-lock.mjs';
+                                                          
 
 export { DB_OWNED_ERROR_CODE, DirectoryOwnedError } from './directory-lock.mjs';
 
@@ -82,6 +83,15 @@ const TEARDOWN_FILENAMES = Object.freeze([
                                                                            
                                                                      
                                                                              
+                                                                             
+                                                                        
+                                                                          
+                                                                            
+                                                                            
+                                                                            
+                                                                      
+                                 
+                                            
                                                                             
                                                                               
                                        
@@ -339,5 +349,9 @@ function makeOpenedSqliteDatabase(
     checkpoint,
     integrityCheck,
     teardown,
+    // No default: the app binds the platform write coordinator before creating
+    // a backup manager (the adapter opens before the coordinator exists). An
+    // unbound source refuses backup-manager construction.
+    writeCoordinator: undefined,
   };
 }

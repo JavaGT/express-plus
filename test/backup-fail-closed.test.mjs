@@ -11,7 +11,7 @@ import { join } from 'node:path';
 
 import { openSqliteAdapter } from '../build/sqlite-adapter.mjs';
 import { createWriteQueue } from '../build/write-queue.mjs';
-import { createBackupManager } from '../build/backup.mjs';
+import { createBackupManager, MAX_DIAGNOSTIC_ERROR_LENGTH } from '../build/backup.mjs';
 import { setAmbientLog } from '../build/log.mjs';
 
 const SECRET_BLOB_CONTENT = 'SECRET-BLOB-BYTES-MUST-NOT-APPEAR-ANYWHERE';
@@ -20,8 +20,12 @@ function tempRoot() {
   return mkdtempSync(join(tmpdir(), 'wb-backup-failclosed-'));
 }
 
+// Bind the freshly-created coordinator to the source (the ownership seam,
+// review #82 finding 3) and construct the manager with that same coordinator.
 function managerFor(opened, options = {}) {
-  return createBackupManager({ source: opened, writeCoordinator: createWriteQueue(), ...options });
+  const writeCoordinator = options.writeCoordinator ?? createWriteQueue();
+  opened.writeCoordinator = writeCoordinator;
+  return createBackupManager({ source: opened, writeCoordinator, ...options });
 }
 
 function manifestOf(dir) {
@@ -129,8 +133,10 @@ test('disk-full (mock): a blob store outage fails closed and the backup is never
       const diskFull = Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
       const blobs = {
         census: () => ['gen-a', 'gen-b'],
-        materialize: (generation) => {
+        materialize: (generation, destDir) => {
           if (generation === 'gen-b') throw diskFull;
+          writeFileSync(join(destDir, `${generation}.blob`), 'bytes-a');
+          return [{ name: `${generation}.blob`, size: 7 }];
         },
       };
       const result = await managerFor(opened, { blobs }).backup();
@@ -172,6 +178,68 @@ test('a census failure inside the barrier fails closed (failed + quarantined, ne
     } finally {
       opened.close();
     }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('error messages are sanitized before persistence and logging — bounded, no content payloads', { timeout: 120000 }, async () => {
+  const root = tempRoot();
+  const dir = join(root, 'owned');
+  // Longer than the diagnostic bound, so the FULL payload can never appear in
+  // a bounded message (review #82 finding 4).
+  const payload = 'SECRET-BLOB-PAYLOAD-'.repeat(200);
+  const entries = [];
+  try {
+    // Persisted-diagnostic path: a snapshot failure whose error embeds the
+    // payload must land in diagnostic.json bounded and WITHOUT the content.
+    const opened = openSqliteAdapter({ directory: dir, name: 'app' });
+    try {
+      const queue = createWriteQueue();
+      opened.writeCoordinator = queue;
+      const leaking = { ...opened, backupTo: async () => { throw new Error(`snapshot failed: ${payload}`); } };
+      const result = await createBackupManager({ source: leaking, writeCoordinator: queue }).backup();
+      assert.equal(result.ok, false);
+      assert.equal(result.status, 'failed');
+      const diagnostic = JSON.parse(readFileSync(join(result.directory, 'diagnostic.json'), 'utf8'));
+      assert.equal(diagnostic.error.includes(payload), false, 'diagnostic never persists the full payload');
+      assert.equal(
+        diagnostic.error.includes('SECRET-BLOB-PAYLOAD'),
+        false,
+        'the content-bearing payload is stripped, not merely truncated',
+      );
+      assert.ok(diagnostic.error.length <= MAX_DIAGNOSTIC_ERROR_LENGTH, 'diagnostic error is bounded');
+      assert.equal(/[\r\n]/.test(diagnostic.error), false, 'diagnostic error is single-line');
+    } finally {
+      opened.close();
+    }
+
+    // Logged path: a materialize error carrying the payload is logged bounded.
+    const { createLog } = await import('../build/log.mjs');
+    setAmbientLog(createLog({ level: 'warn', format: 'json', output: (...args) => entries.push(args) }));
+    try {
+      const opened = openSqliteAdapter({ directory: join(root, 'log-owner'), name: 'app' });
+      try {
+        const blobs = {
+          census: () => ['gen-a'],
+          materialize: () => { throw new Error(`BLOB_UNAVAILABLE: ${payload}`); },
+        };
+        const result = await managerFor(opened, { blobs }).backup();
+        assert.equal(result.ok, false);
+        assert.equal(result.manifest.status, 'partial');
+      } finally {
+        opened.close();
+      }
+    } finally {
+      setAmbientLog(null);
+    }
+    assert.ok(entries.length > 0, 'the partial logged');
+    assert.equal(JSON.stringify(entries).includes(payload), false, 'logs never contain the full payload');
+    assert.equal(
+      JSON.stringify(entries).includes('SECRET-BLOB-PAYLOAD'),
+      false,
+      'logs carry the redaction marker, never the content itself',
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

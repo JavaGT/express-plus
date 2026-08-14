@@ -18,8 +18,12 @@ function tempRoot() {
   return mkdtempSync(join(tmpdir(), 'wb-backup-crash-'));
 }
 
+// Bind the freshly-created coordinator to the source (the ownership seam,
+// review #82 finding 3) and construct the manager with that same coordinator.
 function managerFor(opened, options = {}) {
-  return createBackupManager({ source: opened, writeCoordinator: createWriteQueue(), ...options });
+  const writeCoordinator = options.writeCoordinator ?? createWriteQueue();
+  opened.writeCoordinator = writeCoordinator;
+  return createBackupManager({ source: opened, writeCoordinator, ...options });
 }
 
 function completeManifest(overrides = {}) {
