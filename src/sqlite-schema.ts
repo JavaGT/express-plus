@@ -131,9 +131,6 @@ function checkQuotesBalanced(input: string, label: string): void {
 
 function tokenizeSql(input: string, label: string): SqlToken[] {
   checkQuotesBalanced(input, label);
-  if (input.includes('--') || input.includes('/*')) {
-    throw new Error(`${label} must not contain SQL comments`);
-  }
   const tokens: SqlToken[] = [];
   let depth = 0;
   for (let index = 0; index < input.length;) {
@@ -141,6 +138,12 @@ function tokenizeSql(input: string, label: string): SqlToken[] {
     if (/\s/.test(ch)) {
       index += 1;
       continue;
+    }
+    // Comment starts are only meaningful outside string literals; a '--' or
+    // '/*' inside a quoted string is data, and because string tokens below are
+    // consumed whole, those never reach this position.
+    if ((ch === '-' && input[index + 1] === '-') || (ch === '/' && input[index + 1] === '*')) {
+      throw new Error(`${label} must not contain SQL comments`);
     }
     SQL_EXPRESSION_TOKEN.lastIndex = index;
     const match = SQL_EXPRESSION_TOKEN.exec(input);
@@ -182,6 +185,10 @@ function validateSqlExpression(
   }
   const tokens = tokenizeSql(input, label);
   let skipNext = false;
+  let depth = 0;
+  // Paren frames opened by CAST(...), so the AS between the expression and the
+  // type name is allowed while a bare AS (alias) is not an expression operator.
+  const castFrames: number[] = [];
   for (let i = 0; i < tokens.length; i += 1) {
     const token = tokens[i];
     if (token.kind === 'quoted') {
@@ -193,6 +200,21 @@ function validateSqlExpression(
       }
       continue;
     }
+    if (token.kind === 'punct') {
+      if (token.text === '(') {
+        depth += 1;
+        const previous = tokens[i - 1];
+        if (previous?.kind === 'identifier' && previous.text.toUpperCase() === 'CAST') {
+          castFrames.push(depth);
+        }
+      } else if (token.text === ')') {
+        if (castFrames.length > 0 && castFrames[castFrames.length - 1] === depth) {
+          castFrames.pop();
+        }
+        depth -= 1;
+      }
+      continue;
+    }
     if (token.kind !== 'identifier') continue;
     if (skipNext) {
       skipNext = false;
@@ -200,7 +222,17 @@ function validateSqlExpression(
     }
     const upper = token.text.toUpperCase();
     if (SQL_KEYWORDS.has(upper)) {
-      if (upper === 'COLLATE' || upper === 'AS') skipNext = true;
+      if (upper === 'COLLATE') {
+        skipNext = true;
+        continue;
+      }
+      if (upper === 'AS') {
+        if (castFrames.length > 0 && castFrames[castFrames.length - 1] === depth) {
+          skipNext = true;
+          continue;
+        }
+        throw new Error(`${label} uses AS outside a CAST(...) type name (AS is not an expression operator)`);
+      }
       continue;
     }
     const next = tokens[i + 1];
@@ -220,7 +252,11 @@ function validateSqlExpression(
 
 // Validate a trigger body. Bodies are multi-statement SQL and may reference
 // other tables, so only NEW./OLD. column references are checked against the
-// declaring table. Statements must be semicolon-terminated.
+// declaring table. Statements must be semicolon-terminated and each must be a
+// complete, valid statement shape — a known statement verb, no trailing tokens
+// after the final ';'.
+const TRIGGER_STATEMENT_VERBS = new Set(['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'WITH']);
+
 function validateTriggerBody(
   input: unknown,
   knownColumns: ReadonlyMap<string, unknown>,
@@ -229,10 +265,33 @@ function validateTriggerBody(
   if (typeof input !== 'string' || input.trim().length === 0) {
     throw new Error(`${label} must declare a non-empty trigger body`);
   }
-  if (!input.includes(';')) {
+  const tokens = tokenizeSql(input, label);
+  const statements: SqlToken[][] = [];
+  let statement: SqlToken[] = [];
+  let depth = 0;
+  for (const token of tokens) {
+    if (token.kind === 'punct' && token.text === ';' && depth === 0) {
+      statements.push(statement);
+      statement = [];
+      continue;
+    }
+    if (token.kind === 'punct' && token.text === '(') depth += 1;
+    else if (token.kind === 'punct' && token.text === ')') depth -= 1;
+    statement.push(token);
+  }
+  if (statements.length === 0) {
     throw new Error(`${label} body must contain at least one statement (terminated by ';')`);
   }
-  const tokens = tokenizeSql(input, label);
+  if (statement.length > 0) {
+    throw new Error(`${label} body has trailing tokens after the final ';'`);
+  }
+  for (const body of statements) {
+    const first = body[0];
+    if (first === undefined) throw new Error(`${label} body contains an empty statement`);
+    if (first.kind !== 'identifier' || !TRIGGER_STATEMENT_VERBS.has(first.text.toUpperCase())) {
+      throw new Error(`${label} body statements must begin with SELECT, INSERT, UPDATE, DELETE, or WITH`);
+    }
+  }
   for (let i = 0; i < tokens.length; i += 1) {
     const token = tokens[i];
     if (token.kind !== 'identifier' || (token.text.toUpperCase() !== 'NEW' && token.text.toUpperCase() !== 'OLD')) {
@@ -420,6 +479,12 @@ function validateSpec(input: unknown): void {
     if (!Array.isArray(declaration.shadowTables) || (declaration.shadowTables as unknown[]).length === 0) {
       throw new Error(`virtual table "${declaration.name}" must declare the shadow tables it owns`);
     }
+    // Shadow tables are fts5-internal names attributed to their owning virtual
+    // table by the A2 census, so they are deliberately NOT cross-checked
+    // against externalTables: an external declaration claims only the tables it
+    // names, and a shadow name collision is resolved by the census's
+    // owner-declaration lookup rather than rejected here. The virtual table's
+    // own name IS checked (below, against external declarations).
     const shadows = declaration.shadowTables as unknown[];
     const seenShadows = new Set<string>();
     for (const shadow of shadows) {
@@ -453,6 +518,16 @@ function validateSpec(input: unknown): void {
       columnsByName.set(columnKey, { name: columnName });
     }
     referencedTablesByName.set(externalKey, { table: externalTable as SqliteTableSpec, columnsByName });
+  }
+
+  // A virtual table claims a real table name, so it must not collide with an
+  // external declaration (which claims that name too). Collisions with ordinary
+  // declared tables are rejected in the table loop below.
+  for (const virtualKey of virtualTableNames) {
+    const external = referencedTablesByName.get(virtualKey);
+    if (external !== undefined) {
+      throw new Error(`virtual table "${external.table.name}" collides with an external table declaration`);
+    }
   }
 
   for (const table of tables) {
@@ -669,6 +744,27 @@ function validateColumnList(columns: unknown, knownColumns: ReadonlyMap<string, 
   }
 }
 
+// The runtime migration ledger (migrations.ts) is still the legacy global,
+// version-keyed table until A4 lands per-namespace ledgers (workbench#90). A
+// declaration set listing the same version in two namespaces cannot run against
+// that ledger: the second application trips the UNIQUE constraint on
+// _Migration.version, and a lower-version migration in a fresh namespace is
+// silently skipped once the global max is higher. Fail closed before any DDL or
+// migration executes.
+function assertLegacyLedgerSafe(migrations: readonly SqliteMigrationSpec[], schemaName: string): void {
+  const ownerByVersion = new Map<number, string>();
+  for (const migration of migrations) {
+    const namespace = folded(migration.namespace);
+    const owner = ownerByVersion.get(migration.version);
+    if (owner !== undefined && owner !== namespace) {
+      throw new Error(
+        `schema "${schemaName}" declares migration version ${migration.version} in namespaces "${owner}" and "${migration.namespace}", which collide under the legacy global migration ledger (per-namespace ledgers land in A4, #90); split them into separate schemas or renumber`,
+      );
+    }
+    ownerByVersion.set(migration.version, namespace);
+  }
+}
+
 export interface SqliteColumnSpec {
   name: string;
   type: string;
@@ -821,6 +917,7 @@ export function defineSqliteSchema(spec: SqliteSchemaInput): SqliteSchemaDescrip
     virtualTableDdl: Object.freeze(virtualTableDdl),
     triggerDdl: Object.freeze(triggerDdl),
     prepare(db, options) {
+      if (!options?.skipMigrations) assertLegacyLedgerSafe(migrations, validated.name);
       if (tableDdl.length > 0) {
         begin(db);
         try {

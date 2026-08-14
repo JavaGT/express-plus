@@ -287,6 +287,7 @@ test('expanded features are rejected at declaration time (rejection matrix)', ()
   rejects({ name: 'bad', tables: [{ ...baseTable, columns: [{ name: 'x', type: 'integer', check: 'missing > 0' }] }] }, /missing column "missing"/, 'CHECK unknown column');
   rejects({ name: 'bad', tables: [{ ...baseTable, columns: [{ name: 'x', type: 'integer', check: '((x > 0)' }] }] }, /unbalanced parentheses/, 'CHECK unbalanced parens');
   rejects({ name: 'bad', tables: [{ ...baseTable, columns: [{ name: 'x', type: 'integer', check: 'x > 0 -- sneaky' }] }] }, /must not contain SQL comments/, 'CHECK comment');
+  rejects({ name: 'bad', tables: [{ ...baseTable, columns: [{ name: 'x', type: 'integer', check: 'x AS s' }] }] }, /AS is not an expression operator/, 'CHECK uses AS as an operator');
 
   rejects({ name: 'bad', tables: [{ ...baseTable, columns: [{ name: 'x', type: 'integer', collation: 'not an ident' }] }] }, /must be an identifier/, 'bad collation');
   rejects({ name: 'bad', tables: [{ ...baseTable, columns: [{ name: 'x', type: 'integer', collation: 42 }] }] }, /collation for column "x"/, 'non-string collation');
@@ -365,6 +366,16 @@ test('expanded features are rejected at declaration time (rejection matrix)', ()
     'shadow table claimed by two virtual tables',
   );
   rejects(
+    {
+      name: 'bad',
+      tables: [],
+      externalTables: [{ name: 'Proj', columns: ['id'] }],
+      virtualTables: [{ name: 'proj', module: 'fts5', options: ['id'], ownerPluginId: 'p', shadowTables: ['proj_data'] }],
+    },
+    /virtual table "Proj" collides with an external table declaration/,
+    'virtual table name collides with an external declaration',
+  );
+  rejects(
     { name: 'bad', tables: [{ ...baseTable, withoutRowid: true }] },
     /withoutRowid table "T" must declare a primary key/,
     'WITHOUT ROWID without primary key',
@@ -415,6 +426,22 @@ test('expanded features are rejected at declaration time (rejection matrix)', ()
   rejects(
     {
       name: 'bad',
+      tables: [{ ...baseTable, triggers: [{ name: 'trg', timing: 'after', event: 'update', body: 'UPDATE T SET x = 1; garbage' }] }],
+    },
+    /trailing tokens after the final ';'/,
+    'trigger body trailing garbage after the final semicolon',
+  );
+  rejects(
+    {
+      name: 'bad',
+      tables: [{ ...baseTable, triggers: [{ name: 'trg', timing: 'after', event: 'update', body: 'garbage; UPDATE T SET x = 1;' }] }],
+    },
+    /must begin with SELECT, INSERT, UPDATE, DELETE, or WITH/,
+    'trigger body statement does not begin with a statement verb',
+  );
+  rejects(
+    {
+      name: 'bad',
       tables: [
         { ...baseTable, triggers: [{ name: 'shared_trg', timing: 'after', event: 'insert', body: 'UPDATE T SET x = 1;' }] },
         { name: 'U', columns: [{ name: 'y', type: 'integer' }], triggers: [{ name: 'SHARED_TRG', timing: 'after', event: 'insert', body: 'UPDATE U SET y = 1;' }] },
@@ -423,6 +450,113 @@ test('expanded features are rejected at declaration time (rejection matrix)', ()
     /duplicate trigger/,
     'duplicate trigger name across tables',
   );
+});
+
+test('string literals may contain comment-looking text and CAST uses AS legitimately', () => {
+  const schema = defineSqliteSchema({
+    name: 'strings',
+    tables: [{
+      name: 'Note',
+      columns: [
+        { name: 'id', type: 'text', primaryKey: true },
+        { name: 'body', type: 'text', notNull: true, check: "body IN ('draft -- notes', 'a/*b', 'plain')" },
+        { name: 'size', type: 'integer', notNull: true, check: "CAST(size AS TEXT) != '0 -- len'" },
+      ],
+    }],
+  });
+  const db = new DatabaseSync(':memory:');
+  try {
+    schema.prepare(db);
+    db.prepare("INSERT INTO Note (id, body, size) VALUES ('n1', 'draft -- notes', 3)").run();
+    assert.throws(
+      () => db.prepare("INSERT INTO Note (id, body, size) VALUES ('n2', 'other', 3)").run(),
+      /CHECK/i,
+      'CHECK with comment-looking strings is enforced by SQLite',
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test('trigger bodies may contain comment-looking text inside string literals', () => {
+  const schema = defineSqliteSchema({
+    name: 'trigger-strings',
+    tables: [{
+      name: 'T',
+      columns: [{ name: 'x', type: 'integer' }],
+      triggers: [
+        { name: 'trg', timing: 'after', event: 'insert', body: "UPDATE T SET x = 1 WHERE x = '-- note';" },
+      ],
+    }],
+  });
+  assert.equal(schema.triggerDdl.length, 1);
+  assert.match(schema.triggerDdl[0], /'-- note'/);
+});
+
+test('shadow tables are not cross-checked against external declarations (A2 census attribution policy)', () => {
+  const schema = defineSqliteSchema({
+    name: 'shadow-external',
+    tables: [],
+    externalTables: [{ name: 'Proj', columns: ['id'] }],
+    virtualTables: [{ name: 'ft', module: 'fts5', options: ['id'], ownerPluginId: 'p', shadowTables: ['proj'] }],
+  });
+  assert.deepEqual(schema.virtualTables[0].shadowTables, ['proj']);
+});
+
+test('prepare fails closed on cross-namespace version collisions under the legacy global ledger', () => {
+  let ran = 0;
+  const schema = defineSqliteSchema({
+    name: 'collide',
+    tables: [{ name: 'T', columns: [{ name: 'id', type: 'text', primaryKey: true }] }],
+    migrations: [
+      { namespace: 'workbench', name: 'base', version: 5, up() { ran += 1; } },
+      { namespace: 'app', name: 'seed', version: 5, up() { ran += 1; } },
+    ],
+  });
+  const db = new DatabaseSync(':memory:');
+  try {
+    assert.throws(
+      () => schema.prepare(db),
+      /version 5 in namespaces "workbench" and "app".*legacy global migration ledger.*#90/,
+      'prepare refuses the legacy-ledger version collision',
+    );
+    assert.equal(ran, 0, 'no migration executed');
+    assert.equal(
+      db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'T'").get(),
+      undefined,
+      'no table DDL executed before the refusal',
+    );
+    assert.equal(
+      db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_Migration'").get(),
+      undefined,
+      'migration ledger not touched',
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test('namespaced migrations with distinct versions still run under the legacy global ledger', () => {
+  const applied = [];
+  const schema = defineSqliteSchema({
+    name: 'non-colliding',
+    tables: [],
+    migrations: [
+      { namespace: 'workbench', name: 'a', version: 4, up(db) { applied.push('a'); db.exec('CREATE TABLE IF NOT EXISTS A (id TEXT PRIMARY KEY)'); } },
+      { namespace: 'app', name: 'b', version: 6, up(db) { applied.push('b'); db.exec('CREATE TABLE IF NOT EXISTS B (id TEXT PRIMARY KEY)'); } },
+    ],
+  });
+  const db = new DatabaseSync(':memory:');
+  try {
+    schema.prepare(db);
+    assert.deepEqual(applied, ['a', 'b']);
+    assert.deepEqual(
+      db.prepare('SELECT version FROM _Migration ORDER BY version').all().map((row) => row.version),
+      [4, 6],
+    );
+  } finally {
+    db.close();
+  }
 });
 
 test('declared triggers are validated against the table before any DB is touched', () => {
