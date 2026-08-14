@@ -514,6 +514,7 @@ describe('app.searchStaleness surface', () => {
     const db = freshNoteDb();
     const app = workbench({ db });
     assert.ok(app.searchStaleness, 'the bridge is registered on the app');
+    assert.ok(app.searchReconcile, 'the app binds the bounded reconcile drain to the same bridge');
     app.searchStaleness.engage(db);
     const notice = app.searchStaleness.notifySourceChange({
       entity: 'Note', rowId: 'n1', kind: 'created', committedAt: '2026-08-15T00:00:00.000Z',
@@ -700,6 +701,9 @@ describe('staleness bridge — production wiring (app seams)', () => {
       typeof pending[0].committedAt === 'string' && pending[0].committedAt.length > 0,
       'the record carries the committedAt post-commit proof',
     );
+    const drained = await app.searchReconcile.reconcileBatches();
+    assert.equal(drained.processed, 1, 'the app-wired bounded drain materializes one ledger record');
+    assert.equal(app.searchStaleness.pending().length, 0);
   });
 
   test('a live-delivery revocation fences the plugin and records a high-priority rebuild', async (t) => {

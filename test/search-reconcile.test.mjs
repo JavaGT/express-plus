@@ -59,6 +59,8 @@ export function makeShadowIndexedPlugin({ id = 'notes-fts', version = '1.0.0' } 
   let mode = 'active'; // 'active' | 'shadow'
   let rebuilder = null;
   let commitFails = false;
+  let validateFails = false;
+  let retired = null;
   let ownedProbe = null;
   const calls = [];
 
@@ -92,7 +94,10 @@ export function makeShadowIndexedPlugin({ id = 'notes-fts', version = '1.0.0' } 
     sourceInterests: [{ entity: 'Note' }],
     stalenessKey: (change) => (change.entity === 'Note' ? `${change.entity}:${change.rowId}` : null),
     prepare: () => {},
-    validate: () => ({ counts: { documents: active.size } }),
+    validate: () => {
+      if (validateFails) throw new Error('validate failed (injected)');
+      return { counts: { documents: active.size } };
+    },
     reconcile: (_ctx, changes) => {
       const target = mode === 'shadow' ? shadow : active;
       const owned = probeOwned();
@@ -122,8 +127,15 @@ export function makeShadowIndexedPlugin({ id = 'notes-fts', version = '1.0.0' } 
       const owned = probeOwned();
       calls.push({ op: 'commitShadow', owned });
       if (commitFails) throw new Error('commitShadow failed (injected)');
+      retired = active;
       active = shadow;
       shadow = null;
+      mode = 'active';
+    },
+    rollbackShadow: () => {
+      calls.push({ op: 'rollbackShadow', owned: probeOwned() });
+      active = retired;
+      retired = null;
       mode = 'active';
     },
     abortShadow: () => {
@@ -149,6 +161,9 @@ export function makeShadowIndexedPlugin({ id = 'notes-fts', version = '1.0.0' } 
     // Inject a commit-time failure to simulate a failed activation.
     setCommitFails(fails) {
       commitFails = fails;
+    },
+    setValidateFails(fails) {
+      validateFails = fails;
     },
     // Corrupt the ACTIVE index out-of-band (simulates a corrupt index whose
     // census no longer matches the source).
@@ -325,6 +340,25 @@ export function searchReconcileContractScenarios(_makeKit) {
       },
     },
     {
+      name: 'parity requires a ready registry generation as well as matching census rows',
+      async run(kit) {
+        const { db, bridge, engine } = kit;
+        db.prepare('INSERT INTO Note (id, title) VALUES (?, ?)').run('n1', 'one');
+        assert.equal((await engine.rebuildShadow('notes-fts')).ok, true);
+        assert.equal(engine.parity('notes-fts').matches, true);
+
+        bridge.notifySourceChange({
+          entity: 'Note', rowId: 'n1', kind: 'updated', data: { id: 'n1', title: 'one' },
+          committedAt: '2026-08-15T00:00:00.000Z',
+        });
+        const report = engine.parity('notes-fts');
+        assert.equal(report.generation, 1);
+        assert.equal(report.fence, 1);
+        assert.equal(report.state, 'stale');
+        assert.equal(report.matches, false, 'a stale generation cannot pass parity on census alone');
+      },
+    },
+    {
       name: 'a failed activation discards the shadow, keeps the active generation, and is recoverable',
       async run(kit) {
         const { db, engine, plugin } = kit;
@@ -351,6 +385,50 @@ export function searchReconcileContractScenarios(_makeKit) {
         assert.equal(retried.ok, true);
         assert.equal(retried.activated, true);
         assert.deepEqual([...plugin.index.content()].map((row) => row.id), ['n1']);
+      },
+    },
+    {
+      name: 'a throwing validator aborts before generation promotion',
+      async run(kit) {
+        const { db, engine, plugin } = kit;
+        db.prepare('INSERT INTO Note (id, title) VALUES (?, ?)').run('n1', 'one');
+        assert.equal((await engine.rebuildShadow('notes-fts')).ok, true);
+
+        db.prepare('INSERT INTO Note (id, title) VALUES (?, ?)').run('n2', 'two');
+        plugin.setValidateFails(true);
+        const failed = await engine.rebuildShadow('notes-fts');
+
+        assert.equal(failed.activated, false);
+        assert.equal(plugin.calls.some((call) => call.op === 'abortShadow'), true);
+        assert.deepEqual(plugin.index.content().map((row) => row.id), ['n1']);
+        assert.equal(kit.registry.stateOf('notes-fts').generation, 1, 'the failed validator did not consume a generation');
+      },
+    },
+    {
+      name: 'a rejected registry stamp rolls back a committed shadow and aborts it',
+      async run(kit) {
+        const { db, registry, bridge, queue, engine, plugin } = kit;
+        db.prepare('INSERT INTO Note (id, title) VALUES (?, ?)').run('n1', 'one');
+        assert.equal((await engine.rebuildShadow('notes-fts')).ok, true);
+
+        db.prepare('INSERT INTO Note (id, title) VALUES (?, ?)').run('n2', 'two');
+        const rejectingRegistry = {
+          ...registry,
+          validate: async () => ({ ok: false, lastError: null }),
+        };
+        const rejectingEngine = createSearchReconcileEngine({
+          registry: rejectingRegistry,
+          staleness: bridge,
+          db,
+          writeQueue: queue,
+          now: () => 't',
+        });
+        const failed = await rejectingEngine.rebuildShadow('notes-fts');
+
+        assert.equal(failed.activated, false);
+        assert.equal(plugin.calls.some((call) => call.op === 'rollbackShadow'), true);
+        assert.equal(plugin.calls.some((call) => call.op === 'abortShadow'), true);
+        assert.deepEqual(plugin.index.content().map((row) => row.id), ['n1']);
       },
     },
     {
@@ -423,6 +501,24 @@ export function searchReconcileContractScenarios(_makeKit) {
       },
     },
     {
+      name: 'an unknown durable ledger kind is retained rather than rebuilt',
+      async run(kit) {
+        const { bridge, db, engine, plugin } = kit;
+        bridge.notifySourceChange({
+          entity: 'Note', rowId: 'n1', kind: 'created', data: { id: 'n1' },
+          committedAt: '2026-08-15T00:00:00.000Z',
+        });
+        db.prepare("UPDATE _SearchStaleness SET kind = 'corrupt-kind' WHERE sourceResource = 'Note' AND sourceKey = 'n1'").run();
+
+        const summary = await engine.reconcileBatches();
+        assert.equal(summary.processed, 0);
+        assert.equal(summary.retained, 1);
+        assert.match(summary.failures[0].error, /unknown kind/);
+        assert.equal(bridge.pending().length, 1);
+        assert.equal(plugin.calls.some((call) => call.op === 'rebuild'), false);
+      },
+    },
+    {
       name: 'a restart discards an incomplete shadow and rebuilds the persisted source and pending ledger',
       async run() {
         const directory = mkdtempSync(join(tmpdir(), 'workbench-search-reconcile-'));
@@ -466,6 +562,15 @@ test('census canonicalizes nested object keys before hashing', () => {
   const left = censusOfRows([{ id: 'n1', metadata: { first: 'a', second: 'b' } }]);
   const right = censusOfRows([{ metadata: { second: 'b', first: 'a' }, id: 'n1' }]);
   assert.deepEqual(left, right);
+});
+
+test('engine refuses to run without the application write queue', async () => {
+  const kit = makeFakeKit();
+  try {
+    assert.throws(() => createSearchReconcileEngine({ registry: kit.registry, staleness: kit.bridge }), /requires the application write queue/);
+  } finally {
+    await kit.close();
+  }
 });
 
 describe('search reconcile engine', () => {

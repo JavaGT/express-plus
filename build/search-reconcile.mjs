@@ -62,7 +62,6 @@ import {
 
 
 export const SEARCH_RECONCILE_DEFAULT_BATCH_SIZE = 32;
-export const SEARCH_RECONCILE_DEFAULT_SCAN_BATCH_SIZE = 256;
 
 // The canonical entity census: `count` rows plus a sha256 digest over the rows
 // in a deterministic order (id ascending, object keys sorted), or null when a
@@ -79,8 +78,10 @@ export const SEARCH_RECONCILE_DEFAULT_SCAN_BATCH_SIZE = 256;
 // prepares a separate build target and directs the next `rebuild` into it (the
 // ACTIVE index is untouched until commit); `indexCensus` reports the CURRENT
 // build target's census (the shadow during a build, the active index otherwise);
-// `commitShadow` atomically activates the shadow and retires the old generation;
-// `abortShadow` discards the shadow, leaving the active generation intact.
+// `commitShadow` atomically activates the shadow and retains the prior generation
+// until the registry stamp succeeds; `rollbackShadow` restores it when that stamp
+// fails. `abortShadow` discards an uncommitted shadow.
+
 
 
 
@@ -98,6 +99,7 @@ export function hasShadowCapabilities(plugin              )                     
     typeof (plugin                      ).beginShadow === 'function'
     && typeof (plugin                      ).indexCensus === 'function'
     && typeof (plugin                      ).commitShadow === 'function'
+    && typeof (plugin                      ).rollbackShadow === 'function'
     && typeof (plugin                      ).abortShadow === 'function'
   );
 }
@@ -158,9 +160,6 @@ export function hasShadowCapabilities(plugin              )                     
 
 
                                 
-
-
-
 
 
 
@@ -280,25 +279,28 @@ export function createSearchReconcileEngine(options                        )    
   const tableName = staleness.tableName;
   const now = options.now ?? (() => new Date().toISOString());
   const batchSize = options.batchSize ?? SEARCH_RECONCILE_DEFAULT_BATCH_SIZE;
-  const scanBatchSize = options.scanBatchSize ?? SEARCH_RECONCILE_DEFAULT_SCAN_BATCH_SIZE;
-  void scanBatchSize; // census hashing is chunked in computeSourceCensus; the knob bounds it
   let db                  = options.db ?? null;
-  let writeQueue = options.writeQueue ?? null;
+  if (!options.writeQueue || typeof options.writeQueue.run !== 'function') {
+    throw new TypeError('search reconcile engine requires the application write queue');
+  }
+  let writeQueue = options.writeQueue;
 
   function engage(handle                 )       {
     db = handle;
   }
 
-  function bindWriteQueue(queue                                                         )       {
-    writeQueue = queue ?? null;
+  function bindWriteQueue(queue                                                  )       {
+    if (!queue || typeof queue.run !== 'function') {
+      throw new TypeError('search reconcile engine requires the application write queue');
+    }
+    writeQueue = queue;
   }
 
   // Route a ledger write or plugin materialization through the ONE write
   // coordinator (S1/A5): inside a coordinated turn a nested call joins the
-  // turn (write-queue reentrancy); without a bound queue the work runs
-  // directly.
+  // turn (write-queue reentrancy).
   function coordinated   (fn                      )             {
-    return writeQueue ? writeQueue.run(fn) : Promise.resolve().then(fn);
+    return writeQueue.run(fn);
   }
 
   function requireDb()           {
@@ -356,6 +358,9 @@ export function createSearchReconcileEngine(options                        )    
       }
       deleteIfUnchanged(record, row);
       return 'reconcile';
+    }
+    if (row.kind !== 'revocation' && row.kind !== 'erasure') {
+      throw new Error(`staleness record '${record.sourceResource}:${record.sourceKey}' has an unknown kind '${row.kind}'`);
     }
     // Revocation / erasure: rebuild from the COMMITTED scoped source. Erased or
     // newly-unauthorized rows are absent (or out of the plugin's scope) in
@@ -458,6 +463,9 @@ export function createSearchReconcileEngine(options                        )    
 
   function buildParity(id        , source              , index              )                     {
     const state = registry.stateOf(id);
+    const metadataMatches = state.generation > 0
+      && state.fence <= state.generation
+      && state.state === 'ready';
     const entities = new Set([...Object.keys(source), ...Object.keys(index)]);
     const comparisons                           = [];
     let matches = true;
@@ -486,7 +494,7 @@ export function createSearchReconcileEngine(options                        )    
       source: Object.freeze(source),
       index: Object.freeze(index),
       comparisons: Object.freeze(comparisons),
-      matches,
+      matches: matches && metadataMatches,
     });
   }
 
@@ -530,6 +538,11 @@ export function createSearchReconcileEngine(options                        )    
     } catch {
       // the active generation survives a throwing abort by construction
     }
+  }
+
+  async function rollbackActivation(plugin                    , ctx                     )                {
+    await plugin.rollbackShadow(ctx);
+    await safeAbort(plugin, ctx);
   }
 
   function failedOutcome(
@@ -651,6 +664,11 @@ export function createSearchReconcileEngine(options                        )    
         if (registry.stateOf(id).fence !== fenceAtStart) {
           throw new Error('fence moved before shadow activation (a source change committed mid-build)');
         }
+        // Validate the shadow before it becomes active. The registry performs
+        // the same validation while recording the authoritative stamp below;
+        // this preflight keeps a throwing plugin validator from consuming a
+        // registry generation or exposing the shadow at all.
+        await plugin.validate(ctx);
         await plugin.commitShadow(ctx);
         committed = true;
         // The authoritative stamp: the registry (single source of truth for
@@ -663,7 +681,8 @@ export function createSearchReconcileEngine(options                        )    
         }
       });
     } catch (err) {
-      if (!committed) await safeAbort(plugin, ctx);
+      if (committed) await rollbackActivation(plugin, ctx);
+      else await safeAbort(plugin, ctx);
       return failedOutcome(
         id,
         `shadow activation failed: ${messageOf(err, 'unknown error')}`,
@@ -692,9 +711,6 @@ export function createSearchReconcileEngine(options                        )    
   return Object.freeze({
     get batchSize() {
       return batchSize;
-    },
-    get scanBatchSize() {
-      return scanBatchSize;
     },
     engage,
     bindWriteQueue,

@@ -50,6 +50,7 @@ import { memoryBlobs } from './memory-blobs.ts';
 import { createJobQueue } from './job-queue.ts';
 import { createSearchPluginRegistry, type SearchPlugin } from './search-plugin.ts';
 import { createSearchStalenessBridge } from './search-staleness.ts';
+import { createSearchReconcileEngine } from './search-reconcile.ts';
 import { createPostCommitEffectRunner } from './post-commit-effects.ts';
 import { createClock } from './clock.ts';
 import { createWriteQueue } from './write-queue.ts';
@@ -533,6 +534,13 @@ export default function workbench({
     // coordinator, serializing plugin-owned index writes with authoritative
     // writes (consideration #9).
     app.searchStaleness.bindWriteQueue(app.writeCoordinator);
+    // A3's bounded drain uses the same ledger and coordinator as A2. The clock
+    // owns retries, so a retained record is retried without an HTTP write path.
+    app.searchReconcile = createSearchReconcileEngine({
+      registry: app.searchPlugins,
+      staleness: app.searchStaleness,
+      writeQueue: app.writeCoordinator,
+    });
     // OWNERSHIP BINDING (S1/A3 backup, review #82 finding 2): the adapter-opened
     // source declares the SAME coordinator as the app — so a backup manager
     // built over `app.writeCoordinator` + the app's opened source
@@ -601,6 +609,13 @@ export default function workbench({
       // The staleness ledger (S4/A2) is engaged with the SAME handle: durable
       // pending-staleness survives restart and re-processes via drain().
       app.searchStaleness.engage(handle);
+      app.searchReconcile.engage(handle);
+      app.clock.add({
+        name: 'search-reconcile',
+        intervalMs: 1_000,
+        fn: () => void app.searchReconcile.reconcileBatches().catch((err: unknown) =>
+          app.log.warn('system', 'search reconcile drain failed', { err })),
+      });
       // The queue routes its multi-statement mutations through the ONE write
       // coordinator (job-queue.ts's writeQueue option); a post-commit consumer
       // calling enqueue from inside a dispatch turn joins that turn.
