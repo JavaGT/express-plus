@@ -812,21 +812,57 @@ export function bindReadScope(readScope: ReadScopeTemplate | undefined, principa
 // evaluate against the row's STORED cells (the form SQL returns), mirroring
 // SQLite's numeric/text coercion for equality and relational comparisons. A
 // principal-id param resolves to the principal's id (an anonymous principal's
-// id is null → the eq is false, exactly like `col = NULL` in SQL). A
-// DB-dependent predicate (existsMembership/join/match) cannot be verified
-// against a single row and FAILS CLOSED (false); `nearest` lowers to no SQL
-// filter (1=1), so it imposes no constraint here.
+// id is null → the eq is unevaluable, exactly like `col = NULL` in SQL).
+//
+// The evaluator is THREE-VALUED, not boolean. In SQL a NULL comparison (`col =
+// NULL`, `col IN (NULL)`, `NULL >= x`) is neither true nor false — a WHERE
+// clause treats it as "not satisfied", and NOT of it is STILL not satisfied. A
+// boolean evaluator would reduce those to `false`, which `not` then flips to
+// `true`, admitting rows the SQL path denies. So every decision the row alone
+// cannot prove — a SQL NULL comparison, a membership/join/FTS predicate (their
+// side tables are not visible to one row), or a caller-supplied row that omits
+// a field the SQL path always returns — yields UNEVALUABLE, which `not` and
+// `and` PROPAGATE instead of inverting. A scope containing any unevaluable
+// construct therefore DENIES (fail closed); this is deliberately stricter than
+// SQL's three-valued logic (`false AND NULL` is false in SQL, but here any
+// unevaluable operand denies) because this gate re-verifies a caller-supplied
+// row and must never admit on a guess. `nearest` lowers to no SQL filter (1=1),
+// so it imposes no constraint and evaluates TRUE.
 
 interface ScopeEvalContext {
   row: Record<string, unknown>;
   principal: unknown;
 }
 
+// The unevaluable third value: not `false`, so `not` cannot flip it to true and
+// `and` cannot sweep it away. Only `=== true` at the top admits the row.
+const UNEVALUABLE: unique symbol = Symbol('scope.unevaluable');
+type ScopeTruth = true | false | typeof UNEVALUABLE;
+
+// SQL NULL on either operand: `col = NULL`, `NULL = NULL`, and `NOT (col = NULL)`
+// are all NULL in SQLite — none of them satisfy a WHERE clause.
+const sqlNull = (value: unknown): boolean => value === null || value === undefined;
+
+// The stored cell a predicate reads, distinguishing "the row omits this field"
+// from "the field is present and NULL". A row the SQL path returns always
+// carries every column, so an absent property is a caller-supplied incomplete
+// row — it must not satisfy ANY predicate (not even isNull), and must not be
+// flippable by negation, so absence is UNEVALUABLE, never a boolean.
+function scopeCell(node: AstNode, ctx: ScopeEvalContext): unknown | typeof UNEVALUABLE {
+  const row = ctx.row;
+  const field = String(node.field);
+  if (row === null || typeof row !== 'object' || !Object.hasOwn(row, field)) return UNEVALUABLE;
+  const value = row[field];
+  return value === undefined ? UNEVALUABLE : value;
+}
+
 // SQLite equality: `'1' = 1` is TRUE in SQL (the text is coerced to a number),
 // so a stored text cell compares equal to a numeric literal and vice versa.
-// Everything else is strict — NULL never equals a value, and the coercion is
-// deliberately narrow (only finite numeric text), never JS's `==` semantics.
+// Everything else is strict — NULL never equals a value (not even NULL; a NULL
+// comparison is UNEVALUABLE upstream, never a boolean here) — and the coercion
+// is deliberately narrow (only finite numeric text), never JS's `==` semantics.
 function sqliteEqual(a: unknown, b: unknown): boolean {
+  if (a === null || a === undefined || b === null || b === undefined) return false;
   if (a === b) return true;
   if (typeof a === 'number' && typeof b === 'string') {
     const numericB = Number(b);
@@ -839,40 +875,76 @@ function sqliteEqual(a: unknown, b: unknown): boolean {
   return false;
 }
 
-function evaluateScopeNode(node: AstNode, ctx: ScopeEvalContext): boolean {
+function evaluateScopeNode(node: AstNode, ctx: ScopeEvalContext): ScopeTruth {
   switch (node.node) {
     case 'true': return true;
     case 'false': return false;
     case 'eq': {
+      const cell = scopeCell(node, ctx);
+      if (cell === UNEVALUABLE) return UNEVALUABLE;
       // A rebindable principal param resolves to the principal's identity; an
-      // absent identity binds NULL, and `col = NULL` is false in SQL — mirror
-      // that by denying the comparison outright (no JS null-equal shortcut).
+      // absent identity binds NULL, and `col = NULL` is NULL in SQL. A NULL
+      // operand is unevaluable, not false, so `NOT (col = v)` cannot flip it.
       const want = 'param' in node
         ? scopeParamValue(node, ctx)
         : node.value;
-      if (want === null || want === undefined) return false;
-      return sqliteEqual(ctx.row[String(node.field)], want);
+      if (sqlNull(want) || sqlNull(cell)) return UNEVALUABLE;
+      return sqliteEqual(cell, want);
     }
     case 'in': {
-      const field = ctx.row[String(node.field)];
-      return (node.values as unknown[]).some((value) => sqliteEqual(field, value));
+      const cell = scopeCell(node, ctx);
+      if (cell === UNEVALUABLE || sqlNull(cell)) return UNEVALUABLE;
+      const values = node.values as unknown[];
+      // `x IN (v...)` is `x = v1 OR ...` in SQLite. A NULL list value makes its
+      // own comparison NULL: a real match still admits (TRUE OR NULL = TRUE),
+      // but no match alongside a NULL entry is NULL → unevaluable.
+      if (values.some((value) => !sqlNull(value) && sqliteEqual(cell, value))) return true;
+      if (values.some(sqlNull)) return UNEVALUABLE;
+      return false;
     }
     case 'isNull': {
-      const field = ctx.row[String(node.field)];
-      return field === null || field === undefined;
+      const cell = scopeCell(node, ctx);
+      // An absent field is NOT SQL NULL — it is an incomplete row — so it can
+      // neither satisfy `IS NULL` nor be flipped by an enclosing `not`.
+      if (cell === UNEVALUABLE) return UNEVALUABLE;
+      return cell === null;
     }
     // SQLite relational operators coerce both sides to numbers when either is
     // numeric; JS relational operators do the same, so plain >= / <= mirror the
-    // SQL for both numeric and text columns.
-    case 'gte': return (ctx.row[String(node.field)] as number) >= (node.value as number);
-    case 'lte': return (ctx.row[String(node.field)] as number) <= (node.value as number);
-    case 'not': return !evaluateScopeNode(node.operand as AstNode, ctx);
-    case 'and': return (node.operands as AstNode[]).every((operand) => evaluateScopeNode(operand as AstNode, ctx));
+    // SQL for both numeric and text columns. A NULL operand is unevaluable.
+    case 'gte': {
+      const cell = scopeCell(node, ctx);
+      if (cell === UNEVALUABLE || sqlNull(cell) || sqlNull(node.value)) return UNEVALUABLE;
+      return (cell as number) >= (node.value as number);
+    }
+    case 'lte': {
+      const cell = scopeCell(node, ctx);
+      if (cell === UNEVALUABLE || sqlNull(cell) || sqlNull(node.value)) return UNEVALUABLE;
+      return (cell as number) <= (node.value as number);
+    }
+    case 'not': {
+      const inner = evaluateScopeNode(node.operand as AstNode, ctx);
+      return inner === UNEVALUABLE ? UNEVALUABLE : !inner;
+    }
+    case 'and': {
+      // Deliberately stricter than SQL: ANY unevaluable operand makes the whole
+      // scope unevaluable, even alongside a false operand — a boolean false here
+      // could be flipped by an enclosing `not` and admit a row the SQL path
+      // never would. Every operand is inspected (no short-circuit on false).
+      let result: ScopeTruth = true;
+      for (const operand of node.operands as AstNode[]) {
+        const inner = evaluateScopeNode(operand as AstNode, ctx);
+        if (inner === UNEVALUABLE) return UNEVALUABLE;
+        if (inner === false) result = false;
+      }
+      return result;
+    }
     // `nearest` lowers to no SQL filter (1=1) — the query layer post-filters.
     case 'nearest': return true;
     // existsMembership / join / match need their side tables — unverifiable
-    // against a single row without a database, so fail closed.
-    default: return false;
+    // against a single row without a database, so unevaluable (fail closed, and
+    // never flippable by `not`).
+    default: return UNEVALUABLE;
   }
 }
 

@@ -16,7 +16,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  text, ref, map, scope, grant, deny, read, write, subscribe, everyone,
+  text, date, ref, map, scope, grant, deny, read, write, subscribe, everyone,
   principal, anonymous, requireUser, allowAnonymous,
 } from '../build/index.mjs';
 import { entity, NonCompilableError } from '../build/internal.mjs';
@@ -518,6 +518,79 @@ test('a scope this seam cannot verify against a single row fails closed (members
   });
   assert.equal(d.admitted, false);
   assert.equal(d.reasonCode, 'no-row-scope');
+});
+
+test('a NEGATED membership scope still fails closed — not(...) cannot flip an unverifiable predicate to true', async () => {
+  const adapter = createAuthorizationAdapter();
+  adapter.registerResource({
+    category: 'search',
+    name: 'docs',
+    scope: ({ is }) => is.collaborator().not(),
+    fields: { collaborators: map(ref('User')) },
+    checks: { collaborator: ({ docs, principal }) => docs.collaborators.has(principal.id) },
+  });
+  // The row's admission is decided by NOT (EXISTS ...) in SQL — a decision the
+  // single-row gate cannot prove. It must deny, never treat the membership as
+  // "false" and invert it into an admit.
+  const d = await adapter.admit({
+    category: 'search', operation: 'search', principal: alice, resourceName: 'docs', row: { id: 'd1' },
+  });
+  assert.equal(d.admitted, false);
+  assert.equal(d.reasonCode, 'no-row-scope');
+});
+
+test('a scope combining a satisfiable eq with an unverifiable FTS match denies', async () => {
+  const adapter = createAuthorizationAdapter();
+  adapter.registerResource({
+    category: 'search',
+    name: 'articles',
+    scope: ({ fields }) => fields.status.is('published').and(fields.body.matches('needle')),
+    fields: { status: text(), body: text({ indexed: 'fts' }) },
+  });
+  // The eq arm is satisfiable from the row alone, but the FTS arm is an EXISTS
+  // over the FTS side-table — the whole scope is unevaluable, so it denies.
+  const d = await adapter.admit({
+    category: 'search', operation: 'search', principal: alice, resourceName: 'articles',
+    row: { id: 'a1', status: 'published', body: 'needle in the haystack' },
+  });
+  assert.equal(d.admitted, false);
+  assert.equal(d.reasonCode, 'no-row-scope');
+});
+
+test('an in-list containing NULL follows SQLite semantics — never an admit on null == null', async () => {
+  const adapter = createAuthorizationAdapter();
+  adapter.registerResource({
+    category: 'search',
+    name: 'articles',
+    scope: ({ fields }) => fields.status.in([null]),
+    fields: { status: text() },
+  });
+  // SQLite evaluates `status IN (NULL)` as NULL — not satisfied. A JS evaluator
+  // that treats null == null as equal would wrongly admit the row.
+  const d = await adapter.admit({
+    category: 'search', operation: 'search', principal: alice, resourceName: 'articles', row: { id: 'a1', status: null },
+  });
+  assert.equal(d.admitted, false);
+  assert.equal(d.reasonCode, 'no-row-scope');
+});
+
+test('a missing row field does not satisfy isNull — an incomplete caller row denies', async () => {
+  const adapter = createAuthorizationAdapter();
+  adapter.registerResource({
+    category: 'search',
+    name: 'articles',
+    scope: ({ fields }) => fields.deletedAt.isNull(),
+    fields: { deletedAt: date() },
+  });
+  const absent = await adapter.admit({
+    category: 'search', operation: 'search', principal: alice, resourceName: 'articles', row: { id: 'a1' },
+  });
+  assert.equal(absent.admitted, false, 'a row that omits the field is not "deleted at null"');
+  assert.equal(absent.reasonCode, 'no-row-scope');
+  const nullField = await adapter.admit({
+    category: 'search', operation: 'search', principal: alice, resourceName: 'articles', row: { id: 'a1', deletedAt: null },
+  });
+  assert.equal(nullField.admitted, true, 'a present NULL satisfies isNull');
 });
 
 // --- decisions are immutable and free of payload values ------------------------
