@@ -15,6 +15,7 @@ import workbench, { entity } from '../build/internal.mjs';
 import { createBlobLifecycle } from '../build/blob-lifecycle.mjs';
 import { createBlobStore } from '../build/blob-store.mjs';
 import { generateDDL, generateFrameworkDDL, executeFrameworkDDL } from '../build/ddl.mjs';
+import { declaredBlobField } from '../build/server.mjs';
 
 function photoNote() {
   return entity('Note', {
@@ -280,4 +281,53 @@ test('app.ready runs blob finalize recovery sweep before serving', async (t) => 
   await app.ready;
 
   assert.ok(existsSync(store._pathFor(blobId)), 'the pre-existing crashed commit was finalized by the boot recovery sweep');
+});
+
+// S6/A3 — the finalize consumer resolves ids over the compiled census. An
+// action-level declaration on a NON-entity table stays owned by the
+// pending-blob pipeline (which finalizes it with digest verification) — the
+// framework consumer touches only the census's entity-derived references, so
+// behavior on the existing blob tables is unchanged.
+test('finalize over the census: entity references are resolved, action-declared non-entity references are not', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const root = tmpRoot();
+  const store = createBlobStore({ root, db });
+  const Note = photoNote();
+  for (const sql of generateDDL(Note)) db.exec(sql);
+
+  const lifecycle = createBlobLifecycle({
+    blobs: store,
+    entities: new Map([[Note.name, Note]]),
+    declaredBlobFields: [
+      declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable' }),
+    ],
+  });
+  assert.deepEqual(
+    lifecycle.census.references.map((r) => `${r.table}.${r.column}`),
+    ['File.blob', 'Note.photo'],
+    'the census carries both entity and action-level references',
+  );
+  assert.deepEqual(
+    lifecycle.census.entityReferences.map((r) => `${r.table}.${r.column}`),
+    ['Note.photo'],
+    'only the entity blob field is entity-derived',
+  );
+
+  const { id: noteBlob } = store.upload({ bytes: Buffer.from('note-photo') });
+  const { id: fileBlob } = store.upload({ bytes: Buffer.from('file-bytes') });
+  db.exec('BEGIN IMMEDIATE');
+  store.adopt(db, noteBlob);
+  store.adopt(db, fileBlob);
+  db.exec('COMMIT');
+
+  await lifecycle.blobFinalizeConsumer([
+    { type: 'Note.created', data: { id: 'n1', photo: noteBlob } },
+    { type: 'File.uploaded', data: { id: 'f1', blob: fileBlob } },
+  ]);
+
+  assert.ok(existsSync(store._pathFor(noteBlob)), 'the entity blob field was finalized over the census');
+  assert.ok(!existsSync(store._pathFor(fileBlob)), 'the action-declared reference on a non-entity table is left to the pending-blob pipeline');
+  rmSync(root, { recursive: true, force: true });
+  db.close();
 });

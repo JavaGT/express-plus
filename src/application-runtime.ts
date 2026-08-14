@@ -16,6 +16,7 @@ import { startSimulation } from './simulate.ts';
 import { retentionPrune } from './committed-log.ts';
 import { getLog, withLog } from './log.ts';
 import type { FrameworkLog } from './log.ts';
+import { EMPTY_BLOB_CENSUS, type BlobCensus } from './blob-census.ts';
 import { installBatchHttpDispatcher, installHistoryHttpDispatcher } from './application-action-http.ts';
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.ts';
 import { rawRow } from './entity/query.ts';
@@ -75,8 +76,8 @@ interface RuntimeApp {
   resolveRoutes(): Promise<unknown>;
   clock: RuntimeClock;
   jobs?: { stop?(): unknown; startReaper?(): unknown };
-  blobs?: { reap(options: { ttl: number; blobColumns: readonly unknown[] }): unknown };
-  blobColumns?: readonly unknown[];
+  blobs?: { reap(options: { ttl: number; census: BlobCensus }): unknown };
+  blobCensus?: BlobCensus;
   pendingBlobLifecycle?: { reap(): unknown; reconcile(): unknown };
   reconcileBlobFinalize?(db: unknown): unknown;
   reconcileEmailDelivery?(db: unknown): unknown;
@@ -161,7 +162,7 @@ function engageMaintenance(app: RuntimeApp, log: FrameworkLog): void {
   const options = app._maintenance;
   if (app.blobs) {
     app.sweepBlobs = () => app.writeQueue.run(() =>
-      app.blobs!.reap({ ttl: options.blobReapTtlMs, blobColumns: app.blobColumns ?? [] })
+      app.blobs!.reap({ ttl: options.blobReapTtlMs, census: app.blobCensus ?? EMPTY_BLOB_CENSUS })
     );
     app.clock.add({
       name: 'blob-reaper',

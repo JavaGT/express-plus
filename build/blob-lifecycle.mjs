@@ -2,6 +2,8 @@ import { parseEventType } from './event-handle.mjs';
 import { sweepBehindCursor, upsertConsumerCursor } from './consumer-cursor.mjs';
 import { txn,               } from './driver.mjs';
 import { getLog } from './log.mjs';
+import { compileBlobCensus,                 } from './blob-census.mjs';
+import { declaredBlobField } from './pending-blob.mjs';
                                                  
 
 // Durable, cursor-backed recovery for blob finalize — the same proven pattern
@@ -33,38 +35,48 @@ const CONSUMER = 'blob.finalize';
                                 
                                                                                                                          
                                                                                                               
-                                                        
+                                                                                          
+                     
                                                                           
  
 
-export function createBlobLifecycle({ blobs, entities }                                                                                  )                {
+export function createBlobLifecycle({ blobs, entities, declaredBlobFields = [] }   
+                           
+                                                     
+                                          
+ )                {
+  // Compiled ONCE at prepare time from entity declarations + validated
+  // action-level blob-field declarations (S6/A3). No runtime `blobColumns`
+  // derivation or scan remains — the census is a pure, deterministic registry.
+  const census = compileBlobCensus({
+    entities,
+    declaredBlobFields: declaredBlobFields.map(declaredBlobField),
+  });
+
   if (!blobs) {
     return {
       blobAdapter: undefined,
       blobFinalizeConsumer: null,
-      blobColumns: [],
+      census,
       reconcileBlobFinalize: async () => ({ finalized: 0 }),
     };
   }
 
+  // The framework blob pipeline (adopt-in-dispatch + blob.finalize consumer +
+  // boot reconcile) resolves ids from the census's entity-derived references —
+  // action-level declarations against non-entity tables are owned by the
+  // pending-blob pipeline and finalize themselves.
   const blobFields = new Map                  ();
-  const blobColumns                                           = [];
-  for (const [name, ent] of entities) {
-    const fields           = [];
-    for (const [fname, descriptor] of Object.entries(ent.fields ?? {})) {
-      if (descriptor && (descriptor                      ).blob === true) fields.push(fname);
-    }
-    if (fields.length > 0) {
-      blobFields.set(name, fields);
-      for (const fieldName of fields) blobColumns.push({ table: name, column: fieldName });
-    }
+  for (const ref of census.entityReferences) {
+    if (!blobFields.has(ref.table)) blobFields.set(ref.table, []);
+    blobFields.get(ref.table) .push(ref.column);
   }
 
   if (blobFields.size === 0) {
     return {
       blobAdapter: undefined,
       blobFinalizeConsumer: null,
-      blobColumns,
+      census,
       reconcileBlobFinalize: async () => ({ finalized: 0 }),
     };
   }
@@ -164,5 +176,5 @@ export function createBlobLifecycle({ blobs, entities }                         
     return { finalized };
   }
 
-  return { blobAdapter, blobFinalizeConsumer, blobColumns, reconcileBlobFinalize };
+  return { blobAdapter, blobFinalizeConsumer, census, reconcileBlobFinalize };
 }

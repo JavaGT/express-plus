@@ -13,7 +13,7 @@ test('pending blob staging retains Scope canonical key and immutable digest iden
   const app = workbench({
     db,
     blobs: { root },
-    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 1 },
+    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 1 },
   });
   await app.start();
   t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
@@ -31,7 +31,7 @@ test('claimed blob lifecycle exposes pending, available, failed, and missing sta
   const app = workbench({
     db,
     blobs: { root },
-    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 0 },
+    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 0 },
   });
   await app.start();
   t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
@@ -84,6 +84,7 @@ test('declared blob claims are validated and adopted atomically with the registe
     blobLifecycle: {
       fields: [declaredBlobField({
         actionName: 'File.upload', field: 'blob', resourceField: 'id',
+        owningResource: 'File', erasureCategory: 'deletable',
         canonicalEventMetadata: { byteLength: ['file', 'size'], mediaType: ['file', 'mime'] },
       })],
       pendingTtlMs: 60_000,
@@ -122,7 +123,7 @@ test('a failed duplicate staging request leaves an unrelated pending blob intact
   const app = workbench({
     db,
     blobs: { root },
-    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 },
+    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 },
   });
   await app.start();
   t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
@@ -145,7 +146,7 @@ test('declared deletion is authorized, idempotent, and makes claimed bytes unava
       { type: 'File.purge', authorize: ({ principal }) => principal?.id === 'u1', projections: [{ eventTypes: ['File.deleted'], apply: () => {} }], handler: ({ scope }) => [{ type: 'File.deleted', scope, data: {} }] },
     ],
     blobLifecycle: {
-      fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', purgeActionName: 'File.purge' })],
+      fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable', purgeActionName: 'File.purge' })],
       pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 1,
     },
   });
@@ -171,7 +172,7 @@ test('the ordinary blob reaper retains a finalized pending-blob generation', asy
   const app = workbench({
     db, blobs: { root },
     actions: [{ type: 'File.upload', authorize: () => true, projections: [{ eventTypes: ['File.created'], apply: () => {} }], handler: ({ payload, scope }) => [{ type: 'File.created', scope, data: { blob: payload.blob } }] }],
-    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 },
+    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 },
   });
   await app.start();
   t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
@@ -179,25 +180,25 @@ test('the ordinary blob reaper retains a finalized pending-blob generation', asy
   const staged = await pendingBlobStager(app, actor).stage({ scopeId: 'project:p1', resourceId: 'f1', bytes: new Uint8Array([1]) });
   assert.equal((await app.dispatch({ actionId: 'upload', type: 'File.upload', scope: 'project:p1', payload: { id: 'f1', blob: staged.claim }, principal: actor })).ok, true);
   const blobId = db.prepare('SELECT blobId FROM _PendingBlob WHERE pendingKey = ?').get(staged.pendingKey).blobId;
-  assert.deepEqual(app.blobs.reap({ ttl: 0, blobColumns: [] }), { orphans: 0, danglers: 0 });
+  assert.deepEqual(app.blobs.reap({ ttl: 0, census: app.blobCensus }), { orphans: 0, danglers: 0 });
   assert.deepEqual(readClaimedBlob(app, blobId), Buffer.from([1]));
 });
 
 test('the ordinary blob reaper retains a staged generation until its claim expires', async (t) => {
   const db = new DatabaseSync(':memory:');
   const root = mkdtempSync(path.join(tmpdir(), 'workbench-pending-'));
-  const app = workbench({ db, blobs: { root }, blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 } });
+  const app = workbench({ db, blobs: { root }, blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 } });
   await app.start();
   t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
   const staged = await pendingBlobStager(app, principal({ type: 'user', id: 'u1' })).stage({ scopeId: 'project:p1', resourceId: 'f1', bytes: new Uint8Array([1]) });
-  assert.deepEqual(app.blobs.reap({ ttl: -1, blobColumns: [] }), { orphans: 0, danglers: 0 });
+  assert.deepEqual(app.blobs.reap({ ttl: -1, census: app.blobCensus }), { orphans: 0, danglers: 0 });
   assert.ok(db.prepare('SELECT 1 FROM _PendingBlob WHERE pendingKey = ?').get(staged.pendingKey));
 });
 
 test('principals receive independent staging slots for the same scope and resource', async (t) => {
   const db = new DatabaseSync(':memory:');
   const root = mkdtempSync(path.join(tmpdir(), 'workbench-pending-'));
-  const app = workbench({ db, blobs: { root }, blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 } });
+  const app = workbench({ db, blobs: { root }, blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 } });
   await app.start();
   t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
   const first = await pendingBlobStager(app, principal({ type: 'user', id: 'u1' })).stage({ scopeId: 'project:p1', resourceId: 'f1', bytes: new Uint8Array([1]) });
@@ -212,7 +213,7 @@ test('claims are scope-bound and action authorization runs before claiming', asy
   const app = workbench({
     db, blobs: { root },
     actions: [{ type: 'File.upload', authorize: ({ principal }) => principal.id === 'u1', handler: ({ payload, scope }) => { handled++; return [{ type: 'File.created', scope, data: { blob: payload.blob } }]; } }],
-    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 },
+    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 },
   });
   await app.start();
   t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
@@ -226,7 +227,7 @@ test('claims are scope-bound and action authorization runs before claiming', asy
 test('a foreign principal with a valid token cannot claim a staged blob', async (t) => {
   const db = new DatabaseSync(':memory:');
   const root = mkdtempSync(path.join(tmpdir(), 'workbench-pending-'));
-  const app = workbench({ db, blobs: { root }, actions: [{ type: 'File.upload', authorize: () => true, handler: () => [] }], blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 } });
+  const app = workbench({ db, blobs: { root }, actions: [{ type: 'File.upload', authorize: () => true, handler: () => [] }], blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 } });
   await app.start();
   t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
   const staged = await pendingBlobStager(app, principal({ type: 'user', id: 'u1' })).stage({ scopeId: 'project:p1', resourceId: 'f1', bytes: new Uint8Array([1]) });
@@ -240,7 +241,7 @@ test('a claimed blob cannot be replayed under its action id in a foreign scope',
   const app = workbench({
     db, blobs: { root },
     actions: [{ type: 'File.upload', authorize: () => true, projections: [{ eventTypes: ['File.created'], apply: () => {} }], handler: ({ payload, scope }) => [{ type: 'File.created', scope, data: { blob: payload.blob } }] }],
-    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 },
+    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 },
   });
   await app.start();
   t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
@@ -258,7 +259,7 @@ test('concurrent action ids can claim a staged generation exactly once', async (
   const app = workbench({
     db, blobs: { root },
     actions: [{ type: 'File.upload', authorize: () => true, projections: [{ eventTypes: ['File.created'], apply: () => {} }], handler: ({ payload, scope }) => { handled++; return [{ type: 'File.created', scope, data: { blob: payload.blob } }]; } }],
-    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 },
+    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 },
   });
   await app.start();
   t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
@@ -275,7 +276,7 @@ test('permanent erasure does not implicitly remove declared blob bytes', async (
   const app = workbench({
     db, blobs: { root },
     actions: [{ type: 'File.upload', authorize: () => true, projections: [{ eventTypes: ['File.created'], apply: () => {} }], handler: ({ payload, scope }) => [{ type: 'File.created', scope, data: { blob: payload.blob } }] }],
-    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 },
+    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 },
   });
   await app.start();
   t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
@@ -297,7 +298,7 @@ test('projection failure rolls claim back and a retry can commit it once', async
   const app = workbench({
     db, blobs: { root },
     actions: [{ type: 'File.upload', authorize: () => true, handler: ({ payload, scope }) => { handled++; return [{ type: 'File.created', scope, data: { blob: payload.blob } }]; }, projections: [{ eventTypes: ['File.created'], apply: () => { if (fail) throw new Error('projection failed'); } }] }],
-    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 },
+    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 },
   });
   await app.start();
   t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
@@ -317,7 +318,7 @@ test('missing and expired claims fail before the handler', async (t) => {
   const app = workbench({
     db, blobs: { root },
     actions: [{ type: 'File.upload', authorize: () => true, handler: () => { handled++; return []; } }],
-    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id' })], pendingTtlMs: 0, adoptedRecoveryTtlMs: 60_000 },
+    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable' })], pendingTtlMs: 0, adoptedRecoveryTtlMs: 60_000 },
   });
   await app.start();
   t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
@@ -334,7 +335,7 @@ test('the receipt stores only the canonical blob id', async (t) => {
   const app = workbench({
     db, blobs: { root },
     actions: [{ type: 'File.upload', authorize: () => true, projections: [{ eventTypes: ['File.created'], apply: () => {} }], handler: ({ payload, scope }) => [{ type: 'File.created', scope, data: { blob: payload.blob } }] }],
-    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 },
+    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 },
   });
   await app.start();
   t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
@@ -356,7 +357,7 @@ test('a staged claim cannot be attached to a different resource identity', async
   const app = workbench({
     db, blobs: { root },
     actions: [{ type: 'File.upload', authorize: () => true, handler: () => { handled++; return []; } }],
-    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 },
+    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 },
   });
   await app.start();
   t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
@@ -387,7 +388,7 @@ test('claimed blob metadata cannot be serialized through a post-commit effect', 
         } }],
       }),
     }],
-    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 },
+    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 },
   });
   await app.start();
   t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
@@ -411,7 +412,7 @@ test('renaming a copied claimed digest in an event does not bypass attestation n
         blob: payload.blob, file: { digest: claimedBlobs.blob.sha256 },
       } }],
     }],
-    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 },
+    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 },
   });
   await app.start();
   t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
@@ -423,7 +424,9 @@ test('renaming a copied claimed digest in an event does not bypass attestation n
 });
 
 test('blob declarations reject policy callbacks and other unknown keys', () => {
-  assert.throws(() => declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', validator: () => true }), /requires actionName, field, and resourceField/);
-  assert.throws(() => declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', canonicalEventMetadata: { sha256: ['file', 'sha256'] } }), /requires actionName, field, and resourceField/);
-  assert.throws(() => declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', canonicalEventMetadata: { byteLength: ['file', '__proto__'] } }), /requires actionName, field, and resourceField/);
+  assert.throws(() => declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable', validator: () => true }), /requires actionName, field, resourceField, owningResource, and erasureCategory/);
+  assert.throws(() => declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable', canonicalEventMetadata: { sha256: ['file', 'sha256'] } }), /requires actionName, field, resourceField, owningResource, and erasureCategory/);
+  assert.throws(() => declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable', canonicalEventMetadata: { byteLength: ['file', '__proto__'] } }), /requires actionName, field, resourceField, owningResource, and erasureCategory/);
+  // S6 #4: a declared blob field without an owning resource or erasure category fails validation.
+  assert.throws(() => declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id' }), /requires actionName, field, resourceField, owningResource, and erasureCategory/);
 });

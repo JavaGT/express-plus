@@ -1,6 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { txn, type DbHandle } from './driver.ts';
 import { principalKeyOf, type Principal } from './principal.ts';
+import type { BlobErasureCategory, BlobLifecycleKind, BlobOwnership } from './blob-census.ts';
 import type { BlobStore } from './blob-store.ts';
 
 function failure(code: string): never { const error = new Error(code) as Error & { code?: string }; error.code = code; throw error; }
@@ -34,24 +35,42 @@ export interface DeclaredBlobField {
   field: string;
   resourceField: string;
   purgeActionName?: string;
+  /** The resource generation that owns these bytes (S6 #4); required. */
+  owningResource: string;
+  /** What erasure does with the bytes when the owning generation is removed; required. */
+  erasureCategory: BlobErasureCategory;
+  /** Explicit ownership model; defaults to exclusive. Hash equality never implies sharing (#7). */
+  ownership?: BlobOwnership;
+  /** Lifecycle stage the reference must reach before the bytes are reapable; defaults to finalize. */
+  lifecycle?: BlobLifecycleKind;
   canonicalEventMetadata?: Readonly<{ byteLength?: readonly string[]; mediaType?: readonly string[] }>;
 }
 
 export function declaredBlobField(field: unknown): DeclaredBlobField {
-  const candidate = field as { actionName?: unknown; field?: unknown; resourceField?: unknown; purgeActionName?: unknown; canonicalEventMetadata?: unknown } | null | undefined;
+  const candidate = field as { actionName?: unknown; field?: unknown; resourceField?: unknown; purgeActionName?: unknown; owningResource?: unknown; erasureCategory?: unknown; ownership?: unknown; lifecycle?: unknown; canonicalEventMetadata?: unknown } | null | undefined;
   const keys = candidate && typeof candidate === 'object' ? Object.keys(candidate) : [];
   const canonicalEventMetadata = candidate?.canonicalEventMetadata;
   const metadataKeys = canonicalEventMetadata && typeof canonicalEventMetadata === 'object' ? Object.keys(canonicalEventMetadata) : [];
   const validPath = (path: unknown): path is string[] => Array.isArray(path) && path.length > 0
     && path.every((part) => typeof part === 'string' && part.length > 0 && !['__proto__', 'prototype', 'constructor'].includes(part));
+  const isErasureCategory = (value: unknown): value is BlobErasureCategory =>
+    value === 'deletable' || value === 'retained' || value === 'derived';
+  const isOwnership = (value: unknown): value is BlobOwnership =>
+    value === 'exclusive' || value === 'shared';
+  const isLifecycleKind = (value: unknown): value is BlobLifecycleKind =>
+    value === 'pending' || value === 'adopt' || value === 'finalize';
   if (!candidate || typeof candidate.actionName !== 'string' || typeof candidate.field !== 'string'
     || typeof candidate.resourceField !== 'string'
-    || keys.some((key) => !['actionName', 'field', 'resourceField', 'purgeActionName', 'canonicalEventMetadata'].includes(key))
+    || typeof candidate.owningResource !== 'string' || !candidate.owningResource
+    || !isErasureCategory(candidate.erasureCategory)
+    || keys.some((key) => !['actionName', 'field', 'resourceField', 'purgeActionName', 'owningResource', 'erasureCategory', 'ownership', 'lifecycle', 'canonicalEventMetadata'].includes(key))
     || (candidate.purgeActionName !== undefined && typeof candidate.purgeActionName !== 'string')
+    || (candidate.ownership !== undefined && !isOwnership(candidate.ownership))
+    || (candidate.lifecycle !== undefined && !isLifecycleKind(candidate.lifecycle))
     || (canonicalEventMetadata !== undefined && (!canonicalEventMetadata || typeof canonicalEventMetadata !== 'object'
       || metadataKeys.length === 0 || metadataKeys.some((key) => !['byteLength', 'mediaType'].includes(key))
       || metadataKeys.some((key) => !validPath((canonicalEventMetadata as Record<string, unknown>)[key]))))) {
-    throw new TypeError('declaredBlobField requires actionName, field, and resourceField');
+    throw new TypeError('declaredBlobField requires actionName, field, resourceField, owningResource, and erasureCategory');
   }
   const fieldValue = candidate as DeclaredBlobField;
   return Object.freeze({ ...fieldValue, ...(canonicalEventMetadata === undefined ? {} : {

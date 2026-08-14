@@ -19,6 +19,7 @@ import path from 'node:path';
 
 import workbench, {
   entity } from '../build/internal.mjs';
+import { declaredBlobField } from '../build/server.mjs';
 
 function photoNote() {
   return entity('Note', {
@@ -127,4 +128,105 @@ test('blob reaper runs under the writeQueue mutex — waits for an in-flight dis
   await sweepP;
   assert.equal(swept, true, 'the reaper ran once the writeQueue released');
   assert.ok(!existsSync(path.join(root, 'orph2.pending')), 'the orphan was reaped after release');
+});
+
+// ---- refcount sweep over the COMPILED census (S6/A3) -----------------------
+// The refcount sweep's ONLY column source is the census compiled at prepare
+// time — there is no runtime blobColumns scan. The declared reference points at
+// a plain `Photo` table created here, mirroring an app-declared table that
+// holds blob ids without being an entity `blob: true` field.
+
+function declaredBlobHarness(t) {
+  const db = new DatabaseSync(':memory:');
+  const root = mkdtempSync(path.join(tmpdir(), 'express-blobreap-census-'));
+  const app = workbench({
+    db,
+    blobs: { root },
+    blobLifecycle: {
+      fields: [declaredBlobField({ actionName: 'Photo.upload', field: 'data', resourceField: 'id', owningResource: 'Photo', erasureCategory: 'deletable' })],
+      pendingTtlMs: 60_000,
+      adoptedRecoveryTtlMs: 60_000,
+    },
+  });
+  app.mount('/notes', photoNote());
+  app.listen(0, { principalOf: () => ({ id: 'u1' }) });
+  return { app, db, root, t };
+}
+
+function adoptAndFinalize(app, id) {
+  app.db.exec('BEGIN IMMEDIATE');
+  app.blobs.adopt(app.db, id);
+  app.db.exec('COMMIT');
+  app.blobs.finalize(id);
+}
+
+test('the reaper refcount sweep is driven by the compiled census — referenced blobs are kept, dangling ones reaped', async (t) => {
+  const { app, db, root } = declaredBlobHarness(t);
+  await app.ddl();
+  db.exec('CREATE TABLE Photo (id TEXT PRIMARY KEY, data TEXT)');
+  await app.ready;
+  t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
+
+  const kept = app.blobs.upload({ bytes: Buffer.from('kept'), id: 'kept1' });
+  const dangling = app.blobs.upload({ bytes: Buffer.from('dangling'), id: 'dang1' });
+  adoptAndFinalize(app, kept.id);
+  adoptAndFinalize(app, dangling.id);
+  db.prepare('INSERT INTO Photo (id, data) VALUES (?, ?)').run('p1', kept.id);
+
+  await app.sweepBlobs();
+
+  assert.ok(app.blobs.stat(kept.id), 'the blob referenced by a census column is kept');
+  assert.equal(app.blobs.stat(dangling.id), undefined, 'the unreferenced blob is reaped as a dangler');
+});
+
+test('matching content hashes never merge ownership — identical bytes are reaped independently (#7)', async (t) => {
+  const { app, db, root } = declaredBlobHarness(t);
+  await app.ddl();
+  db.exec('CREATE TABLE Photo (id TEXT PRIMARY KEY, data TEXT)');
+  await app.ready;
+  t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
+
+  const bytes = Buffer.from('identical-bytes');
+  const referenced = app.blobs.upload({ bytes, id: 'same1' });
+  const unreferenced = app.blobs.upload({ bytes, id: 'same2' });
+  assert.equal(referenced.sha256, unreferenced.sha256, 'the two blobs hold identical bytes (matching hashes)');
+  adoptAndFinalize(app, referenced.id);
+  adoptAndFinalize(app, unreferenced.id);
+  db.prepare('INSERT INTO Photo (id, data) VALUES (?, ?)').run('p1', referenced.id);
+
+  await app.sweepBlobs();
+
+  assert.ok(app.blobs.stat(referenced.id), 'the referenced generation is kept');
+  assert.equal(app.blobs.stat(unreferenced.id), undefined, 'the same-bytes generation with no reference is still reaped — no hash-based dedup or merging');
+});
+
+test('the refcount sweep consults ONLY census-declared columns — a blob id in an undeclared column is not a reference', async (t) => {
+  const { app, db, root } = declaredBlobHarness(t);
+  await app.ddl();
+  db.exec('CREATE TABLE Photo (id TEXT PRIMARY KEY, data TEXT, thumb TEXT)');
+  await app.ready;
+  t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
+
+  const up = app.blobs.upload({ bytes: Buffer.from('hidden ref'), id: 'thumb-ref' });
+  adoptAndFinalize(app, up.id);
+  db.prepare('INSERT INTO Photo (id, data, thumb) VALUES (?, ?, ?)').run('p1', null, up.id);
+
+  await app.sweepBlobs();
+
+  assert.equal(app.blobs.stat(up.id), undefined, 'an id living only in an undeclared column reads as unreferenced');
+});
+
+test('a declared reference whose table is not provisioned is skipped, not fatal', async (t) => {
+  const { app, db, root } = declaredBlobHarness(t);
+  await app.ddl();
+  // The census declares a reference on (Photo, data) but no Photo table exists.
+  await app.ready;
+  t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
+
+  const up = app.blobs.upload({ bytes: Buffer.from('lonely'), id: 'lonely1' });
+  adoptAndFinalize(app, up.id);
+
+  await app.sweepBlobs();
+
+  assert.equal(app.blobs.stat(up.id), undefined, 'no table means no reference — the blob is reaped as a dangler without a crash');
 });

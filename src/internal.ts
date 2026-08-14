@@ -29,6 +29,7 @@ export { createClock } from './clock.ts';
 export { createProjectedAsyncConsumer, resolveProjectedAsyncTriggerTypes, reconcileProjectedRecovery } from './projected-async.ts';
 export { buildDurableEffectsRegistry, createDurableEffectsConsumer, reconcileDurableEffects } from './durable-effects.ts';
 export { createBlobLifecycle } from './blob-lifecycle.ts';
+export { compileBlobCensus } from './blob-census.ts';
 export { EventKind, created, updated, removed, fieldSet, native, parseEventType, lifecycleVerb } from './event-handle.ts';
 export { scopeOf, parseScopeKey, tryParseScopeKey, isScopeHandle } from './scope-handle.ts';
 export { decideReplay, normalizeSeqSpan } from './replay-decision.ts';

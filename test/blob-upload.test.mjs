@@ -159,7 +159,14 @@ test('blob lifecycle owns field discovery, adopt, finalize, and reaper columns',
   ]);
   const lifecycle = createBlobLifecycle({ blobs, entities });
 
-  assert.deepEqual(lifecycle.blobColumns, [{ table: 'Note', column: 'photo' }]);
+  assert.deepEqual(
+    lifecycle.census.references,
+    [{
+      table: 'Note', column: 'photo', owningResource: 'Note', field: 'photo',
+      lifecycle: 'finalize', erasureCategory: 'deletable', ownership: 'exclusive',
+    }],
+    'the compiled census carries the entity blob field with full reference metadata',
+  );
 
   const db = {};
   const events = [

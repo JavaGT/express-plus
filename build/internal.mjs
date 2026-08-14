@@ -29,6 +29,7 @@ export { createClock } from './clock.mjs';
 export { createProjectedAsyncConsumer, resolveProjectedAsyncTriggerTypes, reconcileProjectedRecovery } from './projected-async.mjs';
 export { buildDurableEffectsRegistry, createDurableEffectsConsumer, reconcileDurableEffects } from './durable-effects.mjs';
 export { createBlobLifecycle } from './blob-lifecycle.mjs';
+export { compileBlobCensus } from './blob-census.mjs';
 export { EventKind, created, updated, removed, fieldSet, native, parseEventType, lifecycleVerb } from './event-handle.mjs';
 export { scopeOf, parseScopeKey, tryParseScopeKey, isScopeHandle } from './scope-handle.mjs';
 export { decideReplay, normalizeSeqSpan } from './replay-decision.mjs';

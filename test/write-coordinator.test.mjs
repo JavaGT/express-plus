@@ -427,7 +427,7 @@ test('blob upload via the /blobs route, reap via sweepBlobs, and discard via swe
       db,
       blobs: { root: dir },
       blobLifecycle: {
-        fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id' })],
+        fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable' })],
         pendingTtlMs: 0,
         adoptedRecoveryTtlMs: 60_000,
       },

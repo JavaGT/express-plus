@@ -38,6 +38,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { fsBlobs, hasPathFor,                                            } from './fs-blobs.mjs';
+                                                   
                                             
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
@@ -74,7 +75,8 @@ function safeId(id         )       {
 
                                   
               
-                                                        
+                                                                                          
+                     
  
 
                             
@@ -191,7 +193,7 @@ export function createBlobStore({ root, stagingRoot, db, bytes }                
     db.prepare('DELETE FROM BlobStore WHERE id = ?').run(id);
   }
 
-  function reap({ ttl, blobColumns }                 )                                        {
+  function reap({ ttl, census }                 )                                        {
     const now = Date.now();
     let orphans = 0;
     let danglers = 0;
@@ -209,22 +211,36 @@ export function createBlobStore({ root, stagingRoot, db, bytes }                
       orphans++;
     }
 
-    // 2. Refcount sweep: adopted blobs with no references
+    // 2. Refcount sweep: adopted blobs with no references, driven by the
+    // COMPILED census (S6/A3) — no runtime scan derives blob columns anymore.
+    // Each reference's existence query is prepared once per sweep; a declared
+    // table that is not (yet) provisioned holds no rows and so references
+    // nothing (skipped after one catalog check). Matching content hashes never
+    // merge ownership (#7): every id is checked against its own references.
     const adoptedForRefcount = db.prepare('SELECT id FROM BlobStore WHERE status = ?').all('adopted')                         ;
-    for (const row of adoptedForRefcount) {
-      if (db.prepare("SELECT 1 FROM _PendingBlob WHERE blobId = ? AND status IN ('claimed', 'finalized', 'recovery-failed', 'delete-requested')").get(row.id)) continue;
-      let referenced = false;
-      for (const { table, column } of blobColumns) {
-        const ref = db.prepare(`SELECT 1 FROM "${table}" WHERE "${column}" = ? LIMIT 1`).get(row.id);
-        if (ref) {
-          referenced = true;
-          break;
-        }
+    if (adoptedForRefcount.length > 0 && census.references.length > 0) {
+      const existingTables = new Set        ();
+      const tableStmt = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?");
+      for (const ref of census.references) {
+        if (!existingTables.has(ref.table) && tableStmt.get(ref.table)) existingTables.add(ref.table);
       }
-      if (!referenced) {
-        remove(row.id, { pending: false });
-        db.prepare('DELETE FROM BlobStore WHERE id = ?').run(row.id);
-        danglers++;
+      const referenceQueries = census.references
+        .filter((ref) => existingTables.has(ref.table))
+        .map((ref) => ({ query: db.prepare(`SELECT 1 FROM "${ref.table}" WHERE "${ref.column}" = ? LIMIT 1`) }));
+      for (const row of adoptedForRefcount) {
+        if (db.prepare("SELECT 1 FROM _PendingBlob WHERE blobId = ? AND status IN ('claimed', 'finalized', 'recovery-failed', 'delete-requested')").get(row.id)) continue;
+        let referenced = false;
+        for (const { query } of referenceQueries) {
+          if (query.get(row.id)) {
+            referenced = true;
+            break;
+          }
+        }
+        if (!referenced) {
+          remove(row.id, { pending: false });
+          db.prepare('DELETE FROM BlobStore WHERE id = ?').run(row.id);
+          danglers++;
+        }
       }
     }
 

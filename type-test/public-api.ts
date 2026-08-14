@@ -22,7 +22,7 @@ import workbench, {
   type DeclaredClaimedBlob, type RegisteredAction, type WorkbenchApp, type WorkbenchEntity, type WriteQueue,
 } from 'workbench';
 import {
-  assertNoFrameworkTableSql, createBlobStore, createInvitationApi, createJobQueue, createLiveDelivery, declaredBlobField, declaredTableNames,
+  assertNoFrameworkTableSql, compileBlobCensus, createBlobStore, createInvitationApi, createJobQueue, createLiveDelivery, declaredBlobField, declaredTableNames,
   frameworkTableNames, readCommittedCursor,
   runMigrations, describeEntityStorage, describeSqliteStorage,
   claimedBlobLifecycle, operationalConsumerAdmin, createPostCommitEffectRunner,
@@ -244,6 +244,7 @@ assertNoFrameworkTableSql('SELECT id FROM Project');
 void [frameworkTables, projectTables];
 declaredBlobField({
   actionName: 'file.upload', field: 'blob', resourceField: 'fileId',
+  owningResource: 'File', erasureCategory: 'deletable',
   canonicalEventMetadata: { byteLength: ['file', 'size'], mediaType: ['file', 'mime'] },
 });
 // @ts-expect-error projected is a namespace; asynchronous projections use projected.async(...)
@@ -268,7 +269,7 @@ const liveStorage: SqliteStorageDescription = describeSqliteStorage(nativeDb, []
 describeEntityStorage({ grant: grant(read) });
 void [declaredStorage, liveStorage];
 void [nativeApp, queuedValue, owned, nestedQueuedValue];
-const migration: Migration = { version: 1, up: (database) => database.exec('SELECT 1') };
+const migration: Migration = { namespace: 'app', name: 'seed', version: 1, up: (database) => database.exec('SELECT 1') };
 const app: WorkbenchApp = workbench({
   db,
   migrations: [migration],
@@ -475,7 +476,7 @@ customByteStore.capabilities.purgeOnStart;
 const bogusDurability: ByteStoreDurability = 'volatile';
 const surfacedCapabilities: ByteStoreCapabilities = blobs.capabilities;
 const declaredDurability: ByteStoreDurability = surfacedCapabilities.durability;
-const orphanDanglerCounts: { orphans: number; danglers: number } = blobs.reap({ ttl: 60_000, blobColumns: [] });
+const orphanDanglerCounts: { orphans: number; danglers: number } = blobs.reap({ ttl: 60_000, census: compileBlobCensus({ entities: new Map() }) });
 blobs.discardPending('pending-1');
 blobs.discard('final-1');
 // @ts-expect-error pathFor was retired from the portable ByteStore surface (S6/A2)

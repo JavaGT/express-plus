@@ -453,11 +453,12 @@ export function buildKernel(app: any) {
 
   const effectsRegistry = buildEffects(entities);
   const durableEffectsRegistry = buildDurableEffectsRegistry([...entities.values()]);
-  const { blobAdapter, blobFinalizeConsumer, blobColumns, reconcileBlobFinalize } = createBlobLifecycle({
+  const { blobAdapter, blobFinalizeConsumer, census, reconcileBlobFinalize } = createBlobLifecycle({
     blobs: app.blobs,
     entities,
+    declaredBlobFields: app._blobLifecycleOptions?.fields ?? [],
   });
-  app.blobColumns = blobColumns;
+  app.blobCensus = census;
   if (app._blobLifecycleOptions) app.pendingBlobLifecycle = createPendingBlobLifecycle(app, app._blobLifecycleOptions);
   app.durableEffectsRegistry = durableEffectsRegistry;
   app.reconcileBlobFinalize = reconcileBlobFinalize;

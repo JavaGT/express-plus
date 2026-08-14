@@ -14,6 +14,7 @@ import {
   isInvitationCreationAuthority,
 } from './auth/invitation.mjs';
 import { createProjectedAsyncConsumer } from './projected-async.mjs';
+import { createSearchStalenessConsumer } from './search-staleness.mjs';
 import { buildDurableEffectsRegistry, createDurableEffectsConsumer } from './durable-effects.mjs';
 import { createBlobLifecycle } from './blob-lifecycle.mjs';
 import { createOperationalConsumers } from './operational-consumer.mjs';
@@ -394,11 +395,12 @@ function buildDurableAdmission(app     , annotatedKernel     ) {
 //   - 'best-effort-external-consumer' — no cursor, no reconcile sweep at all:
 //     a crash between COMMIT and this consumer running silently drops the
 //     work with no replay. Honestly at-least-once is a claim this kind
-//     CANNOT make; it is unknown-handoff. No shipped consumer is this kind
-//     today (email moved to 'durable-projection-consumer' once it gained a
-//     cursor) — kept in the closed set for a future seam that genuinely has
-//     no recovery path, so classifying one honestly doesn't require growing
-//     the enum under pressure.
+//     CANNOT make; it is unknown-handoff. The search staleness notification
+//     (search-staleness.mjs) is the first shipped consumer of this kind: the
+//     durable ledger is best-effort for the commit→notify window only — a
+//     record that lands survives restart and re-processes via drain(), but a
+//     crash between COMMIT and the consumer cannot replay the missed event
+//     (A3's reconcile engine owns any future cursor-backed recovery).
 //
 // A fourth kind named by the Wave 5/6 design council but not represented in
 // this array — 'clock-driven maintenance starter' (the blob and log-retention
@@ -419,6 +421,12 @@ function engagedPostCommitConsumerDescriptors(app     , entities     , { blobFin
     { name: 'effect.durable', kind: 'durable-projection-consumer', consumer: createDurableEffectsConsumer({ durableEffectsRegistry, jobs: app.jobs }) },
     { name: 'email', kind: 'durable-projection-consumer', consumer: app._emailConsumer },
     { name: 'operational', kind: 'durable-projection-consumer', consumer: operationalConsumer },
+    // The S4/A2 staleness ledger intake (review #109 finding 2): every
+    // committed lifecycle event becomes a durable source-change record with its
+    // committedAt proof. Best-effort for the commit→notify window (no cursor) —
+    // see the kind taxonomy above. Absent when the app never constructed the
+    // bridge (raw buildKernel usage).
+    { name: 'search-staleness', kind: 'best-effort-external-consumer', consumer: app.searchStaleness ? createSearchStalenessConsumer(app.searchStaleness) : null },
   ].filter((d) => Boolean(d.consumer));
 }
 

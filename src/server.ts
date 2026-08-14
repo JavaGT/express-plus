@@ -25,6 +25,7 @@ export { matchRoute } from './http-route-match.ts';
 export { serveStatic } from './views.ts';
 export { createJobQueue } from './job-queue.ts';
 export { createBlobStore } from './blob-store.ts';
+export { compileBlobCensus } from './blob-census.ts';
 export { runMigrations } from './migrations.ts';
 export { WORKBENCH_MIGRATIONS, ensureWorkbenchMigrationTable, appliedWorkbenchVersion, runWorkbenchMigrations } from './workbench-migrations.ts';
 export { defineSqliteSchema } from './sqlite-schema.ts';

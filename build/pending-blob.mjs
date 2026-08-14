@@ -1,6 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { txn,               } from './driver.mjs';
 import { principalKeyOf,                } from './principal.mjs';
+                                                                                              
                                                  
 
 function failure(code        )        { const error = new Error(code)                             ; error.code = code; throw error; }
@@ -34,24 +35,42 @@ function principalKey(principal           )         {
                 
                         
                            
+                                                                         
+                         
+                                                                                          
+                                       
+                                                                                                   
+                            
+                                                                                                      
+                                
                                                                                                        
  
 
 export function declaredBlobField(field         )                    {
-  const candidate = field                                                                                                                                                      ;
+  const candidate = field                                                                                                                                                                                                                                                     ;
   const keys = candidate && typeof candidate === 'object' ? Object.keys(candidate) : [];
   const canonicalEventMetadata = candidate?.canonicalEventMetadata;
   const metadataKeys = canonicalEventMetadata && typeof canonicalEventMetadata === 'object' ? Object.keys(canonicalEventMetadata) : [];
   const validPath = (path         )                   => Array.isArray(path) && path.length > 0
     && path.every((part) => typeof part === 'string' && part.length > 0 && !['__proto__', 'prototype', 'constructor'].includes(part));
+  const isErasureCategory = (value         )                               =>
+    value === 'deletable' || value === 'retained' || value === 'derived';
+  const isOwnership = (value         )                         =>
+    value === 'exclusive' || value === 'shared';
+  const isLifecycleKind = (value         )                             =>
+    value === 'pending' || value === 'adopt' || value === 'finalize';
   if (!candidate || typeof candidate.actionName !== 'string' || typeof candidate.field !== 'string'
     || typeof candidate.resourceField !== 'string'
-    || keys.some((key) => !['actionName', 'field', 'resourceField', 'purgeActionName', 'canonicalEventMetadata'].includes(key))
+    || typeof candidate.owningResource !== 'string' || !candidate.owningResource
+    || !isErasureCategory(candidate.erasureCategory)
+    || keys.some((key) => !['actionName', 'field', 'resourceField', 'purgeActionName', 'owningResource', 'erasureCategory', 'ownership', 'lifecycle', 'canonicalEventMetadata'].includes(key))
     || (candidate.purgeActionName !== undefined && typeof candidate.purgeActionName !== 'string')
+    || (candidate.ownership !== undefined && !isOwnership(candidate.ownership))
+    || (candidate.lifecycle !== undefined && !isLifecycleKind(candidate.lifecycle))
     || (canonicalEventMetadata !== undefined && (!canonicalEventMetadata || typeof canonicalEventMetadata !== 'object'
       || metadataKeys.length === 0 || metadataKeys.some((key) => !['byteLength', 'mediaType'].includes(key))
       || metadataKeys.some((key) => !validPath((canonicalEventMetadata                           )[key]))))) {
-    throw new TypeError('declaredBlobField requires actionName, field, and resourceField');
+    throw new TypeError('declaredBlobField requires actionName, field, resourceField, owningResource, and erasureCategory');
   }
   const fieldValue = candidate                     ;
   return Object.freeze({ ...fieldValue, ...(canonicalEventMetadata === undefined ? {} : {

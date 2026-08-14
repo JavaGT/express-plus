@@ -25,6 +25,7 @@ export { matchRoute } from './http-route-match.mjs';
 export { serveStatic } from './views.mjs';
 export { createJobQueue } from './job-queue.mjs';
 export { createBlobStore } from './blob-store.mjs';
+export { compileBlobCensus } from './blob-census.mjs';
 export { runMigrations } from './migrations.mjs';
 export { WORKBENCH_MIGRATIONS, ensureWorkbenchMigrationTable, appliedWorkbenchVersion, runWorkbenchMigrations } from './workbench-migrations.mjs';
 export { defineSqliteSchema } from './sqlite-schema.mjs';

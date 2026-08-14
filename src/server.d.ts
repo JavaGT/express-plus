@@ -189,6 +189,48 @@ export interface ByteStore {
   exists(id: string, options: { pending: boolean }): boolean;
 }
 
+// Compiled blob-reference census (S6/A3): one deterministic registry of every
+// declared blob reference, compiled at prepare time from entity declarations
+// (`blob: true` fields) and action-level `declaredBlobField` declarations. It
+// replaces the runtime `blobColumns` derivation for the reaper, the finalize
+// consumer, backup manifests (S6/A6), and S8's blob/MediaFile classification.
+// Ownership is explicit per reference — matching content hashes never merge or
+// imply sharing (S6 consideration #7).
+export type BlobLifecycleKind = 'pending' | 'adopt' | 'finalize';
+export type BlobErasureCategory = 'deletable' | 'retained' | 'derived';
+export type BlobOwnership = 'exclusive' | 'shared';
+export interface BlobReference {
+  table: string;
+  column: string;
+  owningResource: string;
+  field: string;
+  lifecycle: BlobLifecycleKind;
+  erasureCategory: BlobErasureCategory;
+  ownership: BlobOwnership;
+}
+export interface BlobCensus {
+  references: readonly BlobReference[];
+  entityReferences: readonly BlobReference[];
+  byResource: ReadonlyMap<string, readonly BlobReference[]>;
+  byTableColumn: ReadonlyMap<string, readonly BlobReference[]>;
+}
+export interface BlobCensusInput {
+  entities: ReadonlyMap<string, { name: string; fields?: Readonly<Record<string, unknown>> }>;
+  declaredBlobFields?: readonly BlobFieldDeclaration[];
+}
+export type BlobFieldDeclaration = Readonly<{
+  actionName: string;
+  field: string;
+  resourceField: string;
+  purgeActionName?: string;
+  owningResource: string;
+  erasureCategory: BlobErasureCategory;
+  ownership?: BlobOwnership;
+  lifecycle?: BlobLifecycleKind;
+}>;
+export function compileBlobCensus(input: BlobCensusInput): BlobCensus;
+export const EMPTY_BLOB_CENSUS: BlobCensus;
+
 export interface BlobStore {
   safeId(id: unknown): void;
   upload(options?: {
@@ -206,7 +248,8 @@ export interface BlobStore {
   discard(id: string): void;
   reap(options: {
     ttl: number;
-    blobColumns: Array<{ table: string; column: string }>;
+    /** Compiled blob-reference census (S6/A3) — the refcount sweep's ONLY column source. */
+    census: BlobCensus;
   }): { orphans: number; danglers: number };
   stat(
     id: string,

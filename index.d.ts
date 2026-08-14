@@ -1514,6 +1514,14 @@ export type DeclaredBlobField = Readonly<{
   field: string;
   resourceField: string;
   purgeActionName?: string;
+  /** The resource generation that owns these bytes (S6 #4); required. */
+  owningResource: string;
+  /** What erasure does with the bytes when the owning generation is removed; required. */
+  erasureCategory: 'deletable' | 'retained' | 'derived';
+  /** Explicit ownership model; defaults to exclusive. Hash equality never implies sharing (#7). */
+  ownership?: 'exclusive' | 'shared';
+  /** Lifecycle stage the reference must reach before the bytes are reapable; defaults to finalize. */
+  lifecycle?: 'pending' | 'adopt' | 'finalize';
   /** Package-written paths beneath the owning event's data; handlers must leave each leaf absent. */
   canonicalEventMetadata?: Readonly<{ byteLength?: readonly string[]; mediaType?: readonly string[] }>;
 }>;

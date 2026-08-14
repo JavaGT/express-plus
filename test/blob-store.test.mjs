@@ -10,6 +10,16 @@ import { rmSync, existsSync, openSync, closeSync } from 'node:fs';
 import path from 'node:path';
 
 import { generateFrameworkDDL } from '../build/ddl.mjs';
+import { EMPTY_BLOB_CENSUS, compileBlobCensus } from '../build/blob-census.mjs';
+
+// A compiled census declaring (Photo, data) as a blob reference — the refcount
+// sweep's ONLY column source (S6/A3: no runtime blobColumns scan).
+const photoCensus = compileBlobCensus({
+  entities: new Map(),
+  declaredBlobFields: [
+    { actionName: 'Photo.upload', field: 'data', resourceField: 'id', owningResource: 'Photo', erasureCategory: 'deletable' },
+  ],
+});
 
 async function setupBlobStore() {
   const root = path.join(tmpdir(), 'express-blob-' + randomUUID());
@@ -149,7 +159,7 @@ test('reaper orphan sweep', async () => {
   // Manually set createdAt to the past
   db.prepare('UPDATE BlobStore SET createdAt = ? WHERE id = ?').run(staleDate, id);
   
-  const { orphans } = store.reap({ ttl: 3600_000, blobColumns: [] });
+  const { orphans } = store.reap({ ttl: 3600_000, census: EMPTY_BLOB_CENSUS });
   assert.equal(orphans, 1, 'stale pending blob swept');
   
   assert.equal(store.stat(id), undefined, 'row deleted');
@@ -170,7 +180,7 @@ test('reaper refcount sweep', async () => {
   store.finalize(id);
   
   // No reference → dangling
-  let result = store.reap({ ttl: 3600_000, blobColumns: [{ table: 'Photo', column: 'data' }] });
+  let result = store.reap({ ttl: 3600_000, census: photoCensus });
   assert.equal(result.danglers, 1, 'dangling blob swept');
   assert.equal(store.stat(id), undefined, 'dangling row deleted');
   
@@ -186,7 +196,7 @@ test('reaper refcount sweep', async () => {
   // Create reference
   db.prepare('INSERT INTO Photo (id, data) VALUES (?, ?)').run(randomUUID(), refId);
   
-  result = store.reap({ ttl: 3600_000, blobColumns: [{ table: 'Photo', column: 'data' }] });
+  result = store.reap({ ttl: 3600_000, census: photoCensus });
   assert.equal(result.danglers, 0, 'referenced blob kept');
   assert.ok(store.stat(refId), 'referenced row exists');
   
