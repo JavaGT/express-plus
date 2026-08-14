@@ -10,7 +10,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -136,6 +136,25 @@ test('verifyBackupGeneration throws on corrupt bytes and on a missing/mismatched
   }
 });
 
+test('verifyBackupGeneration refuses a symlinked digest sidecar pointing outside the backup', async () => {
+  const { root, seams } = await setupSeams();
+  const backupBlobs = makeBackupBlobs('gen-restore', BYTES);
+  const outsideDir = mkdtempSync(join(tmpdir(), 'wb-outside-'));
+  const outsideSidecar = join(outsideDir, 'sidecar');
+  try {
+    // A VALID sidecar planted OUTSIDE the backup, symlinked in as the sidecar
+    // name: the seam must refuse to trust it, never read through the link.
+    writeFileSync(outsideSidecar, `${sha256hex(BYTES)}\n`);
+    rmSync(join(backupBlobs, blobGenerationDigestFileName('gen-restore')), { force: true });
+    symlinkSync(outsideSidecar, join(backupBlobs, blobGenerationDigestFileName('gen-restore')));
+    assert.throws(() => seams.verifyBackupGeneration('gen-restore', backupBlobs), /digest sidecar/, 'a symlinked sidecar is refused');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(backupBlobs, { recursive: true, force: true });
+    rmSync(outsideDir, { recursive: true, force: true });
+  }
+});
+
 test('materializeRestoreGeneration restores verified bytes + sidecar into the target blobs layout', async () => {
   const { root, seams } = await setupSeams();
   const backupBlobs = makeBackupBlobs('gen-restore', BYTES);
@@ -160,6 +179,28 @@ test('materializeRestoreGeneration restores verified bytes + sidecar into the ta
     rmSync(root, { recursive: true, force: true });
     rmSync(backupBlobs, { recursive: true, force: true });
     rmSync(target, { recursive: true, force: true });
+  }
+});
+
+test('materializeRestoreGeneration refuses a pre-existing symlink at the target generation path', async () => {
+  const { root, seams } = await setupSeams();
+  const backupBlobs = makeBackupBlobs('gen-restore', BYTES);
+  const target = mkdtempSync(join(tmpdir(), 'wb-target-'));
+  const destBlobs = join(target, 'blobs');
+  mkdirSync(destBlobs);
+  const outsideDir = mkdtempSync(join(tmpdir(), 'wb-outside-'));
+  const outsideFile = join(outsideDir, 'target');
+  writeFileSync(outsideFile, 'outside bytes');
+  try {
+    symlinkSync(outsideFile, join(destBlobs, 'gen-restore'));
+    assert.throws(() => seams.materializeRestoreGeneration('gen-restore', backupBlobs, destBlobs), /symlink/, 'a symlink at the target generation path is refused');
+    assert.equal(readFileSync(outsideFile, 'utf8'), 'outside bytes', 'the symlink target was never written through');
+    assert.equal(existsSync(join(destBlobs, blobGenerationDigestFileName('gen-restore'))), false, 'the sidecar was not written either');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(backupBlobs, { recursive: true, force: true });
+    rmSync(target, { recursive: true, force: true });
+    rmSync(outsideDir, { recursive: true, force: true });
   }
 });
 

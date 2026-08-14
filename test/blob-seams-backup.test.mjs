@@ -13,7 +13,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -157,6 +157,31 @@ test('materialize verifies the bytes against the recorded digest (integrity meta
     assert.throws(() => seams.materialize('gen-int', blobsDir), /failed digest verification/);
   } finally {
     cleanupRoots(root, blobsDir);
+  }
+});
+
+test('materialize refuses a pre-existing symlink at the generation path — nothing is written outside', async () => {
+  const { root, seams, adopt } = await setupStore();
+  const blobsDir = mkdtempSync(join(tmpdir(), 'wb-materialize-'));
+  const outsideDir = mkdtempSync(join(tmpdir(), 'wb-outside-'));
+  const outsideFile = join(outsideDir, 'target');
+  writeFileSync(outsideFile, 'outside bytes');
+  try {
+    adopt(Buffer.from('inside bytes'), 'gen-one');
+    // A symlink at the byte-file name must never be written through.
+    symlinkSync(outsideFile, join(blobsDir, 'gen-one'));
+    assert.throws(() => seams.materialize('gen-one', blobsDir), /symlink/, 'a symlink at the generation path is refused');
+    assert.equal(readFileSync(outsideFile, 'utf8'), 'outside bytes', 'the symlink target was never written through');
+    assert.equal(existsSync(join(blobsDir, blobGenerationDigestFileName('gen-one'))), false, 'the sidecar was not written either');
+
+    // The digest-sidecar name is guarded the same way.
+    rmSync(join(blobsDir, 'gen-one'), { force: true });
+    symlinkSync(outsideFile, join(blobsDir, blobGenerationDigestFileName('gen-one')));
+    assert.throws(() => seams.materialize('gen-one', blobsDir), /symlink/, 'a symlinked sidecar path is refused');
+    assert.equal(existsSync(join(blobsDir, 'gen-one')), false, 'the byte file was not written when the sidecar path is a symlink');
+    assert.equal(readFileSync(outsideFile, 'utf8'), 'outside bytes', 'nothing landed outside the blob directory');
+  } finally {
+    cleanupRoots(root, blobsDir, outsideDir);
   }
 });
 

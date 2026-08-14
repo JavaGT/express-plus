@@ -15,8 +15,11 @@
 //     row reachable from committed DB state through the compiled census.
 //     `census()` returns exactly those generations — referenced AND adopted.
 //     A generation whose row is 'pending' (never adopted into committed state)
-//     or whose bytes are missing is NEVER censused and NEVER materialized: the
-//     seam throws instead (fail closed).
+//     is never censused (its bytes are not content-addressed yet). An adopted
+//     generation whose bytes are missing IS censused — its reference is
+//     recorded — and then fails at materialize time: the seam throws (fail
+//     closed) rather than silently dropping a referenced blob from the backup
+//     or restore.
 //
 //   - The stable file name under a `blobs/` directory for a generation's
 //     immutable bytes IS the generation id itself (already the fsBlobs final
@@ -154,16 +157,47 @@ function verifyContainedRegularFile(dir: string, name: string): Containment {
   return { ok: true, size: stat.size };
 }
 
-// Read + shape-check the digest sidecar for a generation. A missing or
-// malformed sidecar is a verification failure (the byte file cannot be trusted
-// without its recorded digest).
+// Refuse to write into an occupied destination before materializing a
+// generation: a pre-existing file, directory, or (critically) symlink at the
+// stable generation path must never be overwritten or followed — a symlink
+// planted at the path would redirect the write OUTSIDE the blob directory.
+// Combined with the exclusive (O_EXCL) writes below, this is a
+// no-write-outside guarantee, not a check-then-write race.
+function assertDestinationClear(dir: string, name: string): void {
+  if (name === '' || name === '.' || name === '..' || name.includes('/') || name.includes('\\') || path.isAbsolute(name)) {
+    throw new Error(`blob destination is not a safe single path segment: ${name}`);
+  }
+  let link: ReturnType<typeof lstatSync>;
+  try {
+    link = lstatSync(path.join(dir, name));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw new Error(`blob destination ${name} is not writable`);
+  }
+  if (link.isSymbolicLink()) {
+    throw new Error(`blob destination ${name} is a symlink — refusing to write outside the blob directory`);
+  }
+  throw new Error(`blob destination ${name} already exists — refusing to overwrite (fail closed)`);
+}
+
+// Read + shape-check the digest sidecar for a generation. The sidecar is
+// containment-checked exactly like the byte file (lstat + realpath inside the
+// blob dir): a symlinked sidecar pointing outside the backup/target must never
+// be trusted as the generation's digest. A missing or malformed sidecar is a
+// verification failure (the byte file cannot be trusted without its recorded
+// digest).
 function readSidecar(
   dir: string,
   generation: string,
 ): { readonly ok: true; readonly digest: string } | { readonly ok: false; readonly reason: string } {
+  const sidecarName = blobGenerationDigestFileName(generation);
+  const contained = verifyContainedRegularFile(dir, sidecarName);
+  if (!contained.ok) {
+    return { ok: false, reason: `the digest sidecar for ${generation} is not a contained regular file: ${contained.reason}` };
+  }
   let raw: string;
   try {
-    raw = readFileSync(path.join(dir, blobGenerationDigestFileName(generation)), 'utf8').trim();
+    raw = readFileSync(path.join(dir, sidecarName), 'utf8').trim();
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
       return { ok: false, reason: `the digest sidecar for ${generation} is missing` };
@@ -279,8 +313,10 @@ export function createBlobSeams(options: BlobSeamsOptions): BlobSeams {
       );
     }
     mkdirSync(destBlobDir, { recursive: true, mode: 0o700 });
-    writeFileSync(path.join(destBlobDir, name), bytes, { mode: 0o600 });
-    writeFileSync(path.join(destBlobDir, blobGenerationDigestFileName(generation)), `${digest}\n`, { mode: 0o600 });
+    assertDestinationClear(destBlobDir, name);
+    assertDestinationClear(destBlobDir, blobGenerationDigestFileName(generation));
+    writeFileSync(path.join(destBlobDir, name), bytes, { flag: 'wx', mode: 0o600 });
+    writeFileSync(path.join(destBlobDir, blobGenerationDigestFileName(generation)), `${digest}\n`, { flag: 'wx', mode: 0o600 });
     return [{ name, size: bytes.length }];
   }
 
@@ -318,8 +354,10 @@ export function createBlobSeams(options: BlobSeamsOptions): BlobSeams {
       );
     }
     mkdirSync(destBlobDir, { recursive: true, mode: 0o700 });
-    writeFileSync(path.join(destBlobDir, verified.name), bytes, { mode: 0o600 });
-    writeFileSync(path.join(destBlobDir, blobGenerationDigestFileName(generation)), `${sha256hex(bytes)}\n`, { mode: 0o600 });
+    assertDestinationClear(destBlobDir, verified.name);
+    assertDestinationClear(destBlobDir, blobGenerationDigestFileName(generation));
+    writeFileSync(path.join(destBlobDir, verified.name), bytes, { flag: 'wx', mode: 0o600 });
+    writeFileSync(path.join(destBlobDir, blobGenerationDigestFileName(generation)), `${sha256hex(bytes)}\n`, { flag: 'wx', mode: 0o600 });
     return [{ name: verified.name, size: bytes.length }];
   }
 
