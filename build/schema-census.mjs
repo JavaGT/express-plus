@@ -462,6 +462,10 @@ export function buildOwnershipCensus(input             )               {
       // does not create, so they are attributed to the declaring schema but
       // never treated as exclusive ownership claims (re-declaration by another
       // schema is valid — consideration #8: declared by another participant).
+      // A framework-reserved name is still off-limits: an external declaration
+      // claims knowledge of the name, and the reserved namespace may not be
+      // claimed by any participant.
+      if (refuseReserved('table', external.name, 'schema', schema.name)) continue;
       if (!book.census.has(censusKey('table', external.name))) {
         book.claim('table', external.name, 'schema', schema.name);
       }
@@ -644,8 +648,14 @@ export function buildOwnershipCensus(input             )               {
   }
 
   // --- migration namespace rules (consideration #12) -----------------------
-  const namespaceOwner = new Map                ();
-  for (const schema of schemas) {
+  // A schema's declared migration namespaces must be unique within that schema,
+  // and a namespace may be claimed by at most one schema across the census.
+  // Ownership is tracked per schema declaration (by ordinal, not just name) so
+  // two distinct schema declarations sharing a name cannot silently share a
+  // namespace.
+  const namespaceOwner = new Map                                             ();
+  for (const [schemaOrdinal, schema] of schemas.entries()) {
+    const seenInSchema = new Set        ();
     for (const migration of schema.migrations ?? []) {
       const namespaceKey = folded(migration.namespace);
       if (namespaceKey === RESERVED_MIGRATION_NAMESPACE) {
@@ -656,17 +666,27 @@ export function buildOwnershipCensus(input             )               {
         });
         continue;
       }
-      const priorOwner = namespaceOwner.get(namespaceKey);
-      if (priorOwner !== undefined && priorOwner !== schema.name) {
+      if (seenInSchema.has(namespaceKey)) {
         errors.push({
           code: 'namespace-claim',
-          message: `migration namespace "${migration.namespace}" is claimed by both schema "${priorOwner}" and schema "${schema.name}"`,
+          message: `schema "${schema.name}" declares migration namespace "${migration.namespace}" more than once`,
           name: migration.namespace,
-          participants: [priorOwner, schema.name],
+          participants: [schema.name, schema.name],
         });
         continue;
       }
-      namespaceOwner.set(namespaceKey, schema.name);
+      const prior = namespaceOwner.get(namespaceKey);
+      if (prior !== undefined && prior.ordinal !== schemaOrdinal) {
+        errors.push({
+          code: 'namespace-claim',
+          message: `migration namespace "${migration.namespace}" is claimed by both schema "${prior.schema}" and schema "${schema.name}"`,
+          name: migration.namespace,
+          participants: [prior.schema, schema.name],
+        });
+        continue;
+      }
+      seenInSchema.add(namespaceKey);
+      namespaceOwner.set(namespaceKey, { schema: schema.name, ordinal: schemaOrdinal });
     }
   }
 

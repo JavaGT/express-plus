@@ -207,6 +207,124 @@ test('duplicate claim: index name colliding with a table name under the SQLite r
   assert.match(result.errors.find((error) => error.code === 'duplicate-claim').message, /relation namespace/);
 });
 
+test('duplicate claim: two schemas declaring the same index name', () => {
+  const schema = (name, table) => ({
+    name,
+    tables: [{ name: table, columns: [{ name: 'id', type: 'text', primaryKey: true }], indexes: [{ name: 'idx_shared' }] }],
+  });
+  const result = buildOwnershipCensus({ schemaDeclarations: [schema('a', 'TA'), schema('b', 'TB')] });
+  assert.deepEqual(errorCodes(result), ['duplicate-claim']);
+  assert.match(result.errors[0].message, /idx_shared/);
+});
+
+test('duplicate claim: entity generated index colliding with a schema index', () => {
+  const Note = entity('Note', { title: text() });
+  const Comment = entity('Comment', { noteId: ref(Note, { physical: true }), body: text() });
+  const schema = {
+    name: 'app',
+    tables: [{ name: 'T', columns: [{ name: 'id', type: 'text', primaryKey: true }], indexes: [{ name: 'idx_Comment_noteId' }] }],
+  };
+  const result = buildOwnershipCensus({ schemaDeclarations: [schema], entities: [Note, Comment] });
+  assert.ok(errorCodes(result).includes('duplicate-claim'), JSON.stringify(result.errors));
+});
+
+test('duplicate claim: schema index colliding with a plugin owned index', () => {
+  const schema = {
+    name: 'app',
+    tables: [{ name: 'T', columns: [{ name: 'id', type: 'text', primaryKey: true }], indexes: [{ name: 'idx_shared' }] }],
+  };
+  const plugins = [{ id: 'p1', ownedObjects: [{ kind: 'index', name: 'idx_shared' }] }];
+  const result = buildOwnershipCensus({ schemaDeclarations: [schema], plugins });
+  assert.ok(errorCodes(result).includes('duplicate-claim'), JSON.stringify(result.errors));
+});
+
+test('duplicate claim: two plugins declaring the same index name', () => {
+  const plugins = [
+    { id: 'p1', ownedObjects: [{ kind: 'index', name: 'idx_shared' }] },
+    { id: 'p2', ownedObjects: [{ kind: 'index', name: 'idx_shared' }] },
+  ];
+  const result = buildOwnershipCensus({ plugins });
+  assert.deepEqual(errorCodes(result), ['duplicate-claim']);
+});
+
+test('duplicate claim: two schemas declaring the same trigger name', () => {
+  const schema = (name, table) => ({
+    name,
+    tables: [{ name: table, columns: [{ name: 'id', type: 'text', primaryKey: true }], triggers: [{ name: 'trg_shared' }] }],
+  });
+  const result = buildOwnershipCensus({ schemaDeclarations: [schema('a', 'TA'), schema('b', 'TB')] });
+  assert.deepEqual(errorCodes(result), ['duplicate-claim']);
+  assert.match(result.errors[0].message, /trg_shared/);
+});
+
+test('duplicate claim: schema trigger colliding with a plugin owned trigger', () => {
+  const schema = {
+    name: 'app',
+    tables: [{ name: 'T', columns: [{ name: 'id', type: 'text', primaryKey: true }], triggers: [{ name: 'trg_shared' }] }],
+  };
+  const plugins = [{ id: 'p1', ownedObjects: [{ kind: 'trigger', name: 'trg_shared' }] }];
+  const result = buildOwnershipCensus({ schemaDeclarations: [schema], plugins });
+  assert.ok(errorCodes(result).includes('duplicate-claim'), JSON.stringify(result.errors));
+});
+
+test('duplicate claim: two plugins declaring the same trigger name', () => {
+  const plugins = [
+    { id: 'p1', ownedObjects: [{ kind: 'trigger', name: 'trg_shared' }] },
+    { id: 'p2', ownedObjects: [{ kind: 'trigger', name: 'trg_shared' }] },
+  ];
+  const result = buildOwnershipCensus({ plugins });
+  assert.deepEqual(errorCodes(result), ['duplicate-claim']);
+});
+
+test('duplicate claim: a schema table colliding with an FTS shadow table', () => {
+  const schema = {
+    name: 'app',
+    tables: [{ name: 'ft_x_data', columns: [{ name: 'id', type: 'text', primaryKey: true }] }],
+    virtualTables: [{ name: 'ft_x', module: 'fts5', options: ['title'], ownerPluginId: 'p1', shadowTables: ['ft_x_data'] }],
+  };
+  const result = buildOwnershipCensus({ schemaDeclarations: [schema], plugins: [{ id: 'p1', ownedObjects: [] }] });
+  assert.ok(errorCodes(result).includes('duplicate-claim'), JSON.stringify(result.errors));
+});
+
+test('duplicate claim: an entity main table colliding with an FTS shadow table', () => {
+  const Note = entity('Note', { title: text() });
+  const schema = {
+    name: 'app',
+    tables: [],
+    virtualTables: [{ name: 'ft_x', module: 'fts5', options: ['title'], ownerPluginId: 'p1', shadowTables: ['Note'] }],
+  };
+  const result = buildOwnershipCensus({ schemaDeclarations: [schema], entities: [Note], plugins: [{ id: 'p1', ownedObjects: [] }] });
+  assert.ok(errorCodes(result).includes('duplicate-claim'), JSON.stringify(result.errors));
+});
+
+test('duplicate claim: shadow tables of two virtual tables colliding', () => {
+  const schema = {
+    name: 'app',
+    tables: [],
+    virtualTables: [
+      { name: 'ft_x', module: 'fts5', options: ['title'], ownerPluginId: 'p1', shadowTables: ['ft_x_data'] },
+      { name: 'ft_y', module: 'fts5', options: ['title'], ownerPluginId: 'p2', shadowTables: ['ft_x_data'] },
+    ],
+  };
+  const plugins = [{ id: 'p1', ownedObjects: [] }, { id: 'p2', ownedObjects: [] }];
+  const result = buildOwnershipCensus({ schemaDeclarations: [schema], plugins });
+  assert.ok(errorCodes(result).includes('duplicate-claim'), JSON.stringify(result.errors));
+});
+
+test('duplicate claim: a second plugin claiming an FTS shadow table', () => {
+  const schema = {
+    name: 'app',
+    tables: [],
+    virtualTables: [{ name: 'ft_x', module: 'fts5', options: ['title'], ownerPluginId: 'p1', shadowTables: ['ft_x_data'] }],
+  };
+  const plugins = [
+    { id: 'p1', ownedObjects: [] },
+    { id: 'p2', ownedObjects: [{ kind: 'table', name: 'ft_x_data' }] },
+  ];
+  const result = buildOwnershipCensus({ schemaDeclarations: [schema], plugins });
+  assert.ok(errorCodes(result).includes('duplicate-claim'), JSON.stringify(result.errors));
+});
+
 // ---------------------------------------------------------------------------
 // Entity/plain conflict (the moved app.ts check)
 // ---------------------------------------------------------------------------
@@ -270,6 +388,12 @@ test('reserved namespace: a schema index claiming a framework index name', () =>
   };
   const result = buildOwnershipCensus({ schemaDeclarations: [schema] });
   assert.ok(errorCodes(result).includes('reserved-namespace'), JSON.stringify(result.errors));
+});
+
+test('reserved namespace: external table declaration claiming a framework table', () => {
+  const schema = { name: 'app', tables: [], externalTables: [{ name: '_Log', columns: ['id'] }] };
+  const result = buildOwnershipCensus({ schemaDeclarations: [schema] });
+  assert.deepEqual(errorCodes(result), ['reserved-namespace']);
 });
 
 test('reserved registry exports: without-auth-compile is a subset of the full registry', () => {
@@ -415,6 +539,27 @@ test('a migration namespace is claimed by exactly one schema', () => {
   const result = buildOwnershipCensus({ schemaDeclarations: [schemaA, schemaB] });
   assert.deepEqual(errorCodes(result), ['namespace-claim']);
   assert.deepEqual(result.errors[0].participants, ['a', 'b']);
+});
+
+test('a schema may not declare the same migration namespace twice', () => {
+  const schema = {
+    name: 'app',
+    tables: [],
+    migrations: [
+      { namespace: 'scope', name: 'a', version: 1 },
+      { namespace: 'scope', name: 'b', version: 2 },
+    ],
+  };
+  const result = buildOwnershipCensus({ schemaDeclarations: [schema] });
+  assert.deepEqual(errorCodes(result), ['namespace-claim']);
+  assert.match(result.errors[0].message, /more than once/);
+});
+
+test('two distinct schema declarations sharing a name may not share a migration namespace', () => {
+  const schemaA = { name: 'app', tables: [], migrations: [{ namespace: 'scope', name: 'm1', version: 1 }] };
+  const schemaB = { name: 'app', tables: [], migrations: [{ namespace: 'scope', name: 'm2', version: 1 }] };
+  const result = buildOwnershipCensus({ schemaDeclarations: [schemaA, schemaB] });
+  assert.deepEqual(errorCodes(result), ['namespace-claim']);
 });
 
 test('two namespaces may share a version and one schema may use multiple namespaces', () => {
