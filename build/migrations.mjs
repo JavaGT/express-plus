@@ -37,6 +37,4 @@ export {
 
 
 
-
-  runLedgerMigrations,
 } from './migration-ledger.mjs';

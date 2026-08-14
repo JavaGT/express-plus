@@ -254,6 +254,33 @@ test('an internally inconsistent migration ledger is rejected', { timeout: 12000
   }
 });
 
+test('migration ledger recovery validation uses the runtime namespace identity rules', { timeout: 120000 }, async () => {
+  const root = tempRoot();
+  try {
+    for (const [name, appliedVersions, pattern] of [
+      ['empty namespace', [{ namespace: '', version: 1 }], /non-empty namespace/],
+      ['NUL namespace', [{ namespace: 'alpha\0beta', version: 1 }], /without NUL bytes/],
+      ['case-folded duplicate', [{ namespace: 'Alpha', version: 1 }, { namespace: 'alpha', version: 1 }], /strictly ascending/],
+    ]) {
+      const caseDir = join(root, name);
+      const backup = await makeBackup(caseDir);
+      const manifest = readManifest(caseDir, backup.backupId);
+      writeFileSync(
+        manifestPath(caseDir, backup.backupId),
+        JSON.stringify({
+          ...manifest,
+          migrationLedgerState: { table: '_SchemaMigration', appliedVersions, maxVersion: 1 },
+        }, null, 2),
+      );
+      const result = await managerFor(caseDir).recover({ backupId: backup.backupId });
+      assert.equal(result.ok, false, name);
+      assert.match(result.reason, pattern, name);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('the declared-identity migration validator seam gates the restore', { timeout: 120000 }, async () => {
   const root = tempRoot();
   const dir = join(root, 'owned');

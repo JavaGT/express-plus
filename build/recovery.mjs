@@ -112,10 +112,16 @@ const STAGE_PREFIX = 'data.sqlite.recovering-';
 // untrusted input, so a manifest-chosen table name is refused (review #83).
 const MIGRATION_LEDGER = MIGRATION_LEDGER_TABLE;
 
-// Ordering for the namespaced ledger's applied versions: namespace (string) then
-// version (numeric) — the same (namespace, version) order backup.ts records.
+function foldedNamespace(namespace        )         {
+  return namespace.toLowerCase();
+}
+
+// Ordering for the namespaced ledger's applied versions uses the same folded
+// namespace identity as the migration runner, then version.
 function compareLedgerEntry(a             , b             )         {
-  if (a.namespace !== b.namespace) return a.namespace < b.namespace ? -1 : 1;
+  const aNamespace = foldedNamespace(a.namespace);
+  const bNamespace = foldedNamespace(b.namespace);
+  if (aNamespace !== bNamespace) return aNamespace < bNamespace ? -1 : 1;
   return a.version - b.version;
 }
 
@@ -801,8 +807,9 @@ export function createRecoveryManager(options                        )          
         if (!entry || typeof entry !== 'object') {
           failures.push('migration ledger appliedVersions contains a non-object entry');
         } else {
-          if (typeof (entry                           ).namespace !== 'string') {
-            failures.push('migration ledger appliedVersions entry is missing a string namespace');
+          const namespace = (entry                           ).namespace;
+          if (typeof namespace !== 'string' || namespace.length === 0 || namespace.includes('\0')) {
+            failures.push('migration ledger appliedVersions entry is missing a non-empty namespace without NUL bytes');
           }
           const version = (entry                         ).version;
           if (typeof version !== 'number' || !Number.isSafeInteger(version) || version <= 0) {
@@ -1407,7 +1414,9 @@ function migrationLedgerOf(db              , manifest                )          
   const rows = db
     .prepare(`SELECT namespace, version FROM ${MIGRATION_LEDGER} ORDER BY namespace, version`)
     .all()                                                 ;
-  const appliedVersions = rows.map((row) => ({ namespace: row.namespace, version: Number(row.version) }));
+  const appliedVersions = rows
+    .map((row) => ({ namespace: row.namespace, version: Number(row.version) }))
+    .sort(compareLedgerEntry);
   const maxVersion = appliedVersions.reduce((max, entry) => Math.max(max, entry.version), 0);
   return { table: MIGRATION_LEDGER, appliedVersions, maxVersion };
 }

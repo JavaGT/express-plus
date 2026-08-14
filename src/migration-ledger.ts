@@ -166,7 +166,14 @@ export function migrationLedgerStateOf(db: DbHandle): MigrationLedgerState {
   const rows = db
     .prepare(`SELECT namespace, version FROM ${MIGRATION_LEDGER_TABLE} ORDER BY namespace, version`)
     .all() as Array<Record<string, unknown>>;
-  const appliedVersions = rows.map((row) => ({ namespace: String(row.namespace), version: Number(row.version) }));
+  const appliedVersions = rows
+    .map((row) => ({ namespace: String(row.namespace), version: Number(row.version) }))
+    .sort((a, b) => {
+      const aNamespace = folded(a.namespace);
+      const bNamespace = folded(b.namespace);
+      if (aNamespace !== bNamespace) return aNamespace < bNamespace ? -1 : 1;
+      return a.version - b.version;
+    });
   const maxVersion = appliedVersions.reduce((max, entry) => Math.max(max, entry.version), 0);
   return { table: MIGRATION_LEDGER_TABLE, appliedVersions, maxVersion };
 }
@@ -361,17 +368,28 @@ export function runLedgerMigrations(
   const appliedByKey = new Map<string, AppliedLedgerRow>();
   for (const row of appliedRows) appliedByKey.set(identityKey(row.namespace, row.version), row);
 
-  // Monotonic policy: a new migration must not sit at or below an already-applied
-  // version in the same namespace (versions are monotonically ordered per namespace).
+  // A pending lane continues exactly from the applied ledger. Declaration
+  // validation catches gaps within this boot; this catches a gap after restart,
+  // when old declarations are no longer supplied.
+  const pendingByNamespace = new Map<string, Migration[]>();
+  const appliedMaxByNamespace = new Map<string, number>();
+  for (const row of appliedRows) {
+    const namespace = folded(row.namespace);
+    appliedMaxByNamespace.set(namespace, Math.max(appliedMaxByNamespace.get(namespace) ?? 0, row.version));
+  }
   for (const migration of migrations) {
     if (appliedByKey.has(identityKey(migration.namespace, migration.version))) continue;
-    const appliedInNamespace = appliedRows.filter(
-      (row) => folded(row.namespace) === folded(migration.namespace),
-    );
-    if (appliedInNamespace.some((row) => row.version >= migration.version)) {
-      const maxApplied = Math.max(...appliedInNamespace.map((row) => row.version));
+    const namespace = folded(migration.namespace);
+    const pending = pendingByNamespace.get(namespace) ?? [];
+    pending.push(migration);
+    pendingByNamespace.set(namespace, pending);
+  }
+  for (const [namespace, pending] of pendingByNamespace) {
+    const firstPending = Math.min(...pending.map((migration) => migration.version));
+    const maxApplied = appliedMaxByNamespace.get(namespace);
+    if (maxApplied !== undefined && firstPending !== maxApplied + 1) {
       throw new Error(
-        `migration "${migration.namespace}@${migration.version}" would insert at or below the already-applied version ${maxApplied} in namespace "${migration.namespace}" — versions must be monotonic per namespace`,
+        `migration "${pending[0].namespace}@${firstPending}" leaves a gap after already-applied version ${maxApplied} in namespace "${pending[0].namespace}" — versions must be contiguous per namespace`,
       );
     }
   }

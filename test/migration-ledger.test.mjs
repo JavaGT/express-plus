@@ -16,6 +16,7 @@ import {
   checksumOf,
   validateMigrations,
 } from '../build/migrations.mjs';
+import * as publicMigrations from '../build/migrations.mjs';
 
 function freshDb() {
   return new DatabaseSync(':memory:');
@@ -295,6 +296,11 @@ test('ledger: the reserved workbench namespace is refused for applications (case
   }
 });
 
+test('ledger: the public migration surface cannot access the package-owned runner', () => {
+  assert.equal('runLedgerMigrations' in publicMigrations, false);
+  assert.equal('LedgerRunnerOptions' in publicMigrations, false);
+});
+
 test('ledger: monotonic/gap policy — a gap in declared versions is refused', () => {
   const db = freshDb();
   try {
@@ -323,13 +329,27 @@ test('ledger: monotonic/gap policy — a new migration at or below an applied ve
       () => runMigrations(db, [
         { namespace: 'alpha', name: 'v1', version: 1, up: () => {} },
       ]),
-      /versions must be monotonic per namespace/,
+      /versions must be contiguous per namespace/,
     );
     // An incremental declaration ABOVE the applied max is fine.
     runMigrations(db, [
       { namespace: 'alpha', name: 'v3', version: 3, up: () => {} },
     ]);
     assert.deepEqual(seq(db), ['alpha@2', 'alpha@3']);
+  } finally {
+    db.close();
+  }
+});
+
+test('ledger: restart declarations cannot skip a version after the applied ledger', () => {
+  const db = freshDb();
+  try {
+    runMigrations(db, [{ namespace: 'alpha', name: 'v1', version: 1, up: () => {} }]);
+    assert.throws(
+      () => runMigrations(db, [{ namespace: 'alpha', name: 'v3', version: 3, up: () => {} }]),
+      /leaves a gap after already-applied version 1/,
+    );
+    assert.deepEqual(seq(db), ['alpha@1']);
   } finally {
     db.close();
   }

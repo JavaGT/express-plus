@@ -37,6 +37,4 @@ export {
   type AppliedLedgerRow,
   type LedgerEntry,
   type MigrationLedgerState,
-  type LedgerRunnerOptions,
-  runLedgerMigrations,
 } from './migration-ledger.ts';
