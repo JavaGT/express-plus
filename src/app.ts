@@ -56,6 +56,8 @@ import { createPostCommitEffectRunner } from './post-commit-effects.ts';
 import { createClock } from './clock.ts';
 import { createWriteQueue } from './write-queue.ts';
 import { createMaintenanceSeam } from './maintenance.ts';
+import { createSchemaMaintenanceRunner } from './schema-maintenance.ts';
+import { createDerivedResourceRegistry } from './derived-resource.ts';
 import { createPrincipalSnapshotTransaction } from './principal-snapshot-transaction.ts';
 import { prepareGracefulShutdown } from './lifecycle.ts';
 import { createLog, withLog } from './log.ts';
@@ -235,6 +237,8 @@ export default function workbench({
   blobs: blobOpts,
   requireEnv = [],
   migrations = [],
+  maintenanceSteps = [],
+  derivedResources = [],
   jobs: jobOpts,
   log: logOpts,
   port,
@@ -587,6 +591,16 @@ export default function workbench({
       () => app.db ?? null,
       app.writeCoordinator,
     ).withForeignKeysDisabled;
+    app.schemaMaintenance = createSchemaMaintenanceRunner({
+      db: () => app.db ?? null,
+      steps: maintenanceSteps,
+      writeCoordinator: app.writeCoordinator,
+    });
+    app.derivedResources = createDerivedResourceRegistry({
+      db: () => app.db ?? null,
+      writeCoordinator: app.writeCoordinator,
+    });
+    for (const resource of derivedResources) app.derivedResources.register(resource);
     const principalSnapshotRuntime = createPrincipalSnapshotTransaction(app);
     app.principalSnapshots = { transaction: principalSnapshotRuntime.transaction };
     app._principalSnapshotRuntime = principalSnapshotRuntime;
@@ -813,7 +827,11 @@ export default function workbench({
           await runWorkbenchMigrations(app.db);
           if (declaredMigrations.length) runMigrations(app.db, declaredMigrations);
 
-          // Phase 8: indexes and declared constraints are installed only after
+          // Phase 8: non-transactional maintenance resumes after transactional
+          // migrations. It has its own durable ledger and makes no atomicity claim.
+          await app.schemaMaintenance.run();
+
+          // Phase 9: indexes and declared constraints are installed only after
           // migrations can add/reshape their backing columns.
           if (schema) schema.prepare(app.db, { skipMigrations: true });
           if (schema) {
@@ -823,7 +841,7 @@ export default function workbench({
             for (const sql of generateDDL(entity).filter((statement) => /^CREATE\s+(?:UNIQUE\s+)?INDEX\b/i.test(statement))) app.db.exec(sql);
           }
 
-          // Phase 9: plugin-owned derived resources. CREATE IF NOT EXISTS makes a
+          // Phase 10: plugin-owned derived resources. CREATE IF NOT EXISTS makes a
           // settled reboot non-destructive, including declared triggers.
           if (schema) {
             for (const sql of schema.virtualTableDdl) app.db.exec(sql);
@@ -839,6 +857,7 @@ export default function workbench({
               if (!existing) for (const sql of object.ddl) app.db.exec(sql);
             }
           }
+          await app.derivedResources.prepareAll();
           // Bind only after every plugin-owned object has been lifecycle-created
           // and the declaration census has succeeded. Plugin callbacks receive
           // this narrow capability, never the database handle.
@@ -859,10 +878,11 @@ export default function workbench({
             fn: () => void app.searchReconcile.reconcileBatches().catch((err: unknown) => app.log.warn('system', 'search reconcile drain failed', { err })),
           });
 
-          // Phase 10: reconcile stale derived resources before validation/admission.
+          // Phase 11: reconcile stale derived resources before validation/admission.
+          await app.derivedResources.reconcileBatches();
           await app.searchReconcile.reconcileBatches();
 
-          // Phase 11: exact declaration drift, foreign-key consistency, and the
+          // Phase 12: exact declaration drift, foreign-key consistency, and the
           // SQLite integrity check all run over the settled schema, never rows.
           for (const entity of app.entities.values()) {
             const declaration = schemaTables.get(entity.name.toLowerCase());
