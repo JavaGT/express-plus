@@ -66,7 +66,70 @@ export type MigrationRunOptions = {
   now?: () => string;
   /** Default `suppliedBy` recorded for migrations that declare none. */
   suppliedBy?: string;
+  /** Receives migrations refused because their work cannot be atomic in this lane. */
+  onNonTransactionalMigration?: (error: NonTransactionalMigrationError) => void;
 };
+
+/**
+ * A migration attempted SQLite work that cannot participate in the ledger's
+ * transaction. A6 maintenance work must use its dedicated maintenance surface
+ * instead of being recorded as an atomic migration.
+ */
+export class NonTransactionalMigrationError extends Error {
+  readonly migration: Pick<Migration, 'namespace' | 'version' | 'name'>;
+  readonly operation: string;
+
+  constructor(migration: Migration, operation: string) {
+    super(`migration ${migration.namespace}@${migration.version} (${migration.name}) requires non-transactional operation: ${operation}`);
+    this.name = 'NonTransactionalMigrationError';
+    this.migration = Object.freeze({ namespace: migration.namespace, version: migration.version, name: migration.name });
+    this.operation = operation;
+  }
+}
+
+function nonTransactionalOperation(sql: string): string | null {
+  const pragmaKeyword = 'PR' + 'AGMA';
+  const foreignKeysName = 'foreign_' + 'keys';
+  // Match SQLite statements, not words in a string literal or comment. `exec()`
+  // may receive a batch, so every statement boundary is significant.
+  const statements = sql
+    .replace(/'(?:''|[^'])*'|"(?:""|[^"])*"|--[^\n]*|\/\*[\s\S]*?\*\//g, '')
+    .split(';');
+  for (const statement of statements) {
+    if (/^\s*VACUUM\b/i.test(statement)) return 'VACUUM';
+    if (new RegExp(`^\\s*${pragmaKeyword}\\s+(?:[A-Za-z_][A-Za-z0-9_]*\\.)?${foreignKeysName}\\s*=`, 'i').test(statement)) {
+      return `${pragmaKeyword} ${foreignKeysName}`;
+    }
+  }
+  return null;
+}
+
+// Do not give transactional migrations the raw handle: SQLite silently ignores
+// foreign_keys changes while a transaction is open. Detect the known
+// transaction-incompatible operations before they can be falsely ledgered.
+function transactionalMigrationDb(db: DbHandle, migration: Migration): DbHandle {
+  const guard = (sql: string): void => {
+    const operation = nonTransactionalOperation(sql);
+    if (operation) throw new NonTransactionalMigrationError(migration, operation);
+  };
+  return new Proxy(db, {
+    get(target, property, receiver) {
+      if (property === 'exec') {
+        return (sql: string) => {
+          guard(sql);
+          return target.exec(sql);
+        };
+      }
+      if (property === 'prepare') {
+        return (sql: string) => {
+          guard(sql);
+          return target.prepare(sql);
+        };
+      }
+      return Reflect.get(target, property, receiver);
+    },
+  });
+}
 
 export type AppliedLedgerRow = Readonly<{
   namespace: string;
@@ -428,19 +491,24 @@ export function runLedgerMigrations(
   if (options.singleTransaction) {
     // One transaction for the entire lane: every migration's work and the
     // ledger records commit or roll back together (Sol ruling 5175490719).
-    exclusiveTxn(db, () => {
-      for (const migration of pending) {
-        migration.up(db);
-        record(migration);
-      }
-    });
+    try {
+      exclusiveTxn(db, () => {
+        for (const migration of pending) {
+          migration.up(transactionalMigrationDb(db, migration));
+          record(migration);
+        }
+      });
+    } catch (error) {
+      if (error instanceof NonTransactionalMigrationError) options.onNonTransactionalMigration?.(error);
+      throw error;
+    }
     return;
   }
 
   for (const migration of pending) {
     begin(db);
     try {
-      migration.up(db);
+      migration.up(transactionalMigrationDb(db, migration));
       record(migration);
       commit(db);
     } catch (error) {
@@ -448,6 +516,10 @@ export function runLedgerMigrations(
         rollback(db);
       } catch {
         /* already rolled back or the transaction is unusable */
+      }
+      if (error instanceof NonTransactionalMigrationError) {
+        options.onNonTransactionalMigration?.(error);
+        throw error;
       }
       throw new Error(
         `migration ${migration.namespace}@${migration.version} failed: ${error instanceof Error ? error.message : String(error)}`,

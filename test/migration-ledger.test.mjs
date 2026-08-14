@@ -15,6 +15,7 @@ import {
   migrationLedgerStateOf,
   checksumOf,
   validateMigrations,
+  NonTransactionalMigrationError,
 } from '../build/migrations.mjs';
 import * as publicMigrations from '../build/migrations.mjs';
 
@@ -132,6 +133,25 @@ test('ledger: a failed migration rolls back with no half-recorded version', () =
     );
     assert.deepEqual(seq(db), ['alpha@1'], 'no version 2 row recorded on failure');
     assert.ok(!db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_note_body'").get(), 'failed index rolled back');
+  } finally {
+    db.close();
+  }
+});
+
+test('ledger: a foreign_keys toggle is refused as non-transactional and never ledgered', () => {
+  const db = freshDb();
+  try {
+    const refused = [];
+    assert.throws(
+      () => runMigrations(db, [{
+        namespace: 'alpha', name: 'foreign-keys', version: 1,
+        up: (d) => d.exec('PRAGMA foreign_keys = OFF'),
+      }], { onNonTransactionalMigration: (error) => refused.push(error) }),
+      NonTransactionalMigrationError,
+    );
+    assert.equal(refused.length, 1);
+    assert.equal(refused[0].operation, 'PRAGMA foreign_keys');
+    assert.deepEqual(seq(db), []);
   } finally {
     db.close();
   }

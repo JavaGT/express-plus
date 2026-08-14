@@ -70,6 +70,24 @@ import path from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { makeMountable } from './router.ts';
 
+function observedSchemaObjects(db: { prepare(sql: string): { all(): Array<Record<string, unknown>> } }) {
+  return db.prepare("SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND type IN ('table', 'index', 'trigger')").all()
+    .map((row) => ({
+      type: (String(row.type) === 'table' && /^CREATE\s+VIRTUAL\s+TABLE/i.test(String(row.sql ?? '')) ? 'virtual-table' : String(row.type)) as 'table' | 'index' | 'trigger' | 'virtual-table',
+      name: String(row.name),
+    }));
+}
+
+function ownerDescription(census: ReadonlyMap<string, { kind: string; owner: string }>, name: string, kind: 'table' | 'index' | 'trigger' | 'virtual-table' = 'table'): string {
+  const entry = census.get(`${kind}:${name.toLowerCase()}`)
+    ?? (kind === 'table' ? census.get(`virtual-table:${name.toLowerCase()}`) : undefined);
+  return entry ? `${entry.kind} "${entry.owner}" ${kind} "${name}"` : `undeclared ${kind} "${name}"`;
+}
+
+function quotedSqlLiteral(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
 // router(opts) — a mini-app mounted bare into a parent app with
 // `app.mount(path, router)`. `{ mergeParams: true }` lets a child read a parent
 // path param. A router resolves its routes relative to its own base ('/') and is
@@ -831,17 +849,38 @@ export default function workbench({
               });
             }
           }
-          const exactErrors = validateExactSchema(app.db, ownership.census, schema ? [schema] : [])
+          const settledOwnership = buildOwnershipCensus({
+            schemaDeclarations: schema ? [schema] : [],
+            entities: [...app.entities.values()],
+            plugins: app.searchPlugins.ids().map((id: string) => {
+              const plugin: SearchPlugin = app.searchPlugins.get(id)!;
+              return { id: plugin.id, ownedObjects: plugin.ownedObjects.map(({ kind, name }) => ({ kind, name })) };
+            }),
+            observed: observedSchemaObjects(app.db),
+          });
+          latestSchemaReport = createSchemaReport(app.db, settledOwnership.census);
+          if (settledOwnership.errors.length > 0) throw new Error(settledOwnership.errors[0].message);
+          const exactErrors = validateExactSchema(app.db, settledOwnership.census, schema ? [schema] : [], { validateCensus: true })
             // A schema-owned entity root may legitimately carry a trigger that
             // belongs to a registered derived-resource plugin (A2 ownership).
-            .filter((error) => ownership.census.get(`trigger:${error.name.toLowerCase()}`)?.kind !== 'plugin');
-          if (exactErrors.length > 0) throw new Error(exactErrors[0].message);
+            .filter((error) => settledOwnership.census.get(`trigger:${error.name.toLowerCase()}`)?.kind !== 'plugin');
+           if (exactErrors.length > 0) throw new Error(exactErrors[0].message);
           const foreignKeyErrors = app.db.prepare('PRAGMA foreign_key_check').all();
-          if (foreignKeyErrors.length > 0) throw new Error('schema integrity check failed: foreign key violation');
-          const integrityErrors = app.db.prepare('PRAGMA integrity_check').all()
-            .filter((row: Record<string, unknown>) => Object.values(row).some((value) => value !== 'ok'));
-          if (integrityErrors.length > 0) throw new Error('schema integrity check failed: SQLite integrity_check failed');
-          latestSchemaReport = createSchemaReport(app.db, ownership.census);
+          if (foreignKeyErrors.length > 0) {
+            const violation = foreignKeyErrors[0] as Record<string, unknown>;
+            throw new Error(`${ownerDescription(settledOwnership.census, String(violation.table))} has a foreign key violation`);
+          }
+          // The global PRAGMA output names pages rather than schema objects. Run
+          // it once per census relation so a failure always has its declared
+          // owner, without exposing table data in the diagnostic.
+          for (const entry of settledOwnership.census.values()) {
+            if (entry.objectKind !== 'table' && entry.objectKind !== 'virtual-table') continue;
+            const findings = app.db.prepare(`PRAGMA integrity_check(${quotedSqlLiteral(entry.name)})`).all()
+              .flatMap((row: Record<string, unknown>) => Object.values(row).filter((value): value is string => typeof value === 'string' && value !== 'ok'));
+            if (findings.length > 0) {
+              throw new Error(`${ownerDescription(settledOwnership.census, entry.name, entry.objectKind)} failed SQLite integrity_check: ${findings[0]}`);
+            }
+          }
           return app;
         })();
       }

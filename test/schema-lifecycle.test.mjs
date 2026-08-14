@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import workbench from '../build/internal.mjs';
 import { defineSqliteSchema } from '../build/server.mjs';
 
@@ -17,20 +20,84 @@ function schema() {
 }
 
 test('schema lifecycle creates a complete machine-readable census and is idempotent on reboot', async () => {
-  const db = new DatabaseSync(':memory:');
+  const root = mkdtempSync(join(tmpdir(), 'workbench-schema-lifecycle-'));
+  const databasePath = join(root, 'data.sqlite');
+  let db = new DatabaseSync(databasePath);
   try {
-    const app = workbench({ db, schema: schema() });
-    await app.prepareSchema();
-    const first = app.schemaReport();
+    const firstApp = workbench({ db, schema: schema() });
+    await firstApp.prepareSchema();
+    const first = firstApp.schemaReport();
     assert.ok(first);
     assert.equal(first.objects.find((entry) => entry.name === 'Task')?.state, 'present');
     assert.equal(first.objects.find((entry) => entry.name === 'idx_task_title')?.lifecyclePhase, 'indexes-and-constraints');
     assert.equal(first.objects.find((entry) => entry.name === 'task_audit')?.state, 'present');
 
     const triggerSql = db.prepare("SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = 'task_audit'").get().sql;
-    await app.prepareSchema();
+    db.close();
+    // A fresh connection and a fresh app exercise the real process-reboot path.
+    db = new DatabaseSync(databasePath);
+    const statements = [];
+    const exec = db.exec.bind(db);
+    db.exec = (sql) => { statements.push(sql); return exec(sql); };
+    const rebootedApp = workbench({ db, schema: schema() });
+    await rebootedApp.prepareSchema();
     assert.equal(db.prepare("SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = 'task_audit'").get().sql, triggerSql);
-    assert.deepEqual(app.schemaReport().ledger, first.ledger);
+    assert.deepEqual(rebootedApp.schemaReport().ledger, first.ledger);
+    assert.equal(statements.some((sql) => /\b(?:DROP|DELETE|ALTER)\b/i.test(sql)), false, 'reboot preparation did not run destructive DDL');
+  } finally {
+    db.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('schema lifecycle reports an undeclared physical object', async () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    db.exec('CREATE TABLE Intruder (id TEXT PRIMARY KEY)');
+    const app = workbench({ db, schema: schema() });
+    await assert.rejects(app.prepareSchema(), /observed table "Intruder" is not declared by any lifecycle participant/);
+    assert.deepEqual(
+      app.schemaReport().objects.find((entry) => entry.name === 'Intruder'),
+      { name: 'Intruder', kind: 'table', ownerKind: 'undeclared', owner: 'undeclared', lifecyclePhase: 'undeclared', state: 'present' },
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test('schema lifecycle attributes foreign key violations to the owning object', async () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    const violatingSchema = defineSqliteSchema({
+      name: 'integrity-owner',
+      tables: [
+        { name: 'Parent', columns: [{ name: 'id', type: 'text', primaryKey: true }] },
+        { name: 'Child', columns: [{ name: 'id', type: 'text', primaryKey: true }, { name: 'parentId', type: 'text' }], foreignKeys: [{ columns: ['parentId'], references: { table: 'Parent', columns: ['id'] } }] },
+      ],
+    });
+    violatingSchema.prepare(db);
+    db.exec('PRAGMA foreign_keys = OFF; INSERT INTO Child (id, parentId) VALUES (\'child\', \'missing\'); PRAGMA foreign_keys = ON');
+    const app = workbench({ db, schema: violatingSchema });
+    await assert.rejects(app.prepareSchema(), /schema "integrity-owner" table "Child" has a foreign key violation/);
+  } finally {
+    db.close();
+  }
+});
+
+test('no public API can execute DDL after schema startup', async () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    const app = workbench({ db, schema: schema() });
+    await app.prepareSchema();
+    const statements = [];
+    const exec = db.exec.bind(db);
+    const prepare = db.prepare.bind(db);
+    db.exec = (sql) => { statements.push(sql); return exec(sql); };
+    db.prepare = (sql) => { statements.push(sql); return prepare(sql); };
+    await app.prepareSchema();
+    await app.ddl();
+    app.schemaReport();
+    assert.equal(statements.some((sql) => /^\s*(?:CREATE|ALTER|DROP|VACUUM|REINDEX)\b/i.test(sql)), false, 'public APIs cannot reach DDL after startup');
   } finally {
     db.close();
   }
