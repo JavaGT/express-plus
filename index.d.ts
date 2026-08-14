@@ -1115,6 +1115,45 @@ export function event<State = unknown, Payload = Record<string, unknown>>(
   reduce: (state: State, payload: Payload) => State,
 ): EventHandle<State, Payload>;
 
+export type AtomicOperation =
+  | Readonly<{ kind: 'setAdd'; field: string; value: unknown }>
+  | Readonly<{ kind: 'setRemove'; field: string; value: unknown }>
+  | Readonly<{ kind: 'increment'; field: string; by: number }>
+  | Readonly<{ kind: 'claim'; field: string; value: unknown }>
+  | Readonly<{ kind: 'acknowledge'; field: string }>
+  | Readonly<{ kind: 'toggleTo'; field: string; value: boolean }>;
+export const ATOMIC_OPERATION_KINDS: readonly ['setAdd', 'setRemove', 'increment', 'claim', 'acknowledge', 'toggleTo'];
+export interface AtomicExecution {
+  readonly row: Readonly<Record<string, unknown>>;
+  readonly applied: boolean;
+}
+export interface AtomicOperationContext {
+  readonly payload: unknown;
+  readonly principal: unknown;
+  readonly db: unknown;
+  readonly now: string;
+  readonly scope: string;
+  readonly actionId: string;
+}
+export interface AtomicOperationRegistration {
+  readonly entity: WorkbenchEntity;
+  readonly read: (context: AtomicOperationContext) => Readonly<Record<string, unknown>> | Promise<Readonly<Record<string, unknown>>>;
+}
+export type AtomicOperationHandler = ((context: AtomicOperationContext & { readonly atomic: AtomicExecution }) => unknown) & {
+  readonly inTransaction?: boolean;
+  readonly atomicOperation?: AtomicOperationRegistration;
+};
+export function setAdd(field: string, value: unknown): AtomicOperation;
+export function setRemove(field: string, value: unknown): AtomicOperation;
+export function increment(field: string, by?: number): AtomicOperation;
+export function claim(field: string, value: unknown): AtomicOperation;
+export function acknowledge(field: string): AtomicOperation;
+export function toggleTo(field: string, value: boolean): AtomicOperation;
+export function isAtomicOperation(value: unknown): value is AtomicOperation;
+export function executeAtomicOperation(row: Readonly<Record<string, unknown>>, operation: AtomicOperation): AtomicExecution;
+export function executeAtomicOperations(row: Readonly<Record<string, unknown>>, operations: readonly AtomicOperation[]): AtomicExecution;
+export function atomicOperation(registration: AtomicOperationRegistration, handler: AtomicOperationHandler): AtomicOperationHandler;
+
 export interface CommittedEvent<Data = unknown> {
   readonly type: string;
   readonly scope: string;

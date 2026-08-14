@@ -27,7 +27,8 @@ import { declarePostCommitEffectsInTxn } from './post-commit-effects.ts';
 import { protectedArtefactCapability } from './protected-artefact-store.ts';
 import type { AuthorizationAdapter } from './authorization-adapter.ts';
 import type { DataTier } from './live-tier.ts';
-import { isAtomicOperation } from './atomic-operations.ts';
+import { executeAtomicOperations, isAtomicOperation, type AtomicExecution, type AtomicOperationContext } from './atomic-operations.ts';
+import { admitRowTransition } from './field-admission.ts';
 import { writeInvalidationInTxn } from './invalidation-ledger.ts';
 
 // `action(type)` — declare an imperative request type. The handler that turns it
@@ -643,6 +644,38 @@ function checkHandlers(handlers: Record<string, any>, actions: any[]): number {
   return -1;
 }
 
+function atomicOperationsFor(payload: unknown): readonly import('./atomic-operations.ts').AtomicOperation[] | null {
+  if (!isPlainObject(payload)) return null;
+  const operations = (payload as Record<string, unknown>).atomicOperations;
+  if (operations === undefined) return null;
+  if (!Array.isArray(operations) || !operations.every(isAtomicOperation)) {
+    throw new ValidationError('atomicOperations must be an array of known atomic operations');
+  }
+  return operations;
+}
+
+async function resolveAtomicOperation(handler: any, context: AtomicOperationContext & { authorization?: AuthorizationAdapter | null }): Promise<AtomicExecution | undefined> {
+  const registration = handler.atomicOperation;
+  if (!registration) return undefined;
+  const operations = atomicOperationsFor(context.payload);
+  if (!operations) throw new ValidationError('atomic operation requires atomicOperations');
+  const before = await registration.read(context);
+  if (!isPlainObject(before)) throw new ValidationError('atomic operation target row was not found');
+  const resolved = executeAtomicOperations(before, operations);
+  for (const operation of operations) {
+    requireAdmission(await admitRowTransition({
+      entity: registration.entity,
+      verb: 'update',
+      before,
+      after: resolved.row,
+      fieldName: operation.field,
+      principal: context.principal,
+      authorization: context.authorization,
+    }));
+  }
+  return resolved;
+}
+
 // Returns deniedOutcome(details) when `result` is falsy, or null when authorized.
 function authorizedOrDenied(result: unknown, details?: unknown) {
   if (!result) return deniedOutcome(details);
@@ -744,6 +777,23 @@ function handleOfEvent(event: any): any {
   }
 }
 
+// A raw DatabaseSync has no async transaction mutex. Pipeline stages may await
+// admission or projections, so serialize transaction entry per handle rather
+// than allowing a second dispatch to begin inside the first transaction.
+const transactionTails = new WeakMap<object, Promise<void>>();
+async function coordinatedTxn<T>(db: DbHandle, fn: () => Promise<T>): Promise<T> {
+  let release: (() => void) | undefined;
+  const previous = transactionTails.get(db as object) ?? Promise.resolve();
+  const tail = new Promise<void>((resolve) => { release = resolve; });
+  transactionTails.set(db as object, previous.then(() => tail));
+  await previous;
+  try {
+    return await txn(db, fn) as T;
+  } finally {
+    release!();
+  }
+}
+
 // commitEvents — the durable transaction brace shared by `dispatch` and
 // `dispatchBatch`: BEGIN IMMEDIATE → durable variant applyInTxn → COMMIT →
 // post-commit fan-out, with ROLLBACK on execution error. Expected failures are
@@ -800,7 +850,7 @@ async function commitEvents(db: any, events: any, {
     //
     // A denied action rolls back the entire transaction — no partial state.
     // Post-commit consumers (afterCommit) remain outside the txn as before.
-    committed = await txn(db, async () => {
+    committed = await coordinatedTxn(db, async () => {
       if (authorize) {
         if (Array.isArray(payload)) {
           for (const action of payload) {
@@ -832,8 +882,13 @@ async function commitEvents(db: any, events: any, {
           ? protectedArtefactCapability(db, handler.protectedArtefactTables)
           : null;
         try {
+          atomicOperationsFor(payload);
+          const atomic = await resolveAtomicOperation(handler, {
+            payload, principal, db, now, scope, actionId, authorization,
+          });
           events = await handler({
             payload, principal, db, now, scope, actionId,
+            ...(atomic ? { atomic } : {}),
             ...(authorization !== undefined && authorization !== null ? { authorization } : {}),
             ...(protectedArtefact ? { protectedArtefact } : {}),
             ...(historyCommit?.handlerInputs ? { history: historyCommit.handlerInputs[0] } : {}),

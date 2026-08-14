@@ -8,6 +8,7 @@ export { read, write, subscribe, admin, grant, deny } from './grant.ts';
 export { scope } from './scope.ts';
 export { entity } from './entity/compile.ts';
 export { action, event } from './pipeline.ts';
+export { acknowledge, atomicOperation, ATOMIC_OPERATION_KINDS, claim, executeAtomicOperation, executeAtomicOperations, increment, isAtomicOperation, setAdd, setRemove, toggleTo, type AtomicExecution, type AtomicOperation, type AtomicOperationContext, type AtomicOperationHandler, type AtomicOperationRegistration } from './atomic-operations.ts';
 export { durableHistory } from './durable-history.ts';
 export { erasureDirective, erasureDirectivePreparation } from './erasure-directive.ts';
 export { postCommitEffect } from './post-commit-effects.ts';

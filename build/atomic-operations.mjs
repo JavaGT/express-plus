@@ -13,6 +13,7 @@ import { frozenJsonSnapshot } from './frozen-json.mjs';
 
 
 
+
 export const ATOMIC_OPERATION_KINDS = Object.freeze([
   'setAdd', 'setRemove', 'increment', 'claim', 'acknowledge', 'toggleTo',
 ]         );
@@ -71,7 +72,7 @@ export function isAtomicOperation(value         )                           {
   switch (operation.kind) {
     case 'setAdd':
     case 'setRemove':
-    case 'claim': return hasKeys('kind', 'field', 'value');
+    case 'claim': return hasKeys('kind', 'field', 'value') && isJsonValue(operation.value);
     case 'increment': return hasKeys('kind', 'field', 'by') && typeof operation.by === 'number' && Number.isFinite(operation.by);
     case 'acknowledge': return hasKeys('kind', 'field');
     case 'toggleTo': return hasKeys('kind', 'field', 'value') && typeof operation.value === 'boolean';
@@ -79,10 +80,58 @@ export function isAtomicOperation(value         )                           {
   }
 }
 
+function isJsonValue(value         , seen = new Set         ())          {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (Array.isArray(value)) {
+    if (seen.has(value)) return false;
+    seen.add(value);
+    return value.every((item) => isJsonValue(item, seen));
+  }
+  if (!value || typeof value !== 'object' || Object.getPrototypeOf(value) !== Object.prototype || seen.has(value)) return false;
+  seen.add(value);
+  return Object.values(value).every((item) => isJsonValue(item, seen));
+}
 
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// Marks a handler as an atomic operation. The pipeline owns the in-transaction
+// read, resolution, field admission, and subsequent handler call.
+export function atomicOperation(
+  registration                             ,
+  handler                        ,
+)                         {
+  if (!registration?.entity || typeof registration.read !== 'function') {
+    throw new TypeError('atomic operation requires an entity and current-row reader');
+  }
+  Object.defineProperties(handler, {
+    atomicOperation: { value: Object.freeze(registration) },
+    inTransaction: { value: true },
+  });
+  return handler;
+}
 
 // Resolve one operation against the row read inside the write-coordinator
 // transaction. A no-op is successful and retry-safe; a claim by another actor

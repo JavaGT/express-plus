@@ -1,5 +1,5 @@
 import workbench, {
-  action, event, entity, text, date, ref, projected, computed, ephemeral, inherit, log, state,
+  action, event, entity, text, date, ref, number, projected, computed, ephemeral, inherit, log, state,
   schedule, tick,
   admin, authorizedRows, principal, read, write, grant, membership, parseCookies, SESSION_COOKIE,
   apiKeyPrincipalOf, createInvitationApi as createRootInvitationApi, emailSeam,
@@ -8,6 +8,8 @@ import workbench, {
   matchRoute, noopTransport, serveStatic, sessionCookie, sessionPrincipalOf,
   sessionTokenOf, registerAnnotatedTextStructuralExtension as registerRootAnnotatedTextStructuralExtension,
   durableHistory,
+  acknowledge, atomicOperation, claim, executeAtomicOperation, executeAtomicOperations, increment,
+  isAtomicOperation, setAdd, setRemove, toggleTo,
   normalizeTierDeclaration, tierOf, isDataTier, isEntityTier, DATA_TIERS, ENTITY_TIERS, TIER_DESCRIPTIONS,
   type DataTier, type EntityTier, type HistoryMode, type HistoryVerb, type HistoryVerbMode,
   type ResolvedTier, type TierDeclaration,
@@ -18,6 +20,7 @@ import workbench, {
   type AuditSink, type Auditor, type AuditorOptions, type DenialAuditor, type DenialInput,
   type RetentionConfig,
   type ErasurePreparationContext, type ErasurePreparationReads,
+  type AtomicExecution, type AtomicOperation, type AtomicOperationContext, type AtomicOperationHandler, type AtomicOperationRegistration,
   type OrdinaryRegisteredProjection, type PrivateFactRegisteredProjection,
   type DeclaredClaimedBlob, type RegisteredAction, type WorkbenchApp, type WorkbenchEntity, type WriteQueue,
 } from 'workbench';
@@ -67,6 +70,21 @@ const liveOnlyResolved: ResolvedTier = normalizeTierDeclaration({ live: true });
 const tierDeclaration: TierDeclaration = { history: { create: 'none' }, live: true };
 const classifiedTier: DataTier = tierOf({ live: true });
 void [allTiers, entityOnlyTiers, derivedDescription, tierPredicate, historyVerb, reservedNoneMode, conditionalMode, resolvedTier, liveOnlyResolved, tierDeclaration, classifiedTier];
+
+const atomicValue: AtomicOperation = increment('count');
+const atomicExecution: AtomicExecution = executeAtomicOperations({ count: 0 }, [atomicValue]);
+const atomicContext: AtomicOperationContext = {
+  payload: { atomicOperations: [atomicValue] }, principal: null, db: {}, now: '', scope: '', actionId: '',
+};
+const atomicRegistration: AtomicOperationRegistration = {
+  entity: entity('AtomicNote', { count: number(), grant: grant(read) }),
+  read: () => ({ count: 0 }),
+};
+const atomicHandler: AtomicOperationHandler = atomicOperation(atomicRegistration, ({ atomic }) => {
+  const one = executeAtomicOperation(atomic.row, increment('count'));
+  return [one];
+});
+void [acknowledge, claim, executeAtomicOperation, increment, isAtomicOperation, setAdd, setRemove, toggleTo, atomicExecution, atomicContext, atomicHandler];
 
 declare const claimedBlobApp: WorkbenchApp;
 const claimedBlobApi: ClaimedBlobLifecycle = claimedBlobLifecycle(claimedBlobApp);

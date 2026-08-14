@@ -4,6 +4,7 @@
 
 import { ValidationError } from './field-strategy.ts';
 import { frozenJsonSnapshot } from './frozen-json.ts';
+import type { EntityRecord } from './row-grant.ts';
 
 export type AtomicOperation =
   | Readonly<{ kind: 'setAdd'; field: string; value: unknown }>
@@ -71,7 +72,7 @@ export function isAtomicOperation(value: unknown): value is AtomicOperation {
   switch (operation.kind) {
     case 'setAdd':
     case 'setRemove':
-    case 'claim': return hasKeys('kind', 'field', 'value');
+    case 'claim': return hasKeys('kind', 'field', 'value') && isJsonValue(operation.value);
     case 'increment': return hasKeys('kind', 'field', 'by') && typeof operation.by === 'number' && Number.isFinite(operation.by);
     case 'acknowledge': return hasKeys('kind', 'field');
     case 'toggleTo': return hasKeys('kind', 'field', 'value') && typeof operation.value === 'boolean';
@@ -79,9 +80,57 @@ export function isAtomicOperation(value: unknown): value is AtomicOperation {
   }
 }
 
+function isJsonValue(value: unknown, seen = new Set<unknown>()): boolean {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (Array.isArray(value)) {
+    if (seen.has(value)) return false;
+    seen.add(value);
+    return value.every((item) => isJsonValue(item, seen));
+  }
+  if (!value || typeof value !== 'object' || Object.getPrototypeOf(value) !== Object.prototype || seen.has(value)) return false;
+  seen.add(value);
+  return Object.values(value).every((item) => isJsonValue(item, seen));
+}
+
 export interface AtomicExecution {
   readonly row: Readonly<Record<string, unknown>>;
   readonly applied: boolean;
+}
+
+export interface AtomicOperationContext {
+  readonly payload: unknown;
+  readonly principal: unknown;
+  readonly db: unknown;
+  readonly now: string;
+  readonly scope: string;
+  readonly actionId: string;
+}
+
+export interface AtomicOperationRegistration {
+  readonly entity: EntityRecord;
+  readonly read: (context: AtomicOperationContext) => Readonly<Record<string, unknown>> | Promise<Readonly<Record<string, unknown>>>;
+}
+
+export type AtomicOperationHandler = ((context: AtomicOperationContext & { readonly atomic: AtomicExecution }) => unknown) & {
+  readonly inTransaction?: boolean;
+  readonly atomicOperation?: AtomicOperationRegistration;
+};
+
+// Marks a handler as an atomic operation. The pipeline owns the in-transaction
+// read, resolution, field admission, and subsequent handler call.
+export function atomicOperation(
+  registration: AtomicOperationRegistration,
+  handler: AtomicOperationHandler,
+): AtomicOperationHandler {
+  if (!registration?.entity || typeof registration.read !== 'function') {
+    throw new TypeError('atomic operation requires an entity and current-row reader');
+  }
+  Object.defineProperties(handler, {
+    atomicOperation: { value: Object.freeze(registration) },
+    inTransaction: { value: true },
+  });
+  return handler;
 }
 
 // Resolve one operation against the row read inside the write-coordinator

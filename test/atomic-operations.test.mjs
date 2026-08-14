@@ -14,6 +14,7 @@ import {
 import {
   acknowledge,
   ATOMIC_OPERATION_KINDS,
+  atomicOperation,
   claim,
   executeAtomicOperation,
   executeAtomicOperations,
@@ -22,7 +23,7 @@ import {
   setAdd,
   setRemove,
   toggleTo,
-} from '../build/atomic-operations.mjs';
+} from '../build/index.mjs';
 
 test('membership, increment, claim, acknowledge, and toggle-to-known-value have deterministic results', () => {
   const start = Object.freeze({ members: ['a'], count: 2, owner: null, seen: false, enabled: false });
@@ -47,24 +48,30 @@ test('the grammar has no invert operation and rejects malformed operations', () 
   assert.equal(ATOMIC_OPERATION_KINDS.includes('invert'), false);
   assert.equal(isAtomicOperation({ kind: 'toggle', field: 'enabled' }), false);
   assert.equal(isAtomicOperation({ kind: 'invert', field: 'enabled' }), false);
+  assert.equal(isAtomicOperation({ kind: 'setAdd', field: 'members', value: () => {} }), false);
+  assert.equal(isAtomicOperation({ kind: 'setAdd', field: 'members', value: NaN }), false);
+  assert.equal(isAtomicOperation({ kind: 'claim', field: 'owner', value: undefined }), false);
   assert.throws(() => toggleTo('enabled', 'yes'), /boolean/);
   assert.throws(() => executeAtomicOperation({ count: '2' }, increment('count')), /finite number/);
 });
 
-test('atomic operation envelopes use the live mutation variant and preserve its expected-revision conflict', async () => {
+test('the pipeline resolves a registered atomic operation inside its write transaction', async () => {
   const db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);
   db.exec('CREATE TABLE Note (id TEXT PRIMARY KEY, enabled INTEGER NOT NULL)');
   db.prepare('INSERT INTO Note (id, enabled) VALUES (?, ?)').run('n1', 0);
 
   let calls = 0;
-  const toggle = ({ payload, db: transactionDb }) => {
+  const toggle = atomicOperation({
+    entity: { fields: { enabled: {} } },
+    read: ({ db: transactionDb }) => {
+      const stored = transactionDb.prepare('SELECT enabled FROM Note WHERE id = ?').get('n1');
+      return { id: 'n1', enabled: stored.enabled === 1 };
+    },
+  }, ({ atomic }) => {
     calls += 1;
-    const stored = transactionDb.prepare('SELECT enabled FROM Note WHERE id = ?').get('n1');
-    const resolved = executeAtomicOperations({ enabled: stored.enabled === 1 }, payload.atomicOperations);
-    return [{ type: 'Note.updated', scope: 'Note:n1', data: { id: 'n1', enabled: resolved.row.enabled } }];
-  };
-  Object.defineProperty(toggle, 'inTransaction', { value: true });
+    return [{ type: 'Note.updated', scope: 'Note:n1', data: { id: 'n1', enabled: atomic.row.enabled } }];
+  });
   const server = createServer({
     db,
     handlers: {
@@ -79,6 +86,7 @@ test('atomic operation envelopes use the live mutation variant and preserve its 
     }),
     tierOfEvent: () => 'live',
     authorize: async () => true,
+    authorization: { admit: async () => ({ admitted: true }) },
   });
 
   const request = {
@@ -105,27 +113,77 @@ test('atomic operation envelopes use the live mutation variant and preserve its 
   db.close();
 });
 
-test('admission denial rolls back an atomic live operation before its projection', async () => {
+test('field admission denies an atomic operation before its projection', async () => {
   const db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);
+  db.exec('CREATE TABLE Note (id TEXT PRIMARY KEY, secret INTEGER NOT NULL)');
+  db.prepare('INSERT INTO Note (id, secret) VALUES (?, ?)').run('n1', 0);
   let projected = false;
+  let handlerCalls = 0;
+  const acknowledgeSecret = atomicOperation({
+    entity: { fields: { secret: {} } },
+    read: ({ db: transactionDb }) => ({ id: 'n1', secret: transactionDb.prepare('SELECT secret FROM Note WHERE id = ?').get('n1').secret === 1 }),
+  }, ({ atomic }) => {
+    handlerCalls += 1;
+    return [{ type: 'Note.updated', scope: 'Note:n1', data: { id: 'n1', secret: atomic.row.secret } }];
+  });
   const server = createServer({
     db,
-    handlers: { 'Note.ack': () => [{ type: 'Note.updated', scope: 'Note:n1', data: { id: 'n1' } }] },
+    handlers: { 'Note.ack': acknowledgeSecret },
     pipeline: durableMutationVariant(),
     livePipeline: liveMutationVariant({
-      admission: { beforeProjection: async () => false, afterProjection: async () => true },
+      admission: { beforeProjection: async () => true, afterProjection: async () => true },
       projectionConsumers: [{ eventTypes: ['Note.updated'], apply: () => { projected = true; } }],
     }),
     tierOfEvent: () => 'live',
     authorize: async () => true,
+    authorization: { admit: async ({ fieldName }) => ({ admitted: fieldName !== 'secret' }) },
   });
   const outcome = await server.dispatch({
-    actionId: 'denied-ack', type: 'Note.ack', payload: { atomicOperations: [acknowledge('seen')] },
+    actionId: 'denied-ack', type: 'Note.ack', payload: { atomicOperations: [acknowledge('secret')] },
   });
   assert.equal(outcome.ok, false);
   assert.equal(outcome.failure.category, 'denied');
   assert.equal(projected, false);
+  assert.equal(handlerCalls, 0, 'the handler never receives a denied field update');
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _NoHistoryReceipt').get().count, 0);
+  db.close();
+});
+
+test('concurrent atomic operations resolve against the latest row without losing either change', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE Note (id TEXT PRIMARY KEY, members TEXT NOT NULL, count INTEGER NOT NULL)');
+  db.prepare('INSERT INTO Note (id, members, count) VALUES (?, ?, ?)').run('n1', '[]', 0);
+  const change = atomicOperation({
+    entity: { fields: { members: {}, count: {} } },
+    read: ({ db: transactionDb }) => {
+      const row = transactionDb.prepare('SELECT members, count FROM Note WHERE id = ?').get('n1');
+      return { id: 'n1', members: JSON.parse(row.members), count: row.count };
+    },
+  }, ({ atomic }) => [{ type: 'Note.updated', scope: 'Note:n1', data: atomic.row }]);
+  const server = createServer({
+    db,
+    handlers: { 'Note.change': change },
+    pipeline: durableMutationVariant(),
+    livePipeline: liveMutationVariant({
+      projectionConsumers: [{
+        eventTypes: ['Note.updated'],
+        apply: (event, txn) => txn.prepare('UPDATE Note SET members = ?, count = ? WHERE id = ?')
+          .run(JSON.stringify(event.data.members), event.data.count, event.data.id),
+      }],
+    }),
+    tierOfEvent: () => 'live',
+    authorize: async () => true,
+    authorization: { admit: async () => ({ admitted: true }) },
+  });
+
+  const [membership, count] = await Promise.all([
+    server.dispatch({ actionId: 'add-member', type: 'Note.change', payload: { atomicOperations: [setAdd('members', 'alice')] } }),
+    server.dispatch({ actionId: 'increment-count', type: 'Note.change', payload: { atomicOperations: [increment('count')] } }),
+  ]);
+  assert.equal(membership.ok, true);
+  assert.equal(count.ok, true);
+  assert.deepEqual({ ...db.prepare('SELECT members, count FROM Note WHERE id = ?').get('n1') }, { members: '["alice"]', count: 1 });
   db.close();
 });

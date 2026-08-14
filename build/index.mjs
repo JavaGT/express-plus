@@ -8,6 +8,7 @@ export { read, write, subscribe, admin, grant, deny } from './grant.mjs';
 export { scope } from './scope.mjs';
 export { entity } from './entity/compile.mjs';
 export { action, event } from './pipeline.mjs';
+export { acknowledge, atomicOperation, ATOMIC_OPERATION_KINDS, claim, executeAtomicOperation, executeAtomicOperations, increment, isAtomicOperation, setAdd, setRemove, toggleTo,                                                                                                                                        } from './atomic-operations.mjs';
 export { durableHistory } from './durable-history.mjs';
 export { erasureDirective, erasureDirectivePreparation } from './erasure-directive.mjs';
 export { postCommitEffect } from './post-commit-effects.mjs';
