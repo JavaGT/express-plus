@@ -1,5 +1,5 @@
 export { text, boolean, date, number, json, ref, hash, blob, link, map, list, log, ephemeral, state, computed, projected, raster, polyline, vector } from './field.mjs';
-export { normalizeTierDeclaration, tierOf, DATA_TIERS, ENTITY_TIERS, TIER_DESCRIPTIONS,                                                                                                                                   } from './field.mjs';
+export { normalizeTierDeclaration, tierOf, isDataTier, isEntityTier, DATA_TIERS, ENTITY_TIERS, TIER_DESCRIPTIONS,                                                                                                                                   } from './field.mjs';
 export { annotatedText, annotation, protectingAnnotation, measurement, annotationAction, annotationEntityAction, registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension, annotatedTextAction, annotatedTextAnnotationAction, annotatedTextCreateAction, annotatedTextRetireAction, exportAnnotatedText, readAnnotatedTextForRecipient } from './annotated-text-public.mjs';
 export { annotatedTextClientHandle } from './annotated-text-field.mjs';
 export { owner } from './owner.mjs';

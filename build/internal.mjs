@@ -1,7 +1,7 @@
 export { check, resolveDecision, UnawaitedCheckError } from './check.mjs';
 export { assertGuarded } from './guard/static.mjs';
 export { text, annotatedText, annotation, protectingAnnotation, measurement, annotationAction, annotationEntityAction, boolean, date, number, json, ref, hash, blob, link, map, list, log, ephemeral, state, computed, projected, raster, polyline, vector } from './field.mjs';
-export { normalizeTierDeclaration, tierOf, DATA_TIERS, ENTITY_TIERS, TIER_DESCRIPTIONS,                                                                                                                                   } from './field.mjs';
+export { normalizeTierDeclaration, tierOf, isDataTier, isEntityTier, DATA_TIERS, ENTITY_TIERS, TIER_DESCRIPTIONS,                                                                                                                                   } from './field.mjs';
 export { projectAnnotatedTextForRecipient } from './annotated-text-recipient-projection.mjs';
 export { protectingAnnotationCapabilities } from './row-grant.mjs';
 export { projectAnnotatedTextSnapshot } from './annotated-text-snapshot.mjs';

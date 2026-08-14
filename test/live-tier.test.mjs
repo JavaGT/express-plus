@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { entity, grant, read, subscribe, text, write, normalizeTierDeclaration, tierOf, DATA_TIERS, ENTITY_TIERS, TIER_DESCRIPTIONS } from '../build/index.mjs';
+import { entity, grant, read, subscribe, text, write, normalizeTierDeclaration, tierOf, isDataTier, isEntityTier, DATA_TIERS, ENTITY_TIERS, TIER_DESCRIPTIONS } from '../build/index.mjs';
 
 // S3/A1 — tier model + entity tier declaration. Covers the ticket test list:
 // tier normalization (default history; history mode sub-flags; live flag),
@@ -19,6 +19,9 @@ function declaration(name, extra = {}) {
 test('vocabulary: the four data tiers exist with closed descriptions; entity tiers are a two-value subset', () => {
   assert.deepEqual(DATA_TIERS, ['history', 'live', 'derived', 'operational']);
   assert.deepEqual(ENTITY_TIERS, ['history', 'live']);
+  assert.ok(Object.isFrozen(DATA_TIERS), 'DATA_TIERS is frozen');
+  assert.ok(Object.isFrozen(ENTITY_TIERS), 'ENTITY_TIERS is frozen');
+  assert.ok(Object.isFrozen(TIER_DESCRIPTIONS), 'TIER_DESCRIPTIONS is frozen');
   for (const tier of DATA_TIERS) {
     const description = TIER_DESCRIPTIONS[tier];
     assert.equal(typeof description, 'string');
@@ -28,6 +31,19 @@ test('vocabulary: the four data tiers exist with closed descriptions; entity tie
   assert.match(TIER_DESCRIPTIONS.live, /no domain event history/);
   assert.match(TIER_DESCRIPTIONS.derived, /rebuildable/);
   assert.match(TIER_DESCRIPTIONS.operational, /never collaborative history/);
+});
+
+test('vocabulary: the published tier predicates classify exactly their tier sets', () => {
+  for (const tier of DATA_TIERS) assert.equal(isDataTier(tier), true, `${tier} is a data tier`);
+  for (const tier of ENTITY_TIERS) assert.equal(isEntityTier(tier), true, `${tier} is an entity tier`);
+  for (const tier of ENTITY_TIERS) assert.equal(isDataTier(tier), true, `${tier} is also a data tier`);
+  for (const tier of DATA_TIERS.filter((tier) => !ENTITY_TIERS.includes(tier))) {
+    assert.equal(isEntityTier(tier), false, `${tier} is not an entity tier`);
+  }
+  assert.equal(isDataTier('archival'), false);
+  assert.equal(isDataTier(42), false);
+  assert.equal(isEntityTier('derived'), false);
+  assert.equal(isEntityTier(null), false);
 });
 
 test('normalization: default tier is history with full history mode (zero behavior change)', () => {
@@ -73,8 +89,10 @@ test('normalization: malformed declarations fail closed at declaration compile',
 });
 
 test('derived/operational are resource categories, not entity tiers', () => {
-  // Representable as resources via tierOf (their producer + staleness contract
-  // is S4/S2 territory)...
+  // Representable as resources via tierOf (their producer + staleness
+  // completeness contract is owned by S2/A6 #92 and S4/A1 #110 — see the
+  // live-tier.ts module header); classification is A1's job, validation is the
+  // owning lane's.
   assert.equal(tierOf({ tier: 'derived', producer: 'search', staleness: 'projected' }), 'derived');
   assert.equal(tierOf({ tier: 'operational', producer: 'scheduler' }), 'operational');
   // ...but rejected as ordinary mutation targets.
@@ -86,12 +104,26 @@ test('derived/operational are resource categories, not entity tiers', () => {
 
 test('tierOf resolves existing entities to history (default) and live/live-tagged to live', () => {
   assert.equal(tierOf(null), 'history');
+  assert.equal(tierOf(undefined), 'history');
+  assert.equal(tierOf('not an object'), 'history');
   assert.equal(tierOf({}), 'history');
   assert.equal(tierOf({ title: text() }), 'history');
   assert.equal(tierOf({ history: { update: 'conditional' } }), 'history');
   assert.equal(tierOf({ live: true }), 'live');
   assert.equal(tierOf({ tier: 'live' }), 'live');
   assert.equal(tierOf({ tier: 'history' }), 'history');
+});
+
+test('tierOf runs the same validation as normalizeTierDeclaration: contradictory or malformed raw objects fail closed', () => {
+  assert.throws(() => tierOf({ tier: 'history', live: true }), /contradictory/);
+  assert.throws(() => tierOf({ tier: 'live', live: false }), /contradictory/);
+  assert.throws(() => tierOf({ live: true, history: { update: 'conditional' } }), /hard error/);
+  assert.throws(() => tierOf({ live: 'yes' }), /live must be a boolean/);
+  assert.throws(() => tierOf({ history: 'oops' }), /history must be an object/);
+  assert.throws(() => tierOf({ tier: 'archival' }), /one of history \| live \| derived \| operational/);
+  // A resource category carrying entity tier flags is a contradictory raw object.
+  assert.throws(() => tierOf({ tier: 'derived', live: true }), /resource category.*cannot be combined/);
+  assert.throws(() => tierOf({ tier: 'operational', history: { update: 'conditional' } }), /resource category.*cannot be combined/);
 });
 
 test('entity declarations: zero behavior change — existing entities resolve to history/full with the old flags intact', () => {

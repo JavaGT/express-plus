@@ -8,6 +8,9 @@ import workbench, {
   matchRoute, noopTransport, serveStatic, sessionCookie, sessionPrincipalOf,
   sessionTokenOf, registerAnnotatedTextStructuralExtension as registerRootAnnotatedTextStructuralExtension,
   durableHistory,
+  normalizeTierDeclaration, tierOf, isDataTier, isEntityTier, DATA_TIERS, ENTITY_TIERS, TIER_DESCRIPTIONS,
+  type DataTier, type EntityTier, type HistoryMode, type HistoryVerb, type HistoryVerbMode,
+  type ResolvedTier, type TierDeclaration,
   type ActionHandle, type BatchAction, type CommittedEvent, type DispatchRequest,
   type DispatchResult, type EventHandle, type FailureCategory, type FailureOutcome,
   type InheritDirective, type Principal, type WorkbenchFailure,
@@ -50,6 +53,20 @@ import {
   type AnnotatedTextRange, type AnnotatedTextRedactionMarker,
 } from 'workbench/annotated-text-coords';
 import { DatabaseSync } from 'node:sqlite';
+
+// ── S3/A1 live-data tier vocabulary (published surface) ────────────────────
+const allTiers: readonly DataTier[] = DATA_TIERS;
+const entityOnlyTiers: readonly EntityTier[] = ENTITY_TIERS;
+const derivedDescription: string = TIER_DESCRIPTIONS.derived;
+const tierPredicate: boolean = isDataTier('derived') && isEntityTier('live');
+const historyVerb: HistoryVerb = 'create';
+const reservedNoneMode: HistoryVerbMode = 'none';
+const conditionalMode: HistoryMode = 'conditional';
+const resolvedTier: ResolvedTier = { tier: 'live' };
+const liveOnlyResolved: ResolvedTier = normalizeTierDeclaration({ live: true });
+const tierDeclaration: TierDeclaration = { history: { create: 'none' }, live: true };
+const classifiedTier: DataTier = tierOf({ live: true });
+void [allTiers, entityOnlyTiers, derivedDescription, tierPredicate, historyVerb, reservedNoneMode, conditionalMode, resolvedTier, liveOnlyResolved, tierDeclaration, classifiedTier];
 
 declare const claimedBlobApp: WorkbenchApp;
 const claimedBlobApi: ClaimedBlobLifecycle = claimedBlobLifecycle(claimedBlobApp);

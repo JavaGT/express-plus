@@ -1205,10 +1205,20 @@ export interface BoundWorkbenchEntity<Row extends object = Record<string, unknow
 export type DataTier = 'history' | 'live' | 'derived' | 'operational';
 export type EntityTier = 'history' | 'live';
 export type HistoryMode = 'full' | 'conditional';
-export type HistoryVerbMode = 'conditional' | 'full';
+export type HistoryVerb = 'create' | 'update';
+// `none` is reserved vocabulary for the no-history mutation variant (S3/A2):
+// declaring it today is rejected at compile and redirected to live: true.
+export type HistoryVerbMode = 'conditional' | 'full' | 'none';
+
+export const DATA_TIERS: readonly ['history', 'live', 'derived', 'operational'];
+export const ENTITY_TIERS: readonly ['history', 'live'];
+export const TIER_DESCRIPTIONS: Readonly<Record<DataTier, string>>;
+
+export function isDataTier(value: unknown): value is DataTier;
+export function isEntityTier(value: unknown): value is EntityTier;
 
 export type TierDeclaration = Readonly<{
-  history?: Readonly<Partial<Record<'create' | 'update', HistoryVerbMode>>>;
+  history?: Readonly<Partial<Record<HistoryVerb, HistoryVerbMode>>>;
   live?: boolean;
   tier?: DataTier;
 }>;
@@ -1221,10 +1231,13 @@ export interface ResolvedTier {
 // Normalize a tier declaration into a resolved tier. Throws at declaration
 // compile (never at query time): a live entity that also requests durable
 // history is a hard error; derived/operational are resource categories, not
-// entity tiers.
+// entity tiers; `history: 'none'` is reserved for S3/A2 and redirected to
+// live: true.
 export function normalizeTierDeclaration(declaration?: TierDeclaration, label?: string): ResolvedTier;
-// Resolve the live-data tier of a declared entity or resource without throwing
-// (entities default to `history`; derived/operational resources → their category).
+// Resolve the live-data tier of a declared entity or resource. Entities
+// resolve to `history` (default) or `live`; derived/operational resources →
+// their category. Raw tier declarations run the same normalization/validation
+// as normalizeTierDeclaration, so contradictory raw objects fail closed.
 export function tierOf(resource: unknown): DataTier;
 
 export type EntityDeclaration<Row extends object> = Readonly<Record<string, unknown>> & {

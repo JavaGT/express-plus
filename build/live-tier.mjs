@@ -23,6 +23,19 @@
 // producer + staleness contract — S4's search plugin and S2's derived-resource
 // lifecycle), not entity mutation tiers: declaring one on an entity is a
 // declaration compile error, never a query-time surprise.
+//
+// Contract notes for downstream S3 lanes:
+//   - `history: { create/update: 'none' }` is RESERVED vocabulary for the
+//     no-history mutation variant (S3/A2, JavaGT/workbench#100). A1's decision:
+//     reject `'none'` at declaration compile and redirect to `live: true`
+//     (today's spelling of "no durable history"). A2 owns implementing real
+//     no-log semantics via the tier resolution (the `live` tier), superseding
+//     the redirect.
+//   - The resource completeness contract (a derived/operational resource must
+//     carry explicit `producer` + `staleness` declarations) is validated by the
+//     owning lanes — S2/A6 derived-resource lifecycle (JavaGT/workbench#92) and
+//     S4 search plugin contract (JavaGT/workbench#110) — not here: `tierOf`
+//     only classifies a resource to its category.
 
                                                                       
 
@@ -133,16 +146,28 @@ export function normalizeTierDeclaration(declaration                  = {}, labe
   return { tier: 'history', historyMode: 'full' };
 }
 
-// Resolve the live-data tier of a declared entity or resource WITHOUT throwing:
-// entities resolve to `history` (default) or `live`; derived/operational
-// resources resolve to their category. Read-only classification — the throwing
-// validation path is normalizeTierDeclaration.
+// Resolve the live-data tier of a declared entity or resource. Entities
+// resolve to `history` (default) or `live`; derived/operational resources
+// resolve to their category (their producer + staleness completeness contract
+// is validated by the owning S2/S4 lanes — see the module header). Raw tier
+// declarations run the SAME normalization + validation as
+// normalizeTierDeclaration, so a contradictory or malformed uncompiled object
+// (e.g. `{ tier: 'history', live: true }`) fails closed instead of silently
+// resolving; compiled entity records carry their resolved tier and pass
+// through without throwing.
 export function tierOf(resource         )           {
-  if (resource !== null && typeof resource === 'object') {
-    const declared = resource                           ;
-    if (typeof declared.tier === 'string' && isDataTier(declared.tier)) return declared.tier;
-    if (declared.live === true) return 'live';
-    if (declared.history !== undefined) return 'history';
+  if (resource === null || typeof resource !== 'object') return 'history';
+  const declared = resource                           ;
+  // Resource categories are not entity mutation tiers: classify them before
+  // entity normalization. A resource that also carries the entity tier flags
+  // (live/history) is a contradictory raw object and fails closed.
+  if (typeof declared.tier === 'string' && isDataTier(declared.tier) && !isEntityTier(declared.tier)) {
+    if (declared.live !== undefined || declared.history !== undefined) {
+      throw new Error(
+        `entity tier declaration: tier '${declared.tier}' is a resource category and cannot be combined with live/history entity flags`,
+      );
+    }
+    return declared.tier;
   }
-  return 'history';
+  return normalizeTierDeclaration(declared                   ).tier;
 }

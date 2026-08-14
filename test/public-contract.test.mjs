@@ -22,6 +22,8 @@ export const PUBLIC_API = Object.freeze({
       'principal', 'anonymous', 'requireUser', 'allowAnonymous', 'router',
       'inc', 'dec', 'self', 'many', 'effect', 'schedule', 'tick',
       'simulate', 'now',
+      'normalizeTierDeclaration', 'tierOf', 'isDataTier', 'isEntityTier',
+      'DATA_TIERS', 'ENTITY_TIERS', 'TIER_DESCRIPTIONS',
       'createAuditor', 'createDenialAuditor', 'isOpaqueId', 'sanitizeOpaqueId',
       'annotatedTextClientHandle',
        'annotationEntityAction', 'annotatedTextAnnotationAction',
