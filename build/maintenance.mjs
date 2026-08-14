@@ -13,14 +13,15 @@
 // app build time and resolves the handle at call time (fail-closed when the
 // app never opened one).
 
-import { withForeignKeysDisabledSync,               } from './driver.mjs';
+import { withForeignKeysDisabled,               } from './driver.mjs';
                                                    
 
                                
                                                                            
                                                                          
-                                                                          
-                                                      
+                                                                           
+                                                                              
+                                                                    
                                                                    
   
 
@@ -38,10 +39,12 @@ export function createMaintenanceSeam(dbOrHandle               , writeQueue     
     withForeignKeysDisabled   (fn                      )             {
       // One coordinated turn: the write queue cannot hold a concurrent write
       // while the shared PRAGMA is toggled, and nested turns (already owned)
-      // join the current turn rather than interleaving. run's fn may be async,
-      // so the queued value can itself be a promise; `.then` flattens it once
-      // (the same awaiting every queued async fn already does).
-      return writeQueue.run(() => withForeignKeysDisabledSync(resolveDb(), fn)).then((value) => value     );
+      // join the current turn rather than interleaving. driver.ts's bracket
+      // awaits a thenable body before restoring `foreign_keys = ON`, so an
+      // async body keeps enforcement off until it has completed; writeQueue.run
+      // flattens that promise once (the same awaiting every queued async fn
+      // already does).
+      return writeQueue.run(() => withForeignKeysDisabled(resolveDb(), fn)).then((value) => value     );
     },
   };
 }

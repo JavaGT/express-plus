@@ -66,7 +66,7 @@ test('claim: no bearer → 401; valid bearer, no jobs → 204; with a job → 20
   const base = await ready(app);
   t.after(() => { app.httpServer.close(); db.close(); });
   // enqueue via the substrate (a post-commit consumer would call this)
-  app.jobs.enqueue({ kind: 'transcribe', payload: { url: 'a' } });
+  await app.jobs.enqueue({ kind: 'transcribe', payload: { url: 'a' } });
   const w = await (await fetch(`${base}/workers/register`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ secret: SECRET }),
@@ -86,7 +86,7 @@ test('heartbeat: non-owner → 403; owner → 200', async (t) => {
   const { db, app } = makeApp();
   const base = await ready(app);
   t.after(() => { app.httpServer.close(); db.close(); });
-  app.jobs.enqueue({ kind: 'k', payload: {} });
+  await app.jobs.enqueue({ kind: 'k', payload: {} });
   const w1 = await (await fetch(`${base}/workers/register`, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ secret: SECRET }),
   })).json();
@@ -104,7 +104,7 @@ test('result: idempotent — retried result for a completed job is a 200 no-op',
   const { db, app } = makeApp();
   const base = await ready(app);
   t.after(() => { app.httpServer.close(); db.close(); });
-  app.jobs.enqueue({ kind: 'k', payload: {} });
+  await app.jobs.enqueue({ kind: 'k', payload: {} });
   const w = await (await fetch(`${base}/workers/register`, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ secret: SECRET }),
   })).json();
@@ -128,7 +128,7 @@ test('result: revoked bearer → 401 (reaper revoked the worker)', async (t) => 
   const { db, app } = makeApp();
   const base = await ready(app);
   t.after(() => { app.httpServer.close(); db.close(); });
-  app.jobs.enqueue({ kind: 'k', payload: {} });
+  await app.jobs.enqueue({ kind: 'k', payload: {} });
   const w = await (await fetch(`${base}/workers/register`, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ secret: SECRET }),
   })).json();

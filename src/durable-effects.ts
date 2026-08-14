@@ -35,7 +35,9 @@ interface DurableEventLike {
 }
 
 interface Jobs {
-  enqueue(job: { id: string; kind: string; payload: unknown }): unknown;
+  // enqueue may be coordinated (returns a Promise) or synchronous depending on
+  // whether the queue was built with a write coordinator — await handles both.
+  enqueue(job: { id: string; kind: string; payload: unknown }): unknown | Promise<unknown>;
 }
 
 function isDurableEffectDeclaration(effect: unknown): effect is DurableEffectDeclaration {
@@ -86,9 +88,13 @@ function durablePayload(ev: DurableEventLike, effect: DurableEffectDeclaration):
   };
 }
 
-function enqueueDurableEffectsForEvent(ev: DurableEventLike, effects: readonly DurableEffectEntry[], jobs: Jobs) {
+async function enqueueDurableEffectsForEvent(ev: DurableEventLike, effects: readonly DurableEffectEntry[], jobs: Jobs) {
   for (const { effect } of effects) {
-    jobs.enqueue({
+    // Await each enqueue: when the queue is coordinated, the write lands on a
+    // microtask within the current turn, and a failure must propagate to the
+    // enclosing transaction so it ROLLS BACK (never a dropped, unhandled
+    // rejection).
+    await jobs.enqueue({
       id: durableJobId(ev, effect.durable),
       kind: effect.durable,
       payload: durablePayload(ev, effect),
@@ -97,8 +103,8 @@ function enqueueDurableEffectsForEvent(ev: DurableEventLike, effects: readonly D
 }
 
 async function enqueueDurableEffectsAndAdvance(db: DbHandle, ev: DurableEventLike, effects: readonly DurableEffectEntry[], jobs: Jobs): Promise<void> {
-  await txn(db, () => {
-    enqueueDurableEffectsForEvent(ev, effects, jobs);
+  await txn(db, async () => {
+    await enqueueDurableEffectsForEvent(ev, effects, jobs);
     upsertConsumerCursor(db, { consumer: CONSUMER, scope: ev.scope, lastSeq: ev.seq });
   });
 }

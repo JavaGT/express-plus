@@ -142,7 +142,7 @@ test('scoped job enqueue requires anchor-scope snapshot recovery', async (t) => 
   ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1' }));
   await sleep(50);
 
-  app.jobs.enqueue({ kind: 'index', payload: { noteId: 'n1' }, scope: 'Note:n1' });
+  await app.jobs.enqueue({ kind: 'index', payload: { noteId: 'n1' }, scope: 'Note:n1' });
 
   const ev = await ws.nextEvent();
   assert.ok(ev, 'job recovery control pushed live');
@@ -169,11 +169,11 @@ test('job lifecycle transitions require ordered anchor-scope recovery', async (t
   ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1' }));
   await sleep(50);
 
-  app.jobs.enqueue({ kind: 'index', payload: { noteId: 'n1' }, scope: 'Note:n1' });
+  await app.jobs.enqueue({ kind: 'index', payload: { noteId: 'n1' }, scope: 'Note:n1' });
   const w = app.jobs.registerWorker(SECRET);
-  const job = app.jobs.claim(w.workerId);
+  const job = await app.jobs.claim(w.workerId);
   assert.ok(job, 'job claimed');
-  const r = app.jobs.submitResult(job.id, w.workerId, { status: 'completed', output: { ok: true } });
+  const r = await app.jobs.submitResult(job.id, w.workerId, { status: 'completed', output: { ok: true } });
   assert.ok(r.accepted, 'result accepted');
 
   const evs = [];
@@ -207,7 +207,7 @@ test('unscoped job delivers nothing live', async (t) => {
   ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1' }));
   await sleep(50);
 
-  app.jobs.enqueue({ kind: 'index', payload: {} });
+  await app.jobs.enqueue({ kind: 'index', payload: {} });
 
   assert.equal(await ws.nextEvent(300), null, 'no live delivery for unscoped jobs');
 
@@ -231,7 +231,7 @@ test('missing anchor row fails closed: no live delivery, event stays durable', a
   // which skips authz re-checks).
   db.prepare("DELETE FROM Note WHERE id = 'n1'").run();
 
-  app.jobs.enqueue({ kind: 'index', payload: {}, scope: 'Note:n1' });
+  await app.jobs.enqueue({ kind: 'index', payload: {}, scope: 'Note:n1' });
 
   assert.equal(await ws.nextEvent(300), null, 'event dropped when anchor row is missing');
   assert.equal(

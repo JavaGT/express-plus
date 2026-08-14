@@ -326,12 +326,33 @@ export function setForeignKeys(db          , enabled         )       {
 
 // Serialized wiring lives in src/maintenance.ts (the write coordinator turn);
 // this is the raw PRAGMA bracket, kept here so driver.ts stays the single
-// source of the statement text.
-export function withForeignKeysDisabledSync   (db          , fn         )    {
+// source of the statement text. The body may be sync OR async: a thenable is
+// awaited BEFORE the restore, so `foreign_keys` stays OFF while the body is
+// still running (an async body that yields must not see enforcement re-enabled
+// under it), and the restore runs on every exit path — fulfilled, rejected, or
+// a synchronous throw.
+export function withForeignKeysDisabled   (db          , fn                      )                 {
   setForeignKeys(db, false);
+  let value                ;
   try {
-    return fn();
-  } finally {
+    value = fn();
+  } catch (err) {
     setForeignKeys(db, true);
+    throw err;
   }
+  const restore = () => setForeignKeys(db, true);
+  if (value && typeof (value              ).then === 'function') {
+    return (value              ).then(
+      (resolved) => {
+        restore();
+        return resolved;
+      },
+      (err) => {
+        restore();
+        throw err;
+      },
+    );
+  }
+  restore();
+  return value;
 }

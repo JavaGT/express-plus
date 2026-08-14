@@ -11,24 +11,27 @@
 //                             runtime) → writeCoordinator.run
 //   2. live-state writes    — annotated-text authoring + committed-log
 //                             projections inside kernel dispatch → .run
-//   3. operational queue    — job-queue.ts single-statement writes (DOCUMENTED
-//                             EXCEPTION, below) + operational-consumer sweeps → .run
+//   3. operational queue    — job-queue.ts mutations (enqueue/claim/heartbeat/
+//                             submitResult/updateProgress/cancelJob/reap) →
+//                             .run, because they are multi-statement sequences
+//                             (read-then-write + live-visibility events); only
+//                             registerWorker's genuinely single-statement INSERT
+//                             stays outside; operational-consumer sweeps → .run
 //   4. plugin index writes  — side-table strategy projections (FTS/ordered)
 //                             inside kernel dispatch → .run
 //   5. migration writes     — migrations.ts / workbench-migrations.ts boot lane
 //                             (DOCUMENTED EXCEPTION, below)
-//   6. blob metadata writes — blob-store.ts; adopt/discard run in the caller's
-//                             coordinated transaction (kernel dispatch txn), so
-//                             they are coordinated by construction — never their
-//                             own transaction
+//   6. blob metadata writes — blob-store.ts; upload/discard/reap run inside the
+//                             caller's coordinated turn (the /blobs route wraps
+//                             upload in .run; pending-blob lifecycle and the
+//                             blob reaper sweep inside .run; adopt runs in the
+//                             dispatch txn), so they are coordinated by
+//                             construction — never their own transaction
 //
-// Two documented single-writer exceptions (explicitly NOT a second mutex):
-//   (i)  job-queue.ts claim/enqueue/result are single-statement UPDATE/INSERT
-//        … RETURNING with per-statement atomicity — no BEGIN/COMMIT, no
-//        cross-statement transaction, so the mutex would add nothing;
-//   (ii) migrations.ts / workbench-migrations.ts run a stop-the-world boot
-//        transaction (begin/commit/rollback via the driver dispatchers) before
-//        the app serves, when no concurrent writer can exist.
+// One documented single-writer exception (explicitly NOT a second mutex):
+//   (i) migrations.ts / workbench-migrations.ts run a stop-the-world boot
+//       transaction (begin/commit/rollback via the driver dispatchers) before
+//       the app serves, when no concurrent writer can exist.
 // The shared-state PRAGMA maintenance seam (src/maintenance.ts) also enters
 // through this coordinator so its toggles cannot interleave with writes.
 

@@ -208,7 +208,7 @@ test('HTTP: POST /jobs/:id/progress — sets progress and stage', async (t) => {
   const { db, app } = makeApp();
   const base = await ready(app);
   t.after(() => { app.httpServer.close(); db.close(); });
-  app.jobs.enqueue({ kind: 'k', payload: {} });
+  await app.jobs.enqueue({ kind: 'k', payload: {} });
   const w = await (await fetch(`${base}/workers/register`, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ secret: SECRET }),
   })).json();
@@ -241,7 +241,7 @@ test('HTTP: POST /jobs/:id/cancel — cancels a claimed job', async (t) => {
   const { db, app } = makeApp();
   const base = await ready(app);
   t.after(() => { app.httpServer.close(); db.close(); });
-  app.jobs.enqueue({ kind: 'k', payload: {} });
+  await app.jobs.enqueue({ kind: 'k', payload: {} });
   const w = await (await fetch(`${base}/workers/register`, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ secret: SECRET }),
   })).json();
@@ -261,7 +261,7 @@ test('HTTP: POST /jobs/:id/cancel — completed job returns 400', async (t) => {
   const { db, app } = makeApp();
   const base = await ready(app);
   t.after(() => { app.httpServer.close(); db.close(); });
-  app.jobs.enqueue({ kind: 'k', payload: {} });
+  await app.jobs.enqueue({ kind: 'k', payload: {} });
   const w = await (await fetch(`${base}/workers/register`, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ secret: SECRET }),
   })).json();
@@ -283,7 +283,7 @@ test('HTTP: POST /jobs/:id/cancel — wrong worker returns 403', async (t) => {
   const { db, app } = makeApp();
   const base = await ready(app);
   t.after(() => { app.httpServer.close(); db.close(); });
-  app.jobs.enqueue({ kind: 'k', payload: {} });
+  await app.jobs.enqueue({ kind: 'k', payload: {} });
   const w1 = await (await fetch(`${base}/workers/register`, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ secret: SECRET }),
   })).json();
@@ -314,8 +314,8 @@ test('HTTP: POST /jobs/claim?scope= — scoped claim only returns matching jobs'
   const { db, app } = makeApp();
   const base = await ready(app);
   t.after(() => { app.httpServer.close(); db.close(); });
-  app.jobs.enqueue({ kind: 'k', payload: { n: 1 }, scope: 'project:p1' });
-  app.jobs.enqueue({ kind: 'k', payload: { n: 2 }, scope: 'project:p2' });
+  await app.jobs.enqueue({ kind: 'k', payload: { n: 1 }, scope: 'project:p1' });
+  await app.jobs.enqueue({ kind: 'k', payload: { n: 2 }, scope: 'project:p2' });
   const w = await (await fetch(`${base}/workers/register`, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ secret: SECRET }),
   })).json();

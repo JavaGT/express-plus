@@ -4,10 +4,12 @@
 // platform write coordinator (write-queue.ts) via the CALLER'S coordinated
 // transaction — never a transaction this module opens itself. `adopt` takes a
 // db/txn handle and runs its UPDATE in that (already coordinated) transaction;
-// `upload`/`discard`/`discardPending`/`reap` issue single synchronous
-// statements from callers that are themselves inside a coordinator turn (the
-// kernel dispatch txn or the pending-blob staged write). This module issues no
-// BEGIN/COMMIT/ROLLBACK and owns no transaction control of its own.
+// `upload` is invoked from callers inside a coordinator turn (the /blobs HTTP
+// route wraps it in .run; the pending-blob staged write is already inside
+// .run), and `discard`/`discardPending`/`reap` are likewise called only from
+// coordinated framework paths (pending-blob lifecycle, the blob reaper sweep).
+// This module issues no BEGIN/COMMIT/ROLLBACK and owns no transaction control
+// of its own.
 //
 // Upload writes atomically to a pending slot with computed hashes, then records
 // a 'pending' row. Caller adopts in their txn (status → 'adopted'), then

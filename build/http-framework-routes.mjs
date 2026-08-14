@@ -43,8 +43,10 @@ import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
                          
                                            
                                                      
+                                                                                
+                                                                    
                                                                 
-                                                      
+                                                                         
                                                                                                            
                                                                         
                                                                    
@@ -69,6 +71,8 @@ import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
                                                                                                            
                        
                                                                         
+                                                                               
+                                                                      
                          
  
 
@@ -433,7 +437,15 @@ export async function handleBlobUploadRoute(
     throw err;
   }
   const mime = (req.headers['content-type'] ?? 'application/octet-stream').split(';')[0].trim();
-  const meta = app.blobs.upload({ bytes, mime });
+  // Blob METADATA writes enter through the ONE platform write coordinator (the
+  // /blobs route is a framework write path — never a second mutation route). The
+  // body stream was read BEFORE the turn, so the mutex is not held while
+  // uploading; the hashing + metadata INSERT + pending-slot write take the turn.
+  const coordinator = app.writeCoordinator;
+  const blobs = app.blobs;
+  const meta = coordinator
+    ? await coordinator.run(() => blobs.upload({ bytes, mime }))
+    : blobs.upload({ bytes, mime });
   sendJson(res, 201, meta);
   return true;
 }
@@ -474,7 +486,7 @@ export async function handleJobRoute(
     const workerId = jobs.authenticate(bearer);
     if (!workerId) { reject(res, 401, 'unauthorized'); return true; }
     const scope = url.searchParams.get('scope') || null;
-    const job = jobs.claim(workerId, scope ? { scope } : undefined);
+    const job = await jobs.claim(workerId, scope ? { scope } : undefined);
     if (!job) { res.writeHead(204); res.end(); return true; } // no queued work
     sendJson(res, 200, job);
     return true;
@@ -484,7 +496,7 @@ export async function handleJobRoute(
   if (hb) {
     const workerId = jobs.authenticate(bearer);
     if (!workerId) { reject(res, 401, 'unauthorized'); return true; }
-    const ok = jobs.heartbeat(hb[1], workerId);
+    const ok = await jobs.heartbeat(hb[1], workerId);
     if (!ok) { reject(res, 403, 'not the owning worker or job not running'); return true; }
     sendJson(res, 200, { ok: true });
     return true;
@@ -500,7 +512,7 @@ export async function handleJobRoute(
       throw err;
     }
     const bodyRecord = body                                           ;
-    const updated = jobs.updateProgress({ jobId: pg[1], workerId, progress: bodyRecord.progress, stage: bodyRecord.stage });
+    const updated = await jobs.updateProgress({ jobId: pg[1], workerId, progress: bodyRecord.progress, stage: bodyRecord.stage });
     if (!updated) { reject(res, 403, 'not the owning worker or job not in progress'); return true; }
     const progress = updated                                                                           ;
     sendJson(res, 200, { id: progress.id, progress: progress.progress, stage: progress.stage, status: progress.status });
@@ -517,7 +529,7 @@ export async function handleJobRoute(
       throw err;
     }
     let result                                          ;
-    try { result = jobs.submitResult(rs[1], workerId, body)                                            ; }
+    try { result = await jobs.submitResult(rs[1], workerId, body)                                            ; }
     catch (err) { reject(res, 400, (err         ).message); return true; }
     if (!result?.accepted) { reject(res, 403, 'not the owning worker or job not in progress'); return true; }
     sendJson(res, 200, result);
@@ -528,7 +540,7 @@ export async function handleJobRoute(
   if (cn) {
     const workerId = jobs.authenticate(bearer);
     if (!workerId) { reject(res, 401, 'unauthorized'); return true; }
-    const cancelled = jobs.cancelJob({ jobId: cn[1], workerId })                                                                                                  ;
+    const cancelled = await jobs.cancelJob({ jobId: cn[1], workerId })                                                                                                  ;
     if (!cancelled) { reject(res, 404, 'job not found'); return true; }
     if (cancelled.forbidden) { reject(res, 403, 'not the owning worker'); return true; }
     if (cancelled.terminal) { reject(res, 400, 'job already terminal — cannot cancel'); return true; }

@@ -147,11 +147,17 @@ export function emailSeam({ transport = noopTransport }: { transport?: Transport
       console.warn('[email] cannot send — no job queue configured on the app');
       return;
     }
-    app.jobs.enqueue({
+    // enqueue may be coordinated (returns a Promise when the app wired a write
+    // coordinator) or synchronous — swallow a coordinated rejection the same way
+    // the sync path's throw would be a no-op here (best-effort send).
+    const queued = app.jobs.enqueue({
       id: `email:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
       kind: 'email',
       payload: { to, subject, body },
-    });
+    }) as unknown;
+    if (queued && typeof (queued as Promise<unknown>).then === 'function') {
+      (queued as Promise<unknown>).catch(() => {});
+    }
   }
 
   return {

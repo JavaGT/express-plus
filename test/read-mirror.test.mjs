@@ -64,16 +64,24 @@ test('mode=ro is enforced at the engine even bypassing the rejector', async () =
     opened.handle.prepare('INSERT INTO t VALUES (1)').run();
 
     const mirror = openReadMirror(adapter.readMirror());
+    // The rejector-wrapped surface must not leak an unrestricted raw handle.
+    assert.equal('raw' in mirror, false, 'the mirror never exposes a raw engine handle');
+
+    // A consumer that bypasses the rejector by opening the description's
+    // connectionString directly is still read-only at the ENGINE: the
+    // description pins mode=ro, so SQLite itself refuses writes and DDL.
+    const bypassed = new DatabaseSync(adapter.readMirror().connectionString);
     assert.throws(
-      () => mirror.raw.prepare('INSERT INTO t VALUES (2)').run(),
+      () => bypassed.prepare('INSERT INTO t VALUES (2)').run(),
       /readonly/i,
-      'the underlying connection is mode=ro: a raw write fails at the engine',
+      'the pinned mode=ro connection refuses a write at the engine',
     );
     assert.throws(
-      () => mirror.raw.exec('CREATE TABLE x (a)'),
+      () => bypassed.exec('CREATE TABLE x (a)'),
       /readonly/i,
-      'raw DDL fails at the engine too',
+      'the pinned mode=ro connection refuses DDL at the engine',
     );
+    bypassed.close();
 
     mirror.close();
     opened.close();

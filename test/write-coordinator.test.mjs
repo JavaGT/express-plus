@@ -2,17 +2,21 @@
 // scope#23, S1/A5).
 //
 // ONE coordinator owns every platform write (entity, live-state, operational
-// queue, plugin index, migration, blob metadata). Two documented exceptions —
-// the job-queue's single-statement UPDATE/INSERT…RETURNING claim/result
-// writes, and the migrations stop-the-world boot transaction — are explicitly
-// NOT a second mutex. This suite proves:
+// queue, plugin index, migration, blob metadata). The documented exception is
+// ONLY the migrations stop-the-world boot transaction — it is explicitly NOT a
+// second mutex. The job-queue's mutations are NOT an exception: they are
+// multi-statement read-then-write sequences, so they route through the
+// coordinator (only registerWorker's genuinely single-statement INSERT stays
+// outside). This suite proves:
 //   1. no module outside driver.ts (+ the documented migrations boot phase and
 //      the directory-lock sidecar) issues BEGIN/COMMIT literals, with
 //      SAVEPOINT/ROLLBACK TO/RELEASE and CREATE TRIGGER bodies excluded;
-//   2. entity, live-state, and plugin-index writes all enter through the one
-//      coordinator (observed owned during a dispatch);
-//   3. job-queue single-statement + migrations boot-phase exceptions hold;
-//   4. blob metadata enters through the caller's coordinated transaction.
+//   2. entity, live-state, plugin-index, job-queue, operational-consumer, blob
+//      upload/discard/reap, and both migration lanes all enter through the one
+//      coordinator (observed owned during the write) or are the documented
+//      boot-lane exception;
+//   3. blob metadata never issues its own transaction control (adopt runs in
+//      the caller's coordinated transaction).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -21,6 +25,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
+import { EventEmitter } from 'node:events';
 
 import workbench, {
   entity,
@@ -35,7 +40,10 @@ import workbench, {
   text,
   write,
 } from '../build/internal.mjs';
+import { operationalConsumer, defineOperationalEvent } from '../build/index.mjs';
+import { declaredBlobField } from '../build/server.mjs';
 import { createBlobStore } from '../build/blob-store.mjs';
+import { handleBlobUploadRoute } from '../build/http-framework-routes.mjs';
 
 const ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..');
 const SRC = join(ROOT, 'src');
@@ -97,11 +105,12 @@ test('transaction-control audit: BEGIN/COMMIT literals live only in the authorit
     `BEGIN/COMMIT literals outside driver.ts + the documented exceptions: ${JSON.stringify(violations)}`,
   );
 
-  // The two documented single-writer exceptions are explicitly asserted:
+  // The write categories never open transactions of their own — their writes
+  // ride the coordinator (or the caller's coordinated txn):
   const jobQueue = join(SRC, 'job-queue.ts');
-  assert.equal(perModule.has(jobQueue), false, 'job-queue.ts issues no transaction literals (single-statement claim/result)');
+  assert.equal(perModule.has(jobQueue), false, 'job-queue.ts issues no transaction literals (mutations route through the coordinator)');
   const blobStore = join(SRC, 'blob-store.ts');
-  assert.equal(perModule.has(blobStore), false, 'blob-store.ts issues no transaction literals (adopt runs in the caller\'s transaction)');
+  assert.equal(perModule.has(blobStore), false, 'blob-store.ts issues no transaction literals (metadata rides the caller\'s coordinated turn)');
 
   // The exclusion proof:
   const savepointModule = join(SRC, 'annotated-text-authoring-stream.ts');
@@ -223,25 +232,67 @@ test('entity, live-state, and plugin-index writes enter through the one coordina
   db.close();
 });
 
-test('job-queue claim/enqueue/result are the single-statement exception — no coordinator turn', async () => {
+test('job-queue mutations enter through the coordinator per entry point; registration stays single-statement', async () => {
   const db = new DatabaseSync(':memory:');
   const app = workbench({ db, jobs: { sharedSecret: 'secret', pollIntervalMs: 9999 } });
   await app.prepareSchema();
 
   const turns = instrumentCoordinator(app);
-  const before = turns.length;
 
-  app.jobs.enqueue({ kind: 'k', payload: { x: 1 }, id: 'j1' });
-  const claimed = app.jobs.claim('worker-1', { kind: 'k' });
+  const assertCoordinated = (label) => {
+    const before = turns.length;
+    return () => {
+      const added = turns.slice(before);
+      assert.ok(added.length > 0, `${label} took a coordinated write turn`);
+      assert.ok(added.every((t) => t.owned === true), `${label} ran inside the coordinator (owned)`);
+    };
+  };
+
+  const afterEnqueue = assertCoordinated('enqueue');
+  await app.jobs.enqueue({ kind: 'k', payload: { x: 1 }, id: 'j1' });
+  afterEnqueue();
+
+  const afterClaim = assertCoordinated('claim');
+  const claimed = await app.jobs.claim('worker-1', { kind: 'k' });
   assert.equal(claimed?.id, 'j1');
-  const submitted = app.jobs.submitResult('j1', 'worker-1', { status: 'completed', output: { done: true } });
-  assert.equal(submitted.accepted, true);
+  afterClaim();
 
-  assert.equal(turns.length, before, 'the queue\'s single-statement writes take no coordinator turn — per-statement atomicity is the exception, not a second mutex');
+  const afterHeartbeat = assertCoordinated('heartbeat');
+  assert.equal(await app.jobs.heartbeat('j1', 'worker-1'), true);
+  afterHeartbeat();
+
+  const afterProgress = assertCoordinated('updateProgress');
+  assert.ok(await app.jobs.updateProgress({ jobId: 'j1', workerId: 'worker-1', progress: 50, stage: 'half' }));
+  afterProgress();
+
+  const afterResult = assertCoordinated('submitResult');
+  const submitted = await app.jobs.submitResult('j1', 'worker-1', { status: 'completed', output: { done: true } });
+  assert.equal(submitted.accepted, true);
+  afterResult();
+
+  const afterReap = assertCoordinated('reap');
+  await app.jobs.reap();
+  afterReap();
+
+  // registerWorker is the genuinely single-statement INSERT — the one queue
+  // write that stays outside the coordinator (no turn).
+  const beforeRegister = turns.length;
+  const registered = app.jobs.registerWorker('secret');
+  assert.ok(registered && registered.workerId, 'a worker registered');
+  assert.equal(turns.length, beforeRegister, 'registerWorker (single-statement INSERT) takes no coordinator turn');
+
+  const afterCancel = assertCoordinated('cancelJob');
+  const cancelled = await app.jobs.cancelJob({ jobId: 'j1', workerId: 'worker-1' });
+  assert.ok(cancelled && cancelled.terminal === true, 'the completed job is terminal');
+  const queued = await app.jobs.enqueue({ kind: 'k', id: 'j2' });
+  const cancelledQueued = await app.jobs.cancelJob({ jobId: queued.id });
+  assert.equal(cancelledQueued.status, 'cancelled', 'a queued job is cancelled');
+  afterCancel();
+
   db.close();
 });
 
-test('migrations run as the stop-the-world boot lane — outside the coordinator', async () => {
+test('app migrations run as the stop-the-world boot lane — outside the coordinator', async () => {
   const db = new DatabaseSync(':memory:');
   const app = workbench({
     db,
@@ -261,6 +312,25 @@ test('migrations run as the stop-the-world boot lane — outside the coordinator
     turns.length,
     0,
     'the boot migration lane does not take a coordinator turn — it runs stop-the-world before the app serves (documented exception)',
+  );
+  db.close();
+});
+
+test('the workbench package migration lane runs stop-the-world — outside the coordinator', async () => {
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db });
+
+  const turns = instrumentCoordinator(app);
+  await app.prepareSchema();
+
+  // runWorkbenchMigrations runs at boot even for a fresh db: the exclusive
+  // lane applies every version and records it in the private ledger.
+  const row = db.prepare('SELECT MAX(version) AS v FROM _WorkbenchMigration').get();
+  assert.ok(row && Number(row.v) >= 1, `the package migration ledger recorded applied versions (v=${row.v})`);
+  assert.equal(
+    turns.length,
+    0,
+    'the workbench migration lane does not take a coordinator turn — the same documented stop-the-world boot exception',
   );
   db.close();
 });
@@ -312,4 +382,152 @@ test('blob metadata writes enter through the caller\'s coordinated transaction �
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ---- blob upload / discard / reap routing --------------------------------
+
+function fakeBlobRequest(body) {
+  const req = new EventEmitter();
+  req.url = 'http://localhost/blobs';
+  req.method = 'POST';
+  req.headers = { 'content-type': 'application/octet-stream' };
+  req.pause = () => {};
+  req.resume = () => {};
+  setImmediate(() => {
+    req.emit('data', body);
+    req.emit('end');
+  });
+  return req;
+}
+
+function fakeResponse() {
+  return {
+    statusCode: null,
+    writeHead(status, headers) {
+      this.statusCode = status;
+      this.headers = headers;
+    },
+    end(payload) {
+      this.payload = payload;
+    },
+  };
+}
+
+function assertCoordinatedTurns(turns, label, startIndex) {
+  const added = turns.slice(startIndex);
+  assert.ok(added.length > 0, `${label} took at least one coordinated write turn`);
+  assert.ok(added.every((t) => t.owned === true), `${label} ran inside the coordinator (owned)`);
+}
+
+test('blob upload via the /blobs route, reap via sweepBlobs, and discard via sweepPendingBlobs all enter through the coordinator', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'workbench-blob-coordinator-'));
+  try {
+    const db = new DatabaseSync(':memory:');
+    const app = workbench({
+      db,
+      blobs: { root: dir },
+      blobLifecycle: {
+        fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id' })],
+        pendingTtlMs: 0,
+        adoptedRecoveryTtlMs: 60_000,
+      },
+      blobReapIntervalMs: 1_000_000, // keep the timed reapers inert during this test
+    });
+    await app.start();
+    assert.ok(app.sweepBlobs && app.sweepPendingBlobs, 'boot engaged the blob + pending-blob reapers');
+
+    const turns = instrumentCoordinator(app);
+
+    // upload — the framework-owned POST /blobs route must route the metadata
+    // write through the coordinator (never a direct store write outside it).
+    const beforeUpload = turns.length;
+    const handled = await handleBlobUploadRoute(app, fakeBlobRequest(Buffer.from('hello blob')), fakeResponse(), { id: 'u1' });
+    assert.equal(handled, true, 'the /blobs route handled the upload');
+    const pending = db.prepare("SELECT id FROM BlobStore WHERE status = 'pending'").get();
+    assert.ok(pending, 'the upload metadata row landed');
+    assertCoordinatedTurns(turns, 'blob upload', beforeUpload);
+
+    // reap — app.sweepBlobs wraps blobs.reap in the coordinator and sweeps
+    // the stale orphan the route just uploaded.
+    db.prepare('UPDATE BlobStore SET createdAt = ? WHERE id = ?').run(
+      new Date(Date.now() - 2 * 3600_000).toISOString(), pending.id,
+    );
+    const beforeReap = turns.length;
+    await app.sweepBlobs();
+    assert.equal(db.prepare('SELECT 1 FROM BlobStore WHERE id = ?').get(pending.id), undefined, 'the stale orphan was reaped');
+    assertCoordinatedTurns(turns, 'blob reap', beforeReap);
+
+    // discard — sweepPendingBlobs wraps the pending-blob lifecycle reap (which
+    // calls blobs.discardPending) in the coordinator.
+    app.blobs.upload({ bytes: Buffer.from('to discard'), id: 'b2' });
+    db.prepare(`INSERT INTO _PendingBlob (pendingKey, blobId, claimTokenHash, principalKey, resourceId, contentDigest, byteLength, status, scopeId, createdAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`)
+      .run('scope/resource.pending', 'b2', 'claimhash', 'u1', 'resource', 'digest', 10, 'scope', new Date(Date.now() - 60_000).toISOString());
+    const beforeDiscard = turns.length;
+    await app.sweepPendingBlobs();
+    assert.equal(db.prepare('SELECT 1 FROM BlobStore WHERE id = ?').get('b2'), undefined, 'the pending blob was discarded');
+    assertCoordinatedTurns(turns, 'blob discard', beforeDiscard);
+
+    await app.shutdown();
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---- operational consumer writes ----------------------------------------
+
+test('operational consumer writes enter through the coordinator', async () => {
+  const db = new DatabaseSync(':memory:');
+  const Note = entity('Note', { title: text(), grant: () => grant(read, write) });
+  const delivered = [];
+  const app = workbench({
+    db,
+    entities: [Note],
+    operationalConsumers: [operationalConsumer({
+      name: 'search.index',
+      declarationVersion: 'v1',
+      projectionId: 'search.v1',
+      effectId: 'index.v1',
+      event: defineOperationalEvent({
+        eventType: 'Note.created',
+        fields: ['id', 'title'],
+        project: (fields, _metadata) => ({ id: fields.id, title: fields.title }),
+      }),
+      idempotencyKey: ({ metadata }) => `search:${metadata.committedEventId}`,
+      handle: async (delivery) => {
+        delivered.push(delivery);
+        return { kind: 'ack' };
+      },
+    })],
+  });
+  await app.start();
+
+  // Seed a durable event the consumer must process on the next reconcile.
+  db.prepare(`INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt)
+    VALUES (?, ?, 'Note.created', ?, 'seed-action', '2026-07-26T00:00:00.000Z')`)
+    .run('Note:n2', 1, JSON.stringify({ id: 'n2', title: 'seed' }));
+
+  const turns = instrumentCoordinator(app);
+  const before = turns.length;
+  // The framework runs the reconcile sweep inside a coordinated turn (boot
+  // reconcile path) — the writes it performs (declaration, failure/cursor
+  // rows) must observe owned=true.
+  await app.writeCoordinator.run(() => app.reconcileOperationalConsumers());
+
+  assert.equal(delivered.length, 1, 'the seeded event was delivered by the reconcile');
+  const added = turns.slice(before);
+  assert.ok(added.length > 0, 'operational consumer reconcile took coordinated write turns');
+  assert.ok(added.every((t) => t.owned === true), 'operational consumer writes ran inside the coordinator');
+  assert.ok(
+    db.prepare("SELECT 1 FROM _ConsumerCursor WHERE consumer = 'operational:search.index'").get(),
+    'the ack advanced the consumer cursor',
+  );
+  assert.ok(
+    db.prepare("SELECT 1 FROM _OperationalConsumerDeclaration WHERE name = 'search.index'").get(),
+    'the consumer declaration row landed',
+  );
+
+  await app.shutdown();
+  db.close();
 });

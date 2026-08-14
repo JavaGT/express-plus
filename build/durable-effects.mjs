@@ -35,7 +35,9 @@ const CONSUMER = 'effect.durable';
  
 
                 
-                                                                        
+                                                                               
+                                                                               
+                                                                                           
  
 
 function isDurableEffectDeclaration(effect         )                                     {
@@ -86,9 +88,13 @@ function durablePayload(ev                  , effect                          ) 
   };
 }
 
-function enqueueDurableEffectsForEvent(ev                  , effects                               , jobs      ) {
+async function enqueueDurableEffectsForEvent(ev                  , effects                               , jobs      ) {
   for (const { effect } of effects) {
-    jobs.enqueue({
+    // Await each enqueue: when the queue is coordinated, the write lands on a
+    // microtask within the current turn, and a failure must propagate to the
+    // enclosing transaction so it ROLLS BACK (never a dropped, unhandled
+    // rejection).
+    await jobs.enqueue({
       id: durableJobId(ev, effect.durable),
       kind: effect.durable,
       payload: durablePayload(ev, effect),
@@ -97,8 +103,8 @@ function enqueueDurableEffectsForEvent(ev                  , effects            
 }
 
 async function enqueueDurableEffectsAndAdvance(db          , ev                  , effects                               , jobs      )                {
-  await txn(db, () => {
-    enqueueDurableEffectsForEvent(ev, effects, jobs);
+  await txn(db, async () => {
+    await enqueueDurableEffectsForEvent(ev, effects, jobs);
     upsertConsumerCursor(db, { consumer: CONSUMER, scope: ev.scope, lastSeq: ev.seq });
   });
 }

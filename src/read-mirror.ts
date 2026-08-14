@@ -228,14 +228,17 @@ function assertReadOnlyStatement(sql: string): void {
   refuse(kind, sql);
 }
 
-// The opened read-mirror surface. `prepare`/`exec` are rejector-wrapped;
-// `raw` is the underlying connection, exposed for engine-level verification
-// (a write there still fails — mode=ro is enforced by SQLite itself).
+// The opened read-mirror surface. `prepare`/`exec` are rejector-wrapped and
+// `close` releases the underlying read-only connection. The raw engine handle
+// is deliberately NOT exposed: a mirror consumer gets exactly the
+// rejector-wrapped surface and no way to reach an unrestricted prepare/exec.
+// Engine-level read-only enforcement is proven by opening the description's
+// `mode=ro` connectionString directly (a consumer that bypasses the rejector
+// is still read-only at the engine).
 export type ReadMirrorHandle = {
   prepare(sql: string): StatementSync;
   exec(sql: string): unknown;
   close(): void;
-  readonly raw: DatabaseSync;
 };
 
 export function openReadMirror(description: ReadMirrorDescription): ReadMirrorHandle {
@@ -263,9 +266,6 @@ export function openReadMirror(description: ReadMirrorDescription): ReadMirrorHa
     },
     close(): void {
       raw.close();
-    },
-    get raw(): DatabaseSync {
-      return raw;
     },
   };
   return handle;

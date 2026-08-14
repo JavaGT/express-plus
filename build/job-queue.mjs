@@ -1,12 +1,26 @@
 // job-queue.mjs — the job-queue substrate (eng-review spec #5, Walk 2, §3.3).
 //
-// WRITE-COORDINATOR RED-LINE (S1/A5): the queue's claim/enqueue/result writes
-// are the DOCUMENTED single-statement exception to the platform write
-// coordinator (write-queue.ts). They are single-statement UPDATE/INSERT …
-// RETURNING with per-statement atomicity — no BEGIN/COMMIT, no cross-statement
-// transaction — so routing them through the mutex would add nothing. This is
-// explicitly NOT a second mutex: no BEGIN/COMMIT, no rollback, no held
-// transaction; a statement either lands atomically or not at all.
+// WRITE-COORDINATOR RED-LINE (S1/A5): every state-changing entry point
+// (enqueue/claim/heartbeat/submitResult/updateProgress/cancelJob/reap) routes
+// through the platform write coordinator (write-queue.ts) when one is provided
+// — an app passes its single-writer mutex via `createJobQueue({ writeQueue })`,
+// and a nested call (e.g. a post-commit consumer inside a dispatch turn)
+// joins the current turn instead of interleaving. This is NOT a second mutex:
+// no BEGIN/COMMIT, no rollback, no held transaction.
+//
+// Why the queue is NOT the old "single-statement exception": most entry points
+// are multi-statement read-then-write sequences (claim's UPDATE…RETURNING
+// claims atomically, but submitResult/cancelJob/heartbeat/updateProgress read
+// the row to decide the outcome, reap sweeps multiple predicates, and every
+// scoped mutation appends a live-visibility _Log/_Cursor event afterwards).
+// Only worker registration (registerWorker) is a genuinely single-statement
+// INSERT and stays outside the mutex. Routing the rest through the coordinator
+// keeps every platform write inside the one mutex; claim's per-statement
+// UPDATE…RETURNING remains as the race-safe core (belt and suspenders).
+//
+// Without a writeQueue (a standalone queue), entry points run synchronously
+// and return their value directly; with one, they return a Promise of it —
+// `await` works for both.
 //
 // A job is a unit of work with its own lifecycle (queued→claimed→running→
 // completed/failed, + reassigned→queued by the reaper). It is NOT a derived read
@@ -27,8 +41,8 @@
 // (SELECT … WHERE status='queued' ORDER BY enqueuedAt LIMIT 1) RETURNING *` is
 // one statement — SQLite's per-statement atomicity + node's single-threaded sync
 // DB make concurrent claims race-safe (the second claimant sees status='claimed',
-// gets zero rows). No write-queue mutex needed for the single statement; the
-// reaper's reassign is the same shape.
+// gets zero rows). The claim statement stays single-statement even inside the
+// coordinator; the reaper's reassign is the same shape.
 //
 // Idempotency: result submission is idempotent by job id — a retried result for an
 // already-terminal job is a no-op ack (first terminal result wins; the derived
@@ -85,6 +99,11 @@ const TERMINAL = new Set           ([STATES.COMPLETED, STATES.FAILED, STATES.CAN
                                   
                
                        
+                                                                               
+                                                                         
+                                                                            
+                   
+                                     
                    
                             
                           
@@ -94,6 +113,12 @@ const TERMINAL = new Set           ([STATES.COMPLETED, STATES.FAILED, STATES.CAN
                      
                 
  
+
+// Structural write-queue surface (the app's single-writer coordinator). Type-only
+// shape, deliberately not imported: the queue only needs `run`.
+                       
+                                               
+  
 
                     
                
@@ -131,6 +156,7 @@ function ctEqualHex(a        , b        ) {
 export function createJobQueue({
   db,
   sharedSecret,
+  writeQueue = null,
   leaseMs = 30_000,
   heartbeatGraceMs = 90_000,
   reapIntervalMs = 15_000,
@@ -148,6 +174,13 @@ export function createJobQueue({
   const secretHash = sha256hex(sharedSecret);
   let timer                                        = null;
   let reaperWatcher                            = null;
+
+  // Run a mutation through the write coordinator when one is configured; a
+  // standalone queue runs synchronously. The result is the body's value, or a
+  // Promise of it when coordinated — `await` flattens both uniformly.
+  function coordinated   (fn         )                 {
+    return writeQueue ? writeQueue.run(fn) : fn();
+  }
 
   // ---- event emission (W3 live visibility) ----
 
@@ -247,180 +280,204 @@ export function createJobQueue({
 
   // Enqueue a job. A post-commit consumer (or an imperative handler) calls this;
   // the queue owns the lifecycle from here. Mints an id when absent; preserves a
-  // caller-supplied id (caller-owned, like entity ids).
-  function enqueue({ kind, payload = null, id, scope }                                                                    = {})                {
-    if (!kind) throw new Error('enqueue: kind is required');
-    const jobId = id ?? randomUUID();
-    const t = now();
-    db.prepare(
-      'INSERT INTO _Job (id, kind, payload, status, enqueuedAt, scope, workerId, claimedAt, leaseUntil) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL)',
-    ).run(jobId, kind, payload != null ? JSON.stringify(payload) : null, STATES.QUEUED, t, scope ?? null);
-    const job = parseJob(rawRow(db, '_Job', jobId));
-    if (job && job.scope != null) {
-      emit(buildEvent(job, 'enqueued', t));
-    }
-    return job;
+  // caller-supplied id (caller-owned, like entity ids). Routes through the write
+  // coordinator when one is configured.
+  function enqueue({ kind, payload = null, id, scope }                                                                    = {})                                         {
+    return coordinated(() => {
+      if (!kind) throw new Error('enqueue: kind is required');
+      const jobId = id ?? randomUUID();
+      const t = now();
+      db.prepare(
+        'INSERT INTO _Job (id, kind, payload, status, enqueuedAt, scope, workerId, claimedAt, leaseUntil) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL)',
+      ).run(jobId, kind, payload != null ? JSON.stringify(payload) : null, STATES.QUEUED, t, scope ?? null);
+      const job = parseJob(rawRow(db, '_Job', jobId));
+      if (job && job.scope != null) {
+        emit(buildEvent(job, 'enqueued', t));
+      }
+      return job;
+    });
   }
 
-  // Claim the oldest available queued job for a worker. Atomic single-statement
-  // UPDATE…RETURNING: a racing claim sees status='claimed' and gets zero rows.
-  // `availableAt` is the backoff gate: a retried job is not claimable until now.
-  // `{ kind }` restricts the claim to one kind (an in-process worker runs one
-  // kind's handler). Returns the claimed job (status 'claimed', leaseUntil set)
-  // or null.
-  function claim(workerId        , { kind, scope }                                    = {})                {
-    const t = now();
-    const clauses = ['status = ?', '(availableAt IS NULL OR availableAt <= ?)'];
-    const params                      = [STATES.QUEUED, t];
-    if (kind != null) { clauses.push('kind = ?'); params.push(kind); }
-    if (scope != null) { clauses.push('scope = ?'); params.push(scope); }
-    const where = clauses.join(' AND ');
-    const row = db.prepare(
-      `UPDATE _Job
-         SET status = ?, workerId = ?, claimedAt = ?, leaseUntil = ?
-       WHERE id = (SELECT id FROM _Job WHERE ${where} ORDER BY enqueuedAt LIMIT 1)
-       RETURNING *`,
-    ).get(STATES.CLAIMED, workerId, t, t + leaseMs, ...params);
-    const job = parseJob(row) ?? null;
-    if (job && job.scope != null) {
-      emit(buildEvent(job, 'claimed', t));
-    }
-    return job;
+  // Claim the oldest available queued job for a worker. The claim itself is an
+  // atomic single-statement UPDATE…RETURNING (a racing claim sees
+  // status='claimed' and gets zero rows), but the entry point routes through the
+  // write coordinator because a scoped claim also appends a live-visibility
+  // event afterwards. `availableAt` is the backoff gate: a retried job is not
+  // claimable until now. `{ kind }` restricts the claim to one kind (an
+  // in-process worker runs one kind's handler). Returns the claimed job (status
+  // 'claimed', leaseUntil set) or null.
+  function claim(workerId        , { kind, scope }                                    = {})                                         {
+    return coordinated(() => {
+      const t = now();
+      const clauses = ['status = ?', '(availableAt IS NULL OR availableAt <= ?)'];
+      const params                      = [STATES.QUEUED, t];
+      if (kind != null) { clauses.push('kind = ?'); params.push(kind); }
+      if (scope != null) { clauses.push('scope = ?'); params.push(scope); }
+      const where = clauses.join(' AND ');
+      const row = db.prepare(
+        `UPDATE _Job
+           SET status = ?, workerId = ?, claimedAt = ?, leaseUntil = ?
+         WHERE id = (SELECT id FROM _Job WHERE ${where} ORDER BY enqueuedAt LIMIT 1)
+         RETURNING *`,
+      ).get(STATES.CLAIMED, workerId, t, t + leaseMs, ...params);
+      const job = parseJob(row) ?? null;
+      if (job && job.scope != null) {
+        emit(buildEvent(job, 'claimed', t));
+      }
+      return job;
+    });
   }
 
   // Heartbeat: the owning worker extends its lease; the first heartbeat flips
   // claimed→running. Non-owner or terminal → false. Best-effort: a dropped
-  // heartbeat is fine within the lease window (the reaper reconciles).
-  function heartbeat(jobId        , workerId        , { now: nowFn = now }                         = {})          {
-    const t = (typeof nowFn === 'function' ? nowFn : now)();
-    const pre = db.prepare('SELECT status, scope FROM _Job WHERE id = ?').get(jobId);
-    if (!pre) return false;
-    const wasClaimed = pre.status === STATES.CLAIMED;
-    const res = db.prepare(
-      `UPDATE _Job
-         SET status = ?, leaseUntil = ?
-       WHERE id = ? AND workerId = ? AND status IN (?, ?)`,
-    ).run(STATES.RUNNING, t + leaseMs, jobId, workerId, STATES.CLAIMED, STATES.RUNNING);
-    if (res.changes > 0) {
-      // Keep the OWNING worker alive too: the reaper revokes workers by
-      // _Worker.lastHeartbeat, not by job lease. A heartbeat that extended
-      // only the job lease would let an active worker be revoked
-      // (heartbeatGraceMs after registration) → its bearer rejected → the
-      // in-flight job reassigned to another worker (duplicate execution).
-      db.prepare('UPDATE _Worker SET lastHeartbeat = ? WHERE id = ?').run(t, workerId);
-      if (wasClaimed && pre.scope != null) {
-        const job = parseJob(rawRow(db, '_Job', jobId));
-        if (job && job.scope != null) {
-          emit(buildEvent(job, 'running', t));
+  // heartbeat is fine within the lease window (the reaper reconciles). Routed
+  // through the write coordinator: the _Job update, the _Worker lastHeartbeat
+  // touch, and the possible live-visibility event are separate statements.
+  function heartbeat(jobId        , workerId        , { now: nowFn = now }                         = {})                             {
+    return coordinated(() => {
+      const t = (typeof nowFn === 'function' ? nowFn : now)();
+      const pre = db.prepare('SELECT status, scope FROM _Job WHERE id = ?').get(jobId);
+      if (!pre) return false;
+      const wasClaimed = pre.status === STATES.CLAIMED;
+      const res = db.prepare(
+        `UPDATE _Job
+           SET status = ?, leaseUntil = ?
+         WHERE id = ? AND workerId = ? AND status IN (?, ?)`,
+      ).run(STATES.RUNNING, t + leaseMs, jobId, workerId, STATES.CLAIMED, STATES.RUNNING);
+      if (res.changes > 0) {
+        // Keep the OWNING worker alive too: the reaper revokes workers by
+        // _Worker.lastHeartbeat, not by job lease. A heartbeat that extended
+        // only the job lease would let an active worker be revoked
+        // (heartbeatGraceMs after registration) → its bearer rejected → the
+        // in-flight job reassigned to another worker (duplicate execution).
+        db.prepare('UPDATE _Worker SET lastHeartbeat = ? WHERE id = ?').run(t, workerId);
+        if (wasClaimed && pre.scope != null) {
+          const job = parseJob(rawRow(db, '_Job', jobId));
+          if (job && job.scope != null) {
+            emit(buildEvent(job, 'running', t));
+          }
         }
       }
-    }
-    return res.changes > 0;
+      return res.changes > 0;
+    });
   }
 
   // Submit a result. Idempotent by job id: a retried result for an already-terminal
   // job is a no-op ack ({accepted:true, noop:true}) — the first terminal result
   // wins, the stored output is NOT overwritten (no double-apply of the derived
-  // write). Non-owner / not-found → {accepted:false}.
+  // write). Non-owner / not-found → {accepted:false}. Routed through the write
+  // coordinator: the guard read, the result UPDATE, and the possible
+  // live-visibility event are separate statements (the UPDATE itself is the
+  // atomic result write).
   //
   // Failure policy (substrate-owned, singular): a `failed` result is NOT
   // terminal while attempts < maxAttempts — the job is re-queued with backoff
   // (availableAt = now + backoffMs) and the ack carries {retried, attempts}. At
   // maxAttempts it becomes a terminal dead-letter ({deadLettered, attempts}).
   // A completed result is always terminal.
-  function submitResult(jobId        , workerId        , { status, output = null }                                                                              )               {
-    if (status !== STATES.COMPLETED && status !== STATES.FAILED) {
-      throw new Error('submitResult: status must be completed or failed');
-    }
-    const current = db.prepare('SELECT status, payload, workerId, attempts, scope FROM _Job WHERE id = ?').get(jobId);
-    if (!current) return { accepted: false };
-    if (TERMINAL.has(current.status             )) {
-      // Idempotent retry: only the OWNING worker gets the no-op ack. A non-owner
-      // probing someone else's terminal job is rejected — no accepting ack and no
-      // confirmation that the job is terminal.
-      return current.workerId === workerId ? { accepted: true, noop: true } : { accepted: false };
-    }
-    if (status === STATES.COMPLETED) {
-      const res = db.prepare(
-        `UPDATE _Job SET status = ?, payload = ?
-         WHERE id = ? AND workerId = ? AND status IN (?, ?)`,
-      ).run(status, output != null ? JSON.stringify(output) : null, jobId, workerId, STATES.CLAIMED, STATES.RUNNING);
-      if (res.changes > 0) {
-        if (current.scope != null) {
-          const job = parseJob(rawRow(db, '_Job', jobId));
-          if (job) emit(buildEvent(job, 'completed', now()));
-        }
-        return { accepted: true, noop: false };
+  function submitResult(jobId        , workerId        , { status, output = null }                                                                              )                                       {
+    return coordinated(() => {
+      if (status !== STATES.COMPLETED && status !== STATES.FAILED) {
+        throw new Error('submitResult: status must be completed or failed');
       }
-      return { accepted: false };
-    }
-    // FAILED: retry while under maxAttempts, else terminal dead-letter.
-    const ownerGuard = 'AND workerId = ? AND status IN (?, ?)';
-    const attempts = Number(current.attempts ?? 0) + 1;
-    if (attempts < maxAttempts) {
+      const current = db.prepare('SELECT status, payload, workerId, attempts, scope FROM _Job WHERE id = ?').get(jobId);
+      if (!current) return { accepted: false };
+      if (TERMINAL.has(current.status             )) {
+        // Idempotent retry: only the OWNING worker gets the no-op ack. A non-owner
+        // probing someone else's terminal job is rejected — no accepting ack and no
+        // confirmation that the job is terminal.
+        return current.workerId === workerId ? { accepted: true, noop: true } : { accepted: false };
+      }
+      if (status === STATES.COMPLETED) {
+        const res = db.prepare(
+          `UPDATE _Job SET status = ?, payload = ?
+           WHERE id = ? AND workerId = ? AND status IN (?, ?)`,
+        ).run(status, output != null ? JSON.stringify(output) : null, jobId, workerId, STATES.CLAIMED, STATES.RUNNING);
+        if (res.changes > 0) {
+          if (current.scope != null) {
+            const job = parseJob(rawRow(db, '_Job', jobId));
+            if (job) emit(buildEvent(job, 'completed', now()));
+          }
+          return { accepted: true, noop: false };
+        }
+        return { accepted: false };
+      }
+      // FAILED: retry while under maxAttempts, else terminal dead-letter.
+      const ownerGuard = 'AND workerId = ? AND status IN (?, ?)';
+      const attempts = Number(current.attempts ?? 0) + 1;
+      if (attempts < maxAttempts) {
+        const res = db.prepare(
+          `UPDATE _Job SET status = ?, workerId = NULL, claimedAt = NULL, leaseUntil = NULL, attempts = ?, availableAt = ?
+           WHERE id = ? ${ownerGuard}`,
+        ).run(STATES.QUEUED, attempts, now() + backoffMs, jobId, workerId, STATES.CLAIMED, STATES.RUNNING);
+        if (res.changes > 0) {
+          if (current.scope != null) {
+            const job = parseJob(rawRow(db, '_Job', jobId));
+            if (job) emit(buildEvent(job, 'retried', now()));
+          }
+          return { accepted: true, retried: true, attempts };
+        }
+        return { accepted: false };
+      }
       const res = db.prepare(
-        `UPDATE _Job SET status = ?, workerId = NULL, claimedAt = NULL, leaseUntil = NULL, attempts = ?, availableAt = ?
+        `UPDATE _Job SET status = ?, payload = ?, attempts = ?
          WHERE id = ? ${ownerGuard}`,
-      ).run(STATES.QUEUED, attempts, now() + backoffMs, jobId, workerId, STATES.CLAIMED, STATES.RUNNING);
+      ).run(status, output != null ? JSON.stringify(output) : null, attempts, jobId, workerId, STATES.CLAIMED, STATES.RUNNING);
       if (res.changes > 0) {
         if (current.scope != null) {
           const job = parseJob(rawRow(db, '_Job', jobId));
-          if (job) emit(buildEvent(job, 'retried', now()));
+          if (job) emit(buildEvent(job, 'deadLettered', now()));
         }
-        return { accepted: true, retried: true, attempts };
+        return { accepted: true, deadLettered: true, attempts };
       }
       return { accepted: false };
-    }
-    const res = db.prepare(
-      `UPDATE _Job SET status = ?, payload = ?, attempts = ?
-       WHERE id = ? ${ownerGuard}`,
-    ).run(status, output != null ? JSON.stringify(output) : null, attempts, jobId, workerId, STATES.CLAIMED, STATES.RUNNING);
-    if (res.changes > 0) {
-      if (current.scope != null) {
-        const job = parseJob(rawRow(db, '_Job', jobId));
-        if (job) emit(buildEvent(job, 'deadLettered', now()));
-      }
-      return { accepted: true, deadLettered: true, attempts };
-    }
-    return { accepted: false };
+    });
   }
 
   // Update progress: the owning worker reports progress (0–100) and an
   // optional stage label while the job is claimed/running. Non-owner,
-  // not-found, or terminal → null.
-  function updateProgress({ jobId, workerId, progress, stage }                                                                           = {})                {
-    if (typeof progress !== 'number' || !Number.isFinite(progress)) return null;
-    const clamped = Math.max(0, Math.min(100, Math.round(progress)));
-    const current = db.prepare('SELECT id, workerId, status, scope FROM _Job WHERE id = ?').get(jobId);
-    if (!current) return null;
-    if (current.workerId !== workerId) return null; // only the owning worker may report progress
-    if (current.status !== STATES.CLAIMED && current.status !== STATES.RUNNING) return null;
-    db.prepare(
-      'UPDATE _Job SET progress = ?, stage = ? WHERE id = ?',
-    ).run(clamped, stage ?? null, jobId);
-    const job = parseJob(rawRow(db, '_Job', jobId));
-    if (job && job.scope != null) {
-      emit(buildEvent(job, 'progress', now()));
-    }
-    return job;
+  // not-found, or terminal → null. Routed through the write coordinator (the
+  // guard read, the UPDATE, and the live-visibility event are separate
+  // statements).
+  function updateProgress({ jobId, workerId, progress, stage }                                                                           = {})                                         {
+    return coordinated(() => {
+      if (typeof progress !== 'number' || !Number.isFinite(progress)) return null;
+      const clamped = Math.max(0, Math.min(100, Math.round(progress)));
+      const current = db.prepare('SELECT id, workerId, status, scope FROM _Job WHERE id = ?').get(jobId);
+      if (!current) return null;
+      if (current.workerId !== workerId) return null; // only the owning worker may report progress
+      if (current.status !== STATES.CLAIMED && current.status !== STATES.RUNNING) return null;
+      db.prepare(
+        'UPDATE _Job SET progress = ?, stage = ? WHERE id = ?',
+      ).run(clamped, stage ?? null, jobId);
+      const job = parseJob(rawRow(db, '_Job', jobId));
+      if (job && job.scope != null) {
+        emit(buildEvent(job, 'progress', now()));
+      }
+      return job;
+    });
   }
 
   // Cancel a job. A queued job can be cancelled without owner check (no worker
   // owns it yet); a claimed/running job must be cancelled by its owning worker.
-  // Terminal jobs (completed/failed/cancelled) cannot be cancelled.
-  function cancelJob({ jobId, workerId }                                        = {})                  {
-    const current = db.prepare('SELECT id, status, workerId, scope FROM _Job WHERE id = ?').get(jobId);
-    if (!current) return null;
-    if (TERMINAL.has(current.status             )) return { terminal: true };
-    // If the job has an owner, validate the caller owns it; queued jobs (no
-    // owner) are cancellable without ownership check.
-    if (current.workerId != null && current.workerId !== workerId) return { forbidden: true };
-    db.prepare('UPDATE _Job SET status = ? WHERE id = ?').run(STATES.CANCELLED, jobId);
-    const job = parseJob(rawRow(db, '_Job', jobId));
-    if (job && job.scope != null) {
-      emit(buildEvent(job, 'cancelled', now()));
-    }
-    return job;
+  // Terminal jobs (completed/failed/cancelled) cannot be cancelled. Routed
+  // through the write coordinator (the guard read, the UPDATE, and the
+  // live-visibility event are separate statements).
+  function cancelJob({ jobId, workerId }                                        = {})                                             {
+    return coordinated(() => {
+      const current = db.prepare('SELECT id, status, workerId, scope FROM _Job WHERE id = ?').get(jobId);
+      if (!current) return null;
+      if (TERMINAL.has(current.status             )) return { terminal: true };
+      // If the job has an owner, validate the caller owns it; queued jobs (no
+      // owner) are cancellable without ownership check.
+      if (current.workerId != null && current.workerId !== workerId) return { forbidden: true };
+      db.prepare('UPDATE _Job SET status = ? WHERE id = ?').run(STATES.CANCELLED, jobId);
+      const job = parseJob(rawRow(db, '_Job', jobId));
+      if (job && job.scope != null) {
+        emit(buildEvent(job, 'cancelled', now()));
+      }
+      return job;
+    });
   }
 
   // Reaper sweep. (1) Jobs whose lease expired: a lease loss COUNTS as an attempt
@@ -433,64 +490,79 @@ export function createJobQueue({
   // the payload; workerId kept for forensics, matching submitResult's dead-letter).
   // (2) Revoke workers whose lastHeartbeat is older than the grace window — their
   // bearer is rejected after. The worker's work must be idempotent (documented)
-  // because a reassigned job is re-run from scratch by the new claimant.
-  function reap({ now: nowFn = now }                         = {})                                                                {
-    const t = (typeof nowFn === 'function' ? nowFn : now)();
-    // Dead-letter first, then requeue: any expired row matches exactly one
-    // predicate, and the two back-to-back synchronous statements are race-safe
-    // (single-threaded sync DB, same as the claim path).
-    const deadRows = db.prepare(
-      `UPDATE _Job SET status = ?, attempts = attempts + 1, leaseUntil = NULL
-       WHERE status IN (?, ?) AND leaseUntil < ? AND attempts + 1 >= ${Number(maxAttempts)}
-       RETURNING *`,
-    ).all(STATES.FAILED, STATES.CLAIMED, STATES.RUNNING, t);
-    for (const row of deadRows) {
-      const payload = row.payload != null ? JSON.parse(row.payload          ) : {};
-      db.prepare('UPDATE _Job SET payload = ? WHERE id = ?').run(
-        JSON.stringify({ ...payload, deadLetterReason: 'lease-expired' }), row.id,
-      );
-      if (row.scope != null) {
-        const job = parseJob(row);
-        if (job) emit(buildEvent(job, 'deadLettered', t));
+  // because a reassigned job is re-run from scratch by the new claimant. Routed
+  // through the write coordinator: the sweep is several separate statements.
+  function reap({ now: nowFn = now }                         = {})                                                                                                                                         {
+    return coordinated(() => {
+      const t = (typeof nowFn === 'function' ? nowFn : now)();
+      // Dead-letter first, then requeue: any expired row matches exactly one
+      // predicate, and the back-to-back synchronous statements cannot interleave
+      // with anything else (single-threaded sync DB, and this runs inside the
+      // coordinated turn when one is configured).
+      const deadRows = db.prepare(
+        `UPDATE _Job SET status = ?, attempts = attempts + 1, leaseUntil = NULL
+         WHERE status IN (?, ?) AND leaseUntil < ? AND attempts + 1 >= ${Number(maxAttempts)}
+         RETURNING *`,
+      ).all(STATES.FAILED, STATES.CLAIMED, STATES.RUNNING, t);
+      for (const row of deadRows) {
+        const payload = row.payload != null ? JSON.parse(row.payload          ) : {};
+        db.prepare('UPDATE _Job SET payload = ? WHERE id = ?').run(
+          JSON.stringify({ ...payload, deadLetterReason: 'lease-expired' }), row.id,
+        );
+        if (row.scope != null) {
+          const job = parseJob(row);
+          if (job) emit(buildEvent(job, 'deadLettered', t));
+        }
       }
-    }
-    const reassignedRows = db.prepare(
-      `UPDATE _Job SET status = ?, workerId = NULL, claimedAt = NULL, leaseUntil = NULL, attempts = attempts + 1, availableAt = ?
-       WHERE status IN (?, ?) AND leaseUntil < ?
-       RETURNING *`,
-    ).all(STATES.QUEUED, t + backoffMs, STATES.CLAIMED, STATES.RUNNING, t);
-    for (const row of reassignedRows) {
-      if (row.scope != null) {
-        const job = parseJob(row);
-        if (job) emit(buildEvent(job, 'reassigned', t));
+      const reassignedRows = db.prepare(
+        `UPDATE _Job SET status = ?, workerId = NULL, claimedAt = NULL, leaseUntil = NULL, attempts = attempts + 1, availableAt = ?
+         WHERE status IN (?, ?) AND leaseUntil < ?
+         RETURNING *`,
+      ).all(STATES.QUEUED, t + backoffMs, STATES.CLAIMED, STATES.RUNNING, t);
+      for (const row of reassignedRows) {
+        if (row.scope != null) {
+          const job = parseJob(row);
+          if (job) emit(buildEvent(job, 'reassigned', t));
+        }
       }
-    }
-    if (deadRows.length > 0 || reassignedRows.length > 0) {
-      getLog().warn('system', 'job-queue reaper: lease-expired jobs', {
-        reassigned: reassignedRows.map((r) => ({ id: r.id, kind: r.kind, attempts: r.attempts })),
-        deadLettered: deadRows.map((r) => ({ id: r.id, kind: r.kind, attempts: r.attempts })),
-      });
-    }
-    const revoked = db.prepare(
-      `UPDATE _Worker SET revoked = 1
-       WHERE revoked = 0 AND lastHeartbeat < ?`,
-    ).run(t - heartbeatGraceMs).changes;
-    return { reassigned: reassignedRows.length, deadLettered: deadRows.length, revoked };
+      if (deadRows.length > 0 || reassignedRows.length > 0) {
+        getLog().warn('system', 'job-queue reaper: lease-expired jobs', {
+          reassigned: reassignedRows.map((r) => ({ id: r.id, kind: r.kind, attempts: r.attempts })),
+          deadLettered: deadRows.map((r) => ({ id: r.id, kind: r.kind, attempts: r.attempts })),
+        });
+      }
+      const revoked = db.prepare(
+        `UPDATE _Worker SET revoked = 1
+         WHERE revoked = 0 AND lastHeartbeat < ?`,
+      ).run(t - heartbeatGraceMs).changes;
+      return { reassigned: reassignedRows.length, deadLettered: deadRows.length, revoked };
+    });
   }
 
   // Periodic reaper, owned by the framework (the listen() layer registers the
   // stop() with onShutdown). No-op if already started. When a `clock` is provided
   // to the constructor, the reaper schedules via the shared clock (single timer,
-  // nearest-deadline) instead of starting its own setInterval.
+  // nearest-deadline) instead of starting its own setInterval. A coordinated
+  // reap resolves on a microtask, so both paths surface failures through a
+  // caught promise rather than an uncaught throw.
   function startReaper()       {
     if (timer) return;
+    const sweep = () => {
+      try {
+        const ran = reap();
+        if (ran && typeof (ran                    ).then === 'function') {
+          return (ran                    ).then(() => undefined).catch((err) => getLog().warn('system', 'job-queue reap failed', { err }));
+        }
+      } catch (err) {
+        getLog().warn('system', 'job-queue reap failed', { err });
+      }
+      return undefined;
+    };
     if (clock) {
-      reaperWatcher = clock.add({ name: 'job-queue-reaper', intervalMs: reapIntervalMs, fn: reap });
+      reaperWatcher = clock.add({ name: 'job-queue-reaper', intervalMs: reapIntervalMs, fn: sweep });
       return;
     }
-    timer = setInterval(() => {
-      try { reap(); } catch (err) { getLog().warn('system', 'job-queue reap failed', { err }); }
-    }, reapIntervalMs);
+    timer = setInterval(sweep, reapIntervalMs);
     if (typeof timer.unref === 'function') timer.unref();
   }
 
@@ -535,15 +607,15 @@ export function createJobQueue({
     let stopped = false;
 
     async function once() {
-      const job = claim(workerId, { kind });
+      const job = await claim(workerId, { kind });
       if (!job) return null;
-      heartbeat(job.id, workerId);
+      await heartbeat(job.id, workerId);
       let result              ;
       try {
         const output = await fn(job);
-        result = submitResult(job.id, workerId, { status: STATES.COMPLETED, output: output ?? null });
+        result = await submitResult(job.id, workerId, { status: STATES.COMPLETED, output: output ?? null });
       } catch (err) {
-        result = submitResult(job.id, workerId, { status: STATES.FAILED, output: { error: err instanceof Error ? err.message : String(err) } });
+        result = await submitResult(job.id, workerId, { status: STATES.FAILED, output: { error: err instanceof Error ? err.message : String(err) } });
         getLog().warn('system', 'job worker fn failed', { err, kind, jobId: job.id });
       }
       return { job, result };

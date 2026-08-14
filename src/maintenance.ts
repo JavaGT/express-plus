@@ -13,14 +13,15 @@
 // app build time and resolves the handle at call time (fail-closed when the
 // app never opened one).
 
-import { withForeignKeysDisabledSync, type DbHandle } from './driver.ts';
+import { withForeignKeysDisabled, type DbHandle } from './driver.ts';
 import type { WriteQueue } from './write-queue.ts';
 
 export type MaintenanceSeam = {
   // Run `fn` with `PRAGMA foreign_keys = OFF` inside one coordinated write
   // turn, then restore `ON` in a finally. Rejects when the app has no db
-  // handle (fail-closed). The body runs synchronously within the turn; an
-  // async body is awaited before the restore happens.
+  // handle (fail-closed). The body may be sync or async — an async body is
+  // awaited BEFORE the restore happens, so `foreign_keys` stays OFF until the
+  // body has fully completed (and is restored even when it throws).
   withForeignKeysDisabled<T>(fn: () => T | Promise<T>): Promise<T>;
 };
 
@@ -38,10 +39,12 @@ export function createMaintenanceSeam(dbOrHandle: MaintenanceDb, writeQueue: Wri
     withForeignKeysDisabled<T>(fn: () => T | Promise<T>): Promise<T> {
       // One coordinated turn: the write queue cannot hold a concurrent write
       // while the shared PRAGMA is toggled, and nested turns (already owned)
-      // join the current turn rather than interleaving. run's fn may be async,
-      // so the queued value can itself be a promise; `.then` flattens it once
-      // (the same awaiting every queued async fn already does).
-      return writeQueue.run(() => withForeignKeysDisabledSync(resolveDb(), fn)).then((value) => value as T);
+      // join the current turn rather than interleaving. driver.ts's bracket
+      // awaits a thenable body before restoring `foreign_keys = ON`, so an
+      // async body keeps enforcement off until it has completed; writeQueue.run
+      // flattens that promise once (the same awaiting every queued async fn
+      // already does).
+      return writeQueue.run(() => withForeignKeysDisabled(resolveDb(), fn)).then((value) => value as T);
     },
   };
 }

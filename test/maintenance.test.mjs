@@ -81,6 +81,53 @@ test('foreign_keys is restored to ON even when the body throws', async () => {
   }
 });
 
+test('an async body that yields mid-run keeps foreign_keys OFF until it completes', async () => {
+  const { db, app } = fkApp();
+  try {
+    let released;
+    const gate = new Promise((resolve) => { released = resolve; });
+    let midBody = null;
+    const maintenance = app.withForeignKeysDisabled(async () => {
+      assert.equal(foreignKeysSetting(db), 0, 'OFF at the start of the async body');
+      await gate; // yield mid-body — the restore must NOT happen here
+      midBody = foreignKeysSetting(db);
+      return 'async-done';
+    });
+
+    await delay(10);
+    assert.equal(foreignKeysSetting(db), 0, 'foreign_keys stays OFF while the async body is still awaiting');
+    assert.equal(midBody, null, 'the body has not resumed yet');
+
+    released();
+    assert.equal(await maintenance, 'async-done');
+    assert.equal(midBody, 0, 'still OFF at the point right after the yield');
+    assert.equal(foreignKeysSetting(db), 1, 'restored to ON only after the async body completed');
+  } finally {
+    db.close();
+  }
+});
+
+test('an async body that throws still restores foreign_keys to ON', async () => {
+  const { db, app } = fkApp();
+  try {
+    let released;
+    const gate = new Promise((resolve) => { released = resolve; });
+    const maintenance = app.withForeignKeysDisabled(async () => {
+      await gate;
+      throw new Error('async maintenance failed');
+    });
+
+    await delay(10);
+    assert.equal(foreignKeysSetting(db), 0, 'still OFF while the async body awaits');
+
+    released();
+    await assert.rejects(maintenance, /async maintenance failed/);
+    assert.equal(foreignKeysSetting(db), 1, 'restored to ON even though the async body threw');
+  } finally {
+    db.close();
+  }
+});
+
 test('the seam serializes behind an in-flight coordinated write', async () => {
   const { db, app } = fkApp();
   try {

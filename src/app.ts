@@ -455,7 +455,10 @@ export default function workbench({
         app.blobs = createBlobStore({ root: blobRoot, db: handle });
       }
       app.postCommitEffects = createPostCommitEffectRunner({ db: handle });
-      if (jobOpts) app.jobs = createJobQueue({ db: handle, clock, ...jobOpts });
+      // The queue routes its multi-statement mutations through the ONE write
+      // coordinator (job-queue.ts's writeQueue option); a post-commit consumer
+      // calling enqueue from inside a dispatch turn joins that turn.
+      if (jobOpts) app.jobs = createJobQueue({ db: handle, clock, ...jobOpts, writeQueue: app.writeCoordinator });
     };
     if (db) attachHandleResources(db);
     if (pendingDbAdapter) {

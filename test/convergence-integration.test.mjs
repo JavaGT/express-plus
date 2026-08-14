@@ -155,7 +155,7 @@ const JOB_SECRET = 'test-jobs-secret';
 test('W3: enqueue → register worker → claim → complete', async (t) => {
   const { app, origin } = await bootJobApp(t);
 
-  app.jobs.enqueue({ kind: 'scope.import', payload: { url: 'docs.zip' }, scope: 'project:p1' });
+  await app.jobs.enqueue({ kind: 'scope.import', payload: { url: 'docs.zip' }, scope: 'project:p1' });
 
   // Register worker
   const w = await (await fetch(`${origin}/workers/register`, {
@@ -186,7 +186,7 @@ test('W3: enqueue → register worker → claim → complete', async (t) => {
 test('W3: cancel a claimed job returns cancelled', async (t) => {
   const { app, origin } = await bootJobApp(t);
 
-  app.jobs.enqueue({ kind: 'scope.export', payload: {} });
+  await app.jobs.enqueue({ kind: 'scope.export', payload: {} });
   const w = await (await fetch(`${origin}/workers/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
