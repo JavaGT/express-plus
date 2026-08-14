@@ -162,6 +162,15 @@ const Note = entity('Note', {
 
 An entity **without a grant is a load-time error** (fail closed).
 
+Every entity lives on a **live-data tier** (S3): the default is `history` —
+authoritative current rows + committed event history (undo, catch-up,
+recipient projection). A `live` entity (`live: true` or `tier: 'live'`) keeps
+current rows + live sync with **no** domain event history or undo; declaring
+durable history on a live entity is a compile-time error. `derived` and
+`operational` are resource categories (producer + staleness contract), not
+entity tiers. `tierOf(entity)` resolves an entity/resource to its tier;
+`normalizeTierDeclaration()` validates and resolves a tier declaration.
+
 ### Field constructors (`workbench` exports)
 
 | Constructor | Kind / role |

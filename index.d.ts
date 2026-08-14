@@ -1198,10 +1198,41 @@ export interface BoundWorkbenchEntity<Row extends object = Record<string, unknow
   getOrFail(id: string, principal?: Principal): Row;
 }
 
+// S3 — live data tier vocabulary. `history` | `live` are entity tiers;
+// `derived` and `operational` are resource categories (declared via their own
+// producer + staleness contract, not entity mutation tiers). The default tier
+// is `history` with full history — zero behavior change for existing entities.
+export type DataTier = 'history' | 'live' | 'derived' | 'operational';
+export type EntityTier = 'history' | 'live';
+export type HistoryMode = 'full' | 'conditional';
+export type HistoryVerbMode = 'conditional' | 'full';
+
+export type TierDeclaration = Readonly<{
+  history?: Readonly<Partial<Record<'create' | 'update', HistoryVerbMode>>>;
+  live?: boolean;
+  tier?: DataTier;
+}>;
+
+export interface ResolvedTier {
+  readonly tier: DataTier;
+  readonly historyMode?: HistoryMode;
+}
+
+// Normalize a tier declaration into a resolved tier. Throws at declaration
+// compile (never at query time): a live entity that also requests durable
+// history is a hard error; derived/operational are resource categories, not
+// entity tiers.
+export function normalizeTierDeclaration(declaration?: TierDeclaration, label?: string): ResolvedTier;
+// Resolve the live-data tier of a declared entity or resource without throwing
+// (entities default to `history`; derived/operational resources → their category).
+export function tierOf(resource: unknown): DataTier;
+
 export type EntityDeclaration<Row extends object> = Readonly<Record<string, unknown>> & {
   routes?: (routes: EntityRouteBuilder, entity: BoundWorkbenchEntity<Row>) => unknown | Promise<unknown>;
   grant?: ScopeClause | ScopePredicate | InheritDirective | GrantDecision | ((context: unknown) => GrantDecision);
-  history?: Readonly<{ create?: 'conditional'; update?: 'conditional' }>;
+  history?: Readonly<{ create?: HistoryVerbMode; update?: HistoryVerbMode }>;
+  live?: boolean;
+  tier?: EntityTier;
   indexes?: readonly EntityIndexDeclaration<Row>[];
   /** Explicit allowlist of generated CRUD verbs admitted on POST /workbench/actions. */
   applicationHttpActions?: readonly ApplicationHttpCrudVerb[];

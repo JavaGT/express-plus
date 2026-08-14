@@ -1,0 +1,148 @@
+// Live data tier vocabulary (S3, JavaGT/workbench#99).
+//
+// Every entity mutation used to be indistinguishable: the pipeline wrote `_Log`
+// via durableMutationVariant → appendEvents, and the only nuance was the
+// `history: { create, update }` conditional flag read by the projection layer.
+// S3 makes the four data tiers explicit package vocabulary BEFORE delivery
+// (S3/A4) and mutation (S3/A2) work builds on them. This module owns the
+// vocabulary, the declaration normalization, and the validation rules — the
+// foundation of the S3 lane.
+//
+// The four tiers (closed descriptions):
+//   - history: authoritative current rows + committed event history, receipts,
+//     undo policy, catch-up, recipient projection.
+//   - live: authoritative current rows + live synchronization, no domain event
+//     history or undo.
+//   - derived: rebuildable state notified by authoritative source changes (not
+//     an entity mutation path).
+//   - operational: app-owned runtime state exposed live where useful, never
+//     collaborative history.
+//
+// Entity declarations are restricted to the `history` | `live` tiers.
+// `derived` and `operational` are RESOURCE categories (declared via their own
+// producer + staleness contract — S4's search plugin and S2's derived-resource
+// lifecycle), not entity mutation tiers: declaring one on an entity is a
+// declaration compile error, never a query-time surprise.
+
+export type DataTier = 'history' | 'live' | 'derived' | 'operational';
+
+export type EntityTier = 'history' | 'live';
+
+export type HistoryMode = 'full' | 'conditional';
+
+export type HistoryVerb = 'create' | 'update';
+
+export type HistoryVerbMode = 'conditional' | 'full' | 'none';
+
+export const DATA_TIERS: readonly DataTier[] = Object.freeze(['history', 'live', 'derived', 'operational']);
+
+export const ENTITY_TIERS: readonly EntityTier[] = Object.freeze(['history', 'live']);
+
+export const TIER_DESCRIPTIONS: Readonly<Record<DataTier, string>> = Object.freeze({
+  history: 'authoritative current rows + committed event history, receipts, undo policy, catch-up, recipient projection',
+  live: 'authoritative current rows + live synchronization, no domain event history or undo',
+  derived: 'rebuildable state notified by authoritative source changes (not an entity mutation path)',
+  operational: 'app-owned runtime state exposed live where useful, never collaborative history',
+});
+
+export function isDataTier(value: unknown): value is DataTier {
+  return typeof value === 'string' && (DATA_TIERS as readonly string[]).includes(value);
+}
+
+export function isEntityTier(value: unknown): value is EntityTier {
+  return value === 'history' || value === 'live';
+}
+
+// The entity-level tier declaration surface. `history` is the existing
+// conditional-history declaration (now with an explicit `full` spelling of the
+// default full-log mode); `live: true` and `tier: 'live'` mark the live tier.
+export interface TierDeclaration {
+  history?: Partial<Record<HistoryVerb, HistoryVerbMode>>;
+  live?: boolean;
+  tier?: DataTier;
+}
+
+// The resolved tier for a declaration: `history` tiers carry a `historyMode`
+// sub-flag (`full` — every mutation is logged — or `conditional` — the existing
+// undo/redo conditional flags); `live` tiers carry no history at all.
+export interface ResolvedTier {
+  readonly tier: DataTier;
+  readonly historyMode?: HistoryMode;
+}
+
+// Normalize a tier declaration into a resolved tier. Validation fails HERE at
+// declaration compile, never at query time. `label` names the declaring site in
+// error messages (e.g. `entity('Note')`).
+export function normalizeTierDeclaration(declaration: TierDeclaration = {}, label = 'entity'): ResolvedTier {
+  const { history, live, tier } = declaration;
+  const prefix = `${label} tier declaration`;
+  const historyPrefix = `${label} history`;
+
+  if (history !== undefined && (history === null || typeof history !== 'object' || Array.isArray(history))) {
+    throw new Error(`${historyPrefix} must be an object { create?, update? }`);
+  }
+  if (history !== undefined) {
+    for (const [verb, mode] of Object.entries(history)) {
+      if (verb !== 'create' && verb !== 'update') {
+        throw new Error(`${historyPrefix} must declare only 'create' and 'update' verbs; unknown verb '${verb}'`);
+      }
+      if (mode !== undefined && !['conditional', 'full', 'none'].includes(mode)) {
+        throw new Error(`${historyPrefix} must use 'conditional' | 'full' | 'none' for ${verb}, got ${JSON.stringify(mode)}`);
+      }
+      if (mode === 'none') {
+        throw new Error(
+          `${historyPrefix} 'none' is reserved for the no-history mutation variant (S3/A2) — ` +
+            'use live: true to declare an entity with no durable history',
+        );
+      }
+    }
+  }
+  if (live !== undefined && typeof live !== 'boolean') {
+    throw new Error(`${prefix}: live must be a boolean, got ${JSON.stringify(live)}`);
+  }
+  if (tier !== undefined && !isDataTier(tier)) {
+    throw new Error(`${prefix}: tier must be one of ${DATA_TIERS.join(' | ')}, got ${JSON.stringify(tier)}`);
+  }
+  if (tier !== undefined && !isEntityTier(tier)) {
+    throw new Error(
+      `${prefix}: tier '${tier}' is a resource category, not an entity tier — derived/operational resources ` +
+        'are declared via their own producer + staleness contract, never as mutation entities',
+    );
+  }
+  if (tier === 'history' && live === true) {
+    throw new Error(`${prefix}: contradictory declaration — tier 'history' cannot be combined with live: true`);
+  }
+  if (tier === 'live' && live === false) {
+    throw new Error(`${prefix}: contradictory declaration — tier 'live' cannot be combined with live: false`);
+  }
+
+  const wantsLive = live === true || tier === 'live';
+  const requestsHistory = history !== undefined;
+  if (wantsLive && requestsHistory) {
+    throw new Error(
+      `${prefix}: a live entity that also requests durable history (or undo) is a hard error — ` +
+        'a live tier keeps current rows + live synchronization, no domain event history or undo',
+    );
+  }
+
+  if (wantsLive) return { tier: 'live' };
+  if (requestsHistory) {
+    const modes = Object.values(history).filter((mode) => mode !== undefined);
+    return { tier: 'history', historyMode: modes.includes('conditional') ? 'conditional' : 'full' };
+  }
+  return { tier: 'history', historyMode: 'full' };
+}
+
+// Resolve the live-data tier of a declared entity or resource WITHOUT throwing:
+// entities resolve to `history` (default) or `live`; derived/operational
+// resources resolve to their category. Read-only classification — the throwing
+// validation path is normalizeTierDeclaration.
+export function tierOf(resource: unknown): DataTier {
+  if (resource !== null && typeof resource === 'object') {
+    const declared = resource as Record<string, unknown>;
+    if (typeof declared.tier === 'string' && isDataTier(declared.tier)) return declared.tier;
+    if (declared.live === true) return 'live';
+    if (declared.history !== undefined) return 'history';
+  }
+  return 'history';
+}

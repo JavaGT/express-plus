@@ -45,6 +45,7 @@ import { validateScheduleTrigger, autoStateScheduleTrigger, stateEffectEntries, 
 import { validateAnnotatedTextDeclaration } from '../annotated-text-field.mjs';
 import { getAnnotatedTextCompiledMetadata, resolveAnnotatedTextOwningScope } from '../annotated-text-field.mjs';
 import { scopeOf } from '../scope-handle.mjs';
+import { normalizeTierDeclaration } from '../live-tier.mjs';
 
 // Reserved top-level declaration slots. Every other key on the declaration is a
 // field descriptor. A field name that collides with a reserved slot is a
@@ -53,7 +54,7 @@ import { scopeOf } from '../scope-handle.mjs';
 const RESERVED_DECLARATION_SLOTS = new Set([
   'fields', 'grant', 'checks', 'routes', 'create', 'effects', 'admitsEffects',
   'schedule', 'simulation', 'gate', 'on', 'membership', 'field', 'history', 'indexes',
-  'applicationHttpActions',
+  'applicationHttpActions', 'live', 'tier',
 ]);
 const APPLICATION_HTTP_CRUD_VERBS = Object.freeze(['create', 'update', 'remove']);
 
@@ -79,10 +80,14 @@ export function entity(name     , declaration      = {}) {
     }
   }
 
-  const { grant, checks: declaredChecksIn = {}, membership: membershipDecl, routes, create: createPolicy, effects = null, admitsEffects = null, schedule = {}, simulation = null, gate: declaredGate = {}, history: historyDecl, indexes: indexesDecl, applicationHttpActions: declaredApplicationHttpActions } = declaration;
-  if (historyDecl !== undefined && (typeof historyDecl !== 'object' || historyDecl === null || Array.isArray(historyDecl) || Object.keys(historyDecl).some((key) => key !== 'update' && key !== 'create') || ['update', 'create'].some((key) => historyDecl[key] !== undefined && historyDecl[key] !== 'conditional'))) {
-    throw new Error(`entity('${name}') history must be { create?: 'conditional', update?: 'conditional' }`);
-  }
+  const { grant, checks: declaredChecksIn = {}, membership: membershipDecl, routes, create: createPolicy, effects = null, admitsEffects = null, schedule = {}, simulation = null, gate: declaredGate = {}, history: historyDecl, live: liveDecl, tier: tierDecl, indexes: indexesDecl, applicationHttpActions: declaredApplicationHttpActions } = declaration;
+  // S3/A1 — the tier declaration: `history`/`live`/`tier` normalize into a
+  // resolved live-data tier (default `history`/full — zero behavior change for
+  // existing declarations). Validation fails HERE at declaration compile, never
+  // at query time: a live entity that also requests durable history (or undo)
+  // is a hard error, and derived/operational are resource categories, not
+  // entity mutation tiers.
+  const resolvedTier = normalizeTierDeclaration({ history: historyDecl, live: liveDecl, tier: tierDecl }, `entity('${name}')`);
   const conditionalHistory = historyDecl?.update === 'conditional';
   const conditionalCreateHistory = historyDecl?.create === 'conditional';
   let applicationHttpActions                    = Object.freeze([]);
@@ -417,6 +422,12 @@ export function entity(name     , declaration      = {}) {
     storedComputedFields: Object.freeze(storedComputedFields),
     conditionalHistory,
     conditionalCreateHistory,
+    // The resolved live-data tier (S3/A1): `history` (default) or `live`.
+    // S3/A2 routes live-tier mutations away from _Log on this value; the
+    // historyMode sub-flag (full | conditional) distinguishes the full-log
+    // default from the existing conditional undo/redo declarations.
+    tier: resolvedTier.tier,
+    historyMode: resolvedTier.historyMode,
     indexes: Object.freeze(indexes),
   };
 

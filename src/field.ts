@@ -93,6 +93,28 @@ export function annotatedText(options: FieldOptions = {}): FieldDescriptor {
 // annotated-text-field.mjs for the public surface. Named here so the
 // import-surface contract (index.mjs, internal.mjs) stays in field.mjs.
 export { annotation, protectingAnnotation, measurement, annotationAction, annotationEntityAction } from './annotated-text-field.ts';
+// Live-data tier vocabulary + declaration normalization (S3/A1) — the entity
+// declaration slice. Re-exported here so the import-surface contract
+// (index.mjs, internal.mjs) stays in field.mjs, matching the pattern above.
+// `history`/`live`/`tier` are entity-level declaration options normalized into
+// a resolved tier by normalizeTierDeclaration (default `history`/full — zero
+// behavior change); tierOf() classifies a declared entity or resource.
+export {
+  normalizeTierDeclaration,
+  tierOf,
+  isDataTier,
+  isEntityTier,
+  DATA_TIERS,
+  ENTITY_TIERS,
+  TIER_DESCRIPTIONS,
+  type DataTier,
+  type EntityTier,
+  type HistoryMode,
+  type HistoryVerb,
+  type HistoryVerbMode,
+  type ResolvedTier,
+  type TierDeclaration,
+} from './live-tier.ts';
 // `text.crdt()` — the `crdt` kind instance for collaborative text. One instance
 // of the crdt contract, not a privileged special case (ADR #9).
 type TextFactory = typeof text & {
