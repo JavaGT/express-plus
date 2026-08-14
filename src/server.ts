@@ -45,3 +45,11 @@ export { operationalConsumerAdmin } from './operational-consumer.ts';
 export { createPostCommitEffectRunner } from './post-commit-effects.ts';
 export { pendingBlobStager, declaredBlobField, readClaimedBlob, claimedBlobLifecycle } from './pending-blob.ts';
 export { createHistoryReader } from './history-read.ts';
+// Search plugins are server-only: they receive constrained source and
+// index capabilities, never a raw application database handle.
+export {
+  createSearchPluginRegistry,
+  createSearchSourceReader,
+} from './search-plugin.ts';
+export { createSearchOwnedIndexCapability } from './index-capability.ts';
+export { createVectorPlugin } from './vector-plugin.ts';

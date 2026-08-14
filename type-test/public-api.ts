@@ -32,8 +32,11 @@ import {
   type BlobStore, type SqliteStorageDescription,
   type Invitation, type JobQueue, type JobRow, type LiveDelivery, type LiveDeliveryActivation, type LiveDeliveryBootstrap, type LiveDeliveryCatchup, type LiveDeliveryEnvelope as ServerLiveDeliveryEnvelope, type Migration, type UserPrincipal,
   type ClaimedBlobLifecycle, type ClaimedBlobLifecycleState, type WorkbenchDatabase, type OperationalConsumerAdmin, type OperationalFailure, type PostCommitEffectRunner,
-  type ByteStore, type ByteStoreCapabilities, type ByteStoreDurability,
-} from 'workbench/server';
+   type ByteStore, type ByteStoreCapabilities, type ByteStoreDurability,
+   createSearchPluginRegistry, createSearchSourceReader, createSearchOwnedIndexCapability, createVectorPlugin,
+   type SearchPlugin, type SearchPluginContext, type SearchOwnedIndex, type SearchSourceReader,
+   type SearchOwnedIndexCapabilityOptions, type VectorPlugin,
+ } from 'workbench/server';
 import {
   LiveChannel, LiveList, WorkbenchFailureError, createAuthClient, createLiveStore,
   createLiveDeliverySession, createScopeLiveStore, decodeResult, materializeAnnotatedTextSnapshot,
@@ -277,6 +280,23 @@ const Renamed: EventHandle<ProjectRow, { name: string }> = event(
 declare const db: WorkbenchDatabase;
 const nativeDb = new DatabaseSync(':memory:');
 const nativeApp: WorkbenchApp = workbench({ db: nativeDb });
+const searchRegistry = createSearchPluginRegistry();
+const searchReader: SearchSourceReader = createSearchSourceReader(null, {
+  plugin: 'notes-vector', interests: [{ entity: 'Note' }],
+});
+const vectorPlugin: VectorPlugin = createVectorPlugin({
+  id: 'notes-vector', version: '1',
+  source: { entity: 'Note', vector: 'embedding', model: 'embeddingModel', owns: () => true },
+  modelSpace: { model: 'text-embedding', dimensions: 3 },
+});
+const searchPlugin: SearchPlugin = vectorPlugin;
+nativeApp.registerSearchPlugin(searchPlugin);
+const appSearchPlugins = nativeApp.searchPlugins;
+declare const searchPluginContext: SearchPluginContext;
+declare const searchOwnedIndex: SearchOwnedIndex;
+declare const searchCapabilityOptions: SearchOwnedIndexCapabilityOptions;
+const ownedIndexFor = createSearchOwnedIndexCapability(searchCapabilityOptions);
+void [searchRegistry, searchReader, appSearchPlugins, searchPluginContext, searchOwnedIndex, ownedIndexFor];
 const writeQueue: WriteQueue = nativeApp.writeQueue;
 const queuedValue: Promise<number> = writeQueue.run(() => 1);
 const owned: boolean = writeQueue.owned;

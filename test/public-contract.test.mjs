@@ -40,8 +40,10 @@ export const PUBLIC_API = Object.freeze({
       'matchRoute', 'serveStatic', 'createJobQueue', 'createBlobStore',
       'runMigrations', 'frameworkTableNames', 'declaredTableNames',
       'assertNoFrameworkTableSql',
-      'readCommittedCursor', 'createLiveDelivery', 'createLiveDeliveryHttpHandler',
-    ]),
+       'readCommittedCursor', 'createLiveDelivery', 'createLiveDeliveryHttpHandler',
+       'createSearchPluginRegistry', 'createSearchSourceReader',
+       'createSearchOwnedIndexCapability', 'createVectorPlugin',
+     ]),
   }),
   'workbench/client': Object.freeze({
     default: false,

@@ -11,6 +11,218 @@ import type {
   WorkbenchStatement,
 } from '../index.d.ts';
 export type { WorkbenchDatabase, WorkbenchStatement, UserPrincipal } from '../index.d.ts';
+
+// ---------------------------------------------------------------------------
+// Search plugin contract
+// ---------------------------------------------------------------------------
+
+export type SearchPluginState = 'building' | 'ready' | 'stale' | 'failed';
+export type SearchOwnedObjectKind = 'table' | 'index' | 'trigger' | 'virtual-table';
+export type SearchPluginCounts = Readonly<Record<string, number>>;
+export interface SearchOwnedObject {
+  readonly kind: SearchOwnedObjectKind;
+  readonly name: string;
+  readonly ddl: readonly string[];
+  readonly metadata?: Readonly<Record<string, unknown>>;
+}
+export interface SearchSourceInterest {
+  readonly entity: string;
+  readonly fields?: Readonly<Record<string, unknown>>;
+  readonly scope?: (ctx: { is: unknown; fields: unknown }) => unknown;
+}
+export type SearchChangeKind = 'created' | 'updated' | 'removed';
+export interface SearchChange {
+  readonly entity: string;
+  readonly rowId: string;
+  readonly kind: SearchChangeKind;
+  readonly data?: Readonly<Record<string, unknown>>;
+}
+export interface SearchRequest {
+  readonly query: unknown;
+  readonly entity?: string;
+  readonly principal?: Principal;
+  readonly limit?: number;
+  readonly offset?: number;
+  readonly signal?: AbortSignal;
+}
+export interface SearchMaterializeResult { readonly counts?: SearchPluginCounts; }
+export interface SearchPluginSearchResult { readonly hits: readonly unknown[]; }
+export interface SearchSourceHandle {
+  prepare(sql: string): {
+    all(...params: unknown[]): Record<string, unknown>[];
+    get(...params: unknown[]): Record<string, unknown> | undefined;
+  };
+}
+export interface SearchRetryInfo {
+  readonly message: string;
+  readonly at: string;
+  readonly attempt: number;
+  readonly retryable: boolean;
+}
+export interface SearchPluginHealth {
+  readonly id: string;
+  readonly version: string;
+  readonly generation: number;
+  readonly fence: number;
+  readonly state: SearchPluginState;
+  readonly counts: SearchPluginCounts;
+  readonly lastError: SearchRetryInfo | null;
+}
+export interface SearchOwnedIndex {
+  query(request: { readonly sql: string; readonly params?: readonly unknown[] }): readonly Record<string, unknown>[];
+  write(request: { readonly expectedFence: number; readonly statements: readonly SearchIndexStatement[] }): Promise<{ readonly changes: number }>;
+}
+export interface SearchSourceReader {
+  readonly plugin: string;
+  readonly writeCapable: false;
+  readonly interests: readonly SearchSourceInterest[];
+  sources(): readonly string[];
+  rows(entity: string, options?: { readonly ids?: readonly string[]; readonly limit?: number }): readonly Record<string, unknown>[];
+  row(entity: string, id: string): Record<string, unknown> | undefined;
+}
+export interface SearchPluginContext {
+  readonly id: string;
+  readonly version: string;
+  readonly reader: SearchSourceReader;
+  readonly index: SearchOwnedIndex;
+  readonly generation: number;
+  readonly fence: number;
+}
+export interface SearchLifecycleOutcome {
+  readonly ok: boolean;
+  readonly generation: number;
+  readonly fence: number;
+  readonly state: SearchPluginState;
+  readonly counts: SearchPluginCounts;
+  readonly lastError: SearchRetryInfo | null;
+  readonly result: SearchMaterializeResult | null;
+}
+export interface SearchSearchOutcome {
+  readonly ok: boolean;
+  readonly generation: number;
+  readonly fence: number;
+  readonly state: SearchPluginState;
+  readonly counts: SearchPluginCounts;
+  readonly result: { readonly hits: readonly unknown[]; readonly generation: number; readonly fence: number; readonly state: SearchPluginState } | null;
+  readonly lastError: SearchRetryInfo | null;
+  readonly cancelled: boolean;
+  readonly timedOut: boolean;
+}
+export interface SearchNotification {
+  readonly invalidated: boolean;
+  readonly stalenessKey: string | null;
+}
+export interface SearchPluginCensusEntry { readonly source: string; readonly sql: string; }
+export interface SearchPluginCensusObject extends SearchOwnedObject { readonly owner: string; readonly version: string; }
+export interface SearchPluginCensus {
+  readonly entries: readonly SearchPluginCensusEntry[];
+  readonly objects: readonly SearchPluginCensusObject[];
+}
+export interface SearchPlugin {
+  readonly contractVersion: number;
+  readonly id: string;
+  readonly version: string;
+  readonly ownedObjects: readonly SearchOwnedObject[];
+  readonly sourceInterests: readonly SearchSourceInterest[];
+  readonly generationIdentity?: string;
+  stalenessKey(change: SearchChange): string | null;
+  prepare(ctx: SearchPluginContext): void | Promise<void>;
+  validate(ctx: SearchPluginContext): void | Promise<void>;
+  reconcile(ctx: SearchPluginContext, changes: readonly SearchChange[]): SearchMaterializeResult | Promise<SearchMaterializeResult>;
+  rebuild(ctx: SearchPluginContext): SearchMaterializeResult | Promise<SearchMaterializeResult>;
+  search(ctx: SearchPluginContext, request: SearchRequest): SearchPluginSearchResult | Promise<SearchPluginSearchResult>;
+  health?(ctx: SearchPluginContext): unknown;
+}
+export interface SearchPluginRegistryOptions { now?: () => string; searchTimeoutMs?: number; }
+export interface SearchPluginRegistry {
+  readonly size: number;
+  register(plugin: SearchPlugin): void;
+  has(id: string): boolean;
+  get(id: string): SearchPlugin | undefined;
+  ids(): readonly string[];
+  census(): SearchPluginCensus;
+  stateOf(id: string): SearchPluginHealth;
+  healthOf(id: string): SearchPluginHealth & { readonly plugin: unknown };
+  bindSource(handle: SearchSourceHandle | null): void;
+  bindIndex(index: ((id: string) => SearchOwnedIndex) | null): void;
+  ownedIndex(id: string): SearchOwnedIndex;
+  sourceReader(id: string): SearchSourceReader;
+  notifyChange(id: string, change: SearchChange): SearchNotification;
+  prepare(id: string): Promise<SearchLifecycleOutcome>;
+  validate(id: string): Promise<SearchLifecycleOutcome>;
+  reconcile(id: string, changes: readonly SearchChange[]): Promise<SearchLifecycleOutcome>;
+  rebuild(id: string): Promise<SearchLifecycleOutcome>;
+  search(id: string, request: SearchRequest): Promise<SearchSearchOutcome>;
+}
+export function createSearchSourceReader(
+  handle: SearchSourceHandle | null,
+  options: { plugin: string; interests: readonly SearchSourceInterest[] },
+): SearchSourceReader;
+export function createSearchPluginRegistry(options?: SearchPluginRegistryOptions): SearchPluginRegistry;
+
+export interface SearchIndexStatement {
+  readonly sql: string;
+  readonly params?: readonly unknown[];
+}
+export interface SearchIndexAuthorizerHandle extends WorkbenchDatabase {
+  setAuthorizer(callback: ((actionCode: number, arg1: string | null, arg2: string | null, dbName: string | null, triggerOrView: string | null) => number) | null): void;
+  enableLoadExtension?(allow: boolean): void;
+}
+export interface SearchCensusEntry {
+  readonly kind: 'framework' | 'entity' | 'schema' | 'plugin' | 'sqlite-artifact';
+  readonly owner: string;
+  readonly objectKind: SearchOwnedObjectKind | 'shadow-table';
+  readonly name: string;
+}
+export interface SearchOwnedIndexCapabilityOptions {
+  readonly db: SearchIndexAuthorizerHandle;
+  readonly census: ReadonlyMap<string, SearchCensusEntry>;
+  readonly writeCoordinator: { run<T>(fn: () => T | Promise<T>): Promise<T> };
+  readonly fenceOf: (pluginId: string) => number;
+  readonly maxStatements?: number;
+  readonly maxRows?: number;
+}
+export function createSearchOwnedIndexCapability(options: SearchOwnedIndexCapabilityOptions): (pluginId: string) => SearchOwnedIndex;
+
+export type VectorPluginValidationCode =
+  | 'dimension-mismatch'
+  | 'non-finite-value'
+  | 'model-space-mismatch'
+  | 'unauthorized-source-ownership'
+  | 'invalid-vector';
+export interface VectorModelSpace { readonly model: string; readonly dimensions: number; }
+export interface VectorPluginSource {
+  readonly entity: string;
+  readonly vector: string;
+  readonly model: string;
+  readonly owns: (row: Readonly<Record<string, unknown>>) => boolean;
+}
+export interface VectorPluginOptions {
+  readonly id: string;
+  readonly version: string;
+  readonly source: VectorPluginSource;
+  readonly modelSpace: VectorModelSpace;
+}
+export interface SearchEntityCensus {
+  readonly count: number;
+  readonly digest: string | null;
+}
+export type SearchCensus = Readonly<Record<string, SearchEntityCensus>>;
+export interface SearchShadowCapabilities {
+  beginShadow(ctx: SearchPluginContext): void | Promise<void>;
+  indexCensus(ctx: SearchPluginContext): SearchCensus;
+  commitShadow(ctx: SearchPluginContext): void | Promise<void>;
+  rollbackShadow(ctx: SearchPluginContext): void | Promise<void>;
+  abortShadow(ctx: SearchPluginContext): void | Promise<void>;
+  sourceCensus?(ctx: SearchPluginContext): SearchCensus;
+}
+export interface VectorPlugin extends SearchPlugin, SearchShadowCapabilities {
+  readonly generationIdentity: string;
+  readonly modelSpace: VectorModelSpace;
+  validateSourceRow(row: Readonly<Record<string, unknown>>): void;
+  setModelSpace(modelSpace: VectorModelSpace): void;
+}
+export function createVectorPlugin(options: VectorPluginOptions): VectorPlugin;
 export type { PostCommitEffectRunner } from '../index.d.ts';
 export function createPostCommitEffectRunner(options: {
   db: WorkbenchDatabase;

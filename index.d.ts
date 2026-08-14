@@ -1,6 +1,7 @@
 /// <reference types="node" />
 
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
+import type { SearchPlugin, SearchPluginRegistry } from './src/server.js';
 
 export interface WorkbenchStatement {
   run(...params: unknown[]): { changes: number | bigint };
@@ -1881,6 +1882,8 @@ export interface WorkbenchApp extends RouteBuilder {
   readonly blobs?: unknown;
   readonly principalSnapshots?: PrincipalSnapshotTransactionApi;
   readonly history?: DurableHistoryRuntime;
+  /** Registered server-side search plugins and their lifecycle state. */
+  readonly searchPlugins: SearchPluginRegistry;
   resolveScope?: WorkbenchOptions['resolveScope'];
   scopeSnapshot?: WorkbenchOptions['scopeSnapshot'];
   readonly ready?: Promise<WorkbenchApp>;
@@ -1888,6 +1891,8 @@ export interface WorkbenchApp extends RouteBuilder {
   use(path: string, target: EntityTarget | RouteBuilder | Handler): this;
   entity<Row extends object>(declaration: WorkbenchEntity<Row>): BoundWorkbenchEntity<Row>;
   entity<Row extends object = Record<string, unknown>>(name: string): BoundWorkbenchEntity<Row>;
+  /** Register a search plugin before the app starts; returns this app for chaining. */
+  registerSearchPlugin(plugin: SearchPlugin): this;
   register(...declarations: readonly (WorkbenchEntity | readonly WorkbenchEntity[])[]): this;
   auth(options?: { identifyBy?: readonly string[] }): this;
   static(prefix: string, directory: string): this;
