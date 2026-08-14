@@ -2,10 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import { createLiveDeliveryCore } from '../build/live-delivery-core.mjs';
+import { classifyLiveScope, createLiveDeliveryCore } from '../build/live-delivery-core.mjs';
 import { createLiveDelivery } from '../build/live-delivery-public.mjs';
 import { executeFrameworkDDL } from '../build/ddl.mjs';
 import { captureDeletedRowAnchor } from '../build/deleted-row-anchor.mjs';
+import { writeInvalidationInTxn } from '../build/invalidation-ledger.mjs';
 
 function database() {
   const db = new DatabaseSync(':memory:');
@@ -28,6 +29,18 @@ const authorization = {
   admit: async () => ({ admitted: true, reasonCode: null }),
   registerResource() {},
 };
+
+test('live scope classification keeps collection identity distinct from row scopes', () => {
+  const note = entity();
+  const entities = new Map([['Note', note]]);
+  const resource = classifyLiveScope('Note:n1', (name) => entities.get(name));
+  assert.equal(resource?.kind, 'resource');
+  assert.equal(resource?.entity, note);
+  assert.equal(resource?.kind === 'resource' ? resource.handle.key : null, 'Note:n1');
+  const collection = classifyLiveScope('Note', (name) => entities.get(name));
+  assert.equal(collection?.kind, 'collection');
+  assert.equal(collection?.entity, note);
+});
 
 test('live delivery coalesces revisions to the newest authorized row', async () => {
   const db = database();
@@ -66,6 +79,36 @@ test('live catchup resnapshots when its revision cannot be established from the 
   assert.equal(result.kind, 'snapshot');
   assert.equal(result.cursor, 9);
   assert.deepEqual(result.snapshot, { id: 'n1', title: 'current' });
+});
+
+test('live catchup accepts its current ledger revision and resnapshots stale or compacted cursors', async () => {
+  const db = database();
+  db.prepare('INSERT INTO Note VALUES (?, ?)').run('n1', 'current');
+  db.prepare('INSERT INTO _LiveRevision VALUES (?, ?)').run('Note:n1', 3);
+  for (const revision of [1, 2, 3]) {
+    writeInvalidationInTxn(db, {
+      resourceKey: 'Note:n1', kind: 'resource', revision, updatedAt: `2026-01-01T00:00:0${revision}.000Z`,
+    }, 2);
+  }
+  const delivery = createLiveDelivery({
+    db,
+    entities: new Map([['Note', entity()]]),
+    mayVerb: async () => true,
+    authorization,
+  });
+  const principal = { type: 'user', id: 'u1' };
+
+  const current = await delivery.catchup({ principal, scope: 'Note:n1', after: 3 });
+  assert.equal(current.kind, 'catchup', 'the latest live revision needs no snapshot');
+  assert.equal(current.cursor, 3);
+
+  const stale = await delivery.catchup({ principal, scope: 'Note:n1', after: 2 });
+  assert.equal(stale.kind, 'snapshot');
+  assert.equal(stale.cursor, 3);
+
+  const compacted = await delivery.catchup({ principal, scope: 'Note:n1', after: 0 });
+  assert.equal(compacted.kind, 'snapshot');
+  assert.equal(compacted.cursor, 3);
 });
 
 test('live deletion projects terminal absence using the deletion-time anchor', async () => {

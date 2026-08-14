@@ -30,6 +30,7 @@ import workbench, {
   generateDDL,
 } from '../build/internal.mjs';
 import { createWriteQueue } from '../build/write-queue.mjs';
+import { invalidationRecovery } from '../build/invalidation-ledger.mjs';
 
 const Note = entity('Note', {
   title: text(),
@@ -111,6 +112,11 @@ test('a live mutation writes no _Log row and the history mutation still does', a
   // The row change still landed (the live variant applies the projection).
   assert.equal(db.prepare('SELECT id, title FROM Note WHERE id = ?').get('n1').title, 'live note');
   assert.equal(revisionOf(db, 'Note:n1'), 1);
+  assert.deepEqual(
+    invalidationRecovery(db, 'Note:n1', 'resource', 1),
+    { status: 'current', revision: 1, retainedFromRevision: 1 },
+    'the committed live revision is recoverable without a history row',
+  );
 
   const history = await server.dispatch({
     actionId: randomUUID(), type: 'Article.create', payload: { id: 'a1', title: 'history article' },

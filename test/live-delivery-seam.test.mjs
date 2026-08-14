@@ -133,6 +133,10 @@ function makeNoteEntity() {
   };
 }
 
+function makeLiveNoteEntity() {
+  return { ...makeNoteEntity(), tier: 'live' };
+}
+
 function makeAnnotatedTextEntity() {
   return {
     name: 'Doc',
@@ -293,6 +297,34 @@ test('WebSocket subscribe receives ack, consumer delivers core-projected event v
     live.close();
     httpServer.close();
     await sleep(50);
+  }
+});
+
+test('WebSocket acknowledges the live revision rather than the historical log cursor', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec(`CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT)`);
+  db.prepare(`INSERT INTO Note (id, title) VALUES (?, ?)`).run('n1', 'hello');
+  db.prepare(`INSERT INTO _LiveRevision (resourceKey, revision) VALUES (?, ?)`).run('Note:n1', 4);
+  const httpServer = http.createServer();
+  const live = createWebSocketLiveDelivery(httpServer, {
+    mayVerb: async () => true,
+    principalOf: () => ({ type: 'user', id: 'u1' }),
+    db,
+    resolveEntity: (name) => name === 'Note' ? makeLiveNoteEntity() : null,
+  });
+  httpServer.listen(0);
+
+  try {
+    const ws = await openRawWS(httpServer.address().port);
+    ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1' }));
+    const ack = await ws.nextMessage();
+    assert.equal(ack?.type, 'subscribed');
+    assert.equal(ack?.currentSeq, 4);
+    ws.close();
+  } finally {
+    live.close();
+    httpServer.close();
   }
 });
 
