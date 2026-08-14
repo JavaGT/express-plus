@@ -13,6 +13,7 @@ import { readSeq as cursorReadSeq,                     } from './cursor.mjs';
 import { prepareCached, txn,               } from './driver.mjs';
 import { noHistoryReceiptTableDDL } from './no-history-receipt.mjs';
 import { liveRevisionTableDDL } from './live-revision.mjs';
+import { invalidationLedgerTableDDL } from './invalidation-ledger.mjs';
 
 // The no-history lane (S3/A2) surfaces through this module alongside the
 // durable _Log/_ActionReceipt surfaces, so the boot DDL and the kernel have one
@@ -33,6 +34,7 @@ export {
   guardExpectedRevision,
   expectedRevisionConflict,
 } from './live-revision.mjs';
+export { invalidationLedgerTableDDL } from './invalidation-ledger.mjs';
 
 // ---- DDL ----
 
@@ -123,6 +125,7 @@ export function frameworkLogDDL() {
     // Existing _Log/_ActionReceipt tables and their invariants are untouched.
     noHistoryReceiptTableDDL(),
     liveRevisionTableDDL(),
+    invalidationLedgerTableDDL(),
   ];
 }
 

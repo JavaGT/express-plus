@@ -35,6 +35,14 @@ export const DEFAULT_INVALIDATION_LEDGER_LIMIT = 8;
 
 
 
+// The ledger's standalone writer accepts only the coordinator declared by the
+// database it changes. Shape alone cannot prove that a coordinator serializes
+// this database's writes, so an unbound database and a foreign coordinator fail
+// closed. Applications bind this when they construct their database runtime.
+
+
+
+
 // Only resource identity, kind, revision, and timestamp belong here. In
 // particular there is no payload, prior value, snapshot, or actor attribution.
 export function invalidationLedgerTableDDL() {
@@ -43,7 +51,7 @@ export function invalidationLedgerTableDDL() {
   kind TEXT NOT NULL CHECK (kind IN ('resource', 'collection')),
   revision INTEGER NOT NULL CHECK (revision >= 1),
   updatedAt TEXT NOT NULL,
-  PRIMARY KEY (resourceKey, revision)
+  PRIMARY KEY (resourceKey, kind, revision)
 );`;
 }
 
@@ -68,26 +76,30 @@ function validateEntry(entry                         )       {
   }
 }
 
-// compactInvalidations — keep the latest contiguous tail for one key. The
+// compactInvalidations — keep the latest contiguous tail for one key and kind. The
 // caller controls transaction scope; a compaction failure throws, so it cannot
 // be mistaken for a successful write. The insert has already happened, and the
 // newest revision is never selected for deletion.
-export function compactInvalidations(db          , resourceKey        , limit = DEFAULT_INVALIDATION_LEDGER_LIMIT)       {
+export function compactInvalidations(db          , resourceKey        , kind                  , limit = DEFAULT_INVALIDATION_LEDGER_LIMIT)       {
   if (typeof resourceKey !== 'string' || resourceKey.length === 0) {
     throw new TypeError('invalidation ledger requires a non-empty resourceKey');
+  }
+  if (kind !== 'resource' && kind !== 'collection') {
+    throw new TypeError("invalidation ledger kind must be 'resource' or 'collection'");
   }
   validateLimit(limit);
   prepareCached(
     db,
     `DELETE FROM ${INVALIDATION_LEDGER_TABLE}
      WHERE resourceKey = :resourceKey
+       AND kind = :kind
        AND revision NOT IN (
-         SELECT revision FROM ${INVALIDATION_LEDGER_TABLE}
-         WHERE resourceKey = :resourceKey
-         ORDER BY revision DESC
-         LIMIT :limit
-       )`,
-  ).run({ resourceKey, limit });
+          SELECT revision FROM ${INVALIDATION_LEDGER_TABLE}
+          WHERE resourceKey = :resourceKey AND kind = :kind
+          ORDER BY revision DESC
+          LIMIT :limit
+        )`,
+  ).run({ resourceKey, kind, limit });
 }
 
 // writeInvalidationInTxn — the live mutation path calls this after it bumps the
@@ -102,9 +114,9 @@ export function writeInvalidationInTxn(
   validateLimit(limit);
   const existing = prepareCached(
     db,
-    `SELECT kind, updatedAt FROM ${INVALIDATION_LEDGER_TABLE}
-     WHERE resourceKey = :resourceKey AND revision = :revision`,
-  ).get({ resourceKey: entry.resourceKey, revision: entry.revision });
+     `SELECT kind, updatedAt FROM ${INVALIDATION_LEDGER_TABLE}
+     WHERE resourceKey = :resourceKey AND kind = :kind AND revision = :revision`,
+  ).get({ resourceKey: entry.resourceKey, kind: entry.kind, revision: entry.revision });
   if (existing) {
     if (existing.kind !== entry.kind || existing.updatedAt !== entry.updatedAt) {
       throw new Error(`invalidation ledger revision already recorded differently for '${entry.resourceKey}'`);
@@ -116,7 +128,7 @@ export function writeInvalidationInTxn(
        VALUES (:resourceKey, :kind, :revision, :updatedAt)`,
     ).run(entry);
   }
-  compactInvalidations(db, entry.resourceKey, limit);
+  compactInvalidations(db, entry.resourceKey, entry.kind, limit);
 }
 
 // writeInvalidation — coordinator-routed entry point for a standalone writer.
@@ -124,32 +136,44 @@ export function writeInvalidationInTxn(
 // bump, and marker share one existing transaction.
 export function writeInvalidation(
   writeCoordinator                  ,
-  db          ,
+  db                            ,
   entry                         ,
   limit = DEFAULT_INVALIDATION_LEDGER_LIMIT,
 )                {
   if (!writeCoordinator || typeof writeCoordinator.run !== 'function') {
     throw new TypeError('invalidation ledger requires the platform write coordinator');
   }
+  if (db.writeCoordinator === undefined) {
+    throw new TypeError('invalidation ledger requires the database to declare the write coordinator that owns it');
+  }
+  if (db.writeCoordinator !== writeCoordinator) {
+    throw new TypeError('invalidation ledger refuses a foreign write coordinator');
+  }
   return writeCoordinator.run(() => writeInvalidationInTxn(db, entry, limit));
 }
 
-export function invalidationsFor(db          , resourceKey        )                                     {
+export function invalidationsFor(db          , resourceKey        , kind                  )                                     {
   if (typeof resourceKey !== 'string' || resourceKey.length === 0) {
     throw new TypeError('invalidation ledger requires a non-empty resourceKey');
+  }
+  if (kind !== 'resource' && kind !== 'collection') {
+    throw new TypeError("invalidation ledger kind must be 'resource' or 'collection'");
   }
   return prepareCached(
     db,
     `SELECT resourceKey, kind, revision, updatedAt FROM ${INVALIDATION_LEDGER_TABLE}
-     WHERE resourceKey = :resourceKey ORDER BY revision`,
-  ).all({ resourceKey })                             ;
+     WHERE resourceKey = :resourceKey AND kind = :kind ORDER BY revision`,
+  ).all({ resourceKey, kind })                             ;
 }
 
 // invalidationRecovery — the delivery-facing gap check. A ledger marker can
 // only prove freshness; any stale client gets a resnapshot, never a replay.
-export function invalidationRecovery(db          , resourceKey        , knownRevision        )                       {
+export function invalidationRecovery(db          , resourceKey        , kind                  , knownRevision        )                       {
   if (typeof resourceKey !== 'string' || resourceKey.length === 0) {
     throw new TypeError('invalidation ledger requires a non-empty resourceKey');
+  }
+  if (kind !== 'resource' && kind !== 'collection') {
+    throw new TypeError("invalidation ledger kind must be 'resource' or 'collection'");
   }
   if (!Number.isInteger(knownRevision) || knownRevision < 0) {
     throw new TypeError('knownRevision must be a non-negative integer');
@@ -157,8 +181,8 @@ export function invalidationRecovery(db          , resourceKey        , knownRev
   const row = prepareCached(
     db,
     `SELECT MIN(revision) AS retainedFromRevision, MAX(revision) AS revision
-     FROM ${INVALIDATION_LEDGER_TABLE} WHERE resourceKey = :resourceKey`,
-  ).get({ resourceKey });
+     FROM ${INVALIDATION_LEDGER_TABLE} WHERE resourceKey = :resourceKey AND kind = :kind`,
+  ).get({ resourceKey, kind });
   const revision = Number(row?.revision ?? 0);
   const retainedFromRevision = Number(row?.retainedFromRevision ?? 0);
   if (revision === 0) {

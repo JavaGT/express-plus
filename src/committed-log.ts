@@ -13,6 +13,7 @@ import type { EventIdentityHandle } from './event-handle.ts';
 import { prepareCached, txn, type DbHandle } from './driver.ts';
 import { noHistoryReceiptTableDDL } from './no-history-receipt.ts';
 import { liveRevisionTableDDL } from './live-revision.ts';
+import { invalidationLedgerTableDDL } from './invalidation-ledger.ts';
 
 // The no-history lane (S3/A2) surfaces through this module alongside the
 // durable _Log/_ActionReceipt surfaces, so the boot DDL and the kernel have one
@@ -33,6 +34,7 @@ export {
   guardExpectedRevision,
   expectedRevisionConflict,
 } from './live-revision.ts';
+export { invalidationLedgerTableDDL } from './invalidation-ledger.ts';
 
 // ---- DDL ----
 
@@ -123,6 +125,7 @@ export function frameworkLogDDL() {
     // Existing _Log/_ActionReceipt tables and their invariants are untouched.
     noHistoryReceiptTableDDL(),
     liveRevisionTableDDL(),
+    invalidationLedgerTableDDL(),
   ];
 }
 

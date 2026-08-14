@@ -12,6 +12,7 @@ import {
   writeInvalidation,
   writeInvalidationInTxn,
 } from '../build/invalidation-ledger.mjs';
+import { executeFrameworkDDL } from '../build/ddl.mjs';
 
 function freshDb() {
   const db = new DatabaseSync(':memory:');
@@ -34,6 +35,16 @@ test('ledger schema contains resource keys and revisions only, never content or 
   }
 });
 
+test('framework boot creates the invalidation ledger table', () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    executeFrameworkDDL(db);
+    assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_InvalidationLedger'").get());
+  } finally {
+    db.close();
+  }
+});
+
 test('compaction bounds each resource independently and always retains its latest revision', async () => {
   const db = freshDb();
   try {
@@ -44,13 +55,14 @@ test('compaction bounds each resource independently and always retains its lates
         return Promise.resolve(fn());
       },
     };
+    db.writeCoordinator = writeCoordinator;
     for (let revision = 1; revision <= 4; revision++) {
       await writeInvalidation(writeCoordinator, db, entry(revision), 2);
     }
     writeInvalidationInTxn(db, entry(1, { resourceKey: 'Note:n2' }), 2);
     assert.equal(coordinated, true, 'standalone writes use the platform coordinator');
-    assert.deepEqual(invalidationsFor(db, 'Note:n1').map((row) => row.revision), [3, 4]);
-    assert.deepEqual(invalidationsFor(db, 'Note:n2').map((row) => row.revision), [1]);
+    assert.deepEqual(invalidationsFor(db, 'Note:n1', 'resource').map((row) => row.revision), [3, 4]);
+    assert.deepEqual(invalidationsFor(db, 'Note:n2', 'resource').map((row) => row.revision), [1]);
   } finally {
     db.close();
   }
@@ -62,8 +74,8 @@ test('a superseding revision preserves the newest marker and updates the stalene
     writeInvalidationInTxn(db, entry(1), 2);
     writeInvalidationInTxn(db, entry(2), 2);
     writeInvalidationInTxn(db, entry(3), 2);
-    assert.equal(invalidationRecovery(db, 'Note:n1', 3).status, 'current');
-    assert.deepEqual(invalidationRecovery(db, 'Note:n1', 2), {
+    assert.equal(invalidationRecovery(db, 'Note:n1', 'resource', 3).status, 'current');
+    assert.deepEqual(invalidationRecovery(db, 'Note:n1', 'resource', 2), {
       status: 'resnapshot', reason: 'stale', revision: 3, retainedFromRevision: 2,
     });
   } finally {
@@ -75,7 +87,7 @@ test('a compacted revision forces resnapshot rather than offering replay', () =>
   const db = freshDb();
   try {
     for (let revision = 1; revision <= 4; revision++) writeInvalidationInTxn(db, entry(revision), 2);
-    assert.deepEqual(invalidationRecovery(db, 'Note:n1', 1), {
+    assert.deepEqual(invalidationRecovery(db, 'Note:n1', 'resource', 1), {
       status: 'resnapshot', reason: 'compacted', revision: 4, retainedFromRevision: 3,
     });
   } finally {
@@ -90,7 +102,34 @@ test('a compaction storage failure is reported and does not lose the newest revi
     db.exec(`CREATE TRIGGER reject_invalidation_compaction BEFORE DELETE ON ${INVALIDATION_LEDGER_TABLE}
       BEGIN SELECT RAISE(ABORT, 'compaction unavailable'); END`);
     assert.throws(() => writeInvalidationInTxn(db, entry(2), 1), /compaction unavailable/);
-    assert.deepEqual(invalidationsFor(db, 'Note:n1').map((row) => row.revision), [1, 2]);
+    assert.deepEqual(invalidationsFor(db, 'Note:n1', 'resource').map((row) => row.revision), [1, 2]);
+  } finally {
+    db.close();
+  }
+});
+
+test('a foreign coordinator is refused even when it exposes run()', () => {
+  const db = freshDb();
+  try {
+    const owner = { run: (fn) => Promise.resolve(fn()) };
+    db.writeCoordinator = owner;
+    assert.throws(
+      () => writeInvalidation({ run: (fn) => Promise.resolve(fn()) }, db, entry(1)),
+      /foreign write coordinator/,
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test('resource and collection markers with the same key coexist and compact independently', () => {
+  const db = freshDb();
+  try {
+    writeInvalidationInTxn(db, entry(1, { kind: 'resource' }), 1);
+    writeInvalidationInTxn(db, entry(1, { kind: 'collection' }), 1);
+    writeInvalidationInTxn(db, entry(2, { kind: 'resource' }), 1);
+    assert.deepEqual(invalidationsFor(db, 'Note:n1', 'resource').map((row) => row.revision), [2]);
+    assert.deepEqual(invalidationsFor(db, 'Note:n1', 'collection').map((row) => row.revision), [1]);
   } finally {
     db.close();
   }
