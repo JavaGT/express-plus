@@ -582,6 +582,8 @@ export function createLiveDelivery(options: {
   db: WorkbenchDatabase;
   entities: ReadonlyMap<string, LiveDeliveryEntity> | ((name: string) => LiveDeliveryEntity | undefined);
   mayVerb: (entity: LiveDeliveryEntity, verb: 'subscribe', row: Record<string, unknown>, principal: Principal) => boolean | Promise<boolean>;
+  /** The injected authorization adapter — THE admission path for subscription admission and re-authorization when provided. */
+  authorization?: import('../index.d.ts').AuthorizationAdapter;
   /** Package-owned constrained relational snapshot declarations. */
   snapshots?: readonly LiveDeliverySnapshot[];
   log?: { error?: (channel: string, message: string, context?: Record<string, unknown>) => void } | null;

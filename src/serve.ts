@@ -525,6 +525,13 @@ export function listen(app: any, port: any, optionsOrCallback: any = {}) {
 
   const httpServer = createHttpServer(resolved);
   app.httpServer = httpServer;
+  // The injected authorization adapter is THE admission engine for this whole
+  // application (S5/A2): the HTTP request handler already consults it, and this
+  // stash lets the durable kernel (registered actions) and the live-delivery
+  // seam resolve the SAME instance — single path, no second engine. Only the
+  // injected adapter is stashed; with none, each seam keeps its framework
+  // default (behavior unchanged).
+  app._authorization = options.authorization;
   // Start the tick engine if any entity declares a tick trigger. DEFERRED into
   // `app.ready` below — `app.kernel` (and thus `dispatch`) is not built until
   // `buildKernel(app)` runs; starting earlier would hand the engine an undefined
@@ -583,6 +590,10 @@ export function listen(app: any, port: any, optionsOrCallback: any = {}) {
       // principal connects as anonymous, so live re-authorization (mayVerb) and
       // subscription presence never see a real revoked/expired status.
       principalOf: (req: any) => collapseForAdmission(principalOf(req)),
+      // The injected adapter owns live subscription admission + re-authorization
+      // too (single path); with none injected the framework mayVerb engine runs,
+      // unchanged.
+      authorization: options.authorization,
       db: app.db,
       resolveEntity: (name: any) => app.entities?.get(name),
       ready: () => app.ready,

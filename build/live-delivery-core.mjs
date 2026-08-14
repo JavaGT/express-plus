@@ -31,6 +31,7 @@
 import { readSeq, readSince } from './committed-log.mjs';
 import { EventKind, parseEventType } from './event-handle.mjs';
 import { mayRow } from './row-grant.mjs';
+                                                                       
 import { tryParseScopeKey } from './scope-handle.mjs';
                                                      
                                                 
@@ -62,6 +63,7 @@ function deniedError(scope        )                            {
                    
                                                                                              
                           
+                                              
                                                                             
                                                                                                           
                             
@@ -127,7 +129,7 @@ function deniedError(scope        )                            {
                                                                             
  
 
-export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient, scopeVisible = () => true, log = null }                         )                   {
+export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, projectRecipient, scopeVisible = () => true, log = null }                         )                   {
   if (!db) throw new Error('live-delivery-core: db is required');
   if (!entities) throw new Error('live-delivery-core: entities is required');
   if (!mayVerb) throw new Error('live-delivery-core: mayVerb is required');
@@ -221,6 +223,22 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
 
   async function checkMayRow(entityRec                  , row                         , principal           )                   {
     try {
+      // Re-authorization goes through the injected authorization adapter (S5/A2)
+      // when one is wired — the SAME seam subscribe-time admission uses — so a
+      // policy adapter owns both ends of the live path (the ticket's single-path
+      // requirement). Without an adapter the framework row-grant runs, unchanged.
+      if (authorization) {
+        const decision = await authorization.admit({
+          category: 'entity',
+          verb: 'subscribe',
+          operation: 'subscribe',
+          principal,
+          entity: entityRec         ,
+          row,
+          resourceId: (row                                       )?.id                             ,
+        });
+        return decision.admitted;
+      }
       return await mayRow(entityRec         , 'subscribe', row, principal, mayVerb         );
     } catch {
       return false;

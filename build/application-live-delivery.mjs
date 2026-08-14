@@ -8,6 +8,7 @@ import { createOwnedLiveDelivery } from './live-delivery-public.mjs';
 import { createLiveDeliveryHttpHandler } from './live-delivery-http.mjs';
 import { createLiveDeliveryWebSocket } from './live-delivery-websocket.mjs';
 import { mayVerb } from './row-grant.mjs';
+                                                                       
 import { validatePrincipalSnapshotDeclarations } from './principal-snapshot-delivery.mjs';
 import { collapseForAdmission,                } from './principal.mjs';
                                              
@@ -20,6 +21,7 @@ import { collapseForAdmission,                } from './principal.mjs';
                                  
                                           
                             
+                                       
  
 
                               
@@ -47,6 +49,7 @@ export function attachApplicationLiveDelivery(app                    , {
   snapshots,
   principalSnapshots,
   maxCatchupEvents,
+  authorization,
 }                                )                     {
   if (app._startPromise || app._startupMode || app._transportAttached) {
     throw new Error('live delivery must be attached before application startup');
@@ -69,6 +72,10 @@ export function attachApplicationLiveDelivery(app                    , {
     db: app.db                ,
     entities: (name        , declaration          ) => declaration === undefined ? app.entities.get(name) : app.entity(declaration),
     mayVerb: (entity                  , verb        , row                                            , principal           ) => mayVerb(entity         , verb, row, principal),
+    // The app's injected authorization adapter (S5/A2) owns subscription
+    // admission + re-authorization on this seam too; without one the framework
+    // mayVerb engine runs, unchanged.
+    authorization,
     snapshots,
     principalSnapshots,
     schema: app.schema,
@@ -108,6 +115,7 @@ export function attachApplicationLiveDelivery(app                    , {
           principalOf: principalOfAdmitted,
           resolveEntity: (name        ) => app.entities.get(name),
           mayVerb: (entity                  , verb        , row                                            , principal           ) => mayVerb(entity         , verb, row, principal),
+          authorization,
           db: app.db                ,
           ready: () => Promise.resolve(app.ready),
           log: app.log,

@@ -490,8 +490,12 @@ export function buildKernel(app: any) {
         const row = entity.deserializeRow({ ...stored });
         return admitRow({ kind: 'verb', entity, row, principal: context.principal, verb: verb === 'create' ? 'remove' : 'update' });
       }
+      // A composite (authorizedRows) action evaluates every affected row through
+      // ONE adapter admit() call. The app's injected adapter (listen({ authorization }))
+      // is THE admission engine for the whole app — HTTP, live, and these durable
+      // actions alike; with none injected the framework default runs, unchanged.
       const authorize = isAuthorizedRows(declaration.authorize)
-        ? bindAuthorizedRows(declaration.authorize, app)
+        ? bindAuthorizedRows(declaration.authorize, app, app._authorization)
         : declaration.authorize;
       return authorize({ ...context, db: app.db });
     },

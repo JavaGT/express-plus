@@ -1,5 +1,6 @@
                                             
 import { mayRow } from './row-grant.mjs';
+                                                                       
 
 // A field descriptor as snapshot projection reads it: kind, value type, and the
 // ref target (entity name or declared entity object). Kept loose — the
@@ -569,11 +570,12 @@ export function captureSnapshot({ db, principal, anchor, id, output, tombstones 
                    
  
 
-export async function authorizeSnapshot({ principal, anchor, candidate, mayVerb }   
+export async function authorizeSnapshot({ principal, anchor, candidate, mayVerb, authorization }   
                      
                          
                           
                            
+                                              
  )                                                                                                  {
   const authorized = new WeakMap                                       ();
   const rowAuthorization = new Map                                                   ();
@@ -588,7 +590,11 @@ export async function authorizeSnapshot({ principal, anchor, candidate, mayVerb 
         // mutate the candidate graph. Entity hydrate still deserializes in place
         // (members handles, stored codecs), so hand it a mutable copy.
         const row = typeof entity.hydrate === 'function' ? entity.hydrate({ ...node.raw }, principal) : node.raw;
-        decision = Object.freeze({ row, allowed: row != null && await mayRow(entity, 'subscribe', row, principal, mayVerb) });
+        // A composite snapshot admission is a per-row subscribe admission. An
+        // injected adapter is THE authority (S5/A2 single path); without one the
+        // framework mayVerb engine runs, unchanged.
+        const allowed = row != null && await admitSnapshotRow(authorization, entity, row, principal, mayVerb);
+        decision = Object.freeze({ row, allowed });
         entityRows.set(node.raw.id, decision);
       }
       let requiredAllowed = node.required !== false;
@@ -605,6 +611,22 @@ export async function authorizeSnapshot({ principal, anchor, candidate, mayVerb 
   }
   const anchorAllowed = await authorize(anchor, candidate);
   return Object.freeze({ anchorAllowed, authorized });
+}
+
+async function admitSnapshotRow(adapter                                         , entity                , row         , principal         , mayVerb                 )                   {
+  if (adapter) {
+    const decision = await adapter.admit({
+      category: 'entity',
+      verb: 'subscribe',
+      operation: 'subscribe',
+      principal: principal                                      ,
+      entity,
+      row,
+      resourceId: (row                                       )?.id                             ,
+    });
+    return decision.admitted;
+  }
+  return mayRow(entity, 'subscribe', row, principal, mayVerb);
 }
 
 export function projectSnapshot({ anchor, candidate, output, authorized }   

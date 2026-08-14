@@ -26,6 +26,7 @@ import { createLiveDeliveryCore } from './live-delivery-core.mjs';
                                                                                     
 import { createLiveEnvelopeBuilder } from './live-delivery-envelope.mjs';
 import { createLiveDeliveryWebSocket } from './live-delivery-websocket.mjs';
+                                                                       
                                                                   
                                                 
                                              
@@ -48,6 +49,7 @@ import { createLiveDeliveryWebSocket } from './live-delivery-websocket.mjs';
 export function createWebSocketLiveDelivery(httpServer        , {
   path = '/events',
   mayVerb = null,
+  authorization = null,
   principalOf = (() => ({ type: 'anonymous', id: null })             ),
   db = null,
   resolveEntity = null,
@@ -56,6 +58,7 @@ export function createWebSocketLiveDelivery(httpServer        , {
 }   
                 
                            
+                                              
                                                                          
                            
                                                                                  
@@ -72,6 +75,7 @@ export function createWebSocketLiveDelivery(httpServer        , {
     db: db                ,
     entities: resolveEntity ? (name        ) => resolveEntity(name)                                 : new Map(),
     mayVerb,
+    authorization,
     projectRecipient: (ctx                    ) => envelopeBuilder.buildEnvelope(ctx                                                                  ),
     log,
   });
@@ -85,6 +89,7 @@ export function createWebSocketLiveDelivery(httpServer        , {
     principalOf,
     resolveEntity,
     mayVerb,
+    authorization,
     db,
     ready,
     log,

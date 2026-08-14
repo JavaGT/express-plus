@@ -799,3 +799,98 @@ export function bindReadScope(readScope: ReadScopeTemplate | undefined, principa
   }
   return { sql: readScope.sql, params };
 }
+
+// ---- single-row scope evaluation (the authorization adapter's resource gate) --
+//
+// Evaluate a compiled read-scope template against ONE materialized row for a
+// principal — pure JS, no database. The authorization adapter uses this so a
+// registered resource's scope actually CONSTRAINS admission instead of being a
+// registration-time validation artifact: the caller's read happened under this
+// compiled scope, and admit() re-verifies the supplied row satisfies it.
+//
+// Value predicates (eq/in/isNull/gte/lte and the not/and/true/false combinators)
+// evaluate against the row's STORED cells (the form SQL returns), mirroring
+// SQLite's numeric/text coercion for equality and relational comparisons. A
+// principal-id param resolves to the principal's id (an anonymous principal's
+// id is null → the eq is false, exactly like `col = NULL` in SQL). A
+// DB-dependent predicate (existsMembership/join/match) cannot be verified
+// against a single row and FAILS CLOSED (false); `nearest` lowers to no SQL
+// filter (1=1), so it imposes no constraint here.
+
+interface ScopeEvalContext {
+  row: Record<string, unknown>;
+  principal: unknown;
+}
+
+// SQLite equality: `'1' = 1` is TRUE in SQL (the text is coerced to a number),
+// so a stored text cell compares equal to a numeric literal and vice versa.
+// Everything else is strict — NULL never equals a value, and the coercion is
+// deliberately narrow (only finite numeric text), never JS's `==` semantics.
+function sqliteEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a === 'number' && typeof b === 'string') {
+    const numericB = Number(b);
+    return Number.isFinite(numericB) && a === numericB;
+  }
+  if (typeof a === 'string' && typeof b === 'number') {
+    const numericA = Number(a);
+    return Number.isFinite(numericA) && numericA === b;
+  }
+  return false;
+}
+
+function evaluateScopeNode(node: AstNode, ctx: ScopeEvalContext): boolean {
+  switch (node.node) {
+    case 'true': return true;
+    case 'false': return false;
+    case 'eq': {
+      // A rebindable principal param resolves to the principal's identity; an
+      // absent identity binds NULL, and `col = NULL` is false in SQL — mirror
+      // that by denying the comparison outright (no JS null-equal shortcut).
+      const want = 'param' in node
+        ? scopeParamValue(node, ctx)
+        : node.value;
+      if (want === null || want === undefined) return false;
+      return sqliteEqual(ctx.row[String(node.field)], want);
+    }
+    case 'in': {
+      const field = ctx.row[String(node.field)];
+      return (node.values as unknown[]).some((value) => sqliteEqual(field, value));
+    }
+    case 'isNull': {
+      const field = ctx.row[String(node.field)];
+      return field === null || field === undefined;
+    }
+    // SQLite relational operators coerce both sides to numbers when either is
+    // numeric; JS relational operators do the same, so plain >= / <= mirror the
+    // SQL for both numeric and text columns.
+    case 'gte': return (ctx.row[String(node.field)] as number) >= (node.value as number);
+    case 'lte': return (ctx.row[String(node.field)] as number) <= (node.value as number);
+    case 'not': return !evaluateScopeNode(node.operand as AstNode, ctx);
+    case 'and': return (node.operands as AstNode[]).every((operand) => evaluateScopeNode(operand as AstNode, ctx));
+    // `nearest` lowers to no SQL filter (1=1) — the query layer post-filters.
+    case 'nearest': return true;
+    // existsMembership / join / match need their side tables — unverifiable
+    // against a single row without a database, so fail closed.
+    default: return false;
+  }
+}
+
+function scopeParamValue(node: AstNode, ctx: ScopeEvalContext): unknown {
+  const record = ctx.principal as { id?: unknown; attributes?: Record<string, unknown> } | null | undefined;
+  if (node.param === PRINCIPAL_ID_PARAM) return record?.id ?? null;
+  if (node.param === PRINCIPAL_ATTR_PARAM) return record?.attributes?.token ?? null;
+  return null;
+}
+
+export function rowMatchesScope(
+  template: ReadScopeTemplate,
+  row: Record<string, unknown>,
+  principal: unknown,
+): boolean {
+  try {
+    return evaluateScopeNode(template.ast, { row, principal }) === true;
+  } catch {
+    return false;
+  }
+}

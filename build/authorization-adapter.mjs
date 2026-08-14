@@ -46,7 +46,7 @@ import {
                     
 } from './row-grant.mjs';
 import { buildCheckRegistry } from './registry.mjs';
-import { compileReadScope,                        } from './scope-sql.mjs';
+import { compileReadScope, rowMatchesScope,                        } from './scope-sql.mjs';
 import { DecisionTrace } from './decision-trace.mjs';
                                                               
 
@@ -80,13 +80,17 @@ import { DecisionTrace } from './decision-trace.mjs';
                      
                  
                       
+                       
                    
 
 // The frozen decision every admit() returns. `trace` is null in the production
 // default and a readonly check list when tracing is enabled (env/test flag).
+// `operation` is null ONLY on an 'unknown-operation' denial — an operation the
+// adapter does not recognize is not a category, so the decision carries no
+// label under which admission could have legitimately run.
                                     
                              
-                                        
+                                               
                                               
                                      
                                                   
@@ -148,7 +152,12 @@ import { DecisionTrace } from './decision-trace.mjs';
 // category, optionally naming a resource registered on this adapter. A named
 // but unregistered resource denies ('no-resource'); an absent row denies
 // ('no-row-scope'). The row's visibility is decided by the caller under the
-// resource's REGISTERED (compiled) scope — this seam never loads rows itself.
+// resource's REGISTERED (compiled) scope — this seam never loads rows itself —
+// and, for a named registered resource, admit() re-verifies the supplied row
+// against the registered scope before admitting (a row outside that scope, or a
+// scope this seam cannot evaluate without a database, denies 'no-row-scope').
+// `row` must carry the STORED cell form (the shape SQL returns) so the scope's
+// serialized literals compare correctly.
                                      
                                             
                                 
@@ -220,10 +229,11 @@ export function createAuthorizationAdapter(options                              
     reasonCode                            ,
     capabilities                       ,
     resourceId               ,
+    operation                          ,
   )                    {
     return Object.freeze({
       admitted,
-      operation: operationOf(input),
+      operation,
       resourceCategory: input.category,
       resourceId,
       reasonCode: admitted ? null : reasonCode,
@@ -233,85 +243,95 @@ export function createAuthorizationAdapter(options                              
   }
 
   // Normalize the input operation to a category token. The operation on the
-  // decision is metadata (the checks carry the authority), so an unparseable
-  // operation is an informational fallback to the read category — never a
-  // throw that would mask the denial underneath.
-  function operationOf(input            )                    {
+  // decision is metadata (the checks carry the authority), so a MISSING
+  // operation on a non-entity input is an access check labeled with the closest
+  // generic category (read). An UNPARSEABLE operation — vocabulary the adapter
+  // does not know — is not a category at all and FAILS CLOSED: this returns
+  // null and admit() denies with reasonCode 'unknown-operation', never an
+  // admitted 'read'.
+  function operationOf(input            )                           {
     try {
       if (input.operation == null) {
         if (input.category === 'entity' && input.verb) return operationCategory(input.verb);
-        return anonymousOperation(input);
+        return operationCategory('read');
       }
       return typeof input.operation === 'string'
         ? operationCategory(input.operation)
         : operationCategory(input.operation.operation);
     } catch {
-      return anonymousOperation(input);
+      return null;
     }
   }
 
-  function anonymousOperation(_input            )                    {
-    // route-gate admission is an access check, not a CRUD operation — the
-    // read category is the closest generic label when none was supplied.
-    return operationCategory('read');
-  }
-
-  async function admitEntity(input                  , collapsed           , trace               )                             {
+  async function admitEntity(input                  , collapsed           , trace               , operation                          )                             {
     const { entity, row } = input;
     trace.record('row.visible', row != null);
-    if (row == null) return settle(input, trace, false, 'no-row-scope', [], resourceIdOf(input, row));
+    if (row == null) return settle(input, trace, false, 'no-row-scope', [], resourceIdOf(input, row), operation);
 
     if (input.fieldName) {
       const decision = await runFieldCapabilities(entity, input.fieldName, row, collapsed);
       const capabilityOk = decision.granted && (input.capability == null || decision.capabilities.includes(input.capability));
       trace.record(`field.can.${input.fieldName}`, capabilityOk);
-      if (!capabilityOk) return settle(input, trace, false, 'no-field-access', [], resourceIdOf(input, row));
-      return settle(input, trace, true, null, decision.capabilities, resourceIdOf(input, row));
+      if (!capabilityOk) return settle(input, trace, false, 'no-field-access', [], resourceIdOf(input, row), operation);
+      return settle(input, trace, true, null, decision.capabilities, resourceIdOf(input, row), operation);
     }
 
     const allowed = await runMayRow(entity, input.verb, row, collapsed);
     trace.record(`row.may.${input.verb}`, allowed);
-    if (!allowed) return settle(input, trace, false, 'no-capability', [], resourceIdOf(input, row));
+    if (!allowed) return settle(input, trace, false, 'no-capability', [], resourceIdOf(input, row), operation);
     // Report the conferred capability set (informational). mayRow decided the
     // admission; rowCapabilities only reads the grant again for the report.
     const caps = await rowCapabilities(entity, row, collapsed);
-    return settle(input, trace, true, null, caps.granted ? caps.capabilities : [], resourceIdOf(input, row));
+    return settle(input, trace, true, null, caps.granted ? caps.capabilities : [], resourceIdOf(input, row), operation);
   }
 
-  function admitPrincipal(input                     , collapsed           , trace               )                    {
+  function admitPrincipal(input                     , collapsed           , trace               , operation                          )                    {
     const gate = input.gate ?? requireUser();
     const allowed = gate(collapsed                            );
     trace.record('route.gate', allowed);
-    if (!allowed) return settle(input, trace, false, 'anonymous', [], input.resourceId ?? null);
-    return settle(input, trace, true, null, [], input.resourceId ?? null);
+    if (!allowed) return settle(input, trace, false, 'anonymous', [], input.resourceId ?? null, operation);
+    return settle(input, trace, true, null, [], input.resourceId ?? null, operation);
   }
 
-  async function admitAction(input                  , collapsed           , trace               )                             {
+  async function admitAction(input                  , collapsed           , trace               , operation                          )                             {
     const { requirements } = input;
     trace.record('action.requirements', requirements.length > 0);
-    if (requirements.length === 0) return settle(input, trace, false, 'no-row-scope', [], input.resourceId ?? null);
+    if (requirements.length === 0) return settle(input, trace, false, 'no-row-scope', [], input.resourceId ?? null, operation);
     const grantedCapabilities               = [];
     for (const requirement of requirements) {
       const label = `${requirement.entity?.name ?? 'row'}.${requirement.verb}`;
       trace.record(`requirement.${label}.visible`, requirement.row != null);
-      if (requirement.row == null) return settle(input, trace, false, 'no-row-scope', [], input.resourceId ?? null);
+      if (requirement.row == null) return settle(input, trace, false, 'no-row-scope', [], input.resourceId ?? null, operation);
       const allowed = await runMayRow(requirement.entity, requirement.verb, requirement.row, collapsed);
       trace.record(`requirement.${label}.may`, allowed);
-      if (!allowed) return settle(input, trace, false, 'no-capability', [], input.resourceId ?? null);
+      if (!allowed) return settle(input, trace, false, 'no-capability', [], input.resourceId ?? null, operation);
       if (requirement.capability) grantedCapabilities.push(requirement.capability);
     }
-    return settle(input, trace, true, null, grantedCapabilities, input.resourceId ?? null);
+    return settle(input, trace, true, null, grantedCapabilities, input.resourceId ?? null, operation);
   }
 
-  function admitResource(input                    , _collapsed           , trace               )                    {
+  function admitResource(input                    , collapsed           , trace               , operation                          )                    {
     if (input.resourceName != null) {
       const registered = resources.get(resourceKey(input.category, input.resourceName));
       trace.record('resource.registered', registered !== undefined);
-      if (!registered) return settle(input, trace, false, 'no-resource', [], input.resourceId ?? null);
+      if (!registered) return settle(input, trace, false, 'no-resource', [], input.resourceId ?? null, operation);
+      trace.record('resource.row', input.row != null);
+      if (input.row == null) return settle(input, trace, false, 'no-row-scope', [], input.resourceId ?? null, operation);
+      // The registered scope is the resource's real visibility constraint
+      // (S3/S4/S6) — not a registration-time validation artifact. The caller's
+      // read happened under this compiled scope, and admission re-verifies the
+      // supplied row satisfies it before admitting. A row outside the scope —
+      // or a scope unverifiable against a single row (membership/join/match) —
+      // denies 'no-row-scope', evaluated under the collapsed principal so an
+      // anonymous identity binds NULL exactly like the SQL path.
+      const inScope = rowMatchesScope(registered, input.row                           , collapsed);
+      trace.record('resource.scope', inScope);
+      if (!inScope) return settle(input, trace, false, 'no-row-scope', [], input.resourceId ?? null, operation);
+      return settle(input, trace, true, null, [], input.resourceId ?? null, operation);
     }
     trace.record('resource.row', input.row != null);
-    if (input.row == null) return settle(input, trace, false, 'no-row-scope', [], input.resourceId ?? null);
-    return settle(input, trace, true, null, [], input.resourceId ?? null);
+    if (input.row == null) return settle(input, trace, false, 'no-row-scope', [], input.resourceId ?? null, operation);
+    return settle(input, trace, true, null, [], input.resourceId ?? null, operation);
   }
 
   async function admit(input            )                             {
@@ -325,15 +345,24 @@ export function createAuthorizationAdapter(options                              
       trace.record('principal.status', statusOf(input.principal) === 'active');
       const collapsed = collapseForAdmission(input.principal);
 
+      // Fail closed on an operation outside the known vocabulary: an unknown
+      // operation is not a category, so no check may run under a fabricated
+      // 'read' label — deny before any gate.
+      const operation = operationOf(input);
+      if (operation === null) {
+        trace.record('operation.vocabulary', false);
+        return settle(input, trace, false, 'unknown-operation', [], input.resourceId ?? null, null);
+      }
+
       switch (input.category) {
-        case 'entity': return await admitEntity(input, collapsed, trace);
-        case 'principal': return admitPrincipal(input, collapsed, trace);
-        case 'action': return await admitAction(input, collapsed, trace);
+        case 'entity': return await admitEntity(input, collapsed, trace, operation);
+        case 'principal': return admitPrincipal(input, collapsed, trace, operation);
+        case 'action': return await admitAction(input, collapsed, trace, operation);
         case 'blob':
         case 'search':
         case 'subscription':
-        case 'policy': return admitResource(input, collapsed, trace);
-        default: return settle(input              , trace, false, 'unknown-category', [], null);
+        case 'policy': return admitResource(input, collapsed, trace, operation);
+        default: return settle(input              , trace, false, 'unknown-category', [], null, operation);
       }
     } catch {
       // A policy body (a .can/scope implementation) threw — fail CLOSED. Never
@@ -343,9 +372,9 @@ export function createAuthorizationAdapter(options                              
       // server.
       getLog().debug('auth', 'authorization adapter policy error; denying', {
         category: input.category,
-        operation: operationOf(input).operation,
+        operation: operationOf(input)?.operation,
       });
-      return settle(input, trace, false, 'policy-error', [], input.resourceId ?? null);
+      return settle(input, trace, false, 'policy-error', [], input.resourceId ?? null, operationOf(input) ?? null);
     }
   }
 

@@ -112,3 +112,70 @@ test('caret interest requires a compiled declared caret association', async () =
     db.close();
   }
 });
+
+// --- the injected authorization adapter owns subscribe admission (S5/A2) ------
+
+function spyAdapter() {
+  const calls = [];
+  return {
+    calls,
+    admit: async (input) => {
+      calls.push(input);
+      return {
+        admitted: true,
+        operation: { operation: 'subscribe' },
+        resourceCategory: input.category,
+        resourceId: input.resourceId ?? null,
+        reasonCode: null,
+        capabilities: [],
+        trace: null,
+      };
+    },
+    registerResource: () => {},
+  };
+}
+
+test('an injected authorization adapter is consulted for subscribe admission', async () => {
+  const { db, conn, dependencies: deps } = dependencies();
+  try {
+    const spy = spyAdapter();
+    const result = await authorizeSubscription({ type: 'subscribe', entity: 'Doc', id: 'd1' }, conn, { ...deps, authorization: spy });
+    assert.equal(result.admitted, true);
+    assert.ok(spy.calls.some((c) => c.category === 'entity' && c.verb === 'subscribe'), 'subscribe admission ran through the injected adapter');
+    assert.equal(spy.calls.at(-1).resourceId, 'd1');
+  } finally {
+    db.close();
+  }
+});
+
+test('an injected adapter that denies subscribe admission denies the subscription', async () => {
+  const { db, conn, dependencies: deps } = dependencies();
+  try {
+    const denying = {
+      admit: async (input) => ({
+        admitted: false,
+        operation: { operation: 'subscribe' },
+        resourceCategory: input.category,
+        resourceId: input.resourceId ?? null,
+        reasonCode: 'no-capability',
+        capabilities: [],
+        trace: null,
+      }),
+      registerResource: () => {},
+    };
+    const result = await authorizeSubscription({ type: 'subscribe', entity: 'Doc', id: 'd1' }, conn, { ...deps, authorization: denying });
+    assert.deepEqual(result, { admitted: false, failure: { category: 'denied', message: 'Forbidden.' } });
+  } finally {
+    db.close();
+  }
+});
+
+test('without an injected adapter the framework row-grant decides (unchanged)', async () => {
+  const { db, conn, dependencies: deps } = dependencies({ allowed: false });
+  try {
+    const result = await authorizeSubscription({ type: 'subscribe', entity: 'Doc', id: 'd1' }, conn, deps);
+    assert.deepEqual(result, { admitted: false, failure: { category: 'denied', message: 'Forbidden.' } });
+  } finally {
+    db.close();
+  }
+});

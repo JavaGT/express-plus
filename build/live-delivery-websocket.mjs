@@ -26,6 +26,7 @@ import { createLiveFanout } from './live-fanout.mjs';
 import { LiveConnection } from './live-connection.mjs';
 import { createAnnotatedTextCaretLive } from './annotated-text-caret-live.mjs';
 import { readSeq } from './cursor.mjs';
+                                                                       
 import { anonymous,                } from './principal.mjs';
                                              
                                                      
@@ -36,6 +37,7 @@ import { anonymous,                } from './principal.mjs';
                                                                          
                                                                                  
                            
+                                              
                            
                                  
                             
@@ -52,6 +54,7 @@ export function createLiveDeliveryWebSocket(httpServer        , {
   principalOf = (() => anonymous)                   ,
   resolveEntity = null,
   mayVerb = null,
+  authorization = null,
   db = null,
   ready = () => Promise.resolve(),
   log = null,
@@ -135,6 +138,7 @@ export function createLiveDeliveryWebSocket(httpServer        , {
           core,
           resolveEntity,
           mayVerb,
+          authorization,
           db,
           currentSeq,
           log,

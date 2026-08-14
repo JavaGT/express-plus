@@ -12,6 +12,7 @@ import { authorizeSubscription, parseSubscribeMsg } from './live-admission.ts';
 import { failure, isWorkbenchFailure, sanitizeUnexpectedFailure } from './outcome.ts';
 import { anonymous } from './principal.ts';
 import type { Principal } from './principal.ts';
+import type { AuthorizationAdapter } from './authorization-adapter.ts';
 import type { FrameworkLog } from './log.ts';
 import type { LiveConn, LiveDatabase, LiveEntityRecord, LiveFanoutHandle, MayVerb } from './live-fanout.ts';
 import type { CoreActivation, LiveDeliveryCore } from './live-delivery-core.ts';
@@ -42,6 +43,7 @@ export interface LiveConnectionOptions {
   core?: LiveDeliveryCore | null;
   resolveEntity: ((name: string) => LiveEntityRecord | undefined | null) | null;
   mayVerb: MayVerb | null;
+  authorization?: AuthorizationAdapter | null;
   db: LiveDatabase | null;
   currentSeq: (scope: string) => number;
   onClose: () => void;
@@ -62,6 +64,7 @@ export class LiveConnection {
   #core: LiveDeliveryCore | null;
   #resolveEntity: ((name: string) => LiveEntityRecord | undefined | null) | null;
   #mayVerb: MayVerb | null;
+  #authorization: AuthorizationAdapter | null;
   #db: LiveDatabase | null;
   #currentSeq: (scope: string) => number;
   #onClose: (() => void) | null;
@@ -71,7 +74,7 @@ export class LiveConnection {
   #coreActivations: Map<string, CoreActivation>;
   #coreGen: Map<string, number>;
 
-  constructor(socket: Duplex, id: string, { fanout, core = null, resolveEntity, mayVerb, db, currentSeq, onClose, log = null, carets = null }: LiveConnectionOptions) {
+  constructor(socket: Duplex, id: string, { fanout, core = null, resolveEntity, mayVerb, authorization = null, db, currentSeq, onClose, log = null, carets = null }: LiveConnectionOptions) {
     this.#socket = socket;
     this.#sender = new FrameSender();
     this.#parser = new FrameParser();
@@ -81,6 +84,7 @@ export class LiveConnection {
     this.#core = core;
     this.#resolveEntity = resolveEntity;
     this.#mayVerb = mayVerb;
+    this.#authorization = authorization;
     this.#db = db;
     this.#currentSeq = currentSeq;
     this.#onClose = onClose;
@@ -260,6 +264,7 @@ export class LiveConnection {
     const result = await authorizeSubscription(msg, this, {
       resolveEntity: this.#resolveEntity,
       mayVerb: this.#mayVerb,
+      authorization: this.#authorization ?? undefined,
       db: this.#db,
       fanout: this.#fanout,
     });

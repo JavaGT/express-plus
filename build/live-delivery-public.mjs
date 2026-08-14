@@ -15,6 +15,7 @@ import { hasAnnotatedTextFields, projectEntitySnapshot } from './entity-snapshot
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
 import { rawRow } from './entity/query.mjs';
 import { mayRow } from './row-grant.mjs';
+                                                                       
 import { ensureStream, ensureLease, hashClientNonce, resolveStream, resolveLease, acknowledgeAndPruneSnapshot } from './annotated-text-authoring-stream.mjs';
 import { createPrincipalSnapshotDelivery, isPrincipalSnapshotScope, validatePrincipalSnapshotDeclarations } from './principal-snapshot-delivery.mjs';
                                                 
@@ -146,6 +147,7 @@ function jsonSnapshot(value         , path = 'snapshot', ancestors = new Set    
                    
                                                                                              
                    
+                                              
                       
                                
                    
@@ -158,7 +160,7 @@ function jsonSnapshot(value         , path = 'snapshot', ancestors = new Set    
 // factory below deliberately returns only the delivery protocol; application
 // lifecycle wiring retains the committed consumer, the shared core (which the
 // WebSocket transport presents over the same authority), and shutdown.
-export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, principalSnapshots, schema, log = null, maxCatchupEvents = 1000, includeActionId = true }                          )                                                                                                                                                 {
+export function createOwnedLiveDelivery({ db, entities, mayVerb, authorization, snapshots, principalSnapshots, schema, log = null, maxCatchupEvents = 1000, includeActionId = true }                          )                                                                                                                                                 {
   if (!Number.isSafeInteger(maxCatchupEvents) || maxCatchupEvents < 1) throw new TypeError('maxCatchupEvents must be a positive safe integer');
   const resolveEntity = typeof entities === 'function' ? entities : (name        ) => entities.get(name);
   const composites = compileSnapshots(snapshots, resolveEntity, db         )                                ;
@@ -179,6 +181,24 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
   }
 
   const aggregateRevision = ()         => Number(db.prepare("SELECT revision FROM _CommittedRevision WHERE name = 'actions'").get() .revision);
+  // The one subscribe-row admission for this app-integrated seam (S5/A2): an
+  // injected adapter is THE authority for both subscribe-time admission and
+  // re-authorization; without one the framework mayVerb engine runs, unchanged.
+  async function admitSubscribeRow(entity                  , row         , principal           )                   {
+    if (authorization) {
+      const decision = await authorization.admit({
+        category: 'entity',
+        verb: 'subscribe',
+        operation: 'subscribe',
+        principal,
+        entity: entity         ,
+        row,
+        resourceId: (row                                       )?.id                             ,
+      });
+      return decision.admitted;
+    }
+    return mayRow(entity         , 'subscribe', row, principal, mayVerb         );
+  }
   async function aggregateSnapshot({ principal, scope, declaration }                                                                           )                                 {
     const handle = tryParseScopeKey(scope);
     // No transaction crosses authorization awaits. Each attempt detaches a
@@ -200,9 +220,9 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
         return { kind: 'revoked' };
       }
       if (!captured .candidate) return { kind: 'revoked' };
-      const authorization = await authorizeSnapshot({ principal, anchor: declaration.anchor         , candidate: captured .candidate         , mayVerb: mayVerb          });
-      if (!authorization.anchorAllowed) return { kind: 'revoked' };
-      const value = jsonSnapshot(projectSnapshot({ anchor: declaration.anchor         , candidate: captured .candidate         , output: declaration.output         , authorized: authorization.authorized }));
+      const auth = await authorizeSnapshot({ principal, anchor: declaration.anchor         , candidate: captured .candidate         , mayVerb: mayVerb         , authorization });
+      if (!auth.anchorAllowed) return { kind: 'revoked' };
+      const value = jsonSnapshot(projectSnapshot({ anchor: declaration.anchor         , candidate: captured .candidate         , output: declaration.output         , authorized: auth.authorized }));
       if (readSeq(db, scope) === captured .anchor && aggregateRevision() === captured .aggregate) {
         return Object.freeze({ kind: 'snapshot', snapshot: value, cursor: Object.freeze({ anchor: captured .anchor, aggregate: captured .aggregate }) })                                    ;
       }
@@ -218,12 +238,12 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
       const projectScope = projectEntity.scopeFilter(principal);
       const projectRow = db.prepare(`SELECT * FROM ${projectEntity.name} AS t0 WHERE ${projectScope.sql} AND t0.id = :id`)
         .get({ ...projectScope.params, id: project.id });
-      if (!projectRow || !(await mayRow(projectEntity         , 'subscribe', projectRow, principal, mayVerb         ))) return null;
+      if (!projectRow || !(await admitSubscribeRow(projectEntity         , projectRow, principal))) return null;
     }
     const { sql, params } = document.entity.scopeFilter(principal);
     const row = db.prepare(`SELECT * FROM ${document.entity.name} AS t0 WHERE ${sql} AND t0.id = :id`)
       .get({ ...params, id: document.documentId });
-    if (!row || !(await mayRow(document.entity         , 'subscribe', row, principal, mayVerb         ))) return null;
+    if (!row || !(await admitSubscribeRow(document.entity         , row, principal))) return null;
     return row;
   }
 
@@ -234,6 +254,7 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
     db,
     entities,
     mayVerb,
+    authorization,
     projectRecipient: async (context                    ) => {
       // The public projector must never receive raw _Log eventData. The
       // envelope grammar uses only metadata plus the recipient-hydrated row.

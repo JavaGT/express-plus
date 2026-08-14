@@ -302,6 +302,54 @@ test('revocation after first batch prevents second', async () => {
   core.close();
 });
 
+test('re-authorization runs through the injected adapter (S5/A2 single path)', async () => {
+  const db = makeDb();
+  insertRow(db, 'n1', 'hello', 'u1');
+  appendEvent(db, 'Note:n1', 1, 'Note.created', { title: 'hello' });
+
+  let admits = 0;
+  const adapter = {
+    admit: async (input) => {
+      assert.equal(input.category, 'entity');
+      assert.equal(input.verb, 'subscribe');
+      assert.equal(input.operation, 'subscribe');
+      admits += 1;
+      // subscribe does checkMayRow + catchUp's checkMayRow (2 admits), deny on 3rd (wake)
+      return { admitted: admits <= 2, reasonCode: admits <= 2 ? null : 'no-capability' };
+    },
+    registerResource: () => {},
+  };
+
+  const delivered = [];
+  const core = createLiveDeliveryCore({
+    db,
+    entities: new Map([['Note', makeEntityRecord('Note')]]),
+    mayVerb: alwaysAllow,
+    authorization: adapter,
+    projectRecipient: simpleProjector,
+  });
+
+  await core.subscribe({
+    principal: { type: 'user', id: 'u1' },
+    scope: 'Note:n1',
+    after: 0,
+    signal: null,
+    deliver: async (batch) => { delivered.push(...batch); },
+  });
+
+  assert.equal(delivered.length, 1);
+  assert.equal(admits, 2);
+
+  appendEvent(db, 'Note:n1', 2, 'Note.updated', { title: 'revoked' });
+  await core.wake('Note:n1');
+  await sleep(50);
+
+  assert.equal(delivered.length, 1, 'second event not delivered after adapter denial');
+  assert.equal(admits, 3, 'the third re-authorization went through the adapter and denied');
+
+  core.close();
+});
+
 test('terminal removal delivers after its authorization row is deleted', async () => {
   const db = makeDb();
   insertRow(db, 'n1', 'hello');

@@ -165,6 +165,7 @@ export type AdmissionReasonCode =
   | 'no-field-access'
   | 'no-resource'
   | 'unknown-category'
+  | 'unknown-operation'
   | 'policy-error';
 
 export interface DecisionTraceEntry {
@@ -174,7 +175,8 @@ export interface DecisionTraceEntry {
 
 export interface AdmissionDecision {
   readonly admitted: boolean;
-  readonly operation: OperationCategory;
+  /** Null ONLY on an 'unknown-operation' denial — an unrecognized operation is not a category. */
+  readonly operation: OperationCategory | null;
   readonly resourceCategory: ResourceCategory;
   readonly resourceId: string | null;
   readonly reasonCode: AdmissionReasonCode | null;
@@ -223,6 +225,7 @@ export interface ResourceAdmitInput {
   readonly principal: Principal;
   readonly operation?: OperationCategory | string;
   readonly resourceName?: string;
+  /** The row in STORED cell form (the shape SQL returns); for a named registered resource, admit() re-verifies it against the registered scope. */
   readonly row?: unknown;
   readonly resourceId?: string | null;
 }
@@ -1249,7 +1252,7 @@ export interface ListenOptions {
   hsts?: boolean;
   cors?: { origins: readonly string[] };
   requestLog?: boolean;
-  /** The authorization adapter — THE admission path for the route gate and REST CRUD dispatch. */
+  /** The authorization adapter — THE admission path for the route gate, REST CRUD dispatch, live delivery, and registered durable actions. */
   authorization?: AuthorizationAdapter;
 }
 

@@ -26,6 +26,7 @@ import type { LiveDeliveryCore } from './live-delivery-core.ts';
 import { LiveConnection } from './live-connection.ts';
 import { createAnnotatedTextCaretLive } from './annotated-text-caret-live.ts';
 import { readSeq } from './cursor.ts';
+import type { AuthorizationAdapter } from './authorization-adapter.ts';
 import { anonymous, type Principal } from './principal.ts';
 import type { FrameworkLog } from './log.ts';
 import type { LiveDatabase } from './live-fanout.ts';
@@ -36,6 +37,7 @@ export interface LiveDeliveryWebSocketOptions {
   principalOf?: (req: IncomingMessage) => Principal | Promise<Principal>;
   resolveEntity?: ((name: string) => LiveEntityRecord | undefined | null) | null;
   mayVerb?: MayVerb | null;
+  authorization?: AuthorizationAdapter | null;
   db?: LiveDatabase | null;
   ready?: () => Promise<unknown>;
   log?: FrameworkLog | null;
@@ -52,6 +54,7 @@ export function createLiveDeliveryWebSocket(httpServer: Server, {
   principalOf = (() => anonymous) as () => Principal,
   resolveEntity = null,
   mayVerb = null,
+  authorization = null,
   db = null,
   ready = () => Promise.resolve(),
   log = null,
@@ -135,6 +138,7 @@ export function createLiveDeliveryWebSocket(httpServer: Server, {
           core,
           resolveEntity,
           mayVerb,
+          authorization,
           db,
           currentSeq,
           log,

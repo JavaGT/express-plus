@@ -16,7 +16,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  text, ref, scope, grant, deny, read, write, subscribe, everyone,
+  text, ref, map, scope, grant, deny, read, write, subscribe, everyone,
   principal, anonymous, requireUser, allowAnonymous,
 } from '../build/index.mjs';
 import { entity, NonCompilableError } from '../build/internal.mjs';
@@ -184,6 +184,44 @@ test('an unknown category is a fail-closed denial (unknown-category)', async () 
   const d = await adapter.admit({ category: 'frobnicate', principal: alice });
   assert.equal(d.admitted, false);
   assert.equal(d.reasonCode, 'unknown-category');
+});
+
+// --- unknown operation vocabulary fails closed, never an admitted 'read' ------
+
+test('an unknown operation string denies with unknown-operation (never an admitted read)', async () => {
+  const adapter = createAuthorizationAdapter();
+  const d = await adapter.admit({
+    category: 'entity', verb: 'read', operation: 'frobnicate', principal: alice, entity: ownedNote(), row: aliceRow,
+  });
+  assert.equal(d.admitted, false);
+  assert.equal(d.reasonCode, 'unknown-operation');
+  // an unrecognized operation is not a category, so the decision carries no label
+  assert.equal(d.operation, null);
+});
+
+test('an unknown entity verb denies with unknown-operation (no fallback to read)', async () => {
+  const adapter = createAuthorizationAdapter();
+  const d = await adapter.admit({
+    category: 'entity', verb: 'frobnicate', principal: alice, entity: ownedNote(), row: aliceRow,
+  });
+  assert.equal(d.admitted, false);
+  assert.equal(d.reasonCode, 'unknown-operation');
+  assert.equal(d.operation, null);
+});
+
+test('an unknown operation on a principal admission denies with unknown-operation', async () => {
+  const adapter = createAuthorizationAdapter();
+  const d = await adapter.admit({ category: 'principal', operation: 'frobnicate', principal: alice });
+  assert.equal(d.admitted, false);
+  assert.equal(d.reasonCode, 'unknown-operation');
+  assert.equal(d.operation, null);
+});
+
+test('a missing operation on a non-entity input keeps the access-check label (read)', async () => {
+  const adapter = createAuthorizationAdapter();
+  const d = await adapter.admit({ category: 'principal', principal: alice });
+  assert.equal(d.admitted, true);
+  assert.equal(d.operation.operation, 'read');
 });
 
 // --- fail closed on a policy exception ----------------------------------------
@@ -421,6 +459,65 @@ test('blob/policy resources admit through the same generic seam', async () => {
   assert.equal(d.admitted, true);
   assert.equal(d.resourceCategory, 'blob');
   assert.equal(d.operation.operation, 'blob-read');
+});
+
+// --- the registered scope CONSTRAINS admission (not validation-only) ---------
+
+test('a registered scope denies a row that does not satisfy it (no-row-scope)', async () => {
+  const adapter = createAuthorizationAdapter({ trace: true });
+  adapter.registerResource({
+    category: 'search',
+    name: 'articles',
+    scope: ({ fields }) => fields.status.is('published'),
+    fields: { status: text() },
+  });
+  const inScope = await adapter.admit({
+    category: 'search', operation: 'search', principal: alice, resourceName: 'articles', row: { id: 'a1', status: 'published' },
+  });
+  assert.equal(inScope.admitted, true, 'a row inside the registered scope admits');
+  const outOfScope = await adapter.admit({
+    category: 'search', operation: 'search', principal: alice, resourceName: 'articles', row: { id: 'a2', status: 'draft' },
+  });
+  assert.equal(outOfScope.admitted, false, 'a row outside the registered scope is denied');
+  assert.equal(outOfScope.reasonCode, 'no-row-scope');
+  assert.ok(outOfScope.trace.some((entry) => entry.check === 'resource.scope' && entry.outcome === false), 'the scope denial is visible on the trace');
+});
+
+test('a registered scope binds the principal — the owner admits, a stranger is denied', async () => {
+  const adapter = createAuthorizationAdapter();
+  adapter.registerResource({
+    category: 'search',
+    name: 'mydocs',
+    scope: ({ is }) => is.owner(),
+    fields: { owner: ref('User', { role: 'owner' }) },
+  });
+  const ownerDecision = await adapter.admit({
+    category: 'search', operation: 'search', principal: alice, resourceName: 'mydocs', row: { id: 'd1', owner: 'alice' },
+  });
+  assert.equal(ownerDecision.admitted, true, 'the owner admits');
+  const strangerDecision = await adapter.admit({
+    category: 'search', operation: 'search', principal: bob, resourceName: 'mydocs', row: { id: 'd1', owner: 'alice' },
+  });
+  assert.equal(strangerDecision.admitted, false, 'a non-owner is denied against the same row');
+  assert.equal(strangerDecision.reasonCode, 'no-row-scope');
+});
+
+test('a scope this seam cannot verify against a single row fails closed (membership check)', async () => {
+  const adapter = createAuthorizationAdapter();
+  adapter.registerResource({
+    category: 'search',
+    name: 'docs',
+    scope: ({ is }) => is.collaborator(),
+    fields: { collaborators: map(ref('User')) },
+    checks: { collaborator: ({ docs, principal }) => docs.collaborators.has(principal.id) },
+  });
+  // The compiled scope is an EXISTS over the membership side-table — not
+  // verifiable against one row without a database, so admission fails closed.
+  const d = await adapter.admit({
+    category: 'search', operation: 'search', principal: alice, resourceName: 'docs', row: { id: 'd1' },
+  });
+  assert.equal(d.admitted, false);
+  assert.equal(d.reasonCode, 'no-row-scope');
 });
 
 // --- decisions are immutable and free of payload values ------------------------

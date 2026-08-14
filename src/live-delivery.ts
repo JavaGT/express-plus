@@ -26,6 +26,7 @@ import { createLiveDeliveryCore } from './live-delivery-core.ts';
 import type { CoreProjectContext, LiveDeliveryCore } from './live-delivery-core.ts';
 import { createLiveEnvelopeBuilder } from './live-delivery-envelope.ts';
 import { createLiveDeliveryWebSocket } from './live-delivery-websocket.ts';
+import type { AuthorizationAdapter } from './authorization-adapter.ts';
 import type { LiveEntityRecord, MayVerb } from './live-fanout.ts';
 import type { Principal } from './principal.ts';
 import type { FrameworkLog } from './log.ts';
@@ -48,6 +49,7 @@ import type { LiveDatabase } from './live-fanout.ts';
 export function createWebSocketLiveDelivery(httpServer: Server, {
   path = '/events',
   mayVerb = null,
+  authorization = null,
   principalOf = (() => ({ type: 'anonymous', id: null }) as Principal),
   db = null,
   resolveEntity = null,
@@ -56,6 +58,7 @@ export function createWebSocketLiveDelivery(httpServer: Server, {
 }: {
   path?: string;
   mayVerb?: MayVerb | null;
+  authorization?: AuthorizationAdapter | null;
   principalOf?: (req: IncomingMessage) => Principal | Promise<Principal>;
   db?: LiveDatabase | null;
   resolveEntity?: ((name: string) => LiveEntityRecord | undefined | null) | null;
@@ -72,6 +75,7 @@ export function createWebSocketLiveDelivery(httpServer: Server, {
     db: db as LiveDatabase,
     entities: resolveEntity ? (name: string) => resolveEntity(name) as LiveEntityRecord | undefined : new Map(),
     mayVerb,
+    authorization,
     projectRecipient: (ctx: CoreProjectContext) => envelopeBuilder.buildEnvelope(ctx as unknown as Parameters<typeof envelopeBuilder.buildEnvelope>[0]),
     log,
   });
@@ -85,6 +89,7 @@ export function createWebSocketLiveDelivery(httpServer: Server, {
     principalOf,
     resolveEntity,
     mayVerb,
+    authorization,
     db,
     ready,
     log,

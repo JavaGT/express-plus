@@ -1,5 +1,7 @@
 // Subscribe-time admission: validate the subscribe message, bind read scope,
-// run mayVerb('subscribe') authorization, and return an admission decision.
+// run 'subscribe' authorization (through the injected authorization adapter
+// when one is wired, else the framework row-grant), and return an admission
+// decision.
 //
 // Pure authorization logic — no socket I/O, no subscription side effects.
 // The caller applies the subscribe confirmation (addSubscription + send).
@@ -9,6 +11,7 @@
                                                 
 import { anonymous } from './principal.mjs';
 import { mayRow } from './row-grant.mjs';
+                                                                       
 import { validatePaceSelection } from './field-pace.mjs';
                                                                        
 import { scopeOf, tryParseScopeKey } from './scope-handle.mjs';
@@ -145,11 +148,13 @@ export async function authorizeSubscription(
   {
     resolveEntity,
     mayVerb,
+    authorization,
     db,
     fanout,
   }   
                                                                                               
                                         
+                                         
                                         
                              
    ,
@@ -192,7 +197,23 @@ export async function authorizeSubscription(
   }
   {
     const hydrated = entity.hydrate ? entity.hydrate(row, principal) : row;
-    if (!(await mayRow(entity         , 'subscribe', hydrated, principal, mayVerb         ))) {
+    // Subscribe admission runs through the injected authorization adapter
+    // (S5/A2) when one is wired — the SAME seam REST dispatch and the route
+    // gate consult — so an app policy adapter owns live admission too (the
+    // ticket's single-path requirement). Without an adapter the framework
+    // row-grant runs, unchanged.
+    const allowed = authorization
+      ? (await authorization.admit({
+          category: 'entity',
+          verb: 'subscribe',
+          operation: 'subscribe',
+          principal,
+          entity: entity         ,
+          row: hydrated,
+          resourceId: idStr,
+        })).admitted
+      : await mayRow(entity         , 'subscribe', hydrated, principal, mayVerb         );
+    if (!allowed) {
       return { admitted: false, failure: failure('denied', 'Forbidden.') };
     }
   }

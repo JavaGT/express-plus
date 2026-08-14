@@ -9,6 +9,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
+import { connect as tcpConnect } from 'node:net';
+import { randomBytes } from 'node:crypto';
 
 import { text, ref, scope, grant, deny, read, write, subscribe, principal, operations } from '../build/index.mjs';
 import workbench, { entity } from '../build/internal.mjs';
@@ -178,4 +180,138 @@ test('the default adapter keeps existing callers working (no authorization injec
   const b = await serve(t, seededDb(), ownedNote(), principal({ type: 'user', id: 'bob' }), undefined);
   const strangerRead = await fetch(`${b.origin}/notes/1`);
   assert.equal(strangerRead.status, 404);
+});
+
+// --- the injected adapter reaches the live-delivery seam (serve.ts wiring) ----
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// A raw WebSocket harness over the framework seam at /events (same pattern as
+// live-delivery-seam.test.mjs) — proves serve.ts passes { authorization } into
+// createWebSocketLiveDelivery.
+function openRawWS(port) {
+  return new Promise((resolve, reject) => {
+    const sock = tcpConnect(port, '127.0.0.1');
+    const key = randomBytes(16).toString('base64');
+    const handshake =
+      'GET /events HTTP/1.1\r\n' +
+      'Host: localhost\r\n' +
+      'Upgrade: websocket\r\n' +
+      'Connection: Upgrade\r\n' +
+      `Sec-WebSocket-Key: ${key}\r\n` +
+      'Sec-WebSocket-Version: 13\r\n' +
+      '\r\n';
+
+    let buf = Buffer.alloc(0);
+    let upgraded = false;
+    const inbox = [];
+
+    sock.on('connect', () => sock.write(handshake));
+    sock.on('data', (chunk) => {
+      buf = Buffer.concat([buf, chunk]);
+      if (!upgraded) {
+        const idx = buf.indexOf('\r\n\r\n');
+        if (idx === -1) return;
+        const head = buf.slice(0, idx).toString();
+        buf = buf.slice(idx + 4);
+        if (!head.startsWith('HTTP/1.1 101')) {
+          reject(new Error('upgrade failed: ' + head.split('\r\n')[0]));
+          return;
+        }
+        upgraded = true;
+        resolve({ sock, send, nextMessage, close });
+      }
+      while (buf.length >= 2) {
+        const b0 = buf[0];
+        const b1 = buf[1] & 0x7f;
+        let payloadLen = b1;
+        let headerLen = 2;
+        if (b1 === 126) { if (buf.length < 4) return; payloadLen = buf.readUInt16BE(2); headerLen = 4; }
+        else if (b1 === 127) { if (buf.length < 10) return; payloadLen = Number(buf.readBigUInt64BE(2)); headerLen = 10; }
+        if (buf.length < headerLen + payloadLen) return;
+        const payload = buf.slice(headerLen, headerLen + payloadLen);
+        const opcode = b0 & 0x0f;
+        buf = buf.slice(headerLen + payloadLen);
+        if (opcode === 0x1) inbox.push(payload.toString('utf-8'));
+      }
+    });
+    sock.on('error', reject);
+
+    function send(text) {
+      const payload = Buffer.from(text, 'utf-8');
+      const mask = randomBytes(4);
+      const masked = Buffer.alloc(payload.length);
+      for (let i = 0; i < payload.length; i++) masked[i] = payload[i] ^ mask[i % 4];
+      let header;
+      if (payload.length < 126) {
+        header = Buffer.alloc(2);
+        header[1] = 0x80 | payload.length;
+      } else if (payload.length <= 0xffff) {
+        header = Buffer.alloc(4);
+        header[1] = 0x80 | 126;
+        header.writeUInt16BE(payload.length, 2);
+      }
+      header[0] = 0x81;
+      sock.write(Buffer.concat([header, mask, masked]));
+    }
+
+    async function nextMessage(timeoutMs = 2000) {
+      const start = Date.now();
+      while (Date.now() - start <= timeoutMs) {
+        if (inbox.length > 0) return JSON.parse(inbox.shift());
+        await sleep(20);
+      }
+      return null;
+    }
+
+    function close() {
+      try { sock.destroy(); } catch { /* ignore */ }
+    }
+  });
+}
+
+async function liveServe(t, db, Entity, who, authorization) {
+  const app = workbench({ db });
+  app.mount('/notes', Entity);
+  app.listen(0, { principalOf: () => who, authorization });
+  await app.ready;
+  t.after(() => {
+    app.httpServer.closeAllConnections?.();
+    app.httpServer.close();
+    db.close();
+  });
+  return app.httpServer.address().port;
+}
+
+test('serve.ts wires the injected adapter into the live-delivery seam (subscribe admission)', async (t) => {
+  const db = seededDb();
+  const spy = spyAdapter();
+  const port = await liveServe(t, db, ownedNote(), alice, spy);
+  const ws = await openRawWS(port);
+  try {
+    ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: '1' }));
+    const ack = await ws.nextMessage();
+    assert.ok(ack, 'subscribed ack received');
+    assert.equal(ack.type, 'subscribed', `expected subscribed but got ${JSON.stringify(ack)}`);
+    const subscribeCalls = spy.calls.filter((c) => c.category === 'entity' && c.verb === 'subscribe');
+    assert.ok(subscribeCalls.length >= 1, 'live subscribe admission ran through the adapter serve.ts injected');
+  } finally {
+    ws.close();
+  }
+});
+
+test('serve.ts live seam honors an injected adapter denial (no subscribed ack)', async (t) => {
+  const db = seededDb();
+  const denying = makeAdapter({
+    onEntity: (input) => deniedDecision(input, 'no-capability'),
+  });
+  const port = await liveServe(t, db, ownedNote(), alice, denying);
+  const ws = await openRawWS(port);
+  try {
+    ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: '1' }));
+    const msg = await ws.nextMessage();
+    assert.equal(msg?.type, 'error', 'a denied live subscription is an error, never a subscribed ack');
+  } finally {
+    ws.close();
+  }
 });

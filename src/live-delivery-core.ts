@@ -31,6 +31,7 @@
 import { readSeq, readSince } from './committed-log.ts';
 import { EventKind, parseEventType } from './event-handle.ts';
 import { mayRow } from './row-grant.ts';
+import type { AuthorizationAdapter } from './authorization-adapter.ts';
 import { tryParseScopeKey } from './scope-handle.ts';
 import type { ScopeHandle } from './scope-handle.ts';
 import type { Principal } from './principal.ts';
@@ -62,6 +63,7 @@ export interface LiveDeliveryCoreOptions {
   db: LiveDatabase;
   entities: Map<string, LiveEntityRecord> | ((name: string) => LiveEntityRecord | undefined);
   mayVerb: MayVerb | null;
+  authorization?: AuthorizationAdapter | null;
   projectRecipient: (ctx: CoreProjectContext) => unknown | Promise<unknown>;
   scopeVisible?: (ctx: { entity: LiveEntityRecord; principal: Principal; scope: ScopeHandle }) => boolean;
   log?: FrameworkLog | null;
@@ -127,7 +129,7 @@ export interface LiveDeliveryCore {
   exceedsCatchupLimit(scope: string, after: number, limit: number): boolean;
 }
 
-export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient, scopeVisible = () => true, log = null }: LiveDeliveryCoreOptions): LiveDeliveryCore {
+export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, projectRecipient, scopeVisible = () => true, log = null }: LiveDeliveryCoreOptions): LiveDeliveryCore {
   if (!db) throw new Error('live-delivery-core: db is required');
   if (!entities) throw new Error('live-delivery-core: entities is required');
   if (!mayVerb) throw new Error('live-delivery-core: mayVerb is required');
@@ -221,6 +223,22 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
 
   async function checkMayRow(entityRec: LiveEntityRecord, row: Record<string, unknown>, principal: Principal): Promise<boolean> {
     try {
+      // Re-authorization goes through the injected authorization adapter (S5/A2)
+      // when one is wired — the SAME seam subscribe-time admission uses — so a
+      // policy adapter owns both ends of the live path (the ticket's single-path
+      // requirement). Without an adapter the framework row-grant runs, unchanged.
+      if (authorization) {
+        const decision = await authorization.admit({
+          category: 'entity',
+          verb: 'subscribe',
+          operation: 'subscribe',
+          principal,
+          entity: entityRec as never,
+          row,
+          resourceId: (row as { id?: unknown } | null | undefined)?.id as string | null | undefined,
+        });
+        return decision.admitted;
+      }
       return await mayRow(entityRec as never, 'subscribe', row, principal, mayVerb as never);
     } catch {
       return false;

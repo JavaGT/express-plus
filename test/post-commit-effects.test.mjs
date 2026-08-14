@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 
-import workbench, { admin, authorizedRows, entity, everyone, grant, map, membership, postCommitEffect, read, ref, scope, subscribe, text, write } from '../build/index.mjs';
+import workbench, { admin, authorizedRows, createAuthorizationAdapter, entity, everyone, grant, map, membership, postCommitEffect, read, ref, scope, subscribe, text, write } from '../build/index.mjs';
 
 const principal = { type: 'user', id: 'editor', attributes: {} };
 
@@ -110,6 +110,88 @@ test('authorizedRows requires the same principal capability on both project rows
   const granted = await app.dispatch({ actionId: 'granted-both', scope: 'TransferProject:source', type: action.type, payload: { source: 'source', target: 'target' }, principal });
   assert.equal(granted.ok, true);
   assert.equal(handled, 1);
+});
+
+test('registered durable actions consult the app-injected authorization adapter (S5/A2 single path)', async (t) => {
+  const Project = entity('AdapterTransferProject', {
+    name: text(),
+    owner: ref('User', { role: 'owner' }),
+    grant: () => [scope(() => everyone()).can(async ({ is }) =>
+      (await is.owner()) ? grant(read, write) : grant(read))],
+  });
+  let handled = 0;
+  const action = {
+    type: 'adapter.authorized',
+    authorize: authorizedRows(({ payload }) => [
+      { entity: Project, id: payload.source, capability: write },
+    ]),
+    handler: () => {
+      handled += 1;
+      return [{ type: 'adapter.committed', scope: 'AdapterTransferProject:source', data: {} }];
+    },
+  };
+  const db = new DatabaseSync(':memory:');
+  const defaultAdapter = createAuthorizationAdapter();
+  const calls = [];
+  const spy = {
+    admit: async (input) => {
+      calls.push(input);
+      return defaultAdapter.admit(input);
+    },
+    registerResource: (input) => defaultAdapter.registerResource(input),
+  };
+  const app = workbench({ db, entities: [Project], actions: [action] });
+  app._authorization = spy; // what serve.ts listen() stashes from { authorization }
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); });
+  db.prepare('INSERT INTO AdapterTransferProject (id, name, owner) VALUES (?, ?, ?)').run('source', 'Source', 'editor');
+
+  const granted = await app.dispatch({ actionId: 'adapter-granted', scope: 'AdapterTransferProject:source', type: action.type, payload: { source: 'source' }, principal });
+  assert.equal(granted.ok, true);
+  assert.equal(handled, 1);
+  const actionCalls = calls.filter((c) => c.category === 'action');
+  // Registered-action authorization runs at both durable auth gates (the two
+  // admission halts of the commit pipeline), so one dispatch consults the
+  // adapter twice — but every consultation is a single composite admit() call.
+  assert.ok(actionCalls.length >= 1, 'the composite action admission consulted the injected adapter');
+  assert.ok(actionCalls.every((c) => c.category === 'action' && c.operation === 'execute'), 'every consultation is a whole-action composite admit');
+});
+
+test('an injected adapter denial blocks the registered durable action', async (t) => {
+  const Project = entity('AdapterDenyProject', {
+    name: text(),
+    owner: ref('User', { role: 'owner' }),
+    grant: () => [scope(() => everyone()).can(async ({ is }) =>
+      (await is.owner()) ? grant(read, write) : grant(read))],
+  });
+  let handled = 0;
+  const action = {
+    type: 'adapter.denied',
+    authorize: authorizedRows(({ payload }) => [
+      { entity: Project, id: payload.source, capability: write },
+    ]),
+    handler: () => {
+      handled += 1;
+      return [{ type: 'adapter.denied.committed', scope: 'AdapterDenyProject:source', data: {} }];
+    },
+  };
+  const db = new DatabaseSync(':memory:');
+  const denying = {
+    admit: async (input) => {
+      assert.equal(input.category, 'action');
+      return { admitted: false, reasonCode: 'no-capability' };
+    },
+    registerResource: () => {},
+  };
+  const app = workbench({ db, entities: [Project], actions: [action] });
+  app._authorization = denying;
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); });
+  db.prepare('INSERT INTO AdapterDenyProject (id, name, owner) VALUES (?, ?, ?)').run('source', 'Source', 'editor');
+
+  const denied = await app.dispatch({ actionId: 'adapter-denied', scope: 'AdapterDenyProject:source', type: action.type, payload: { source: 'source' }, principal });
+  assert.equal(denied.ok, false);
+  assert.equal(handled, 0, 'a denied action never runs its handler');
 });
 
 test('authorizedRows binds a post-compilation membership declaration and checks both row subjects', async (t) => {

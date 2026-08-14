@@ -6,6 +6,7 @@ import { connect as tcpConnect } from 'node:net';
 import { randomBytes } from 'node:crypto';
 
 import { createWebSocketLiveDelivery, createLiveServer } from '../build/live-delivery.mjs';
+import { createAuthorizationAdapter } from '../build/authorization-adapter.mjs';
 import { executeFrameworkDDL } from '../build/ddl.mjs';
 import { scope } from '../build/scope.mjs';
 import { grant, read, write, subscribe } from '../build/grant.mjs';
@@ -288,6 +289,106 @@ test('WebSocket subscribe receives ack, consumer delivers core-projected event v
     // Verify no extra events (only one event delivered).
     const extra = await ws.nextEvent(100);
     assert.equal(extra, null, 'no extra event delivered');
+  } finally {
+    live.close();
+    httpServer.close();
+    await sleep(50);
+  }
+});
+
+test('live subscription admission + re-authorization run through the injected adapter (S5/A2 single path)', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec(`CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT, owner TEXT, workspace TEXT)`);
+  db.prepare(`INSERT INTO Note (id, title, owner, workspace) VALUES (?, ?, ?, ?)`).run('n1', 'hello', 'u1', 'public');
+  appendEvent(db, 'Note:n1', 1, 'Note.created', { title: 'hello' });
+
+  const inner = createAuthorizationAdapter();
+  const calls = [];
+  const spy = {
+    admit: async (input) => {
+      calls.push(input);
+      return inner.admit(input);
+    },
+    registerResource: (input) => inner.registerResource(input),
+  };
+
+  const httpServer = http.createServer();
+  const live = createWebSocketLiveDelivery(httpServer, {
+    mayVerb: async () => true,
+    authorization: spy,
+    principalOf: () => ({ type: 'user', id: 'u1' }),
+    db,
+    resolveEntity: (name) => name === 'Note' ? makeNoteEntity() : null,
+    log: null,
+  });
+
+  httpServer.listen(0);
+  const port = httpServer.address().port;
+
+  try {
+    const ws = await openRawWS(port);
+    ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1' }));
+    const ack = await ws.nextMessage();
+    assert.ok(ack, 'subscribed ack received');
+    assert.equal(ack.type, 'subscribed', `expected subscribed but got ${JSON.stringify(ack)}`);
+    const subscribeAdmits = calls.filter((c) => c.category === 'entity' && c.verb === 'subscribe');
+    assert.ok(subscribeAdmits.length >= 1, 'subscribe-time admission ran through the injected adapter');
+    assert.equal(subscribeAdmits[0].operation, 'subscribe');
+
+    // A committed event triggers core re-authorization — through the SAME adapter.
+    const beforeCommit = calls.length;
+    db.prepare(`UPDATE Note SET title = ? WHERE id = ?`).run('world', 'n1');
+    appendEvent(db, 'Note:n1', 2, 'Note.updated', { title: 'world' });
+    const consumer = live.createConsumer({ entities: new Map([['Note', makeNoteEntity()]]) });
+    await consumer([{ scope: 'Note:n1', type: 'Note.updated', seq: 2, data: { title: 'world' } }], { db });
+    await sleep(100);
+    assert.ok(calls.length > beforeCommit, 're-authorization after a commit also ran through the injected adapter');
+  } finally {
+    live.close();
+    httpServer.close();
+    await sleep(50);
+  }
+});
+
+test('an injected adapter denial blocks the live subscription (no subscribed ack)', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec(`CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT, owner TEXT, workspace TEXT)`);
+  db.prepare(`INSERT INTO Note (id, title, owner, workspace) VALUES (?, ?, ?, ?)`).run('n1', 'hello', 'u1', 'public');
+  appendEvent(db, 'Note:n1', 1, 'Note.created', { title: 'hello' });
+
+  const denying = {
+    admit: async (input) => ({
+      admitted: false,
+      operation: { operation: 'subscribe' },
+      resourceCategory: input.category,
+      resourceId: input.resourceId ?? null,
+      reasonCode: 'no-capability',
+      capabilities: [],
+      trace: null,
+    }),
+    registerResource: () => {},
+  };
+
+  const httpServer = http.createServer();
+  const live = createWebSocketLiveDelivery(httpServer, {
+    mayVerb: async () => true,
+    authorization: denying,
+    principalOf: () => ({ type: 'user', id: 'u1' }),
+    db,
+    resolveEntity: (name) => name === 'Note' ? makeNoteEntity() : null,
+    log: null,
+  });
+
+  httpServer.listen(0);
+  const port = httpServer.address().port;
+
+  try {
+    const ws = await openRawWS(port);
+    ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1' }));
+    const msg = await ws.nextMessage();
+    assert.equal(msg?.type, 'error', 'a denied subscription surfaces as an error, never a subscribed ack');
   } finally {
     live.close();
     httpServer.close();

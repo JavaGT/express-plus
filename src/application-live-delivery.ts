@@ -8,6 +8,7 @@ import { createOwnedLiveDelivery } from './live-delivery-public.ts';
 import { createLiveDeliveryHttpHandler } from './live-delivery-http.ts';
 import { createLiveDeliveryWebSocket } from './live-delivery-websocket.ts';
 import { mayVerb } from './row-grant.ts';
+import type { AuthorizationAdapter } from './authorization-adapter.ts';
 import { validatePrincipalSnapshotDeclarations } from './principal-snapshot-delivery.ts';
 import { collapseForAdmission, type Principal } from './principal.ts';
 import type { FrameworkLog } from './log.ts';
@@ -20,6 +21,7 @@ export interface ApplicationLiveDeliveryOptions {
   snapshots?: readonly unknown[];
   principalSnapshots?: readonly unknown[];
   maxCatchupEvents?: number;
+  authorization?: AuthorizationAdapter;
 }
 
 interface ApplicationLiveApp {
@@ -47,6 +49,7 @@ export function attachApplicationLiveDelivery(app: ApplicationLiveApp, {
   snapshots,
   principalSnapshots,
   maxCatchupEvents,
+  authorization,
 }: ApplicationLiveDeliveryOptions): ApplicationLiveApp {
   if (app._startPromise || app._startupMode || app._transportAttached) {
     throw new Error('live delivery must be attached before application startup');
@@ -69,6 +72,10 @@ export function attachApplicationLiveDelivery(app: ApplicationLiveApp, {
     db: app.db as LiveDatabase,
     entities: (name: string, declaration?: unknown) => declaration === undefined ? app.entities.get(name) : app.entity(declaration),
     mayVerb: (entity: LiveEntityRecord, verb: string, row: Record<string, unknown> | null | undefined, principal: Principal) => mayVerb(entity as never, verb, row, principal),
+    // The app's injected authorization adapter (S5/A2) owns subscription
+    // admission + re-authorization on this seam too; without one the framework
+    // mayVerb engine runs, unchanged.
+    authorization,
     snapshots,
     principalSnapshots,
     schema: app.schema,
@@ -108,6 +115,7 @@ export function attachApplicationLiveDelivery(app: ApplicationLiveApp, {
           principalOf: principalOfAdmitted,
           resolveEntity: (name: string) => app.entities.get(name),
           mayVerb: (entity: LiveEntityRecord, verb: string, row: Record<string, unknown> | null | undefined, principal: Principal) => mayVerb(entity as never, verb, row, principal),
+          authorization,
           db: app.db as LiveDatabase,
           ready: () => Promise.resolve(app.ready),
           log: app.log,
