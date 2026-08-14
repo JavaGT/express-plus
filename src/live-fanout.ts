@@ -42,6 +42,7 @@ export interface FieldDescriptor {
 /** The subset of a compiled entity record the live-delivery seams rely on. */
 export interface LiveEntityRecord {
   name: string;
+  tier?: 'history' | 'live';
   fields?: Record<string, FieldDescriptor>;
   scopeFilter(principal: Principal): { sql: string; params: Readonly<Record<string, unknown>> };
   hydrate?(raw: unknown, principal: Principal): Record<string, unknown> | null | undefined;

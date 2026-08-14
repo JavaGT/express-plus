@@ -29,6 +29,8 @@
 // them and should not re-deliver on reconnect.
 
 import { readSeq, readSince } from './committed-log.ts';
+import { readRevision } from './live-revision.ts';
+import { readDeletedRowAnchor } from './deleted-row-anchor.ts';
 import { EventKind, parseEventType } from './event-handle.ts';
 import { mayRow } from './row-grant.ts';
 import type { AuthorizationAdapter } from './authorization-adapter.ts';
@@ -264,6 +266,14 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
     return record;
   }
 
+  function isLiveEntity(entityRec: LiveEntityRecord): boolean {
+    return entityRec.tier === 'live';
+  }
+
+  function deliveryCursor(entityRec: LiveEntityRecord, scope: string): number {
+    return isLiveEntity(entityRec) ? readRevision(db as never, scope) : readSeq(db, scope);
+  }
+
   async function authorizeSnapshot(principal: Principal, scope: string): Promise<boolean> {
     const handle = tryParseScopeKey(scope);
     if (!handle) throw new Error(`invalid scope '${scope}'`);
@@ -291,9 +301,10 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
     if (closed) throw new Error('live-delivery-core is closed');
     // A materializer may await recipient authorization. If a commit interleaves,
     // reject rather than return a snapshot/cursor pair from different states.
-    const before = readSeq(db, scope);
+    const handle = tryParseScopeKey(scope)!;
+    const before = deliveryCursor(entityRecord(handle.entity), scope);
     const value = await snapshot({ principal, scope });
-    const cursor = readSeq(db, scope);
+    const cursor = deliveryCursor(entityRecord(handle.entity), scope);
     // A materializer is a synchronous read projection. Letting it commit while
     // materializing would make its returned state and cursor incomparable.
     if (cursor !== before) throw new Error('live delivery snapshot function must not change its committed cursor');
@@ -320,11 +331,17 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
     return Number(row?.count ?? 0) > limit;
   }
 
-  function reauthFor(entityRec: LiveEntityRecord, principal: Principal, handle: ScopeHandle): { row: Record<string, unknown> } | null {
+  function reauthFor(entityRec: LiveEntityRecord, principal: Principal, handle: ScopeHandle, allowDeletedAnchor = false): { row: Record<string, unknown>; terminal: boolean } | null {
     try {
       if (!scopeVisible({ entity: entityRec, principal, scope: handle })) return null;
       const { sql: where, params: scopeParams } = entityRec.scopeFilter(principal);
-      const raw = db.prepare(`SELECT * FROM ${entityRec.name} AS t0 WHERE ${where} AND t0.id = :id`).get({ ...scopeParams, id: handle.id });
+      const current = db.prepare(`SELECT * FROM ${entityRec.name} AS t0 WHERE ${where} AND t0.id = :id`).get({ ...scopeParams, id: handle.id });
+      const anchored = allowDeletedAnchor && !current
+        ? readDeletedRowAnchor(db as Parameters<typeof readDeletedRowAnchor>[0], entityRec.name, handle.id)
+        : undefined;
+      const raw = current ?? (anchored && typeof anchored === 'object' && !Array.isArray(anchored)
+        ? anchored as Record<string, unknown>
+        : undefined);
       if (!raw) return null;
       // When hydrate is explicitly declared as a non-function (undefined/null),
       // fail closed — no raw row fallback. When hydrate is absent (compiled
@@ -332,7 +349,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
       if ('hydrate' in entityRec && typeof entityRec.hydrate !== 'function') return null;
       const row = typeof entityRec.hydrate === 'function' ? entityRec.hydrate(raw, principal) : raw;
       if (row === null || row === undefined) return null;
-      return { row };
+      return { row, terminal: allowDeletedAnchor && !current };
     } catch (err) {
       log?.error?.('live', 'reauthFor failed', { scope: handle.key, err: String(err) });
       return null;
@@ -432,6 +449,73 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
         const revocationDriven = revocationsOwed > 0;
         const handle = tryParseScopeKey(sub.scope);
         if (!handle) { removeSub(subId); log?.error?.('live', 'invalid scope', { scope: sub.scope }); throw new Error(`invalid scope '${sub.scope}'`); }
+        if (isLiveEntity(sub.entityRec)) {
+          // Live-tier rows have no _Log history. A revision says only that the
+          // current authorized state changed, so this projects the newest row
+          // once instead of reconstructing intermediate mutations.
+          const revision = readRevision(db as never, sub.scope);
+          const resyncEnvelope = sub.resyncEnvelope;
+          const auth = reauthFor(sub.entityRec, sub.principal, handle, true);
+          if (auth) prunePublishedRevocations(sub.scope);
+          if (!auth || !(await checkMayRow(sub.entityRec, auth.row, sub.principal))) {
+            if (!revocationDriven) publishRevocationForScope(sub.scope, revision || null);
+            removeSub(subId); log?.error?.('live', 'reauth denied', { scope: sub.scope }); return;
+          }
+          if (!sub.active) return;
+          if (revision === sub.cursor && !resyncEnvelope) {
+            revocationsOwed -= 1;
+            if (sub.dirty || revocationsOwed > 0) continue;
+            return;
+          }
+          const batch: unknown[] = resyncEnvelope ? [resyncEnvelope] : [];
+          if (revision !== sub.cursor) {
+            const event = Object.freeze({
+              scope: sub.scope,
+              seq: revision,
+              eventType: `${sub.entityRec.name}.${auth.terminal ? 'removed' : 'updated'}`,
+              type: `${sub.entityRec.name}.${auth.terminal ? 'removed' : 'updated'}`,
+              committedAt: new Date().toISOString(),
+            });
+            try {
+              const projected = await projectRecipient(Object.freeze({
+                entity: sub.entityRec,
+                event,
+                principal: sub.principal,
+                // The anchor proves deletion-time admission but is never current
+                // state: terminal output is an absence projection only.
+                row: auth.terminal ? null : auth.row,
+                scope: sub.scope,
+                document: sub.document ?? null,
+              }));
+              if (!Array.isArray(projected)) throw new Error('projectRecipient must return an array');
+              batch.push(...projected);
+            } catch (err) {
+              log?.error?.('live', 'projectRecipient threw', { scope: sub.scope, seq: revision, err: String(err) });
+              removeSub(subId);
+              throw new Error(`projectRecipient threw for scope '${sub.scope}' seq ${revision}`);
+            }
+          }
+          if (batch.length > 0) {
+            try {
+              await sub.deliver(batch);
+            } catch (err) {
+              log?.error?.('live', 'delivery callback threw', { scope: sub.scope, err: String(err) });
+              removeSub(subId);
+              throw new Error(`delivery callback threw for scope '${sub.scope}'`);
+            }
+            if (resyncEnvelope && sub.resyncEnvelope === resyncEnvelope) sub.resyncEnvelope = null;
+          }
+          if (!sub.active) return;
+          sub.cursor = revision;
+          if (auth.terminal) {
+            if (!revocationDriven) publishRevocationForScope(sub.scope, revision || null);
+            removeSub(subId);
+            return;
+          }
+          revocationsOwed -= 1;
+          if (sub.dirty || revocationsOwed > 0) continue;
+          return;
+        }
         let events: Array<{ seq: number } & Readonly<Record<string, unknown>>>;
         try {
           events = readSince(db as never, sub.scope, sub.cursor) as unknown as Array<{ seq: number } & Readonly<Record<string, unknown>>>;
@@ -585,10 +669,13 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
       log?.error?.('live', 'entity not found', { scope, entity: handle.entity });
       throw new Error(`entity '${handle.entity}' not found for scope '${scope}'`);
     }
-    const auth = reauthFor(entityRec, principal, handle);
+    let auth = reauthFor(entityRec, principal, handle);
     if (!auth) {
-      const unread = allowTerminal ? readSince(db as never, scope, after) : [];
-      if (unread.length > 0 && unread.every((event) => isTerminalRemoval(event, entityRec.name))) {
+      const terminalAuth = isLiveEntity(entityRec) ? reauthFor(entityRec, principal, handle, true) : null;
+      const unread = allowTerminal && !isLiveEntity(entityRec) ? readSince(db as never, scope, after) : [];
+      if (terminalAuth && terminalAuth.terminal && readRevision(db as never, scope) > after) {
+        auth = terminalAuth;
+      } else if (unread.length > 0 && unread.every((event) => isTerminalRemoval(event, entityRec.name))) {
         // A catch-up may begin immediately after deletion. Only a fully
         // contiguous suffix of this anchor's terminal removals is safe to
         // deliver without a current authorization row.
@@ -707,8 +794,13 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
     if (!authorized) {
       const handle = tryParseScopeKey(scope);
       const entityRec = handle ? resolveEntity(handle.entity) : null;
-      const unread = entityRec ? readSince(db as never, scope, after) : [];
-      if (!entityRec || unread.length === 0 || !unread.every((event) => isTerminalRemoval(event, entityRec.name))) {
+      const terminalAuth = entityRec && handle && isLiveEntity(entityRec)
+        ? reauthFor(entityRec, principal, handle, true)
+        : null;
+      const unread = entityRec && !isLiveEntity(entityRec) ? readSince(db as never, scope, after) : [];
+      if (terminalAuth?.terminal && readRevision(db as never, scope) > after && await checkMayRow(entityRec!, terminalAuth.row, principal)) {
+        // The deletion anchor authorizes exactly one terminal absence delivery.
+      } else if (!entityRec || unread.length === 0 || !unread.every((event) => isTerminalRemoval(event, entityRec.name))) {
         return { kind: 'revoked' };
       }
     }
