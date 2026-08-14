@@ -2,11 +2,15 @@
 //
 // A subscriber of scope "Project:p1" receives a _Job.updated event emitted
 // with the Project entity record as anchor. Authz is re-checked against the
-// anchor row; delta projection and ephemeral-field pacing are skipped.
+// anchor row; delta projection and ephemeral-field pacing are skipped. The
+// foreign payload is field-gated like any other payload: a field the recipient
+// cannot prove to read (undeclared or unreadable on the anchor) never crosses
+// live delivery — the recipient resyncs instead, matching the committed
+// envelope path's foreign-entity behavior.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createLiveFanout } from '../build/live-fanout.mjs';
-import { scope, grant, subscribe } from '../build/internal.mjs';
+import { scope, grant, read, subscribe } from '../build/internal.mjs';
 
 function makeConn(id, principalId = id) {
   const messages = [];
@@ -21,9 +25,9 @@ function makeConn(id, principalId = id) {
 function projectRecord() {
   return {
     name: 'Project',
-    fields: {},
-    grant: () => [scope(() => true).can(() => grant(subscribe))],
-    findById(id) { return { id, title: 'test-project' }; },
+    fields: { status: { kind: 'text' } },
+    grant: () => [scope(() => true).can(() => grant(read, subscribe))],
+    findById(id) { return { id, title: 'test-project', status: 'completed' }; },
   };
 }
 
@@ -45,6 +49,38 @@ test('scope-anchored foreign event is delivered to scope subscriber', async () =
   assert.equal(msgs[0].id, 'p1');
   assert.equal(msgs[0].seq, 1);
   assert.equal(msgs[0].event.type, '_Job.updated');
+  // The foreign payload rides through only while every field is readable.
+  assert.deepEqual(msgs[0].event.data, { id: 'job1', status: 'completed' });
+  fanout.close();
+});
+
+test('scope-anchored foreign event with an unreadable field resyncs instead of leaking the payload', async () => {
+  const fanout = createLiveFanout({ mayVerb: async () => true });
+  const conn = makeConn('c1');
+  // The anchor declares no foreign payload field: `status` cannot be proven
+  // readable, so the payload must never cross live delivery.
+  const project = {
+    name: 'Project',
+    fields: {},
+    grant: () => [scope(() => true).can(() => grant(subscribe))],
+    findById(id) { return { id, title: 'test-project' }; },
+  };
+
+  fanout.addSubscription('Project:p1', conn);
+
+  await fanout.emit(
+    project, 'p1', { id: 'p1' },
+    { type: '_Job.updated', scope: 'Project:p1', seq: 1, data: { id: 'job1', status: 'completed' } },
+  );
+
+  const msgs = conn.drain();
+  assert.equal(msgs.length, 1);
+  assert.deepEqual(msgs[0], {
+    type: 'resync', entity: 'Project', id: 'p1', seq: 1,
+    reason: 'recipient-snapshot-required',
+  });
+  assert.equal(JSON.stringify(msgs).includes('completed'), false, 'unreadable payload field never reaches the subscriber');
+  fanout.close();
 });
 
 test('scope-anchored foreign event envelope carries no delta', async () => {

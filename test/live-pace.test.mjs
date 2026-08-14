@@ -155,6 +155,34 @@ test('removal bypasses an ephemeral pace buffer', async () => {
   fanout.close();
 });
 
+test('events buffered before unsubscribe are not drained after removal', async () => {
+  const fanout = createLiveFanout({ mayVerb: async () => true });
+  const conn = makeConn('c1', 'alice');
+  const entity = makeCanvasRecord();
+  fanout.addSubscription('Canvas', 'c1', conn, { activeStroke: true }, { window: 100, by: 'latest-wins' });
+  await fanout.emit(entity, 'c1', { id: 'c1', title: 'Drawing' }, stroke(1));
+  fanout.removeSubscription('Canvas', 'c1', conn);
+  assert.equal(fanout.hasSubscription(conn, 'Canvas', 'c1'), false, 'subscription removed');
+  await sleep(150);
+  assert.deepEqual(conn.drain(), [], 'buffered event is dropped with the subscription');
+  fanout.close();
+});
+
+test('removal discards only the removed subscriber\'s pace buffer, others still drain', async () => {
+  const fanout = createLiveFanout({ mayVerb: async () => true });
+  const conn = makeConn('c1', 'alice');
+  const other = makeConn('c2', 'bob');
+  const entity = makeCanvasRecord();
+  fanout.addSubscription('Canvas', 'c1', conn, { activeStroke: true }, { window: 30, by: 'latest-wins' });
+  fanout.addSubscription('Canvas', 'c1', other, { activeStroke: true }, { window: 30, by: 'latest-wins' });
+  await fanout.emit(entity, 'c1', { id: 'c1', title: 'Drawing' }, stroke(1));
+  fanout.removeSubscription('Canvas', 'c1', conn);
+  await sleep(60);
+  assert.deepEqual(conn.drain(), []);
+  assert.equal(other.drain().length, 1, 'remaining subscriber still receives the drained cell');
+  fanout.close();
+});
+
 test('revocation at flush time drops buffered ephemeral events', async () => {
   let allowed = true;
   const fanout = createLiveFanout({ mayVerb: async () => allowed });

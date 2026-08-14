@@ -218,21 +218,44 @@ function hasAnnotatedText(entityRecord: LiveEntityRecord): boolean {
 // annotated-text field redacts to its explicit placeholder), so an unreadable
 // or undeclared field never reaches a subscriber. Native and field-set events
 // carry ONE field's operation payload and are gated at the field level by the
-// caller (an unreadable field resyncs instead); removed and scope-anchored
-// foreign events pass their identity / foreign payloads through untouched.
+// caller (an unreadable field resyncs instead); removed events pass their
+// identity payload through untouched.
 async function projectRecipientEventData(
   entityRecord: LiveEntityRecord,
   committed: FanoutCommittedEvent,
   handle: EventIdentityHandle,
-  scopeAnchored: boolean,
   principal: Principal,
   readableFields: ReadonlySet<string> | undefined,
   authorization: AuthorizationAdapter | null,
 ): Promise<Record<string, unknown> | undefined> {
   const data = committed.data;
-  if (readableFields === undefined || scopeAnchored) return data;
+  if (readableFields === undefined) return data;
   if (!data || typeof data !== 'object' || Array.isArray(data)) return data;
   if (handle.kind === EventKind.native || handle.kind === EventKind.fieldSet || handle.kind === EventKind.removed) return data;
+  return projectRowForRecipient(entityRecord as never, data, principal, { readable: readableFields, authorization });
+}
+
+// A scope-anchored foreign event (e.g. a _Job.updated riding the anchor's own
+// scope stream) carries the FOREIGN entity's payload. Field-read admission is
+// computable at this seam only for the anchor row, so a foreign payload field
+// is provably readable only when it is a declared readable field of the anchor.
+// Matching the committed envelope path's foreign-entity behavior, a payload
+// with any field that cannot be proven readable never crosses live delivery —
+// the recipient receives an opaque snapshot requirement (resync) instead.
+// Returns `undefined` when the payload cannot be safely gated.
+async function projectScopeAnchoredRecipientData(
+  entityRecord: LiveEntityRecord,
+  committed: FanoutCommittedEvent,
+  principal: Principal,
+  readableFields: ReadonlySet<string> | undefined,
+  authorization: AuthorizationAdapter | null,
+): Promise<Record<string, unknown> | undefined> {
+  const data = committed.data;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return data;
+  for (const key of Object.keys(data)) {
+    if (key === 'id') continue;
+    if (readableFields === undefined || !readableFields.has(key)) return undefined;
+  }
   return projectRowForRecipient(entityRecord as never, data, principal, { readable: readableFields, authorization });
 }
 
@@ -338,6 +361,15 @@ export function createLiveFanout({ mayVerb = null, authorization = null }: { may
       mine.delete(scope);
       if (mine.size === 0) connSubs.delete(conn);
     }
+    // A paced ephemeral buffer must not outlive its subscription: events
+    // buffered for (conn, scope) are dropped on removal, so a removed
+    // subscriber never receives cells drained after unsubscribe.
+    for (const [bufKey, entry] of paceBuffers) {
+      if (entry.conn === conn && entry.scope === scope) {
+        if (entry.timer !== null) { clearTimeout(entry.timer); entry.timer = null; }
+        paceBuffers.delete(bufKey);
+      }
+    }
   }
 
   function removeSubscriptionLegacy(entity: string, id: unknown, conn: LiveConn): void {
@@ -430,6 +462,10 @@ export function createLiveFanout({ mayVerb = null, authorization = null }: { may
     paceBuffers.delete(key);
     if (events.length === 0) return;
     if (conn.closed) return;
+    // Drain-time liveness: a pace buffer is only drained to a subscription that
+    // still exists. Removal clears the buffer directly, but this second check
+    // keeps any surviving buffer from delivering to a removed subscriber.
+    if (!byScope.get(scope)?.has(conn)) return;
 
     if (!(await mayRow(entityRecord as never, 'subscribe', authzRow, conn.principal ?? anonymous, mayVerb as never))) return;
 
@@ -581,7 +617,26 @@ export function createLiveFanout({ mayVerb = null, authorization = null }: { may
       }
 
       if (pace.window === 0) {
-        const recipientData = await projectRecipientEventData(entityRecord, committed, handle, scopeAnchored, principal, readableFields, authorization);
+        let recipientData: Record<string, unknown> | undefined;
+        if (scopeAnchored) {
+          // Scope-anchored foreign payloads are field-gated like any other
+          // payload: a field the recipient cannot prove to read on the anchor
+          // stream never reaches them. The only safe output is the same opaque
+          // snapshot requirement the committed envelope path emits for a
+          // foreign-entity event — never a partial or raw foreign payload.
+          recipientData = await projectScopeAnchoredRecipientData(entityRecord, committed, principal, readableFields, authorization);
+          if (recipientData === undefined && committed.data && typeof committed.data === 'object' && !Array.isArray(committed.data)) {
+            const seq = committed.seq as number;
+            if (!Number.isSafeInteger(seq) || seq < 0) continue;
+            conn.send({
+              type: 'resync', entity: name, id, seq,
+              reason: 'recipient-snapshot-required',
+            });
+            continue;
+          }
+        } else {
+          recipientData = await projectRecipientEventData(entityRecord, committed, handle, principal, readableFields, authorization);
+        }
         const recipientEvent = recipientData === committed.data ? committed : { ...committed, data: recipientData };
         // Envelope identity (entity, id) is always the ANCHOR — matching the
         // subscription's scope — even for a scope-anchored foreign event;
