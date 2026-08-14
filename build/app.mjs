@@ -386,10 +386,9 @@ export default function workbench({
     // One construction path: a bare-string app gets the same treatment as a
     // pre-built handle. (seam-review §2.1, priority #7.)
     if (db) db = wrapDriver(db);
-    // The final ownership census must distinguish objects the lifecycle just
-    // created (migrations and derived-resource DDL) from objects that were
-    // already present but never declared. The latter remain census failures.
-    let schemaBeforeLifecycle = db ? new Set(observedSchemaObjects(db).map(schemaObjectKey)) : null;
+    // The final ownership census distinguishes objects created by this schema
+    // lifecycle from undeclared objects that predate it.
+    let schemaBeforeLifecycle = null;
 
     if (schema !== undefined && (!schema || typeof schema.prepare !== 'function' || !Array.isArray(schema.tables))) {
       throw new TypeError('schema must be a SqliteSchemaResult');
@@ -672,7 +671,6 @@ export default function workbench({
                 // every registered plugin to the freshly installed handle now,
                 // so a pre-start registration works after ready.
                 app.searchPlugins.bindSource(handle);
-                schemaBeforeLifecycle = new Set(observedSchemaObjects(handle).map(schemaObjectKey));
                 attachHandleResources(handle);
                 return opened;
               });
@@ -728,6 +726,9 @@ export default function workbench({
       if (!app.schemaReady) {
         app.schemaReady = (async () => {
           if (!app.db) throw new Error('cannot generate DDL — no db configured on the app');
+          // Capture at the lifecycle boundary, rather than construction: callers
+          // may alter the database after creating an app but before preparing it.
+          schemaBeforeLifecycle = new Set(observedSchemaObjects(app.db).map(schemaObjectKey));
           // Phase 3: resolve declarations and validate the global ownership graph
           // before lifecycle DDL can alter the database.
           await app.resolveRoutes();
@@ -889,8 +890,9 @@ export default function workbench({
           // predates the boot still has to be declared by the normal census.
           const settledCensus = new Map(settledOwnership.census);
           for (const object of observedSchemaObjects(app.db)) {
-            if (schemaBeforeLifecycle?.has(schemaObjectKey(object))) continue;
-            settledCensus.set(schemaObjectKey(object), {
+            const key = schemaObjectKey(object);
+            if (schemaBeforeLifecycle?.has(key) || settledCensus.has(key)) continue;
+            settledCensus.set(key, {
               kind: 'framework', owner: 'lifecycle', objectKind: object.type, name: object.name,
             });
           }

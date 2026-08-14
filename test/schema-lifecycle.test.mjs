@@ -65,6 +65,18 @@ test('schema lifecycle reports an undeclared physical object', async () => {
   }
 });
 
+test('schema lifecycle rejects an undeclared object created after app construction', async () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    const app = workbench({ db, schema: schema() });
+    db.exec('CREATE TABLE Intruder (id TEXT PRIMARY KEY)');
+
+    await assert.rejects(app.prepareSchema(), /observed table "Intruder" is not declared by any lifecycle participant/);
+  } finally {
+    db.close();
+  }
+});
+
 test('schema lifecycle attributes foreign key violations to the owning object', async () => {
   const db = new DatabaseSync(':memory:');
   try {
