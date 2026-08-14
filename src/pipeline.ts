@@ -27,6 +27,7 @@ import { declarePostCommitEffectsInTxn } from './post-commit-effects.ts';
 import { protectedArtefactCapability } from './protected-artefact-store.ts';
 import type { AuthorizationAdapter } from './authorization-adapter.ts';
 import type { DataTier } from './live-tier.ts';
+import { isAtomicOperation } from './atomic-operations.ts';
 
 // `action(type)` — declare an imperative request type. The handler that turns it
 // into events is attached later by the entity/dispatch wiring.
@@ -427,6 +428,16 @@ export function liveMutationVariant({
       if (expectedRevision !== undefined) {
         const guardScope = finalizedEvents[0]?.scope ?? owningScope;
         guardExpectedRevision(db as DbHandle, guardScope as string, expectedRevision);
+      }
+
+      // Atomic handlers resolve their operation against the current row inside
+      // this coordinator transaction, then emit the ordinary update event. The
+      // operation grammar is validated here as well, before projection, receipt,
+      // and revision bump can make a malformed request observable.
+      const atomicOperations = isPlainObject(payload) ? (payload as Record<string, unknown>).atomicOperations : undefined;
+      if (atomicOperations !== undefined
+        && (!Array.isArray(atomicOperations) || !atomicOperations.every(isAtomicOperation))) {
+        throw new ValidationError('atomicOperations must be an array of known atomic operations');
       }
 
       // Projection consumers — materialize entity rows from the events. Batch

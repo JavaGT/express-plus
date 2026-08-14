@@ -27,6 +27,7 @@ import { declarePostCommitEffectsInTxn } from './post-commit-effects.mjs';
 import { protectedArtefactCapability } from './protected-artefact-store.mjs';
 
 
+import { isAtomicOperation } from './atomic-operations.mjs';
 
 // `action(type)` — declare an imperative request type. The handler that turns it
 // into events is attached later by the entity/dispatch wiring.
@@ -427,6 +428,16 @@ export function liveMutationVariant({
       if (expectedRevision !== undefined) {
         const guardScope = finalizedEvents[0]?.scope ?? owningScope;
         guardExpectedRevision(db            , guardScope          , expectedRevision);
+      }
+
+      // Atomic handlers resolve their operation against the current row inside
+      // this coordinator transaction, then emit the ordinary update event. The
+      // operation grammar is validated here as well, before projection, receipt,
+      // and revision bump can make a malformed request observable.
+      const atomicOperations = isPlainObject(payload) ? (payload                           ).atomicOperations : undefined;
+      if (atomicOperations !== undefined
+        && (!Array.isArray(atomicOperations) || !atomicOperations.every(isAtomicOperation))) {
+        throw new ValidationError('atomicOperations must be an array of known atomic operations');
       }
 
       // Projection consumers — materialize entity rows from the events. Batch
