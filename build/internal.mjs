@@ -70,7 +70,25 @@ export {
                     
                      
                   
+                              
 } from './backup.mjs';
+export {
+  createRecycleManager,
+  RECYCLE_FORMAT_VERSION,
+  DEFAULT_RECYCLE_RETENTION_DAYS,
+                      
+                             
+                       
+                       
+                       
+                        
+                           
+                           
+                          
+                          
+                            
+                            
+} from './backup/recycle.mjs';
 export {
   createRecoveryManager,
   probeDatabaseFile,

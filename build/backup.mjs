@@ -118,6 +118,25 @@ export const DEFAULT_RETENTION                                  = Object.freeze(
 // The concretely enumerated manifest fields (issue #82 spec §2). `encryption`
 // is recorded explicitly per owner decision #3 — the platform encrypts at the
 // volume (macOS FileVault) layer, never inside the backup.
+//
+// `binnedGenerations` is the S1/A6 recycling-bin re-mark, written by
+// src/backup/recycle.ts when content is moved out of this backup into the bin
+// (owner decision #4: deleted content is recoverable from a bin, never
+// silently destroyed). It is OPTIONAL and additive: a backup that has never
+// been re-marked carries no such field (manifest stays canonical), recovery
+// validation (src/recovery.ts) ignores unknown fields, and the field never
+// changes `blobGenerations` — that array is the census recorded at capture and
+// stays truthful. `purgedAt` is set when the binned bytes were force-deleted
+// earlier than the recovery period (or swept at expiry), so an operator can
+// tell destroyed content from restorable content.
+                                               
+                              
+                        
+                        
+                            
+                             
+   
+
                               
                                                        
                                           
@@ -129,6 +148,7 @@ export const DEFAULT_RETENTION                                  = Object.freeze(
                                
                                           
                               
+                                                                 
   
 
 // Diagnostics are retained for failure forensics WITHOUT data content: stage,

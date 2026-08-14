@@ -70,7 +70,25 @@ export {
   type BackupResult,
   type BackupListing,
   type TrimResult,
+  type BackupBinnedGeneration,
 } from './backup.ts';
+export {
+  createRecycleManager,
+  RECYCLE_FORMAT_VERSION,
+  DEFAULT_RECYCLE_RETENTION_DAYS,
+  type RecycleManager,
+  type RecycleManagerOptions,
+  type RecycleBlobSeam,
+  type RecycleDeletion,
+  type RecycleBinEntry,
+  type RecycleBinResult,
+  type RecycleBinnedBackup,
+  type RecycleFailedBackup,
+  type RecyclePurgeTarget,
+  type RecyclePurgeResult,
+  type RecycleRestoreTarget,
+  type RecycleRestoreResult,
+} from './backup/recycle.ts';
 export {
   createRecoveryManager,
   probeDatabaseFile,
