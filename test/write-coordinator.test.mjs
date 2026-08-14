@@ -44,6 +44,7 @@ import { operationalConsumer, defineOperationalEvent } from '../build/index.mjs'
 import { declaredBlobField } from '../build/server.mjs';
 import { createBlobStore } from '../build/blob-store.mjs';
 import { handleBlobUploadRoute } from '../build/http-framework-routes.mjs';
+import { createSearchOwnedIndexCapability } from '../build/index-capability.mjs';
 
 const ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..');
 const SRC = join(ROOT, 'src');
@@ -229,6 +230,85 @@ test('entity, live-state, and plugin-index writes enter through the one coordina
   assert.ok(turns.length > added.length, 'the plugin-index write took its own coordinated turn');
 
   await app.shutdown();
+  db.close();
+});
+
+test('owned-index statements are census-authorized, atomic, fenced, and host-executed inside the coordinator', async () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE SearchIndex (id TEXT PRIMARY KEY, value TEXT); CREATE TABLE Source (id TEXT PRIMARY KEY); CREATE VIRTUAL TABLE SearchFts USING fts5(value);');
+  const app = workbench({ db });
+  let fence = 4;
+  const census = new Map([
+    ['table:searchindex', { kind: 'plugin', owner: 'notes', objectKind: 'table', name: 'SearchIndex' }],
+    // An FTS shadow artifact has the same plugin attribution as its declared virtual table.
+    ['table:searchindex_data', { kind: 'sqlite-artifact', owner: 'notes', objectKind: 'shadow-table', name: 'SearchIndex_data' }],
+    ['table:source', { kind: 'entity', owner: 'Source', objectKind: 'table', name: 'Source' }],
+    ['virtual-table:searchfts', { kind: 'plugin', owner: 'notes', objectKind: 'virtual-table', name: 'SearchFts' }],
+    ...db.prepare("SELECT name FROM sqlite_schema WHERE name LIKE 'SearchFts_%'").all()
+      .map((row) => [`table:${row.name.toLowerCase()}`, { kind: 'sqlite-artifact', owner: 'notes', objectKind: 'shadow-table', name: row.name }]),
+  ]);
+  const executionOwnership = [];
+  const prepare = db.prepare.bind(db);
+  db.prepare = (sql) => {
+    executionOwnership.push(app.writeCoordinator.owned);
+    return prepare(sql);
+  };
+  const index = createSearchOwnedIndexCapability({
+    db: app.db,
+    census,
+    writeCoordinator: app.writeCoordinator,
+    fenceOf: () => fence,
+    maxStatements: 2,
+    maxRows: 2,
+  })('notes');
+
+  // A plugin callback runs outside the coordinator; invoking its capability is
+  // what schedules the host-owned statement execution inside it.
+  assert.equal(app.writeCoordinator.owned, false);
+  await index.write({ expectedFence: 4, statements: [{ sql: 'INSERT INTO SearchIndex VALUES (?, ?)', params: ['a', 'one'] }] });
+  assert.ok(executionOwnership.every(Boolean), 'only host statement execution observed a coordinator-owned turn');
+
+  await assert.rejects(
+    index.write({ expectedFence: 4, statements: [
+      { sql: 'INSERT INTO SearchIndex VALUES (?, ?)', params: ['b', 'two'] },
+      { sql: 'INSERT INTO SearchIndex VALUES (?, ?)', params: ['a', 'duplicate'] },
+    ] }),
+    /UNIQUE/,
+  );
+  assert.equal(db.prepare("SELECT 1 FROM SearchIndex WHERE id = 'b'").get(), undefined, 'a failed batch rolls back every statement');
+
+  await assert.rejects(
+    index.write({ expectedFence: 4, statements: [{ sql: "INSERT INTO SearchIndex VALUES ('c', 'three'), ('d', 'four'), ('e', 'five')" }] }),
+    /batch limit/,
+  );
+  assert.equal(db.prepare("SELECT 1 FROM SearchIndex WHERE id = 'c'").get(), undefined, 'a row-limit breach rolls back its statement');
+
+  fence = 5;
+  const moved = await index.write({ expectedFence: 4, statements: [{ sql: 'INSERT INTO SearchIndex VALUES (?, ?)', params: ['moved', 'no'] }] });
+  assert.equal(moved.changes, 0, 'a moved fence executes zero statements');
+  assert.equal(db.prepare("SELECT 1 FROM SearchIndex WHERE id = 'moved'").get(), undefined);
+
+  assert.deepEqual(index.query({ sql: 'SELECT id, value FROM SearchIndex' }).map((row) => ({ ...row })), [{ id: 'a', value: 'one' }]);
+  await index.write({ expectedFence: 5, statements: [{ sql: 'INSERT INTO SearchFts (value) VALUES (?)', params: ['needle'] }] });
+  assert.equal(index.query({ sql: "SELECT value FROM SearchFts WHERE SearchFts MATCH 'needle'" })[0].value, 'needle', 'FTS shadow artifacts inherit census ownership');
+  for (const sql of [
+    'SELECT * FROM Source',
+    "INSERT INTO Source VALUES ('s')",
+    'PRAGMA user_version',
+    'BEGIN',
+    'COMMIT',
+    'ROLLBACK',
+    'CREATE TABLE denied (id TEXT)',
+    'DROP TABLE SearchIndex',
+    "ATTACH DATABASE ':memory:' AS other",
+    'DETACH DATABASE other',
+    'CREATE TEMP TABLE denied_temp (id TEXT)',
+  ]) {
+    const operation = /^(SELECT|PRAGMA)/.test(sql)
+      ? () => index.query({ sql })
+      : () => index.write({ expectedFence: 5, statements: [{ sql }] });
+    await assert.rejects(async () => operation(), /not authorized|authorization|prohibited|owned-index/i, `${sql} must be refused by SQLite's authorizer`);
+  }
   db.close();
 });
 

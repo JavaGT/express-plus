@@ -49,6 +49,7 @@ import { createBlobStore } from './blob-store.ts';
 import { memoryBlobs } from './memory-blobs.ts';
 import { createJobQueue } from './job-queue.ts';
 import { createSearchPluginRegistry, type SearchPlugin } from './search-plugin.ts';
+import { createSearchOwnedIndexCapability } from './index-capability.ts';
 import { createSearchStalenessBridge } from './search-staleness.ts';
 import { createSearchReconcileEngine } from './search-reconcile.ts';
 import { createPostCommitEffectRunner } from './post-commit-effects.ts';
@@ -827,6 +828,17 @@ export default function workbench({
               ).get(object.name, object.kind === 'virtual-table' ? 'table' : object.kind);
               if (!existing) for (const sql of object.ddl) app.db.exec(sql);
             }
+          }
+          // Bind only after every plugin-owned object has been lifecycle-created
+          // and the declaration census has succeeded. Plugin callbacks receive
+          // this narrow capability, never the database handle.
+          app.searchPlugins.bindIndex(createSearchOwnedIndexCapability({
+            db: app.db,
+            census: ownership.census,
+            writeCoordinator: app.writeCoordinator,
+            fenceOf: (id) => app.searchPlugins.stateOf(id).fence,
+          }));
+          for (const id of app.searchPlugins.ids()) {
             const prepared = await app.searchPlugins.prepare(id);
             if (!prepared.ok) throw new Error(`plugin "${id}" preparation failed: ${prepared.lastError?.message ?? 'unknown error'}`);
           }

@@ -258,7 +258,7 @@ test('schema-owned entity table validation permits a trigger owned by a register
     db.exec('CREATE TRIGGER SchemaNote_plugin_audit AFTER INSERT ON SchemaNote BEGIN SELECT 1; END');
     const app = workbench({ db, schema, entities: [Note] });
     app.registerSearchPlugin({
-      contractVersion: 1,
+      contractVersion: 2,
       id: 'note-audit',
       version: '1',
       ownedObjects: [{

@@ -51,7 +51,7 @@ import {
 // version it was built against; anything else fails registration (version
 // compatibility — a declaration cannot silently bind to a contract it was not
 // written for).
-export const SUPPORTED_SEARCH_PLUGIN_CONTRACT_VERSION = 1;
+export const SUPPORTED_SEARCH_PLUGIN_CONTRACT_VERSION = 2;
 
 // The closed plugin-state vocabulary. `building` = a materialization cycle is
 // in progress (or nothing has materialized yet); `ready` = the index reflects
@@ -171,8 +171,16 @@ export interface SearchPluginContext {
   readonly id: string;
   readonly version: string;
   readonly reader: SearchSourceReader;
+  readonly index: SearchOwnedIndex;
   readonly generation: number;
   readonly fence: number;
+}
+
+// Narrow plugin-owned storage capability. It intentionally has neither a raw
+// database handle nor prepare/exec/transaction verbs.
+export interface SearchOwnedIndex {
+  query(request: { readonly sql: string; readonly params?: readonly unknown[] }): readonly Record<string, unknown>[];
+  write(request: { readonly expectedFence: number; readonly statements: readonly { readonly sql: string; readonly params?: readonly unknown[] }[] }): Promise<{ readonly changes: number }>;
 }
 
 // The scoped source reader handed to a plugin. Reachable sources are exactly
@@ -281,6 +289,8 @@ export interface SearchPluginRegistry {
   stateOf(id: string): SearchPluginHealth;
   healthOf(id: string): SearchPluginHealth & { readonly plugin: unknown };
   bindSource(handle: SearchSourceHandle | null): void;
+  bindIndex(index: ((id: string) => SearchOwnedIndex) | null): void;
+  ownedIndex(id: string): SearchOwnedIndex;
   sourceReader(id: string): SearchSourceReader;
   notifyChange(id: string, change: SearchChange): SearchNotification;
   prepare(id: string): Promise<SearchLifecycleOutcome>;
@@ -498,6 +508,7 @@ export function createSearchPluginRegistry(options: SearchPluginRegistryOptions 
   const ledger = new Map<string, PluginLedger>();
   const ownedNames = new Set<string>();
   let source: SearchSourceHandle | null = null;
+  let indexCapability: ((id: string) => SearchOwnedIndex) | null = null;
 
   function ledgerOf(id: string): PluginLedger {
     const entry = ledger.get(id);
@@ -541,6 +552,7 @@ export function createSearchPluginRegistry(options: SearchPluginRegistryOptions 
         plugin: id,
         interests: entry.plugin.sourceInterests,
       }),
+      index: ownedIndex(id),
       generation: entry.generation,
       fence: entry.fence,
     };
@@ -690,6 +702,24 @@ export function createSearchPluginRegistry(options: SearchPluginRegistryOptions 
     source = handle;
   }
 
+  function bindIndex(index: ((id: string) => SearchOwnedIndex) | null): void {
+    indexCapability = index;
+  }
+
+  function ownedIndex(id: string): SearchOwnedIndex {
+    ledgerOf(id);
+    if (indexCapability === null) {
+      // Direct registry/reconcile harnesses may run before application lifecycle
+      // binding. They still receive the v2 shape, but every capability use fails
+      // closed until the post-census app binding supplies an executor.
+      return Object.freeze({
+        query: () => { throw new Error(`search plugin '${id}' owned-index capability is not bound until schema census succeeds`); },
+        write: async () => { throw new Error(`search plugin '${id}' owned-index capability is not bound until schema census succeeds`); },
+      });
+    }
+    return indexCapability(id);
+  }
+
   function sourceReader(id: string): SearchSourceReader {
     const entry = ledgerOf(id);
     return createSearchSourceReader(source, {
@@ -740,13 +770,18 @@ export function createSearchPluginRegistry(options: SearchPluginRegistryOptions 
     // older in-flight rebuild can never overwrite a newer invalidation with a
     // premature ready.
     const fenceAtStart = entry.fence;
+    const identityAtStart = entry.plugin.generationIdentity;
     const ctx = contextOf(id);
     try {
       const result = await run(ctx);
       // A plugin-owned identity can change while an async materialization is
       // running (for example, a vector model-space switch). Its result belongs
-      // to the old identity and cannot make the new one ready.
-      if (entry.plugin.generationIdentity !== entry.generationIdentity) {
+      // to the old identity and cannot make the new one ready. The comparison
+      // must be against the identity captured at START: if a newer
+      // materialization synchronized the ledger while this one was in flight,
+      // the current values would match and a stale result could overwrite the
+      // newer generation's counts/state.
+      if (entry.plugin.generationIdentity !== identityAtStart) {
         synchronizeGenerationIdentity(entry);
         return {
           ok: true,
@@ -921,6 +956,8 @@ export function createSearchPluginRegistry(options: SearchPluginRegistryOptions 
     stateOf,
     healthOf,
     bindSource,
+    bindIndex,
+    ownedIndex,
     sourceReader,
     notifyChange,
     prepare,
