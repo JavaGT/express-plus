@@ -52,6 +52,14 @@
 //     has no path; it may return a synthetic key or throw if called. Callers
 //     that must be driver-portable do not use it.
 //
+//   capabilities
+//     A queryable, honest declaration of what this backend guarantees:
+//     durability (durable | ephemeral), atomicPromotion, rangeSupport,
+//     deleteVerification (a verified backend throws on a failed remove — it
+//     never reports an erasure that did not happen, #16), and a consistency
+//     tag. Callers (createBlobStore) surface it; a backend must not overstate
+//     it. fsBlobs declares durable + atomic + range + verified.
+//
 // SYNC / ASYNC: every method here is synchronous because node:fs sync APIs are
 // the right tool for blob-sized writes under the single-writer discipline, and
 // because `adopt` (which does NOT touch bytes — it runs the metadata UPDATE in
@@ -82,12 +90,81 @@ export interface FsBlobSlotOptions {
   pending?: boolean;
 }
 
+// ─── capability declaration ────────────────────────────────────────────────
+
+// Durability of a byte store: `durable` bytes survive a process restart;
+// `ephemeral` bytes live only within the owning process.
+export type ByteStoreDurability = 'durable' | 'ephemeral';
+
+// Consistency tag a backend declares for its byte storage. `single-node-strong`
+// is the only tag shipped; multi-node backends would declare a different one.
+export type ByteStoreConsistency = 'single-node-strong';
+
+// A backend's closed, queryable declaration of what it guarantees. A backend
+// must declare honestly — lifecycle code and callers can branch on it.
+export interface ByteStoreCapabilities {
+  readonly durability: ByteStoreDurability;
+  readonly atomicPromotion: boolean;
+  readonly rangeSupport: boolean;
+  readonly deleteVerification: boolean;
+  readonly consistency: ByteStoreConsistency;
+}
+
+// ─── the byte-store contract ────────────────────────────────────────────────
+// Each method's guarantee is PART OF THE TYPE: any conforming implementation
+// must keep it, because the lifecycle in blob-store.ts depends on these
+// semantics. See the module header for the narrative version.
+
 export interface ByteStore {
+  /** Queryable, honest capability declaration. A backend must not overstate it. */
+  readonly capabilities: ByteStoreCapabilities;
+
+  /**
+   * Write `bytes` to the pending slot for `id`. Atomic enough that a crash
+   * mid-write leaves NO partial FINAL blob — a torn pending write is fine (the
+   * reaper sweeps it); a torn final write is not. Callers normalize strings to
+   * Buffers before calling.
+   */
   writePending(id: string, bytes: Uint8Array): void;
+
+  /**
+   * Promote the pending slot to the final slot, durably. After this returns the
+   * bytes MUST survive a process restart (an adopted blob's final bytes are the
+   * product of a committed dispatch). Idempotent: a missing pending slot
+   * (already finalized, or never uploaded) is a no-op — the reaper and the
+   * post-commit finalize consumer both rely on that.
+   */
   finalizePending(id: string): string;
+
+  /**
+   * Return the bytes in `[start, end)` as a Buffer. Falls back to the pending
+   * slot when no final slot exists (a blob is readable while still pending).
+   * `end` clamps to the byte length; an open-ended range reads to EOF. Bounds
+   * are validated here and rejected cleanly (negative / non-finite / inverted
+   * → throw), never handed to the underlying store to misbehave with.
+   */
   readRange(id: string, range?: [start?: number, end?: number]): Buffer;
+
+  /**
+   * Delete the pending (`pending: true`) or final (`pending: false`) slot.
+   * Idempotent: a missing slot is a no-op (ENOENT-equivalent swallowed). Any
+   * OTHER failure MUST throw — a delete-verification-capable backend never
+   * reports success for an erasure that did not happen (#16).
+   */
   remove(id: string, options: { pending: boolean }): void;
+
+  /**
+   * True iff the pending / final slot has bytes. Used by the reaper to
+   * reconcile (an adopted blob whose pending slot still exists needs
+   * finalizing) and by tests.
+   */
   exists(id: string, options: { pending: boolean }): boolean;
+
+  /**
+   * The physical path of a slot — TEST/DEBUG-ONLY introspection, NOT part of
+   * the portable contract (an S3 implementation has no path; it may return a
+   * synthetic key or throw if called). Driver-portable callers must not use it.
+   */
   pathFor(id: string, options?: FsBlobSlotOptions): string;
 }
 
@@ -99,6 +176,14 @@ function safeId(id: unknown): void {
 
 export function fsBlobs({ root }: { root: string }): ByteStore {
   mkdirSync(root, { recursive: true });
+
+  const capabilities: ByteStoreCapabilities = {
+    durability: 'durable',
+    atomicPromotion: true,
+    rangeSupport: true,
+    deleteVerification: true,
+    consistency: 'single-node-strong',
+  };
 
   function pathFor(id: string, { pending }: FsBlobSlotOptions = {}): string {
     return path.join(root, id + (pending ? '.pending' : ''));
@@ -184,6 +269,7 @@ export function fsBlobs({ root }: { root: string }): ByteStore {
   }
 
   return {
+    capabilities,
     writePending,
     finalizePending,
     readRange,

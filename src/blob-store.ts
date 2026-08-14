@@ -31,7 +31,7 @@
 // storage — a future `s3Blobs({...})` implements the same interface).
 
 import { createHash, randomUUID } from 'node:crypto';
-import { fsBlobs, type ByteStore } from './fs-blobs.ts';
+import { fsBlobs, type ByteStore, type ByteStoreCapabilities } from './fs-blobs.ts';
 import type { DbHandle } from './driver.ts';
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
@@ -82,6 +82,8 @@ export interface BlobStore {
   reap(options: BlobReapOptions): { orphans: number; danglers: number };
   stat(id: string): BlobStoreRow | undefined;
   pathFor(id: string, options?: { pending?: boolean }): string;
+  /** The injected byte store's honest capability declaration, surfaced. */
+  readonly capabilities: ByteStoreCapabilities;
 }
 
 export interface BlobStoreOptions {
@@ -225,5 +227,6 @@ export function createBlobStore({ root, db, bytes }: BlobStoreOptions): BlobStor
     reap,
     stat,
     pathFor,
+    capabilities: store.capabilities,
   };
 }

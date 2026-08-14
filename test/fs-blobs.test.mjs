@@ -1,22 +1,23 @@
 // fs-blobs.mjs — the byte-store plugin seam (seam-review §2.2).
 //
-// Two layers of proof:
+// Three layers of proof:
 // 1. The fsBlobs byte-store INTERFACE CONTRACT against a temp root —
 //    writePending→exists→readRange roundtrip, finalize durability, remove
 //    idempotence, bogus-range rejection. These are the guarantees the lifecycle
 //    in blob-store.mjs leans on.
-// 2. An end-to-end proof that a CUSTOM byte store (an in-memory Map-backed
-//    implementation written here) plugs in via `workbench({ blobs: memStore })`
-//    by SHAPE, and the existing blob upload/read HTTP flow runs against it —
-//    no fs bytes land on disk, yet upload/adopt/finalize/stat all work. This is
-//    the seam's reason for existing: a photo app deploys to S3, not node:fs.
+// 2. Capability honesty: fsBlobs declares durable + atomic + range + verified,
+//    `createBlobStore` surfaces it, and delete verification holds — `remove`
+//    throws on a real failure and never reports an erasure that did not happen.
+// 3. An end-to-end proof that `workbench({ blobs: { root } })` still constructs
+//    fsBlobs internally (the back-compat path). The in-memory backend's plug-in
+//    proof lives in memory-blobs.test.mjs; the shared contract suite that runs
+//    against BOTH backends lives in blob-contract.test.mjs.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
 import { fsBlobs } from '../build/fs-blobs.mjs';
@@ -164,41 +165,56 @@ test('createBlobStore delegates bytes to the injected byte store (metadata stays
   rmSync(root, { recursive: true, force: true });
 });
 
-// ─── 3. end-to-end: a CUSTOM in-memory byte store plugs into workbench ──────
+// ─── 2. capability honesty + delete verification ───────────────────────────
 
-// A Map-backed byte store conforming to the byte-store interface. Proves the
-// seam accepts ANY conforming object by shape — no fs, no node:fs import in the
-// "deployment". `pathFor` returns a synthetic key (an S3 driver would do the
-// same — there is no filesystem path in object storage).
-function memBlobs() {
-  const pending = new Map();
-  const final = new Map();
-  return {
-    writePending(id, buf) { pending.set(id, Buffer.from(buf)); },
-    finalizePending(id) {
-      const buf = pending.get(id);
-      if (buf) { final.set(id, buf); pending.delete(id); }
-      return `mem://blobs/${id}`;
-    },
-    readRange(id, [start, end] = []) {
-      const buf = final.get(id) ?? pending.get(id);
-      if (!buf) throw new Error('blob not found');
-      start = start ?? 0;
-      if (!Number.isFinite(start) || start < 0 || !Number.isInteger(start)) throw new Error('invalid blob range: start');
-      end = end == null ? buf.length : Math.min(end, buf.length);
-      if (!Number.isFinite(end) || end < 0 || !Number.isInteger(end)) throw new Error('invalid blob range: end');
-      if (end < start) throw new Error('invalid blob range: end < start');
-      return buf.subarray(start, end);
-    },
-    remove(id, { pending: p } = {}) {
-      if (p) pending.delete(id); else final.delete(id);
-    },
-    exists(id, { pending: p } = {}) {
-      return p ? pending.has(id) : final.has(id);
-    },
-    pathFor(id) { return `mem://blobs/${id}`; },
-  };
-}
+test('fsBlobs declares honest capabilities — durable, atomic, range-verified', () => {
+  const root = freshRoot();
+  const store = fsBlobs({ root });
+  assert.deepEqual(store.capabilities, {
+    durability: 'durable',
+    atomicPromotion: true,
+    rangeSupport: true,
+    deleteVerification: true,
+    consistency: 'single-node-strong',
+  });
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('createBlobStore surfaces the byte store’s capabilities', () => {
+  const root = freshRoot();
+  const db = new DatabaseSync(':memory:');
+  for (const sql of generateFrameworkDDL()) db.exec(sql);
+  const store = createBlobStore({ db, bytes: fsBlobs({ root }) });
+  assert.deepEqual(store.capabilities, {
+    durability: 'durable',
+    atomicPromotion: true,
+    rangeSupport: true,
+    deleteVerification: true,
+    consistency: 'single-node-strong',
+  });
+  db.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('deleteVerification: remove throws on a real failure — erasure is never silently reported complete', () => {
+  const root = freshRoot();
+  const store = fsBlobs({ root });
+  assert.equal(store.capabilities.deleteVerification, true, 'fs declares delete verification');
+
+  // A directory at the slot path is not a deletable file: unlink fails with a
+  // real error (EISDIR), and a verification-capable backend MUST throw — a
+  // deletion can never be reported complete while the bytes are still there.
+  mkdirSync(path.join(root, 'occupied'));
+  assert.throws(() => store.remove('occupied', { pending: false }), /EISDIR|EPERM/);
+  assert.ok(existsSync(path.join(root, 'occupied')), 'failed erasure leaves the slot behind — never reported complete');
+
+  // ENOENT stays the idempotent no-op: a missing slot is not a failure.
+  assert.doesNotThrow(() => store.remove('ghost', { pending: false }));
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+// ─── 3. end-to-end: the back-compat `{ root }` options bag ──────────────────
 
 function photoNote() {
   return entity('Note', {
@@ -225,38 +241,6 @@ async function harness(t, blobs) {
 }
 
 const json = (r) => r.json();
-
-test('a custom in-memory byte store plugs in via workbench({ blobs }) by shape — upload/read HTTP flow works with no fs', async (t) => {
-  const mem = memBlobs();
-  const { app, base } = await harness(t, mem);
-
-  // The injected byte store is the one the framework uses — same object.
-  assert.equal(app.blobs.pathFor('x'), 'mem://blobs/x', 'the custom byte store was accepted by shape');
-
-  const bytes = Buffer.from('a photo in memory');
-  const up = await json(await fetch(`${base}/blobs`, {
-    method: 'POST',
-    headers: { 'content-type': 'image/png' },
-    body: bytes,
-  }));
-  assert.equal(up.size, bytes.length);
-  assert.equal(up.md5, createHash('md5').update(bytes).digest('hex'));
-  assert.equal(up.sha256, createHash('sha256').update(bytes).digest('hex'));
-  assert.ok(mem.exists(up.id, { pending: true }), 'bytes are in the Map, NOT on disk');
-
-  // A dispatch referencing the blob adopts it (in-txn metadata) and finalizes it
-  // (post-commit byte promotion) — against the in-memory store.
-  const created = await json(await fetch(`${base}/notes`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ body: 'n', photo: up.id }),
-  }));
-  assert.equal(created.photo, up.id, 'the blob id is stored on the note');
-  assert.equal(app.blobs.stat(up.id).status, 'adopted', 'metadata row adopted');
-  assert.ok(mem.exists(up.id, { pending: false }), 'bytes promoted to the final Map slot');
-  assert.ok(!mem.exists(up.id, { pending: true }), 'pending slot cleared');
-  assert.deepStrictEqual(mem.readRange(up.id), bytes, 'final bytes served from the Map');
-});
 
 test('back-compat: blobs: { root } still constructs fsBlobs internally (the default path)', async (t) => {
   const root = mkdtempSync(path.join(tmpdir(), 'express-blob-bc-'));

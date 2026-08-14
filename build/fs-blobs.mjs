@@ -52,6 +52,14 @@
 //     has no path; it may return a synthetic key or throw if called. Callers
 //     that must be driver-portable do not use it.
 //
+//   capabilities
+//     A queryable, honest declaration of what this backend guarantees:
+//     durability (durable | ephemeral), atomicPromotion, rangeSupport,
+//     deleteVerification (a verified backend throws on a failed remove — it
+//     never reports an erasure that did not happen, #16), and a consistency
+//     tag. Callers (createBlobStore) surface it; a backend must not overstate
+//     it. fsBlobs declares durable + atomic + range + verified.
+//
 // SYNC / ASYNC: every method here is synchronous because node:fs sync APIs are
 // the right tool for blob-sized writes under the single-writer discipline, and
 // because `adopt` (which does NOT touch bytes — it runs the metadata UPDATE in
@@ -82,12 +90,81 @@ const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
                     
  
 
-                            
-                                                    
-                                      
-                                                                        
+// ─── capability declaration ────────────────────────────────────────────────
+
+// Durability of a byte store: `durable` bytes survive a process restart;
+// `ephemeral` bytes live only within the owning process.
                                                           
+
+// Consistency tag a backend declares for its byte storage. `single-node-strong`
+// is the only tag shipped; multi-node backends would declare a different one.
+                                                        
+
+// A backend's closed, queryable declaration of what it guarantees. A backend
+// must declare honestly — lifecycle code and callers can branch on it.
+                                        
+                                           
+                                    
+                                 
+                                       
+                                             
+ 
+
+// ─── the byte-store contract ────────────────────────────────────────────────
+// Each method's guarantee is PART OF THE TYPE: any conforming implementation
+// must keep it, because the lifecycle in blob-store.ts depends on these
+// semantics. See the module header for the narrative version.
+
+                            
+                                                                                   
+                                               
+
+     
+                                                                           
+                                                                               
+                                                                               
+                            
+     
+                                                    
+
+     
+                                                                                
+                                                                                
+                                                                         
+                                                                           
+                                                     
+     
+                                      
+
+     
+                                                                              
+                                                                             
+                                                                              
+                                                                              
+                                                                      
+     
+                                                                        
+
+     
+                                                                           
+                                                                             
+                                                                           
+                                                              
+     
+                                                          
+
+     
+                                                                       
+                                                                     
+                              
+     
                                                              
+
+     
+                                                                             
+                                                                             
+                                                                                
+     
                                                            
  
 
@@ -99,6 +176,14 @@ function safeId(id         )       {
 
 export function fsBlobs({ root }                  )            {
   mkdirSync(root, { recursive: true });
+
+  const capabilities                        = {
+    durability: 'durable',
+    atomicPromotion: true,
+    rangeSupport: true,
+    deleteVerification: true,
+    consistency: 'single-node-strong',
+  };
 
   function pathFor(id        , { pending }                    = {})         {
     return path.join(root, id + (pending ? '.pending' : ''));
@@ -184,6 +269,7 @@ export function fsBlobs({ root }                  )            {
   }
 
   return {
+    capabilities,
     writePending,
     finalizePending,
     readRange,

@@ -31,7 +31,7 @@
 // storage — a future `s3Blobs({...})` implements the same interface).
 
 import { createHash, randomUUID } from 'node:crypto';
-import { fsBlobs,                } from './fs-blobs.mjs';
+import { fsBlobs,                                            } from './fs-blobs.mjs';
                                             
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
@@ -82,6 +82,8 @@ function safeId(id         )       {
                                                                         
                                              
                                                                
+                                                                           
+                                               
  
 
                                    
@@ -225,5 +227,6 @@ export function createBlobStore({ root, db, bytes }                  )          
     reap,
     stat,
     pathFor,
+    capabilities: store.capabilities,
   };
 }
