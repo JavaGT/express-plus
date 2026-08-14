@@ -89,6 +89,9 @@ export const SEARCH_RECONCILE_DEFAULT_BATCH_SIZE = 32;
 
 
 
+
+
+
 // A plugin that can participate in shadow-generation rebuilds. The base contract
 // (reconcile/rebuild/search) stays untouched — these hooks are the optional
 // A3 extension the engine drives.
@@ -102,6 +105,10 @@ export function hasShadowCapabilities(plugin              )                     
     && typeof (plugin                      ).rollbackShadow === 'function'
     && typeof (plugin                      ).abortShadow === 'function'
   );
+}
+
+function sourceCensusOf(plugin                    , ctx                     )               {
+  return plugin.sourceCensus?.(ctx) ?? computeSourceCensus(ctx.reader);
 }
 
 
@@ -514,7 +521,7 @@ export function createSearchReconcileEngine(options                        )    
     }
     const state = registry.stateOf(id);
     const ctx = contextOf(id, state.generation, state.fence);
-    const source = computeSourceCensus(ctx.reader);
+    const source = sourceCensusOf(plugin, ctx);
     const index = plugin.indexCensus(ctx);
     return buildParity(id, source, index);
   }
@@ -622,7 +629,7 @@ export function createSearchReconcileEngine(options                        )    
     const ctx = contextOf(id, before.generation + 1, before.fence);
     let sourceBefore              ;
     try {
-      sourceBefore = computeSourceCensus(ctx.reader);
+      sourceBefore = sourceCensusOf(plugin, ctx);
     } catch (err) {
       return failedOutcome(id, messageOf(err, 'source census is unreadable'), false, null, fenceAtStart, before);
     }
@@ -639,7 +646,7 @@ export function createSearchReconcileEngine(options                        )    
     }
     let sourceAfter              ;
     try {
-      sourceAfter = computeSourceCensus(ctx.reader);
+      sourceAfter = sourceCensusOf(plugin, ctx);
     } catch (err) {
       await safeAbort(plugin, id);
       return failedOutcome(id, messageOf(err, 'source census re-read failed'), true, null, fenceAtStart, before);

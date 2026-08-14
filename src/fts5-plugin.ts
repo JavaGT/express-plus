@@ -8,6 +8,9 @@ import {
   type SearchPluginSearchResult,
 } from './search-plugin.ts';
 import { censusOfRows, type SearchCensus, type SearchShadowCapabilities } from './search-reconcile.ts';
+import { admitSearchHits } from './search-auth.ts';
+import type { AuthorizationAdapter } from './authorization-adapter.ts';
+import type { EntityRecord } from './row-grant.ts';
 
 export type Fts5Tokenizer = 'unicode61' | 'porter' | 'trigram';
 
@@ -23,18 +26,27 @@ export interface Fts5PluginSource {
   readonly fields: readonly string[];
 }
 
+export interface Fts5SearchAdmission {
+  // The current entity declaration supplies field-level excerpt admission; the
+  // adapter remains the sole authorization authority for the source row.
+  readonly entity: EntityRecord;
+  readonly adapter: AuthorizationAdapter;
+}
+
 export interface Fts5PluginOptions {
   readonly id: string;
   readonly version: string;
   readonly source: Fts5PluginSource;
   readonly tokenizer?: Fts5Tokenizer;
   readonly snippetLength?: number;
+  readonly admission: Fts5SearchAdmission;
 }
 
 export interface Fts5SearchHit extends Readonly<Record<string, unknown>> {
   readonly id: string;
   readonly rank: number;
-  readonly excerpt: string;
+  readonly excerptField: string;
+  readonly excerpt?: string;
 }
 
 export interface Fts5Plugin extends SearchPlugin, SearchShadowCapabilities {
@@ -83,6 +95,19 @@ function asNumber(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
 
+function boundedExcerpt(value: string, length: number): string {
+  if (value.length <= length) return value;
+  if (length <= 3) return '.'.repeat(length);
+  return `${value.slice(0, Math.max(0, length - 3))}...`;
+}
+
+function indexedRows(rows: readonly Readonly<Record<string, unknown>>[], fields: readonly string[]): Record<string, unknown>[] {
+  return rows.map((row) => Object.fromEntries([
+    ['id', rowId(row)],
+    ...fields.map((field) => [field, typeof row[field] === 'string' ? row[field] : '']),
+  ]));
+}
+
 function countOf(ctx: SearchPluginContext, table: string): number {
   // count() is intentionally outside the owned-index SQL function allowlist.
   // The bounded capability already caps query rows, so count concrete rowids.
@@ -101,6 +126,7 @@ export function createFts5Plugin(options: Fts5PluginOptions): Fts5Plugin {
   if (!TOKENIZERS.has(tokenizer)) throw new TypeError(`unsupported FTS5 tokenizer '${tokenizer}'`);
   const snippetLength = options.snippetLength ?? 24;
   if (!Number.isSafeInteger(snippetLength) || snippetLength < 1) throw new TypeError('FTS5 snippetLength must be a positive safe integer');
+  if (options.admission === null || typeof options.admission !== 'object') throw new TypeError('FTS5 plugin requires a search admission configuration');
 
   const base = pluginName(options.id);
   const stateTable = `${base}_state`;
@@ -201,25 +227,60 @@ export function createFts5Plugin(options: Fts5PluginOptions): Fts5Plugin {
       await writeRows(ctx, table, rows);
       return { counts: { documents: countOf(ctx, table) } };
     },
-    search(ctx, request): SearchPluginSearchResult {
+    async search(ctx, request): Promise<SearchPluginSearchResult> {
       if (typeof request.query !== 'string' || request.query.trim().length === 0) {
         throw new Fts5QueryValidationError('FTS5 query must be a non-empty string');
       }
+      if (request.principal === undefined) throw new Fts5QueryValidationError('FTS5 search requires a principal for result admission');
       const table = tables[activeGeneration(ctx)];
       try {
         // This deliberately uses the SQLite FTS5 parser. There is no parallel
         // JavaScript grammar whose acceptance could diverge from MATCH.
         ctx.index.query({ sql: `SELECT rowid FROM ${table} WHERE ${table} MATCH ? LIMIT 0`, params: [request.query] });
+        const snippets = options.source.fields.map((_, index) => `snippet(${table}, ${index}, '[', ']', '...', ?) AS excerpt_${index}`).join(', ');
         const rows = ctx.index.query({
-          sql: `SELECT ${idColumn} AS id, bm25(${table}) AS score, snippet(${table}, 0, '[', ']', '...', ?) AS excerpt FROM ${table} WHERE ${table} MATCH ? ORDER BY score ASC, ${idColumn} ASC LIMIT ?`,
-          params: [snippetLength, request.query, Math.max(0, Math.floor(request.limit ?? 100))],
+          sql: `SELECT ${idColumn} AS id, bm25(${table}) AS score, ${snippets} FROM ${table} WHERE ${table} MATCH ? ORDER BY score ASC, ${idColumn} ASC LIMIT ?`,
+          params: [...options.source.fields.map(() => snippetLength), request.query, Math.max(0, Math.floor(request.limit ?? 100))],
         });
         const greatest = Math.max(0, ...rows.map((row) => -asNumber(row.score)));
-        return {
-          hits: Object.freeze(rows.map((row) => Object.freeze({
-            id: String(row.id),
+        const candidates = rows.map((row) => {
+          const excerptIndex = options.source.fields.findIndex((_, index) => {
+            const candidate = row[`excerpt_${index}`];
+            return typeof candidate === 'string' && candidate.includes('[');
+          });
+          const fieldIndex = excerptIndex === -1 ? 0 : excerptIndex;
+          const excerpt = row[`excerpt_${fieldIndex}`];
+          const id = String(row.id);
+          const hit = Object.freeze({
+            id,
             rank: greatest === 0 ? 1 : Math.max(0, -asNumber(row.score) / greatest),
-            excerpt: typeof row.excerpt === 'string' ? row.excerpt : '',
+            excerptField: options.source.fields[fieldIndex],
+          });
+          return {
+            hit,
+            key: id,
+            rank: hit.rank,
+            row: ctx.reader.row(options.source.entity, id) ?? null,
+            ...(typeof excerpt === 'string' ? {
+              excerpt: {
+                entity: options.admission.entity,
+                fieldName: hit.excerptField,
+                text: boundedExcerpt(excerpt, snippetLength),
+              },
+            } : {}),
+          };
+        });
+        const admitted = await admitSearchHits(options.admission.adapter, {
+          pluginId: options.id,
+          generation: ctx.generation,
+          staleness: 'stale',
+          principal: request.principal,
+          candidates,
+        });
+        return {
+          hits: Object.freeze(admitted.hits.map(({ hit, excerpt }) => Object.freeze({
+            ...hit,
+            ...(excerpt !== undefined ? { excerpt } : {}),
           }))),
         };
       } catch (error) {
@@ -232,13 +293,13 @@ export function createFts5Plugin(options: Fts5PluginOptions): Fts5Plugin {
       await ctx.index.write({ expectedFence: ctx.fence, statements: [{ sql: `DELETE FROM ${tables[building]}` }] });
     },
     indexCensus(ctx): SearchCensus {
-      const rows = ctx.index.query({ sql: `SELECT payload FROM ${targetTable(ctx)} ORDER BY ${idColumn} ASC` }).map((row) => {
-        if (typeof row.payload !== 'string') throw new Error('FTS5 index payload is corrupt');
-        const parsed = JSON.parse(row.payload) as unknown;
-        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('FTS5 index payload is corrupt');
-        return parsed as Record<string, unknown>;
-      });
+      const rows = ctx.index.query({ sql: `SELECT ${idColumn} AS id, ${options.source.fields.join(', ')} FROM ${targetTable(ctx)} ORDER BY ${idColumn} ASC` });
       return Object.freeze({ [options.source.entity]: censusOfRows(rows) });
+    },
+    sourceCensus(ctx): SearchCensus {
+      return Object.freeze({
+        [options.source.entity]: censusOfRows(indexedRows(ctx.reader.rows(options.source.entity), options.source.fields)),
+      });
     },
     async commitShadow(ctx) {
       if (building === null) throw new Error('FTS5 plugin has no shadow generation to commit');
@@ -263,7 +324,7 @@ export function createFts5Plugin(options: Fts5PluginOptions): Fts5Plugin {
     },
     health(ctx) {
       try {
-        const source = ctx.reader.rows(options.source.entity);
+        const source = indexedRows(ctx.reader.rows(options.source.entity), options.source.fields);
         const active = activeGeneration(ctx);
         const index = plugin.indexCensus(ctx)[options.source.entity];
         const sourceCensus = censusOfRows(source);

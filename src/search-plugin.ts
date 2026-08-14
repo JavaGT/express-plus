@@ -46,6 +46,7 @@ import {
   searchPageWindow,
   searchWithDeadline,
 } from './search-response.ts';
+import type { Principal } from './principal.ts';
 
 // The contract version this package's registry supports. A plugin declares the
 // version it was built against; anything else fails registration (version
@@ -104,7 +105,7 @@ export interface SearchChange {
 export interface SearchRequest {
   readonly query: unknown;
   readonly entity?: string;
-  readonly principal?: unknown;
+  readonly principal?: Principal;
   readonly limit?: number;
   readonly offset?: number;
   // The window the plugin is asked to serve. The registry owns offsetting, so

@@ -47,6 +47,7 @@ import {
   searchWithDeadline,
 } from './search-response.mjs';
 
+
 // The contract version this package's registry supports. A plugin declares the
 // version it was built against; anything else fails registration (version
 // compatibility — a declaration cannot silently bind to a contract it was not

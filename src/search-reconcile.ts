@@ -87,6 +87,9 @@ export interface SearchShadowCapabilities {
   commitShadow(ctx: SearchPluginContext): void | Promise<void>;
   rollbackShadow(ctx: SearchPluginContext): void | Promise<void>;
   abortShadow(ctx: SearchPluginContext): void | Promise<void>;
+  // Some indexes intentionally materialize a projection of their source rows.
+  // Their source census must use that same projection for parity to be useful.
+  sourceCensus?(ctx: SearchPluginContext): SearchCensus;
 }
 
 // A plugin that can participate in shadow-generation rebuilds. The base contract
@@ -102,6 +105,10 @@ export function hasShadowCapabilities(plugin: SearchPlugin): plugin is SearchSha
     && typeof (plugin as SearchShadowPlugin).rollbackShadow === 'function'
     && typeof (plugin as SearchShadowPlugin).abortShadow === 'function'
   );
+}
+
+function sourceCensusOf(plugin: SearchShadowPlugin, ctx: SearchPluginContext): SearchCensus {
+  return plugin.sourceCensus?.(ctx) ?? computeSourceCensus(ctx.reader);
 }
 
 export interface SearchParityComparison {
@@ -514,7 +521,7 @@ export function createSearchReconcileEngine(options: SearchReconcileOptions): Se
     }
     const state = registry.stateOf(id);
     const ctx = contextOf(id, state.generation, state.fence);
-    const source = computeSourceCensus(ctx.reader);
+    const source = sourceCensusOf(plugin, ctx);
     const index = plugin.indexCensus(ctx);
     return buildParity(id, source, index);
   }
@@ -622,7 +629,7 @@ export function createSearchReconcileEngine(options: SearchReconcileOptions): Se
     const ctx = contextOf(id, before.generation + 1, before.fence);
     let sourceBefore: SearchCensus;
     try {
-      sourceBefore = computeSourceCensus(ctx.reader);
+      sourceBefore = sourceCensusOf(plugin, ctx);
     } catch (err) {
       return failedOutcome(id, messageOf(err, 'source census is unreadable'), false, null, fenceAtStart, before);
     }
@@ -639,7 +646,7 @@ export function createSearchReconcileEngine(options: SearchReconcileOptions): Se
     }
     let sourceAfter: SearchCensus;
     try {
-      sourceAfter = computeSourceCensus(ctx.reader);
+      sourceAfter = sourceCensusOf(plugin, ctx);
     } catch (err) {
       await safeAbort(plugin, id);
       return failedOutcome(id, messageOf(err, 'source census re-read failed'), true, null, fenceAtStart, before);
