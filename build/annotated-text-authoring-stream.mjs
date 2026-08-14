@@ -6,57 +6,57 @@ const MAX_LEASES_PER_STREAM = 16;
 const MAX_RETAINED_PER_LEASE = 16 * 1024 * 1024;
 const MAX_RETAINED_PER_STREAM = 64 * 1024 * 1024;
 
-                     
-                                               
-                               
-                                 
- 
 
-              
-                                  
-                             
- 
 
-                     
-             
-                      
-                         
-                       
-                     
-                       
-                     
- 
 
-                    
-             
-                    
-                            
-                             
-                     
-                     
- 
 
-                       
-                
-                   
-                       
-                        
-                           
-                     
-                     
-                             
- 
 
-                                  
-                            
-                           
-                         
- 
 
-                          
-             
-                
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function base64url(bytes        )         {
   return bytes.toString('base64url');
@@ -98,12 +98,12 @@ export function hashClientNonce(nonce        )         {
   return clientNonceHash(nonce);
 }
 
-export function ensureStream({ db, prefix, documentId, principalType, principalId }   
-         
-                 
-                     
-                        
-                      
+export function ensureStream({ db, prefix, documentId, principalType, principalId }
+
+
+
+
+
  )                                   {
   const existing = db.prepare(`SELECT id, expires_at FROM ${prefix}_authoring_stream WHERE document_id = ? AND principal_type = ? AND principal_id = ?`).get(documentId, principalType, principalId)                         ;
   if (existing) {
@@ -124,11 +124,11 @@ export function ensureStream({ db, prefix, documentId, principalType, principalI
   return { id, created: true };
 }
 
-export function ensureLease({ db, prefix, streamId, clientNonceHash }   
-         
-                 
-                   
-                          
+export function ensureLease({ db, prefix, streamId, clientNonceHash }
+
+
+
+
  )                                                                     {
   const existing = db.prepare(`SELECT id, acknowledged_fence, expires_at FROM ${prefix}_authoring_lease WHERE stream_id = ? AND client_nonce_hash = ?`).get(streamId, clientNonceHash)                        ;
   if (existing) {
@@ -172,13 +172,13 @@ function clearLeaseChildren(db    , prefix        , leaseId        )       {
   db.prepare(`DELETE FROM ${prefix}_authoring_checkpoint WHERE lease_id = ?`).run(leaseId);
 }
 
-export function resolveStream({ db, prefix, streamToken, documentId, principalType, principalId }   
-         
-                 
-                      
-                     
-                        
-                      
+export function resolveStream({ db, prefix, streamToken, documentId, principalType, principalId }
+
+
+
+
+
+
  )                   {
   const stream = db.prepare(`SELECT * FROM ${prefix}_authoring_stream WHERE id = ? AND document_id = ? AND principal_type = ? AND principal_id = ?`).get(streamToken, documentId, principalType, principalId)                         ;
   if (!stream) return null;
@@ -192,11 +192,11 @@ export function resolveStream({ db, prefix, streamToken, documentId, principalTy
   return stream;
 }
 
-export function resolveLease({ db, prefix, leaseToken, streamId }   
-         
-                 
-                     
-                   
+export function resolveLease({ db, prefix, leaseToken, streamId }
+
+
+
+
  )                  {
   const lease = db.prepare(`SELECT * FROM ${prefix}_authoring_lease WHERE id = ? AND stream_id = ?`).get(leaseToken, streamId)                        ;
   if (!lease) return null;
@@ -214,22 +214,22 @@ export function resolveLease({ db, prefix, leaseToken, streamId }
   return lease;
 }
 
-export function resolvePosition({ db, prefix, positionToken, leaseId }   
-         
-                 
-                        
-                  
+export function resolvePosition({ db, prefix, positionToken, leaseId }
+
+
+
+
  )                     {
   const position = db.prepare(`SELECT position.*, checkpoint.family_checkpoint AS family_checkpoint FROM ${prefix}_authoring_position AS position LEFT JOIN ${prefix}_authoring_checkpoint AS checkpoint ON checkpoint.id = position.checkpoint_id WHERE position.token = ? AND position.lease_id = ?`).get(positionToken, leaseId)                           ;
   if (!position) return null;
   return position;
 }
 
-function ensureCheckpointForBasis({ db, prefix, leaseId, familyCheckpoint }   
-         
-                 
-                  
-                            
+function ensureCheckpointForBasis({ db, prefix, leaseId, familyCheckpoint }
+
+
+
+
  )         {
   const serialized = JSON.stringify(familyCheckpoint);
   const existing = db.prepare(`SELECT id FROM ${prefix}_authoring_checkpoint WHERE lease_id = ? AND family_checkpoint = ? LIMIT 1`).get(leaseId, serialized);
@@ -242,14 +242,14 @@ function ensureCheckpointForBasis({ db, prefix, leaseId, familyCheckpoint }
 // A position frame is DOCUMENT-scoped (issue #33): one frame names the whole
 // document's family checkpoint basis, not a block. The client's edit carries an
 // absolute UTF-16 offset against that basis.
-export function issuePositionFrame({ db, prefix, leaseId, fence, familyCheckpoint, visibleAtIssue, redactions = [] }   
-         
-                 
-                  
-                
-                            
-                           
-                         
+export function issuePositionFrame({ db, prefix, leaseId, fence, familyCheckpoint, visibleAtIssue, redactions = [] }
+
+
+
+
+
+
+
  )                           {
   const token = randomToken();
   const resolvedCheckpointId = ensureCheckpointForBasis({ db, prefix, leaseId, familyCheckpoint });
@@ -263,11 +263,11 @@ export function issuePositionFrame({ db, prefix, leaseId, fence, familyCheckpoin
   return { token };
 }
 
-export function issueSnapshot({ db, prefix, leaseId, fence }   
-         
-                 
-                  
-                
+export function issueSnapshot({ db, prefix, leaseId, fence }
+
+
+
+
  )                        {
   const id = randomToken();
   const issuedAt = now();
@@ -281,12 +281,12 @@ export function issueSnapshot({ db, prefix, leaseId, fence }
 // A snapshot is one coherent basis: every position must serialize to the same
 // family checkpoint, otherwise the dedup key could split into the pre/post-split
 // bases an action was never meant to straddle.
-export function issueAuthoringSnapshot({ db, prefix, leaseId, fence, positions }   
-         
-                 
-                  
-                
-                                      
+export function issueAuthoringSnapshot({ db, prefix, leaseId, fence, positions }
+
+
+
+
+
  )                                                                                {
   const attempt = ()                                                                                => {
     db.exec('SAVEPOINT authoring_snapshot_issue');
@@ -324,11 +324,11 @@ export function issueAuthoringSnapshot({ db, prefix, leaseId, fence, positions }
   return attempt();
 }
 
-export function acknowledgeAndPruneSnapshot({ db, prefix, snapshotId, leaseId }   
-         
-                 
-                     
-                  
+export function acknowledgeAndPruneSnapshot({ db, prefix, snapshotId, leaseId }
+
+
+
+
  )                                                         {
   db.exec('SAVEPOINT authoring_snapshot_acknowledge');
   try {
@@ -399,11 +399,11 @@ function retainedBytes(db    , prefix        , leaseId                = null, st
       ${leaseId !== null ? 'WHERE snapshot.lease_id = ?' : `JOIN ${prefix}_authoring_lease AS lease ON lease.id = snapshot.lease_id WHERE lease.stream_id = ?`}`).get(leaseId ?? streamId).bytes);
 }
 
-function hasCapacity({ db, prefix, leaseId, bytes = 0 }   
-         
-                 
-                  
-                 
+function hasCapacity({ db, prefix, leaseId, bytes = 0 }
+
+
+
+
  )          {
   const leaseBytes = retainedBytes(db, prefix, leaseId);
   if (leaseBytes + bytes > MAX_RETAINED_PER_LEASE) return false;
@@ -434,19 +434,19 @@ export function clearAuthoringState(db    , prefix        , documentId        ) 
   for (const stream of streams) clearStream(db, prefix, stream.id);
 }
 
-export function buildAuthoringEnvelope({ streamToken, leaseToken, snapshotToken, fence, positionFrames }   
-                      
-                     
-                        
-                
-                                           
- )   
-             
-                 
-                
-                   
-                               
-                                                   
+export function buildAuthoringEnvelope({ streamToken, leaseToken, snapshotToken, fence, positionFrames }
+
+
+
+
+
+ )
+
+
+
+
+
+
   {
   return {
     version: 1,

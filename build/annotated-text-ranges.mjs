@@ -18,21 +18,21 @@ import {
   projectEndpointToOffset,
   compareStructuralEndpoints,
 } from './annotated-text-continuous.mjs';
-                                                                           
-                                                                     
-                                                       
+
+
+
 
 function fail(message        )        {
   throw new Error(`annotated-text ranges: ${message}`);
 }
 
 /** A blockless annotation record (the block-free shape reused from the block era). */
-                             
-             
-                 
-                             
-                                         
- 
+
+
+
+
+
+
 
 /** Validate and freeze an annotation record. */
 export function assertAnnotation(annotation     )             {
@@ -63,11 +63,11 @@ export function assertAnnotation(annotation     )             {
   });
 }
 
-                                  
-                       
-                            
-                          
- 
+
+
+
+
+
 
 /**
  * Validate a character range over a continuous family. Endpoints must be

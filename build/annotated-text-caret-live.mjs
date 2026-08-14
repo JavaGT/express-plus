@@ -4,61 +4,61 @@ import { projectAnnotatedTextCaretSnapshot } from './annotated-text-snapshot.mjs
 import { scopeOf } from './scope-handle.mjs';
 import { getAnnotatedTextCompiledMetadata } from './annotated-text-field.mjs';
 
-                           
-              
-                     
-                  
-                               
- 
 
-                             
-               
-                              
-                                                                                    
-                                                          
- 
 
-                       
-                                                                                 
-                                                                                 
-                                                                                                                         
-                                                                                                                      
- 
 
-                     
-                              
-                 
-             
-                
-                   
-                     
-                                   
-                                                                                   
-                                                                                 
- 
 
-                          
-               
-             
- 
 
-                              
-                       
-                 
-             
-                
-                 
-                             
- 
 
-                             
-                      
-                 
-             
-                
- 
 
-                                                                                                           
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function invalid(message        )        { throw Object.assign(new Error(message), { status: 400 }); }
 
@@ -98,12 +98,12 @@ function parseClear(message         )                    {
   return message                     ;
 }
 
-export function createAnnotatedTextCaretLive({ db, resolveEntity, mayVerb, fanout, delay = null }   
-                                                                                                                                               
-                                                                        
-                   
-                      
-                                                   
+export function createAnnotatedTextCaretLive({ db, resolveEntity, mayVerb, fanout, delay = null }
+
+
+
+
+
  )                                                                                                                                                                                                                               {
   const slots = new Map                   ();
   const key = (conn                 , entity        , id        , field        ) => `${conn.id}\0${entity}\0${id}\0${field}`;

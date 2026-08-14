@@ -30,30 +30,30 @@ import { operationCategory,                        } from './operation.mjs';
 // admitted ONLY if machinePrincipal() minted it.
 const MACHINE_BRAND = new WeakSet        ();
 
-                                            
-                          
-                      
-                                 
-                                                                          
-                                                                       
-                   
-                                                                       
-                                                                          
-                                                                       
-                  
-                                                                          
-                                  
-     
-  
 
-                                        
-                                                                          
-                                                                         
-             
-                                                                                
-                                                                                
-                                
- 
+
+
+
+                                                                 
+
+
+
+
+
+
+
+
+
+
+
+
+                                    
+
+
+
+
+
+
 
 // Mint a machine principal. Fail closed on a missing/empty id, a non-array
 // operations list, or an operation name outside the closed vocabulary. The

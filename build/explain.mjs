@@ -1,73 +1,73 @@
 import { rowCapabilities, mayVerb, fieldCapabilities } from './row-grant.mjs';
 import { isRuntimeGrantClause } from './scope.mjs';
 
-                      
-                                        
-                    
- 
 
-                           
-                
-                
-                
-                   
-                   
- 
 
-                        
-               
-                  
-                                        
-                                           
-                                                                                         
-                    
- 
 
-                      
-               
-                       
-                          
- 
 
-                            
-                            
-               
- 
 
-                         
-                          
-                        
-                              
- 
 
-                
-                                                                                        
-                                            
-                                           
-                                       
 
-                     
-              
-                                  
- 
 
-                        
-                       
-               
-                     
-               
-                 
- 
 
-                         
-               
-                 
-                    
-                                                                              
-                   
-                                                                 
-                                                                    
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function grantClauses(entityRecord              )          {
   const grant = entityRecord.grant;

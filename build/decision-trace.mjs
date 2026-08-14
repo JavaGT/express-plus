@@ -9,10 +9,10 @@
 // transports already render (401 unauthorized / 403 forbidden / 404 not found),
 // matching the opaque pre-adapter responses.
 
-                                     
-                         
-                            
- 
+
+
+
+
 
 // A per-decision trace collector. A fresh collector is used per admit() call;
 // `take()` freezes and detaches the recorded checks once, so the returned

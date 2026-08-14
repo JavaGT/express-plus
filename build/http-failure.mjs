@@ -3,7 +3,7 @@ import {
   failureOutcome,
   isWorkbenchFailure,
   sanitizeUnexpectedFailure,
-                        
+
 } from './outcome.mjs';
 
 export function statusForFailure(value                            )                              {
@@ -18,10 +18,10 @@ export function statusForFailure(value                            )             
   }
 }
 
-                                  
-                          
-                                                   
- 
+
+
+
+
 
 export function failureResponse(
   workbenchFailure         ,
@@ -36,12 +36,12 @@ export function failureResponse(
   });
 }
 
-                        
-               
-                 
-                
-                    
-             
+
+
+
+
+
+
 
 export function sendFailure(
   sendJson          ,

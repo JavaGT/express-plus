@@ -1,17 +1,17 @@
-                                              
+
 import { read, write } from '../grant.mjs';
 import { membershipTable, membershipOwnerCol, MEMBER_COLUMN } from '../scope-sql.mjs';
 import * as eventHandles from '../event-handle.mjs';
 import { scopeOf } from '../scope-handle.mjs';
 import { authorizeFieldOp, dispatchFieldMutation, mapMutationAction } from './shared.mjs';
-             
-                  
-               
-                     
-                       
-                           
-                    
-                    
+
+
+
+
+
+
+
+
 
 // authorizeFieldOp types its capability param as string, but the row-grant
 // engine compares capability tokens by identity (read/write are frozen

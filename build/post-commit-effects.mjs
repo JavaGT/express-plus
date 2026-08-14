@@ -2,7 +2,7 @@
 // transaction, but Workbench never performs their external I/O. A privileged
 // application-owned runner claims immutable descriptors after commit.
 
-                                            
+
 
 const STATUS_PENDING = 'pending';
 const STATUS_CLAIMED = 'claimed';
@@ -23,14 +23,14 @@ function assertText(value         , where        )         {
   return value;
 }
 
-                                   
-               
-                    
-              
-                       
-                   
-                  
- 
+
+
+
+
+
+
+
+
 
 function normalizeEffects(effects         )                     {
   if (effects === undefined) return [];
@@ -64,14 +64,14 @@ function annotatedContribution(value         )          {
     && Number.isSafeInteger(record?.scalarCount) && (record?.scalarCount          ) > 0;
 }
 
-                           
-                    
-                 
-                       
-                         
-                                                                                                                
-                 
- 
+
+
+
+
+
+
+
+
 
 function annotatedPrivateFact(fact                 )          {
   if (fact.version !== 2 || typeof fact.documentId !== 'string' || fact.documentId.length === 0) return false;
@@ -91,21 +91,21 @@ function annotatedPrivateFact(fact                 )          {
     && (fact.linkage.outcome === 'noop' || (annotatedContribution(fact.contribution) && (!Object.hasOwn(fact, 'redo') || annotatedContribution(fact.redo))));
 }
 
-                                        
-               
-                    
-               
-                       
-                    
- 
 
-                                   
-               
-                    
-              
-                       
-                   
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 export function postCommitEffect(input                        )                   {
   return Object.freeze({
@@ -133,13 +133,13 @@ function canonicalPrivateFact(privateFact         , required         )          
   return { fact: deepFreeze(fact), factJson };
 }
 
-export function declarePostCommitEffectsInTxn(db          , { scope, actionId, committedAt, privateFact, effects, requirePrivateFact = false }   
-                
-                   
-                      
-                        
-                    
-                               
+export function declarePostCommitEffectsInTxn(db          , { scope, actionId, committedAt, privateFact, effects, requirePrivateFact = false }
+
+
+
+
+
+
  )                                      {
   const declared = normalizeEffects(effects);
   const canonical = canonicalPrivateFact(privateFact, requirePrivateFact || declared.length > 0);
@@ -167,45 +167,45 @@ function parseJson(value        , where        )          {
   try { return JSON.parse(value); } catch { throw new TypeError(`${where} must contain valid JSON`); }
 }
 
-                      
-                
-                   
-                      
-                    
-                            
-                       
-                              
-                           
-                    
-                            
-                                     
-                                       
-                                
- 
 
-                          
-                
-                   
-                      
-               
-                  
-                      
- 
 
-                                 
-               
-                
-              
-                   
-                      
-                
- 
 
-                                       
-                       
-                      
-                                                                                                          
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // Rebuild private projections solely from the private fact and its receipt-owned
 // event references. The caller supplies only explicitly opted-in projections.
@@ -291,22 +291,22 @@ export function replayPrivateFactProjections(db          , projections          
   return { projected };
 }
 
-                                     
-                
-                   
-               
-                    
-                  
- 
 
-                                             
-                         
-              
-                       
-                   
-                
-                            
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function parse(row                                            )                                    {
   if (!row) return null;
@@ -336,18 +336,18 @@ function identityParams(id         )                          {
   };
 }
 
-                                         
-                                                             
-                                                                              
-                                                                                                                                                                        
-                                                                                                                       
-                                      
- 
 
-export function createPostCommitEffectRunner({ db, leaseMs = 30_000, now = () => Date.now() }   
-                
-                   
-                     
+
+
+
+
+
+
+
+export function createPostCommitEffectRunner({ db, leaseMs = 30_000, now = () => Date.now() }
+
+
+
   = {})                         {
   if (!db) throw new Error('createPostCommitEffectRunner: db is required');
   if (!Number.isSafeInteger(leaseMs) || leaseMs <= 0) throw new TypeError('leaseMs must be a positive safe integer');

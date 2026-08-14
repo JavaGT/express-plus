@@ -14,18 +14,18 @@
 // app never opened one).
 
 import { withForeignKeysDisabled,               } from './driver.mjs';
-                                                   
 
-                               
-                                                                           
-                                                                         
-                                                                           
-                                                                              
-                                                                    
-                                                                   
-  
 
-                                                                           
+
+
+
+                                                          
+
+
+
+
+
+
 
 export function createMaintenanceSeam(dbOrHandle               , writeQueue            )                  {
   const resolveDb = ()           => {

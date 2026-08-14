@@ -8,8 +8,8 @@ import { sendFailure,               } from './http-failure.mjs';
 import { annotatedTextHistorySession, resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
 import { scopeOf } from './scope-handle.mjs';
 import { rawRow } from './entity/query.mjs';
-                                                           
-                                                
+
+
 
 const ACTION_PATH = '/workbench/actions';
 const BATCH_ACTION_PATH = '/workbench/actions/batch';
@@ -22,111 +22,111 @@ const APPLICATION_HTTP_CRUD_VERBS = new Set        (['create', 'update', 'remove
 // The loose application surface this transport reads: the entity registry, the
 // db for owner-scope resolution, and the kernel dispatch path. The app module
 // owns the full shape; only these seams are consumed here.
-                                 
-                
-                
-                         
- 
 
-                            
-               
-                                                    
-                                             
-                                         
-                                            
-                                                                   
-                         
- 
 
-                        
-                                                                                                     
- 
 
-                                 
-               
-                             
-                       
- 
 
-                                 
-                                         
-                                            
-             
-                                                   
-                    
-                                                                                          
-                                                                          
-                         
- 
 
-                            
-                 
-                
-                     
-                                  
-                         
- 
 
-                       
-               
-                   
- 
 
-                         
-                   
-               
-                   
-                 
-                              
-                    
- 
 
-                              
-                   
-                 
-                              
-                                  
-                    
- 
 
-                          
-                   
-                 
-                              
-                  
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // The union of validators' outputs as the admission/gate layer sees it. Every
 // field is optional here because the shape varies per endpoint; the validators
 // above guarantee the fields a given path actually consumes.
-                             
-                   
-                
-                    
-                 
-                              
-                    
-                   
-                                   
- 
 
-                            
-                
-                    
-                 
- 
 
-                             
-               
-                  
-                                              
-                                                                   
-                                                                    
-                   
-                    
-                    
-                      
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 export function installHistoryHttpDispatcher(
   app                ,
@@ -351,9 +351,9 @@ function routeGateDenies(app                , request                  , princip
   return !gate(principal);
 }
 
-                              
-                                                                              
- 
+
+
+
 
 /** Handle the fixed HTTP skin for application-registered actions. */
 export async function handleApplicationActionHttp(

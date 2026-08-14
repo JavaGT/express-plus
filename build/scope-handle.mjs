@@ -5,13 +5,13 @@
 // Distinct from Grant row-scope (`src/scope.mjs`): that module compiles SQL
 // visibility predicates; this module owns identity grammar only.
 
-                              
-                                 
-                          
-                      
-                       
-                     
- 
+
+
+
+
+
+
+
 
 function assertEntity(value        )       {
   if (typeof value !== 'string' || value.length === 0 || value.includes('.') || value.includes(':')) {

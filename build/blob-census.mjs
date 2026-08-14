@@ -11,58 +11,58 @@
 // or imply sharing (S6 consideration #7) — the census knows nothing about
 // hashes, and the reaper only ever reasons about blob ids.
 
-                                                                 
-                                                                       
-                                                   
 
-                                
-                                              
-                
-                                        
-                 
-                                                       
-                         
-                                           
-                
-                                                                              
-                               
-                                                                                
-                                       
-                                                                                
-                           
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 /** Action-level blob-field declaration. owningResource + erasureCategory are required (S6 #4). */
-                                       
-                     
-                
-                        
-                           
-                         
-                                       
-                            
-                                
- 
 
-                             
-                                                                               
-                                                
-     
-                                                                            
-                                                                             
-                                                                             
-                                                                             
-                                                                     
-     
-                                                      
-                                                                     
-                                                                        
- 
 
-                                  
-                                                                                              
-                                                       
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                     
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 const refKey = (table        , column        )         => `${table}\u0000${column}`;
 const SQL_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;

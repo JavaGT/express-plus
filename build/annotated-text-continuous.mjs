@@ -25,14 +25,14 @@ import {
   applyTextOp,
   compactTextCheckpoint,
 } from './annotated-text.mjs';
-             
-                                                         
-                             
+
+
+
 import {
   assertStructuralEndpoint,
   rgaTraversal,
 } from './annotated-text-family.mjs';
-                                                                     
+
 
 const ROOT_ID = 'root';
 const trustedFamilies = new WeakSet        ();
@@ -40,27 +40,27 @@ const serializedFamilyCache = new Map                              ();
 const SERIALIZED_FAMILY_CACHE_LIMIT = 16;
 const derivedIndexCache = new WeakMap                                                  ();
 
-                                       
-             
-                        
- 
 
-                                      
-                                               
-                                          
-                                                              
-                                    
-                        
- 
 
-                        
-                                                                                             
-                                                                              
 
-                                         
-                            
-                          
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function trustFamily(family                      )                       {
   const trusted = deepFreeze(family);

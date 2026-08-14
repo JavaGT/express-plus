@@ -6,12 +6,12 @@
 //
 // Span-aware: a single seq is treated as [seq, seq]. Advance to hi on next.
 
-                                                
 
-                            
-                                  
-                            
-                                                       
+
+
+
+
+
 
 /** Normalize a seq or [lo, hi] span to a frozen [lo, hi] pair. */
 export function normalizeSeqSpan(

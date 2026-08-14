@@ -21,9 +21,9 @@
 //       entity-load and reject any `is.*` call not lexically inside an `await`.
 //       Catches the mid-expression foot-gun before any request runs.
 
-                                             
-                        
- 
+
+
+
 
 export class UnawaitedCheckError extends Error {
   check               ;
@@ -40,15 +40,15 @@ export class UnawaitedCheckError extends Error {
 // at the use site: `(await is.owner()) ? grant(...) : deny(...)`.
 const CHECK_RESULT                = Symbol('workbench.checkResult');
 
-                                               
 
-                                                                                
 
-                                                                        
-                           
-  
 
-                                                                                                 
+
+
+
+
+
+
 
 export function check(fn         , { name }                    = {})              {
   const callable = (...args           )                     => {

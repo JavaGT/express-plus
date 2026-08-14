@@ -5,38 +5,38 @@
 
 const OPAQUE_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 
-                    
-                        
-                 
-                             
- 
 
-                      
-             
-                 
-                                  
- 
 
-                            
-             
-                 
-                
-                     
- 
 
-                        
-                                                       
-                                                         
-                                                                        
-                                                                                      
-                                                        
 
-                                      
-             
-             
-                              
-                          
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function opaqueToken(value         )                  {
   return typeof value === 'string' && OPAQUE_TOKEN.test(value);

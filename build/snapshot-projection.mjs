@@ -1,29 +1,29 @@
-                                            
+
 import { mayRow } from './row-grant.mjs';
-                                                                       
+
 
 // A field descriptor as snapshot projection reads it: kind, value type, and the
 // ref target (entity name or declared entity object). Kept loose — the
 // descriptor is built by field.mjs and consumed by many layers.
-                                   
-                
-                
-                                             
-                   
-                         
- 
+
+
+
+
+
+
+
 
 // The snapshot entity shape: name, declared fields, and the bound facets used
 // by the runtime half (scope visibility filter and row hydration). The declared
 // anchor may lack the bound facets until bindOutput/boundEntity resolve them.
-                          
-               
-                                                  
-                                                                                     
-                                                                                                          
- 
 
-                                                                      
+
+
+
+
+
+
+
 
 function entityOf(value         )                 {
   if (!value || typeof value !== 'object' || typeof (value                      ).name !== 'string' || !(value                        ).fields) throw new TypeError('snapshot relation requires a declared entity');
@@ -72,56 +72,56 @@ function relation(from                , to                , inverse         , vi
 
 // ---- compiled output branches ----
 
-                       
-                         
-                   
-             
- 
 
-                                 
-              
-                                           
-                         
-             
-                   
-                                     
-                                
-                                                     
-                              
- 
 
-                    
-                         
-                                                                                                                                                                                                         
-                                                                                                           
 
-                          
-                         
-                                    
- 
 
-                              
-                 
-                                 
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function outputFor(node         )                            {
   const candidate = node                                         ;
   return candidate?.kind === 'object' ? (node                      ) : null;
 }
 
-                                
-                
-                              
-                
-                   
-                    
-                    
-                   
-                   
-                    
-                         
- 
+
+
+
+
+
+
+
+
+
+
+
+
 
 function compileOutput(entity                , output         , ancestors = new Set                ())                 {
   const object = outputFor(output);
@@ -209,44 +209,44 @@ function compileOutput(entity                , output         , ancestors = new 
 
 // ---- tombstones ----
 
-                                  
-                
-                   
-                   
-                     
-                    
-                          
-                        
-                          
-                              
-                      
-                  
-                      
-                   
-                         
- 
 
-                                       
-                
-                   
-                   
-                       
-                         
- 
 
-                         
-                         
-                         
-                   
-                         
-                                     
-                               
-                                       
-               
-                
-                    
-                            
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function compileTombstones(declaration                             , resolveEntity               )                       {
   const rule = declaration.tombstones;
@@ -358,12 +358,12 @@ function physicalForeignKey(db                 , from                , field    
   if (retainTarget && !['RESTRICT', 'NO ACTION'].includes(matching[0].on_delete          )) throw new TypeError(`snapshot terminal tombstone scope ${from.name}.${field} FOREIGN KEY must use ON DELETE RESTRICT or NO ACTION`);
 }
 
-                                      
-                         
-                         
-                                  
-                                       
- 
+
+
+
+
+
+
 
 export function compileSnapshots(declarations         , resolveEntity               , db                  = null)                                   {
   if (declarations === undefined) return new Map();
@@ -461,10 +461,10 @@ function detached(raw                         )                          {
   return Object.freeze({ ...raw });
 }
 
-                         
-                
-                    
- 
+
+
+
+
 
 function readRows(db          , entity                , principal         , fk        , value         , inverse         , order                      , tombstones                                             )                            {
   const filter = entity.scopeFilter (principal);
@@ -514,25 +514,25 @@ function readUser(db          , id         , tombstones                         
 
 // Capture only raw, scope-filtered candidates while SQLite is synchronous. No
 // authorization may await inside this read boundary.
-                        
-                               
-                                        
-                                               
- 
 
-                       
-                         
-                               
-                                               
- 
 
-export function captureSnapshot({ db, principal, anchor, id, output, tombstones = null }   
-               
-                     
-                         
-             
-                         
-                                               
+
+
+
+
+
+
+
+
+
+
+export function captureSnapshot({ db, principal, anchor, id, output, tombstones = null }
+
+
+
+
+
+
  )                      {
   function capture(_entity                , raw                         , branch                )               {
     const children = new Map                               ();
@@ -563,19 +563,19 @@ export function captureSnapshot({ db, principal, anchor, id, output, tombstones 
   return rows.length === 1 ? capture(anchor, rows[0], output) : null;
 }
 
-                                                                                                             
 
-                               
-                                                  
-                   
- 
 
-export async function authorizeSnapshot({ principal, anchor, candidate, mayVerb, authorization }   
-                     
-                         
-                          
-                           
-                                              
+
+
+
+
+
+export async function authorizeSnapshot({ principal, anchor, candidate, mayVerb, authorization }
+
+
+
+
+
  )                                                                                                  {
   const authorized = new WeakMap                                       ();
   const rowAuthorization = new Map                                                   ();
@@ -629,11 +629,11 @@ async function admitSnapshotRow(adapter                                         
   return mayRow(entity, 'subscribe', row, principal, mayVerb);
 }
 
-export function projectSnapshot({ anchor, candidate, output, authorized }   
-                         
-                          
-                         
-                                                             
+export function projectSnapshot({ anchor, candidate, output, authorized }
+
+
+
+
  )                                 {
   function project(_entity                , node              , branch                )                                 {
     const current = authorized.get(node);

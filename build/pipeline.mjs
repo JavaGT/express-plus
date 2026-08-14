@@ -29,6 +29,8 @@ import { protectedArtefactCapability } from './protected-artefact-store.mjs';
 
 import { executeAtomicOperations, isAtomicOperation,                                                   } from './atomic-operations.mjs';
 import { admitRowTransition } from './field-admission.mjs';
+import { writeInvalidationInTxn } from './invalidation-ledger.mjs';
+import { tryParseScopeKey } from './scope-handle.mjs';
 
 // `action(type)` — declare an imperative request type. The handler that turns it
 // into events is attached later by the entity/dispatch wiring.
@@ -511,12 +513,32 @@ export function liveMutationVariant({
         }
       }
 
+      // Revision bump and invalidation marker share this transaction with the
+      // projection. The ledger proves live reconnect cursors without retaining
+      // the mutation payload or creating a second history.
       // The receipt records the FIRST resource's key and THAT resource's new
       // revision (single-resource actions are the live norm; multi-resource
       // atomicity is the S3/A6 surface).
       const touched = new Map                ();
       for (const ev of finalizedEvents) {
-        touched.set(ev.scope, bumpRevision(db            , ev.scope));
+        const revision = bumpRevision(db            , ev.scope);
+        touched.set(ev.scope, revision);
+        writeInvalidationInTxn(db            , {
+          resourceKey: ev.scope,
+          kind: 'resource',
+          revision,
+          updatedAt: now,
+        });
+        const handle = tryParseScopeKey(ev.scope);
+        if (handle) {
+          const collectionRevision = bumpRevision(db            , handle.entity);
+          writeInvalidationInTxn(db            , {
+            resourceKey: handle.entity,
+            kind: 'collection',
+            revision: collectionRevision,
+            updatedAt: now,
+          });
+        }
       }
       const resourceKey = finalizedEvents[0]?.scope ?? (owningScope          );
       const committedRevision = touched.get(resourceKey) ?? readLiveRevision(db            , resourceKey);

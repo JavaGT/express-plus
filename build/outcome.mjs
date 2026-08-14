@@ -1,10 +1,10 @@
-                             
-                   
-            
-                    
-               
-              
-               
+
+
+
+
+
+
+
 
 export const FAILURE_CATEGORIES = Object.freeze([
   'invalid-input',
@@ -15,16 +15,16 @@ export const FAILURE_CATEGORIES = Object.freeze([
   'internal',
 ]         );
 
-                                   
-                                     
-                           
-                                                       
- 
 
-                                 
-                     
-                                     
- 
+
+
+
+
+
+
+
+
+
 
 const failureCategories = new Set                 (FAILURE_CATEGORIES);
 
@@ -130,13 +130,13 @@ const categoryByLegacyStatus = new Map                         ([
   [503, 'conflict'],
 ]);
 
-                       
-                   
-                    
-                 
-                    
-                             
- 
+
+
+
+
+
+
+
 
 export function failureFromError(error         )                   {
   if (isWorkbenchFailure(error)) return error;

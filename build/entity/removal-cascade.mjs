@@ -4,38 +4,38 @@ import { rawRow } from './query.mjs';
 export const CASCADE_PREAUTHORIZED                = Symbol('workbench.cascade-preauthorized');
 export const CASCADE_DESCENDANT                = Symbol('workbench.cascade-descendant');
 
-                           
-                
-                
-                    
-                                      
-                   
- 
 
-                        
-               
-                                          
-                                                            
- 
 
-                     
-                                                                 
-                                                            
- 
 
-                    
-                                  
- 
 
-                    
-                       
-                    
- 
 
-                        
-                       
-             
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function targetName(descriptor                             )                     {
   return typeof descriptor?.target === 'string' ? descriptor.target : descriptor?.target?.name;

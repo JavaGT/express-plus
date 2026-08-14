@@ -1,14 +1,14 @@
-                                                 
 
-                                  
-                 
-               
-                         
- 
 
-                        
-                                                   
-                                                        
+
+
+
+
+
+
+
+
+
 
 function matchPath(template        , actual        )                     {
   const t = template.split('/').filter(Boolean);
@@ -29,11 +29,11 @@ function specificity(template        )         {
   return template.split('/').filter((s) => s && !s.startsWith(':')).length;
 }
 
-                       
-                         
-                      
-                
- 
+
+
+
+
+
 
 export function matchRoute(
   routes                            ,

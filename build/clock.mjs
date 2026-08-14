@@ -13,36 +13,36 @@
 // `_tick(ms)` is for tests: deterministic drive without real timers.
 // Do NOT call `_schedule()` in test mode.
 
-                                 
-               
-                     
-                 
-                   
- 
 
-                   
-               
-                     
-                 
-                      
- 
 
-                         
-                 
- 
 
-                        
-                     
- 
 
-                        
-                                              
-                    
-               
-                          
- 
 
-                                                                        
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 export function createClock({ now = Date.now }               = {})        {
   let watchers = new Map                 ();

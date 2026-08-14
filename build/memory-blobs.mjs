@@ -21,7 +21,7 @@
 // in-process restart) or start a fresh backing (a process boundary). NOT a
 // production store: bytes never survive a process exit.
 
-                                                                                                
+
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -34,15 +34,15 @@ function safeId(id         )       {
 // The storage a store operates on. Injectable so a NEW store can be bound to
 // the same backing (simulating an in-process restart) or to a fresh one
 // (simulating a process boundary).
-                                    
-                               
-                             
- 
 
-                                     
-                                                                              
-                              
- 
+
+
+
+
+
+
+
+
 
 export function memoryBlobs({ backing }                     = {})                                       {
   const pending = backing?.pending ?? new Map                ();

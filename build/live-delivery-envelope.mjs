@@ -8,62 +8,62 @@
 // for the lifetime of the delivery seam, not recreated per batch.
 
 import { createDeltaProjector } from './field-delta.mjs';
-                                                       
+
 import { EventKind, parseEventType } from './event-handle.mjs';
-                                                             
-                                                        
+
+
 import { createdTextReducerSeeds } from './text-reducer-transport.mjs';
-                                                                   
+
 import { tryParseScopeKey } from './scope-handle.mjs';
 
-                                    
-               
-                
-              
-                      
-                    
-                                 
-                               
- 
 
-                                     
-              
-                
-                      
-                     
-                
-                    
- 
 
-                                  
-                       
-                            
-                     
-                                                  
-                
-                      
-                     
-                                                                              
-                                                                      
-                                       
- 
 
-                               
-                           
-                  
-              
-               
-                             
-                            
-                                  
-                               
-                  
- 
 
-                                      
-                                                      
-                
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function hasAnnotatedText(entityRecord              ) {
   return Object.values(entityRecord.fields ?? {}).some((field) => field?.kind === 'annotatedText');

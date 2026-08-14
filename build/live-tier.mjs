@@ -37,15 +37,15 @@
 //     S4 search plugin contract (JavaGT/workbench#110) — not here: `tierOf`
 //     only classifies a resource to its category.
 
-                                                                      
 
-                                            
 
-                                                 
 
-                                              
 
-                                                              
+
+
+
+
+
 
 export const DATA_TIERS                      = Object.freeze(['history', 'live', 'derived', 'operational']);
 
@@ -69,19 +69,19 @@ export function isEntityTier(value         )                      {
 // The entity-level tier declaration surface. `history` is the existing
 // conditional-history declaration (now with an explicit `full` spelling of the
 // default full-log mode); `live: true` and `tier: 'live'` mark the live tier.
-                                  
-                                                          
-                 
-                  
- 
+
+
+
+
+
 
 // The resolved tier for a declaration: `history` tiers carry a `historyMode`
 // sub-flag (`full` — every mutation is logged — or `conditional` — the existing
 // undo/redo conditional flags); `live` tiers carry no history at all.
-                               
-                          
-                                     
- 
+
+
+
+
 
 // Normalize a tier declaration into a resolved tier. Validation fails HERE at
 // declaration compile, never at query time. `label` names the declaring site in

@@ -6,84 +6,84 @@ const TOMBSTONE_TYPE = '$workbench.erased';
 const TOMBSTONE_ACTION_ID = '$workbench.erased';
 const TOMBSTONE_DATA = JSON.stringify({ version: 1 });
 
-                             
-                                    
-                        
-                                            
-                                               
- 
 
-                         
-                      
-                                               
- 
 
-                              
-                         
-                       
-                            
-                             
-                               
-                                   
- 
 
-                               
-                         
-                            
-                                
-                               
-                                 
-                                                 
- 
 
-                            
-                                     
-                      
-                               
-                           
-                                                   
-                                 
- 
 
-                              
-                               
-                           
-                                 
- 
 
-                                              
-                                                                           
-                                                                                                                     
-                                                                          
- 
 
-                                             
-                                                                                                              
- 
 
-                      
-                
-                   
-                     
-                     
-                       
-                      
-                    
-                       
-                    
-                    
-                         
- 
 
-                  
-                
-              
-                   
-                    
-                    
-                      
-                         
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function fail(message        )        { throw new TypeError(`invalid erasure directive: ${message}`); }
 function text(value         , name        )         {
@@ -221,9 +221,9 @@ function validateRule(rule         , name        )       {
 /** Create a closed, inert declaration for a package-owned transaction erasure. */
 export function erasureDirective(input         )                             {
   keys(input, new Set(['kind', 'version', 'owningScope', 'subject', 'actions', 'census']), 'directive');
-  const directive = input     
-                                                                                
-                                        
+  const directive = input
+
+
    ;
   if (directive.kind !== 'workbench.erasure' || directive.version !== 1) fail('kind/version must be workbench.erasure/1');
   text(directive.owningScope, 'owningScope');
@@ -347,18 +347,18 @@ export function prepareErasureDirective(db          , input         , { excludeA
 /** Apply a validated directive inside an already-open durable transaction. */
 export async function applyErasureDirective(db          , directive                  , {
   scope, actionId, actionContext, prepare, tables = [], readTables = [],
-}   
-                
-                   
-                         
-                                
-                                               
-                                             
-                                         
-                                                                                                   
-                              
-                    
-                        
+}
+
+
+
+
+
+
+
+
+
+
+
  )                {
   erasureDirective(directive);
   if (directive.owningScope !== scope) fail('owningScope must equal request scope');

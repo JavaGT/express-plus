@@ -2,26 +2,26 @@
 // No DB, no HTTP — inject timestamps and get a decision.
 // Each function is independently testable without standing up the server.
 
-                                
-               
-                       
-                       
- 
 
-                               
-                   
-               
-                     
-                  
-                 
- 
 
-                              
-                   
-               
-                     
-                      
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // Login lockout: after `threshold` consecutive failures, lock for
 // `baseMs * 2^(attempts - threshold)` ms, capped at `maxMs`.
@@ -51,9 +51,9 @@ export function totpLockoutDecision(opts                     = {}               
 //     but the stale failed-attempt counter still holds the pre-lock value. The
 //     next failure must count from 0, or one invalid token after expiry would
 //     instantly relock (the stale counter alone would trip the threshold).
-                            
-                                          
-                                              
+
+
+
 
 export function evaluateLockout(
   failedAttempts                           ,

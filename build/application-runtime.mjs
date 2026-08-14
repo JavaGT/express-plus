@@ -15,83 +15,83 @@ import { reconcileDurableEffects } from './durable-effects.mjs';
 import { startSimulation } from './simulate.mjs';
 import { retentionPrune } from './committed-log.mjs';
 import { getLog, withLog } from './log.mjs';
-                                             
+
 import { EMPTY_BLOB_CENSUS,                 } from './blob-census.mjs';
 import { installBatchHttpDispatcher, installHistoryHttpDispatcher } from './application-action-http.mjs';
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
 import { rawRow } from './entity/query.mjs';
-                                                                          
+
 
 const BLOB_REAP_INTERVAL_MS = 10 * 60_000;
 const BLOB_REAP_TTL_MS = 60 * 60_000;
 
-                                     
-                             
-                        
-                           
-                                 
- 
 
-                           
-                                                                                                                                         
-                             
- 
 
-                         
-                                              
-                                   
-                                   
- 
 
-                         
-                                       
-                                               
-                          
- 
 
-                        
-                                                                           
-                   
-                    
- 
 
-                      
-                                      
-                                    
-                             
-                         
-                                      
-                                     
-                               
-                                   
-                    
-                                                         
-                        
-                    
-                                       
-                                                                                                                        
-                                                  
-                              
-                                    
-                                    
-                      
-                                                       
-                                                                          
-                          
-                                                                   
-                                               
-                                                
-                                            
-                                   
-                                                       
-                       
-                                      
-                                             
-                                    
-                           
-                                                                                                     
-                                                 
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function installRuntimeShutdown(app            )       {
   if (app._runtimeShutdownInstalled) return;

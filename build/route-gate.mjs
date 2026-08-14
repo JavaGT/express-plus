@@ -19,12 +19,12 @@
 // name these; an unknown verb is a load-time typo guard (fail closed).
 export const ROUTE_VERBS = ['list', 'read', 'create', 'update', 'remove']         ;
 
-                                                     
 
-                                
-               
-                       
- 
+
+
+
+
+
 
 // Every gate carries a non-enumerable BRAND so the imperative-router varargs peel
 // (`r.post(path, allowAnonymous(), handler)`) can tell a gate from a middleware/handler
@@ -34,7 +34,7 @@ export const ROUTE_VERBS = ['list', 'read', 'create', 'update', 'remove']       
 // the brand is invisible to callers. This mirrors the pipeline action/event brand.
 const GATE_BRAND                = Symbol('workbench.gate');
 
-                                                                                    
+
 
 // brand(fn) — stamp an authorization function as a gate. Internal; the public
 // surface is the named gate factories below plus isGate() for the peeler.
@@ -74,7 +74,7 @@ export function allowAnonymous()       {
   return brand(() => true);
 }
 
-                                                                    
+
 
 // Normalize a declared `{ verb: gateFn }` map into a full per-verb gate, filling
 // every unlisted verb with the default-on requireUser(). A non-function gate

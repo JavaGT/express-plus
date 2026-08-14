@@ -17,68 +17,68 @@ import { failureForHttpError, sendFailure,               } from './http-failure.
 import { readScopedRow, authorizeRow,                                   } from './http-crud-dispatch.mjs';
 import { rawRow } from './entity/query.mjs';
 import { readSeq, readSince, minSeqForScope } from './committed-log.mjs';
-                                            
+
 import { BodyError, readRawBody, readRequestBody } from './http-body.mjs';
 import { scopeOf, tryParseScopeKey } from './scope-handle.mjs';
 import { createdTextReducerSeeds, textReducerCheckpoints } from './text-reducer-transport.mjs';
-                                                                   
+
 import { publicEvent } from './event-delivery.mjs';
 import { parseEventType } from './event-handle.mjs';
 import { createLiveEnvelopeBuilder } from './live-delivery-envelope.mjs';
 import { hasAnnotatedTextFields, projectEntitySnapshot } from './entity-snapshot-projection.mjs';
 import { projectRowForRecipient } from './entity/projection.mjs';
 import { readableFieldNames } from './field-admission.mjs';
-                                                                       
+
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
-                                                
 
-                            
-               
-                  
-                                              
-                                                                   
-                                                                    
-                   
-                    
-                    
-                      
- 
 
-                         
-                                           
-                                                     
-                                                                                
-                                                                    
-                                                                
-                                                                         
-                                                                                                           
-                                                                        
-                                                                   
-                         
- 
 
-                       
-                 
-             
-                                
- 
 
-                       
-                     
-                  
-                       
- 
 
-                                            
-                                             
-                                                               
-                                                                                                           
-                       
-                                                                        
-                                                                               
-                                                                      
-                         
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                             
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function reject(res                  , status        , message        , details          )       {
   const workbenchFailure = failureForHttpError({ status, message, details });

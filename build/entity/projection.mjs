@@ -18,96 +18,96 @@ import { resolveDeclarationMeasurementExtension } from '../annotated-text-field.
 import { annotationRangeRows, attachAnnotationRange, canonicalEndpointJSON } from '../annotated-text-storage.mjs';
 import { frozenJsonSnapshot } from '../frozen-json.mjs';
 import { markAnnotatedEntityProjection } from '../annotated-text-history.mjs';
-                                             
-                                                                                         
+
+
 import { annotatedTextDeniedPlaceholder, readableFieldNames } from '../field-admission.mjs';
-                                                                        
+
 import { rawRow } from './query.mjs';
 
-                                   
-                   
 
-                           
-               
-                
-                   
-                 
-                                                                             
-                                                                                            
-                                          
-                                               
-                         
- 
 
-                                              
 
-                                                                                                                 
 
-                    
-              
-                   
-                                                            
-                         
- 
 
-                     
-                                           
-                         
-                        
-                
-                         
-                         
- 
 
-                        
-                              
-                       
- 
 
-                                 
-                        
-                                                                             
- 
 
-                         
-                                         
-                                               
-                                                   
-                                  
-                  
-                                             
-                     
-                  
-                   
-                                                
- 
 
-                            
-             
-                  
-                       
-                      
-               
-                  
-                          
-                                                
-                                                                                                                  
-                        
-                          
-    
-                       
-                         
- 
 
-                                                                                       
 
-                                 
-                    
-                  
-                                          
-                                          
-                           
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function isTextRevision(value         )                        {
   const record = value                           ;
@@ -190,16 +190,16 @@ function initializeAnnotatedText({ name, fields, event, db, row }               
 // field row, and one `_membership` row. Endpoints use the membership-valid
 // affinity — END = right, START = right (the document-root start resolves to
 // left automatically) — matching the runtime range-apply semantics.
-function seedImportedAnnotationRanges({ name, fieldName, prefix, descriptor, db, row, family, fullText, ranges }   
-               
-                    
-                 
-                              
-         
-           
-                                                
-                   
-                                         
+function seedImportedAnnotationRanges({ name, fieldName, prefix, descriptor, db, row, family, fullText, ranges }
+
+
+
+
+
+
+
+
+
  ) {
   const frontier = family.checkpoint.frontier;
   for (const [index, range] of ranges.entries()) {
@@ -588,12 +588,12 @@ function buildProjectedComputeRow(storedRow     , fields        )      {
   return row;
 }
 
-                                                
-                                              
-                                                                                
-                                                                             
-                                 
- 
+
+
+
+
+
+
 
 // The single recipient read projection (S5/A3 — field-read admission path).
 // Given a materialized row, return exactly the field subset the principal can
@@ -625,14 +625,14 @@ export async function projectRowForRecipient(
   return projected;
 }
 
-export function createEntityProjection({ name, fields, verbs, storedComputedFields, sideTableStrategyEntries, conditionalHistory = false, conditionalCreateHistory = false }   
-               
-                 
-                                          
-                                             
-                                                          
-                               
-                                     
+export function createEntityProjection({ name, fields, verbs, storedComputedFields, sideTableStrategyEntries, conditionalHistory = false, conditionalCreateHistory = false }
+
+
+
+
+
+
+
  ) {
   const projection = {
     eventTypes: [

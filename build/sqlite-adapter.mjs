@@ -20,19 +20,19 @@ import path from 'node:path';
 import {
   applyConnectionPragmas,
   attachDriverHelpers,
-                
+
 } from './driver.mjs';
 import {
   capabilitiesOf,
-                 
-                       
-                        
-                       
-                      
-                             
+
+
+
+
+
+
 } from './db-adapter.mjs';
 import { acquireDirectoryLock,                    } from './directory-lock.mjs';
-                                                          
+
 import { probeDatabaseFile,                          } from './recovery.mjs';
 
 export { DB_OWNED_ERROR_CODE, DirectoryOwnedError } from './directory-lock.mjs';
@@ -61,58 +61,58 @@ const TEARDOWN_FILENAMES = Object.freeze([
 
 // Options for the online-backup hook (S1/A3). Mirrors node:sqlite's BackupOptions:
 // `source`/`target` name ATTACHed databases; `rate` is pages per step.
-                                   
-                           
-                           
-                         
-                                                                                     
-  
 
-                                                              
-                                   
-                                                                               
-                                                                              
-                                                  
-                               
-                                                                           
-                                                                                
-                                                    
-                                    
-                                                                             
-                                                                              
-                                                                            
-                                                                           
-                                                                     
-                                                                             
-                                                                             
-                                                                        
-                                                                          
-                                                                            
-                                                                            
-                                                                            
-                                                                      
-                                 
-                                            
-                                                                               
-                                                                            
-                                                                         
-                                                                              
-                                                                        
-                                       
-                                                                            
-                                                                              
-                                       
-                   
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                      
+
+
+
+
+
+
+
+
+
+
+
+                                            
+
+
+
+
+
+               
+
+
+
+
+
+
+
 
 // The bound adapter object (DbAdapter-conforming: async open + readMirror) plus
 // the managed-path surface an app wires into serving and blob-root checks.
-                                                    
-                                   
-                               
-                                    
-                                  
- 
+
+
+
+
+
+
 
 export function openSqliteAdapter(config                  = {})                       {
   if (config.mode === 'memory') return openMemoryAdapter();

@@ -1,8 +1,8 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { txn,               } from './driver.mjs';
 import { principalKeyOf,                } from './principal.mjs';
-                                                                                              
-                                                 
+
+
 
 function failure(code        )        { const error = new Error(code)                             ; error.code = code; throw error; }
 function token()         { return randomBytes(32).toString('base64url'); }
@@ -30,21 +30,21 @@ function principalKey(principal           )         {
   return key;
 }
 
-                                    
-                     
-                
-                        
-                           
-                                                                         
-                         
-                                                                                          
-                                       
-                                                                                                   
-                            
-                                                                                                      
-                                
-                                                                                                       
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 export function declaredBlobField(field         )                    {
   const candidate = field                                                                                                                                                                                                                                                     ;
@@ -78,92 +78,92 @@ export function declaredBlobField(field         )                    {
   }) });
 }
 
-                                              
-                                       
-                       
-                               
- 
 
-                          
-                                                               
-               
-                   
- 
 
-                                          
-                  
-                     
-                                                
-                     
- 
 
-                                    
-                                                    
-                     
-                     
-                        
- 
 
-                              
-                 
-                     
-                 
-              
-                     
-                           
- 
 
-                                    
-                 
-                
-                     
-                     
-                   
-                                    
-                  
-                           
- 
 
-                                      
-                  
-                     
-                     
-                   
-                  
- 
 
-                          
-                     
-                 
-                         
-                       
-                     
-                        
-                     
-                 
-                          
-                                  
-                         
-                    
-                           
-                             
-                           
-                                
-                                 
- 
 
-                                       
-                                                                                            
-                                                               
-                                                               
-                                                                              
-                                        
-                             
-                        
-                                
-                                       
-                                                 
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 export function createPendingBlobLifecycle(app                , options                             )                       {
   const fields = (options?.fields ?? []).map(declaredBlobField);
@@ -314,14 +314,14 @@ export function createPendingBlobLifecycle(app                , options         
   });
 }
 
-                                
-                                                     
-                                                               
- 
 
-                                    
-                                                                      
- 
+
+
+
+
+
+
+
 
 export function pendingBlobStager(workbench                      , authenticatedPrincipal           )                    {
   const lifecycle = workbench.pendingBlobLifecycle;
@@ -335,16 +335,16 @@ export function readClaimedBlob(workbench                      , blobId        )
   return lifecycle.readClaimed(blobId);
 }
 
-                                       
-                                                                                              
-                                 
-                                
-                                  
 
-                                       
-                                                     
-                             
- 
+
+
+
+
+
+
+
+
+
 
 export function claimedBlobLifecycle(workbench                      )                       {
   const lifecycle = workbench?.pendingBlobLifecycle;

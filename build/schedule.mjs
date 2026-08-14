@@ -9,8 +9,8 @@
 
 const MS                                        = { d: 86_400_000, h: 3_600_000, m: 60_000, s: 1_000 };
 
-                                                                     
-                                                                                                  
+
+
 
 function parseDelay(delay                 )         {
   if (typeof delay === 'number' && Number.isFinite(delay) && delay >= 0) return delay;
@@ -58,33 +58,33 @@ function validateTriggerKey(value         , context        )                    
   return value;
 }
 
-                           
-               
-                  
-                 
-                 
- 
 
-                                  
-                          
-                 
-                        
-                         
-                    
- 
 
-                                                               
-                      
- 
 
-                                                                  
-                         
-                
- 
 
-export const schedule   
-                                                                      
-                                                                                                    
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+export const schedule
+
+
   = Object.freeze({
   at(field         , options                  = {}) {
     if (!field || typeof field !== 'object') throw new Error('schedule.at: field must be a field descriptor');
@@ -128,9 +128,9 @@ export function schedulerSource(entityName        , verb        , triggerId     
 // tick — interval trigger constructors for row-set ticks.
 // A tick fires `update` against EVERY row matching `while` per interval.
 // No singleton/cron shape. An EMPTY `while` is FORBIDDEN at load-time.
-export const tick   
-                                                                                                                                                                          
-                                                                                                                                                                                                     
+export const tick
+
+
   = Object.freeze({
   hz(n        , options                  = {}) {
     if (typeof n !== 'number' || !Number.isFinite(n) || n <= 0) {
@@ -170,18 +170,18 @@ export function simulate({ hz, step, when }                  = {})              
   return Object.freeze({ kind: 'simulate', hz, step: step                                   , when: (when ?? undefined)                                                  });
 }
 
-                           
-              
-                 
-                 
- 
 
-                              
-                   
-             
-                                        
-                                                      
- 
+
+
+
+
+
+
+
+
+
+
+
 
 // tickSource — derives the identity for a tick principal, mirroring the
 // schedulerSource pattern (entity + verb + trigger identity). No fieldName —
@@ -213,6 +213,6 @@ export {
   isMachinePrincipal,
   machineAllows,
   machineOperations,
-                        
-                             
+
+
 } from './machine-principal.mjs';

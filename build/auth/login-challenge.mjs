@@ -35,29 +35,29 @@ import crypto from 'node:crypto';
 const DEFAULT_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const DEFAULT_MAX_ATTEMPTS = 5;
 
-                                      
-                 
-                   
-                  
- 
+
+
+
+
+
 
 // A reserved challenge's settlement handle. Opaque to consumers: the route
 // reads only `userId` (identity is derived from the claim, never the request),
 // and the store verifies the claim's token against the CURRENT reservation
 // before finalize/release/fail touch anything.
-                                      
-                    
-                 
-                    
-                
- 
+
+
+
+
+
+
 
 // The stored record: the public entry plus the reservation state. `reservedBy`
 // holds the per-reservation token when the challenge is claimed, null when it
 // is available.
-                                                       
-                            
- 
+
+
+
 
 // generateLoginChallenge(length) → base64url-encoded random bytes. 32 bytes
 // (256 bits) makes the challenge cryptographically unguessable.

@@ -6,7 +6,7 @@ export const EventKind = Object.freeze({
   native: 'native',
 }         );
 
-                                                                 
+
 
 const LIFECYCLE_TYPES = new Set([
   EventKind.created,
@@ -19,36 +19,36 @@ const LIFECYCLE_VERBS = Object.freeze({
   [EventKind.removed]: 'remove',
 }         );
 
-                           
-                                 
-                          
-                     
- 
 
-                                 
-                        
-                                              
-                            
-      
-                        
-                                              
-                            
-      
-                        
-                                              
-                            
-      
-                        
-                                               
-                             
-                            
-      
-                        
-                                             
-                             
-                                  
-                            
-       
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function assertName(label        , value         )       {
   if (typeof value !== 'string' || value.length === 0 || value.includes('.')) {
@@ -56,13 +56,13 @@ function assertName(label        , value         )       {
   }
 }
 
-                       
-                 
-                  
-                 
-                      
-               
- 
+
+
+
+
+
+
+
 
 function freezeHandle(parts             )                      {
   const handle                          = { brand: 'event-handle', ...parts };
@@ -155,6 +155,6 @@ export function lifecycleVerb(
   // same row-grant authorization path as PATCH.
   if (handle.kind === EventKind.native) return 'update';
   return LIFECYCLE_VERBS[
-    handle.kind                                                                                  
+    handle.kind
   ];
 }

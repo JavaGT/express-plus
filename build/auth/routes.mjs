@@ -43,8 +43,8 @@ import {
   parseClientDataJSON,
 } from './passkey.mjs';
 
-                                                                  
-                                                 
+
+
 
 // ---- Structural types --------------------------------------------------------
 // The router's handler chain dispatches `(req, res, next)` where req carries the
@@ -53,23 +53,23 @@ import {
 // The entity facades (User, Session, ...) are compiled bindings from the untyped
 // entity layer, so they stay `any`; the request surface is pinned here.
 
-                                    
-                   
-                        
-                                        
-                       
- 
 
-                       
-                                                   
-                                 
-                                
-                       
-                                                       
- 
 
-                                   
-                                        
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // Build the `/auth` router. `secure` follows the app env (true only in
 // production) so the same fail-closed cookie attributes apply on login and
@@ -118,10 +118,10 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
   //                 counters were advanced in the caller's transaction.
   //   - 'locked'  — the TOTP fence is active and the token is not a backup code;
   //                 nothing was written and the caller rejects with 429.
-                            
-                                         
-                         
-                                               
+
+
+
+
 
   // The ONE TOTP failed-attempt write, shared by authenticate/disable (via
   // settleSecondFactor) and by the verify route — a single normalization, not
@@ -718,11 +718,11 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
     // Verifying the factor, consuming a backup code, and removing the
     // enrollment commit in ONE driver transaction: a valid token can never
     // leave the enrollment half-disabled with a backup code burned.
-                         
-                      
-                           
-                                                
-                         
+
+
+
+
+
     let outcome                            ;
     try {
       await txn(db, () => {
@@ -811,11 +811,11 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
     // never durably consumed unless the session actually exists, and a second
     // concurrent submission re-reads the code under the write lock and is
     // rejected.
-                              
-                                                                    
-                           
-                                                
-                         
+
+
+
+
+
     let outcome                                 ;
     let commitStatus                                            = 'ambiguous';
     let error         ;

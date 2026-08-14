@@ -20,25 +20,25 @@ import { tryBetterAuthHash } from './hash-compat.mjs';
 // A field descriptor as the strategy table sees it: kind, value type, and the
 // option surface the validate/serialize seams read. Kept loose — the descriptor
 // is built by field.mjs and consumed by many layers.
-                                  
-                        
-                         
-                                                                      
-                                                                    
-                                          
-                                          
-                                          
-                                       
-                                           
-                                                                         
-                                                   
-                                       
- 
 
-                               
-                        
-                                                             
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // A typed failure for the validate stage. Stage 1 throws this and NOTHING
 // downstream runs (no apply, no persist, no emit) — a bad payload never proceeds
@@ -86,11 +86,11 @@ function isJsonValue(value         , seen = new WeakSet        ())          {
   return false;
 }
 
-                                
-                                             
-                    
-                                               
- 
+
+
+
+
+
 
 // store (map) membership diff over { member: role } materializations. A member
 // add → added; a member gone → removed; a same-member role change → changed
@@ -135,21 +135,21 @@ function structDiff(previous         , next         , descriptor                
 
 // The named-whole algebraic laws a field kind's mutations obey. Consulted by
 // undo (invertible), log compaction (coalescible), and derivation consumers.
-                               
-                               
-                                
-                               
-                                     
- 
 
-                                
-                              
-                                                                                     
-                                                                
-                                                                                                     
-                                                                                 
-                                                                                   
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // The four named-whole strategies. value is fully implemented (whole-value diff);
 // The FIELD-TYPE CONTRACTS table. A field descriptor carries only `kind`; the

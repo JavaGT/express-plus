@@ -1,14 +1,14 @@
 const DOUBLE_RESPONSE_WARNING_CODE = 'WB_DOUBLE_RESPONSE';
 
-                                   
-                        
-                          
-                      
-                                                 
-                                                                          
-                                                         
-                                   
- 
+
+
+
+
+
+
+
+
+
 
 export function responseHasStarted(res                  )          {
   return Boolean(res.headersSent || res.writableEnded || res.destroyed);
@@ -50,14 +50,14 @@ export function canWriteResponse(
   return false;
 }
 
-                                  
-                         
- 
 
-                                  
-                     
-                          
- 
+
+
+
+
+
+
+
 
 export function sendJson(
   res                  ,
@@ -77,10 +77,10 @@ export function sendJson(
   return true;
 }
 
-                          
-                 
-               
- 
+
+
+
+
 
 export function committedEventHeaders(
   result                                                           ,

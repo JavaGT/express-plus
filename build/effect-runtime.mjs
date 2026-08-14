@@ -20,7 +20,7 @@ import { principal,                } from './principal.mjs';
 import { randomUUID } from 'node:crypto';
 import { membershipTable, membershipOwnerCol, MEMBER_COLUMN } from './scope-sql.mjs';
 import { scopeOf, tryParseScopeKey } from './scope-handle.mjs';
-                                            
+
 
 // ---- Field-plugin operators for `with` templates (P6b Part 1) ----
 
@@ -29,9 +29,9 @@ import { scopeOf, tryParseScopeKey } from './scope-handle.mjs';
 // These operators reference ONLY the target's own field value, which the effect
 // principal already has authority to mutate. NOT arbitrary cross-entity reads.
 
-                                                                              
-                                                                              
-                                                      
+
+
+
 
 export function inc(n        )              {
   return Object.freeze({ kind: 'inc', value: n });
@@ -45,93 +45,93 @@ export function dec(n        )              {
 // When an effect declares `mutate: self`, the effect mutates the origin entity
 // itself (emits `:updated`), rather than creating a fresh row in a target entity.
 
-                                                                                   
+
 export const self               = Object.freeze({ kind: 'self' });
 
 // The typed entity handle an effect mutates (e.g. `Inbox`). Optional `kind`
 // exists only so the `self`/`many` sentinels form one discriminated union.
-                               
-                         
-                            
-                                  
-                   
-                         
-                   
-                            
-                
- 
+
+
+
+
+
+
+
+
+
+
 
 // many — fan-out effect constructor (P6c-C step 2).
 // When an effect declares `mutate: many(Target, { over })`, the effect creates
 // one target row per member in the `over` collection (e.g. one Inbox per collaborator).
 // Each member gets a fresh UUID targetId (create-only, no upsert).
-                               
-                        
-                                
-                              
-                            
- 
+
+
+
+
+
+
 export function many(target              , { over }                   )               {
   return Object.freeze({ kind: 'many', target, overField: over });
 }
 
-                                                                      
 
-                                    
-                                 
-                          
-                   
- 
 
-                                    
-                                 
-                          
- 
 
-                                        
-                             
-                          
-                        
- 
 
-                                    
-                                 
-                                                                                                  
-                                                      
-                                                    
- 
 
-                                     
-                        
-                         
-                                          
-                                                                
- 
 
-                              
-               
-                
-                                
-                        
-                              
-                          
- 
 
-                         
-             
-                                  
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // ---- Runtime effect execution ----
 
 // Resolve the membership rows for a `many` fan-out effect.
 // Returns an array of {id, member} where `id` is a fresh UUID (create-only)
 // and `member` carries the member data {id, ...otherCells}.
-function resolveManyMembers({ originId, sourceEntityName, db, overFieldName }   
-                               
-                           
-                                  
-                         
+function resolveManyMembers({ originId, sourceEntityName, db, overFieldName }
+
+
+
+
  )                  {
   if (!overFieldName || !db) return [];
 
@@ -166,13 +166,13 @@ function resolveManyMembers({ originId, sourceEntityName, db, overFieldName }
 // P6c-C: inc/dec operators perform read-modify-write using the in-txn db handle.
 // P6c-C: self target mutates the origin row (emits :updated) rather than creating fresh.
 // P6c-C step 2: `many(Target, {over})` fan-out creates one target row per collection member.
-                                       
-                                   
-                   
-                           
-                                  
-                         
- 
+
+
+
+
+
+
+
 
 export function executeEffect(effect                   , { triggerEvent, actionId, sourceEntityName, db, overFieldName }                      )                {
   const mutate = effect.mutate;
@@ -288,11 +288,11 @@ export function executeEffect(effect                   , { triggerEvent, actionI
 // Execute effects for a committed event.
 // Returns an array of target events to apply through the caller's durable variant.
 // db: the in-txn database handle for RMW reads (P6c-C).
-                                      
-                       
-                            
-                         
- 
+
+
+
+
+
 
 export function executeEffectsForEvent(
   event                    ,

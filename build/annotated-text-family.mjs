@@ -1,16 +1,16 @@
 import {
   assertFrontier, assertStructuralPoint, compareOpId,
 } from './annotated-text.mjs';
-             
-                                                    
-                             
+
+
+
 
 const ROOT_ID = 'root';
 
-                                     
-                         
-                          
- 
+
+
+
+
 
 function fail(message        )        {
   throw new Error(`invalid annotated-text family: ${message}`);

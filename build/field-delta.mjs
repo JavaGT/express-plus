@@ -1,7 +1,7 @@
 import { EventKind } from './event-handle.mjs';
-                                                             
+
 import { resolveStrategy } from './field-strategy.mjs';
-                                                                         
+
 import { config } from './config.mjs';
 import { getLog } from './log.mjs';
 import { scopeOf } from './scope-handle.mjs';
@@ -9,19 +9,19 @@ import { scopeOf } from './scope-handle.mjs';
 const DIFF_ELIGIBLE = new Set(['value', 'state', 'struct']);
 const DEFAULT_MAX_SCOPES = 10_000;
 
-                                   
-                                                                               
- 
 
-                                      
-                               
-                                        
- 
 
-                                 
-                                                                                                                                                   
-                
- 
+
+
+
+
+
+
+
+
+
+
+
 
 function isReplaceStubCrdt(descriptor                 ) {
   return descriptor?.kind === 'crdt' && (descriptor.type === 'raster' || descriptor.type === 'polyline');

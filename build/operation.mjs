@@ -22,9 +22,9 @@
 // Unknown verbs are a construction-time error — fail closed, the same
 // discipline as an unknown principal type or an unknown route verb.
 
-                                    
-                             
- 
+
+
+
 
 function category(operation        )                    {
   return Object.freeze({ operation });

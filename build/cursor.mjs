@@ -4,11 +4,11 @@
 
 import { prepareCached } from './driver.mjs';
 
-                                 
-                         
-                                                                
-    
- 
+
+
+
+
+
 
 export function readSeq(db                                   , scope        )         {
   if (!db) return 0;

@@ -5,50 +5,50 @@ const SAFE_POSITIVE = (value         )          => Number.isSafeInteger(value) &
 const HIGH_SURROGATE = /^[\uD800-\uDBFF]$/;
 const LOW_SURROGATE = /^[\uDC00-\uDFFF]$/;
 
-                                                             
-                                       
-                                                                                                    
-                                                                           
-                                                                           
-                                                                                                          
-                                                                                        
 
-                              
-           
-                  
-                 
-                 
-                  
-                      
- 
 
-                                    
-                 
-             
- 
 
-                            
-             
-                     
-                                        
-                                                
-                                             
-                     
-                               
- 
 
-                                        
-             
-                     
-                                                
-                                             
-                     
-                               
- 
 
-                            
-                      
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function fail(message        )        {
   throw new Error(`invalid annotated-text value: ${message}`);

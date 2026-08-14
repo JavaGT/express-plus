@@ -5,48 +5,48 @@
 // other mutation — simulation short-circuits the DB per tick, not per
 // checkpoint.
 
-                                                     
+
 import { createClockRunner } from './clock-runner.mjs';
 import { getLog } from './log.mjs';
-                                                
+
 import { principal as makePrincipal } from './principal.mjs';
 
-                        
-                                                                 
- 
 
-                   
-                      
-                           
- 
 
-                      
-             
-                                        
-                                                                                   
- 
 
-                            
-               
-                         
- 
 
-                           
-                
-                                 
- 
 
-                                
-                                  
-                                      
- 
 
-                                  
-                   
-               
-                       
-                                   
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function simulationEntities(entities                   )                     {
   const sims                     = [];
@@ -70,17 +70,17 @@ function simPrincipal(entityName        )            {
   });
 }
 
-                                         
-                   
-                              
-                                                      
-                                        
- 
 
-                                   
-               
-                                    
- 
+
+
+
+
+
+
+
+
+
+
 
 export function startSimulation({ db, entities, dispatch, clock }                        )                   {
   const sims = simulationEntities(entities);

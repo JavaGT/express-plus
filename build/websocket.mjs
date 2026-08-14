@@ -98,15 +98,15 @@ const STATE = Object.freeze({
   PAYLOAD: 'payload',      // reading the payload data
 }         );
 
-                                                     
 
-                        
-                 
-                   
-                 
-                     
-                       
- 
+
+
+
+
+
+
+
+
 
 export class FrameParser {
   #state             = STATE.HEADER;
@@ -313,19 +313,19 @@ export class FrameParser {
 
 // --- WebSocket upgrade handshake (§4.2.2) ---------------------------------------
 
-                                          
-                                                         
- 
 
-                                         
-                               
-                     
- 
 
-                                         
-                 
-              
- 
+
+
+
+
+
+
+
+
+
+
+
 
 export function upgradeWebSocket(
   req                         ,

@@ -15,38 +15,40 @@
 // handshake request is handled as an ordinary GET and 400s against the SSE
 // handler ('invalid live delivery request').
 
-                                                         
-                                          
+
+
 
 import { upgradeWebSocket } from './websocket.mjs';
 import { isSameOriginRequest } from './middleware.mjs';
 import { createLiveFanout } from './live-fanout.mjs';
-                                                                                    
-                                                                
+
+
 import { LiveConnection } from './live-connection.mjs';
+import { classifyLiveScope } from './live-delivery-core.mjs';
 import { createAnnotatedTextCaretLive } from './annotated-text-caret-live.mjs';
 import { readSeq } from './cursor.mjs';
-                                                                       
+import { readRevision } from './live-revision.mjs';
+
 import { anonymous,                } from './principal.mjs';
-                                             
-                                                     
 
-                                               
-                
-                                 
-                                                                         
-                                                                                 
-                           
-                                              
-                           
-                                 
-                            
- 
 
-                                        
-                  
-                         
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 export function createLiveDeliveryWebSocket(httpServer        , {
   path = '/events',
@@ -66,7 +68,10 @@ export function createLiveDeliveryWebSocket(httpServer        , {
   let closed = false;
   let closePromise                       = null;
 
-  const currentSeq = (scope        ) => readSeq(db, scope);
+  const currentSeq = (scope        ) => {
+    const liveScope = resolveEntity && classifyLiveScope(scope, resolveEntity);
+    return liveScope ? readRevision(db         , scope) : readSeq(db, scope);
+  };
 
   async function close()                {
     if (closePromise) return closePromise;

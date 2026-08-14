@@ -14,16 +14,16 @@ import { applicationTable as resolveApplicationTable } from './application-table
 // carry only the non-sensitive IDs and provenance needed to reference the
 // artefact; erasure is a permanent hard DELETE from the declared store.
 
-                                                   
-                                                                                                              
-                                                                          
-                                                                                                                             
-                                                                         
- 
 
-                                                                                       
-                
- 
+
+
+
+
+
+
+
+
+
 
 function fail(message        )        {
   throw new TypeError(`invalid protected artefact store: ${message}`);

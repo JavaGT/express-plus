@@ -2,13 +2,14 @@
 // authorization, projection, and cursor semantics; adapters only deliver the
 // recipient-safe batch and acknowledge it by resolving their callback.
 
-import { createLiveDeliveryCore } from './live-delivery-core.mjs';
-                                                                                    
+import { classifyLiveScope, createLiveDeliveryCore } from './live-delivery-core.mjs';
+
 import { createLiveEnvelopeBuilder } from './live-delivery-envelope.mjs';
 import { tryBuildAnnotatedTextFoldEnvelopes } from './annotated-text-fold-envelope.mjs';
 import { tryParseScopeKey } from './scope-handle.mjs';
-                                                     
+
 import { readSeq } from './committed-log.mjs';
+import { invalidationRecovery } from './invalidation-ledger.mjs';
 import { readSnapshotTxn } from './driver.mjs';
 import { compileSnapshots, captureSnapshot, authorizeSnapshot, projectSnapshot } from './snapshot-projection.mjs';
 import { hasAnnotatedTextFields, projectEntitySnapshot } from './entity-snapshot-projection.mjs';
@@ -17,12 +18,12 @@ import { rawRow } from './entity/query.mjs';
 import { projectRowForRecipient } from './entity/projection.mjs';
 import { mayReadField, readableFieldNames } from './field-admission.mjs';
 import { mayRow } from './row-grant.mjs';
-                                                                       
+
 import { ensureStream, ensureLease, hashClientNonce, resolveStream, resolveLease, acknowledgeAndPruneSnapshot } from './annotated-text-authoring-stream.mjs';
 import { createPrincipalSnapshotDelivery, isPrincipalSnapshotScope, validatePrincipalSnapshotDeclarations } from './principal-snapshot-delivery.mjs';
-                                                
-                                             
-                                                                                                 
+
+
+
 
 function jsonSnapshot(value         , path = 'snapshot', ancestors = new Set         ())          {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
@@ -52,111 +53,111 @@ function jsonSnapshot(value         , path = 'snapshot', ancestors = new Set    
 // Package-private shared delivery shapes
 // ---------------------------------------------------------------------------
 
-                                                                     
-                 
-                     
-                
-                                 
-               
-                    
-                       
- 
 
-                                
-                
-                            
-                               
-                             
-                                 
-                         
- 
 
-                                 
-                                        
- 
 
-                                    
-                            
-                                          
-                            
-                         
- 
 
-                                      
-                           
-                         
-                                       
-                                            
-                         
- 
 
-                                                                                                      
 
-                                          
-                                           
-                              
- 
 
-                                        
-                
-                           
-                     
-                    
-                                                 
-                              
-                
- 
 
-                                                                                    
 
-                                   
-                                                                                      
-                       
-                      
 
-                                 
-                                                                   
-                       
-                                                                                      
-                      
 
-                                   
-                                                
- 
 
-                                       
-                       
-                
-                       
-                      
-                                                               
-                      
-                                          
-                   
- 
 
-                                    
-                                                                                                                              
-                                                                                                                                 
-                                                                    
-                                                                                                                                     
-                                                                                                                                                       
-                            
-                                                                                                                                                                                                   
- 
 
-                                           
-                   
-                                                                                             
-                   
-                                              
-                      
-                               
-                   
-                            
-                            
-                            
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // Package-private assembly for an application-owned activation. The public
 // factory below deliberately returns only the delivery protocol; application
@@ -438,12 +439,25 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, authorization, 
     async catchup(input                                                                                                        )                               {
       if (isPrincipalSnapshotScope(input.scope)) {
         return principalDelivery
-          ? principalDelivery.catchup(input         )                                           
+          ? principalDelivery.catchup(input         )
           : Object.freeze({ kind: 'revoked' });
       }
       const handle = tryParseScopeKey(input.scope);
       if ((input.document && requiredEntities.has(input.document.entity.name)) || (handle && requiredEntities.has(handle.entity))) {
         return { kind: 'revoked' };
+      }
+      const liveScope = classifyLiveScope(input.scope, resolveEntity);
+      if (liveScope) {
+        const after = typeof input.after === 'number' ? input.after : 0;
+        // A live revision has no replay payload. The bounded ledger can only
+        // establish that this revision is current; every other result converges
+        // through the same authorized snapshot used for bootstrap.
+        if (invalidationRecovery(db         , input.scope, liveScope.kind, after).status !== 'current') {
+          return this.bootstrap({ principal: input.principal, scope: input.scope, document: input.document });
+        }
+        // Collection state is materialized by its compiled rule at transport
+        // subscription time; an unruled public catch-up cannot disclose it.
+        if (liveScope.kind === 'collection') return { kind: 'revoked' };
       }
       if (input.document) {
         // Document-bound catch-up may still fold sequential text envelopes when

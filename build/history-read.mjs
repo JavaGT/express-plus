@@ -4,66 +4,66 @@ import { mayRow, mayVerb as rowGrantMayVerb,                                    
 import { tryParseScopeKey,                  } from './scope-handle.mjs';
 import { hasAnnotatedTextFields,                           } from './entity-snapshot-projection.mjs';
 import { publicEvent } from './event-delivery.mjs';
-                                            
 
-                                         
-                             
- 
 
-                                      
-               
-                                                              
-                                                                                    
-                                                                                                             
-                  
-                    
- 
 
-                                     
-                 
-                                                        
-                    
-                 
- 
 
-                                    
-                             
-                   
- 
 
-                                        
-                
-                   
-                                                       
- 
 
-                                 
-                
-                   
-                      
-                     
-                            
-                    
- 
 
-                                
-                                                                                 
-                                                                              
- 
 
-                            
-                              
-                            
-                                    
-                               
-                
- 
 
-                                                                        
 
-                                                                                                                        
 
-                                                                                                                                                
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function forbidden()                                           {
   const error = new Error('history.forbidden')                                            ;
@@ -100,13 +100,13 @@ export function createHistoryReader({
   annotatedHistory = null,
   projectRecipient,
   scopeVisible = () => true,
-}   
-                                  
-                                                                                                           
-                                 
-                                                                                  
-                                        
-                                   
+}
+
+
+
+
+
+
  )                {
   if (!db) throw new Error('history reader requires a database');
   if (!entities) throw new Error('history reader requires an entity registry');

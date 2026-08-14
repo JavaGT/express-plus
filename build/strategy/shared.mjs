@@ -7,11 +7,11 @@
 
 import { randomUUID } from 'node:crypto';
 
-                                              
+
 import { mayFieldOp } from '../row-grant.mjs';
-                                                    
-                                                                        
-                                                 
+
+
+
 import { failure } from '../outcome.mjs';
 
 // The generic field-denial reason code from the A2 adapter's closed vocabulary
@@ -68,29 +68,29 @@ export function requireFieldDispatch(entityName        , fieldName        , disp
   }
 }
 
-                         
-                   
-               
-                   
-                      
- 
 
-                          
-              
-                    
- 
+
+
+
+
+
+
+
+
+
+
 
 // The shared tail of every side-table write: require a dispatch ref, dispatch
 // the field action, fail closed on deny. Callers authorize BEFORE their
 // payload prep so an unauthorized principal gets 403 even when the write would
 // be a no-op. Returns the dispatch result for handles that read emitted events.
-export async function dispatchFieldMutation({ entityName, fieldName, dispatch, type, payload, principal }   
-                     
-                    
-                                                              
-               
-                   
-                      
+export async function dispatchFieldMutation({ entityName, fieldName, dispatch, type, payload, principal }
+
+
+
+
+
+
  )                          {
   requireFieldDispatch(entityName, fieldName, dispatch);
   const result = await dispatch({ actionId: randomUUID(), type, payload, principal });
@@ -98,19 +98,19 @@ export async function dispatchFieldMutation({ entityName, fieldName, dispatch, t
   return result;
 }
 
-                                     
-                
-                 
-                 
- 
 
-export function mapMutationAction({ entityName, fieldName, operation, owner, member, role }   
-                     
-                    
-                    
-                 
-                  
-                 
+
+
+
+
+
+export function mapMutationAction({ entityName, fieldName, operation, owner, member, role }
+
+
+
+
+
+
  )                                                                    {
   if (!['add', 'setRole', 'remove'].includes(operation)) {
     throw new Error(`unknown map mutation operation '${String(operation)}'`);

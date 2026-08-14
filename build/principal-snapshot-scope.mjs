@@ -1,18 +1,18 @@
 const DECLARATION_RE = /^[a-z][a-z0-9-]{0,63}$/;
 const PRINCIPAL_TYPES = ['user', 'link', 'system', 'apiKey']         ;
 
-                                                      
 
-                                         
-                      
-                                          
- 
 
-                                               
-                      
-                      
-             
- 
+
+
+
+
+
+
+
+
+
+
 
 export function principalSnapshotScope({ declaration, principal: { type, id } }                        )         {
   if (typeof declaration !== 'string' || !DECLARATION_RE.test(declaration)) {

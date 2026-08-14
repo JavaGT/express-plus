@@ -1,20 +1,20 @@
 import { randomUUID } from 'node:crypto';
 
-                                              
+
 import { read, write } from '../grant.mjs';
 import { membershipTable, membershipOwnerCol } from '../scope-sql.mjs';
 import * as eventHandles from '../event-handle.mjs';
 import { scopeOf } from '../scope-handle.mjs';
 import { authorizeFieldOp, dispatchFieldMutation } from './shared.mjs';
-             
-                 
-                  
-               
-                     
-                       
-                           
-                    
-                    
+
+
+
+
+
+
+
+
+
 
 // authorizeFieldOp types its capability param as string, but the row-grant
 // engine compares capability tokens by identity (read/write are frozen

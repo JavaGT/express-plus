@@ -9,12 +9,12 @@ import { write } from './grant.mjs';
 import { rawRow } from './entity/query.mjs';
 import { tryParseScopeKey } from './scope-handle.mjs';
 
-                                          
-                                      
-                            
-                                                             
-                                                       
- 
+
+
+
+
+
+
 
 export function createAnnotatedTextKernelSeam(entities                  )                          {
   const annotatedEntities = new Set(

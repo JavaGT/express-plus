@@ -70,8 +70,8 @@
 import { randomBytes, randomUUID, createHash, timingSafeEqual } from 'node:crypto';
 import { getLog } from './log.mjs';
 import { appendEvents, readSeq,                    } from './committed-log.mjs';
-                                            
-                                        
+
+
 import { rawRow } from './entity/query.mjs';
 import { operationCategory } from './operation.mjs';
 import { machineAllows, isMachinePrincipal,                       } from './machine-principal.mjs';
@@ -79,7 +79,7 @@ import { principalKeyOf } from './principal.mjs';
 
 const STATES = { QUEUED: 'queued', CLAIMED: 'claimed', RUNNING: 'running', COMPLETED: 'completed', FAILED: 'failed', CANCELLED: 'cancelled' }         ;
 
-                                                      
+
 
 const TERMINAL = new Set           ([STATES.COMPLETED, STATES.FAILED, STATES.CANCELLED]);
 
@@ -89,77 +89,77 @@ const TERMINAL = new Set           ([STATES.COMPLETED, STATES.FAILED, STATES.CAN
 // confused with a real ungranted operation in a denial report.
 const ATTRIBUTION_INVALID = '<attribution-invalid>';
 
-                         
-             
-               
-                   
-                    
-                     
-                          
-                           
-                            
-                          
-                             
-                          
-                       
-                       
-                                                                            
-                                                                          
-                                                                             
-                                                                           
-                                                                
-                              
-                                       
-                                                                           
-                                                                          
-                                                                             
-                                                                             
-                                                                     
-                              
- 
 
-                                  
-               
-                       
-                                                                               
-                                                                         
-                                                                            
-                   
-                                     
-                   
-                            
-                          
-                       
-                     
-                          
-                     
-                
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                  
+
+
+
+
+
+
+
+               
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // Structural write-queue surface (the app's single-writer coordinator). Type-only
 // shape, deliberately not imported: the queue only needs `run`.
-                       
-                                               
-  
 
-                    
-               
-                       
-              
-                                
-                   
-                      
- 
 
-                                          
 
-                   
-                                      
-                                                       
-                                                            
-                        
 
-                                                                                
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function sha256hex(s        ) {
   return createHash('sha256').update(s).digest('hex');

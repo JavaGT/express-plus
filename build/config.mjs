@@ -9,12 +9,12 @@
 // are opaque on the wire in every mode; environment belongs in server logs and
 // other deployment behavior, not in the public failure grammar.
 
-                                  
-                        
-                       
-                                   
-                                     
- 
+
+
+
+
+
+
 
 function readPort(raw                             )         {
   const n = Number.parseInt(String(raw ?? ''), 10);
@@ -27,11 +27,11 @@ function readPort(raw                             )         {
 // the process-wide singleton below (env-sourced defaults). The frozen shape is
 // the same four keys every consumer reads, so `app.config` and the singleton
 // are interchangeable to readers — only the values differ per app.
-export function resolveConfig(options    
-                         
-               
-                           
-                                    
+export function resolveConfig(options
+
+
+
+
  )                  {
   return Object.freeze({
     port: readPort(options?.port ?? process.env.PORT),

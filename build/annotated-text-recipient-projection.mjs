@@ -21,11 +21,11 @@ export function authoringRedactionsForRecipient(recipient     ) {
 // marker position `visibleStart` where it renders. This is the inverse
 // coordinate table of the projection: the recipient edits against wire
 // offsets, the server maps them back to canonical before planning.
-                                     
-                       
-                
-              
- 
+
+
+
+
+
 
 /**
  * Map a redacted recipient's WIRE offset (an index into the projected
@@ -66,52 +66,52 @@ function exact(value     , keys          , label        ) {
       Object.keys(value).length !== keys.length || keys.some((key) => !Object.hasOwn(value, key))) fail(`${label} has invalid shape`);
 }
 
-                               
-             
-                 
-                              
-                 
-                                
- 
 
-                          
-                       
-                
-              
- 
 
-                                
-             
-                 
-                        
-               
- 
 
-                           
-             
-                 
-                              
-                     
-                               
-                 
- 
 
-                                  
-               
-                  
-               
-                                     
-                           
-                                       
-                            
-                              
- 
 
-                              
-                  
-                                                              
-                            
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 export function projectAnnotatedTextForRecipient(canonical                        , descriptor     , decisions                    ) {
   const meta = getAnnotatedTextCompiledMetadata(descriptor);

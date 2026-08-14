@@ -4,7 +4,7 @@ import { txn,               } from './driver.mjs';
 import { getLog } from './log.mjs';
 import { compileBlobCensus,                 } from './blob-census.mjs';
 import { declaredBlobField } from './pending-blob.mjs';
-                                                 
+
 
 // Durable, cursor-backed recovery for blob finalize — the same proven pattern
 // as effect.durable (durable-effects.mjs) and projected.async (projected-
@@ -19,31 +19,31 @@ import { declaredBlobField } from './pending-blob.mjs';
 // no scope-cursor equivalent.
 const CONSUMER = 'blob.finalize';
 
-                              
-                                                      
-                       
-                                        
-                        
-                      
- 
 
-                               
-               
-                                             
- 
 
-                                
-                                                                                                                         
-                                                                                                              
-                                                                                          
-                     
-                                                                          
- 
 
-export function createBlobLifecycle({ blobs, entities, declaredBlobFields = [] }   
-                           
-                                                     
-                                          
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                              
+
+
+
+
+export function createBlobLifecycle({ blobs, entities, declaredBlobFields = [] }
+
+
+
  )                {
   // Compiled ONCE at prepare time from entity declarations + validated
   // action-level blob-field declarations (S6/A3). No runtime `blobColumns`
@@ -83,7 +83,7 @@ export function createBlobLifecycle({ blobs, entities, declaredBlobFields = [] }
 
   const resolveBlobIds = (event                    )           => {
     const entityName = event.handle?.brand === 'event-handle'
-      ? event.handle.entity          
+      ? event.handle.entity
       : (() => { try { return parseEventType(event.type          ).entity; } catch { return ''; } })();
     const fields = blobFields.get(entityName) ?? [];
     const ids           = [];

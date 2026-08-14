@@ -19,9 +19,9 @@
 // write authority or a write path — no txn/begin/commit/upsert surface.
 
 import { DatabaseSync,                    } from 'node:sqlite';
-                                                             
 
-                                                                                                     
+
+
 
 // Clear, distinguishable error for a refused statement. `code` lets a consumer
 // branch without parsing the message; `kind` names the offending statement
@@ -235,11 +235,11 @@ function assertReadOnlyStatement(sql        )       {
 // Engine-level read-only enforcement is proven by opening the description's
 // `mode=ro` connectionString directly (a consumer that bypasses the rejector
 // is still read-only at the engine).
-                                
-                                      
-                             
-                
-  
+
+
+
+
+
 
 export function openReadMirror(description                       )                   {
   if (!description || typeof description !== 'object') {

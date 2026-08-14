@@ -16,9 +16,9 @@
 // the grant runs every verb.
 
 import { check, resolveDecision } from './check.mjs';
-                                              
+
 import { read, write, subscribe, admin } from './grant.mjs';
-                                                            
+
 import { getLog } from './log.mjs';
 import { isRuntimeGrantClause } from './scope.mjs';
 import { operationCategory } from './operation.mjs';
@@ -34,50 +34,50 @@ const GRANT_CLAUSES_CACHE = new WeakMap                                         
 
 // A check-registry entry as the runtime half sees it. `run` is the per-row
 // boolean face; `harvest` belongs to the scope compiler (not consumed here).
-                      
-                                                                                    
-                    
- 
+
+
+
+
 
 // A field descriptor's access seam (the field `.can(fn)` body) — same shape as
 // field.ts's access, kept local so this module stays decoupled from the
 // descriptor constructors.
-                                                                                       
+
 
 // The inherit directive (`inherit(Parent, { via })`) as the runtime sees it.
-                            
-                            
-                       
- 
+
+
+
+
 
 // The compiled entity record the row-grant reads: name, the unified check
 // registry, the declared fields (for the field `.can` seam), and the runtime
 // (needed to resolve an inherit-child's parent entity object).
-                               
-               
-                  
-                                        
-                                                
-                    
- 
+
+
+
+
+
+
+
 
 // The capability decision a grant body confers: granted + the token set (or a
 // denial). `is` is the bound check proxy the `.can` body destructured.
-                                     
-                   
-                                      
- 
 
-                                                  
-                                  
- 
+
+
+
+
+
+
+
 
 // The runtime `.can` body on a clause — a function receiving `{ is, entity }`
 // and returning a grant()/deny() decision. The declaration-facing type of a
 // clause (scope.ts) types `.can` as the chaining builder; the RUNTIME clause's
 // `.can` is this body, so the call site lowers it explicitly.
-                                                                                       
-                                         
+
+
 
 // Build the `is` proxy the .can body destructures: each entity check, bound to
 // this row + principal, wrapped as an awaitable check so `await is.owner()`
@@ -358,7 +358,7 @@ function resolveInheritedParent(entityRecord              , inherited           
   return runtime ? (runtime                                              ).entityOf(parent) : parent;
 }
 
-                                                                                                                  
+
 
 export async function mayRow(
   entityRecord              ,
@@ -445,9 +445,9 @@ export async function mayFieldOp(
 // create-history move admits a missing anchor; the remove handler short-circuits
 // the Invitation fallback on a missing row) keeps that decision at its own site
 // and passes a present row only.
-                             
-                                                                                          
-                                                                                                                           
+
+
+
 
 export async function admitRow(request                 )                   {
   const { entity, row, principal } = request;

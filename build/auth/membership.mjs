@@ -28,12 +28,12 @@ import {
   MEMBER_COLUMN,
   anyOf,
 } from '../scope-sql.mjs';
-                                                                  
+
 import { scope } from '../scope.mjs';
-                                                      
+
 import { grant, deny, read, write, subscribe, admin } from '../grant.mjs';
-                                                             
-                                                            
+
+
 
 // Owner always receives the full capability set.
 const OWNER_CAPABILITIES                        = Object.freeze([read, write, subscribe, admin]);
@@ -41,51 +41,51 @@ const OWNER_CAPABILITIES                        = Object.freeze([read, write, su
 // A membership declaration: one named role → the capabilities it confers on the
 // rows it belongs to, plus an optional explicit field selector. `can` is the
 // allowlist that grants the role its capabilities (never a denylist).
-                                
-                                                      
-                    
- 
 
-                                                             
+
+
+
+
+
 
 // The compiled per-role mapping: which map field backs the role and the role
 // values stored in the side-table's role column.
-                                  
-                    
-                    
-                             
- 
+
+
+
+
+
 
 // The `is` proxy every scope predicate / .can body destructures. Harvest calls
 // mint AST nodes; the scope compiler injects the proxy before the predicate runs.
-                                                  
+
 
 // A membership check-registry entry: harvest (SQL-compilable scope face) + run
 // (per-row boolean face) — the same two-face shape the unified registry uses.
-                                
-                         
-                                                                                                                
- 
+
+
+
+
 
 // The minimal runtime surface a membership `run` face reads: the db handle with
 // a prepare().get() path. The concrete driver satisfies this structurally.
-                                
-       
-                                                                            
-    
- 
+
+
+
+
+
 
 // A compiled entity record as membership() reads and augments it. Auth-bearing
 // properties are mutable so the standalone overlay can set them in place.
-                                  
-               
-                                          
-                  
-                                                   
-                                                               
-                     
-                                                                                         
- 
+
+
+
+
+
+
+
+
+
 
 // ---- Core: compile a membership declaration into { grant, checks } ----
 // Called by the entity compiler when `membership:` is present in the declaration.
@@ -94,13 +94,13 @@ const OWNER_CAPABILITIES                        = Object.freeze([read, write, su
 // Returns:
 //   { grant: () => [clause], checks: { [role]: registryEntry, ... }, fieldMappings }
 // The `checks` values are registry-style entries { harvest, run }.
-export function compileMembershipAuthz(entityName        , fields                                 , config                  )   
-                                    
-                                               
-                                                     
-                                                       
-                                                               
-                    
+export function compileMembershipAuthz(entityName        , fields                                 , config                  )
+
+
+
+
+
+
   {
   if (!config || typeof config !== 'object' || Object.keys(config).length === 0) {
     throw new Error(
@@ -325,10 +325,10 @@ function buildCheckEntry(entityName        , fieldName        , dbRoles         
   };
 
   // Run face: queries the membership side-table at runtime.
-  const run = ({ entity: row, principal, runtime }   
-                            
-                               
-                                  
+  const run = ({ entity: row, principal, runtime }
+
+
+
    )          => {
     const db = runtime.db;
     if (dbRoles.length > 0) {

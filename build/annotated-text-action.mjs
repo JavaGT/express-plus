@@ -3,52 +3,52 @@ import { resolveDeclarationMeasurementExtension } from './annotated-text-field.m
 import { frozenJsonSnapshot } from './frozen-json.mjs';
 import { annotatedTextAction as buildAnnotatedTextAction } from './annotated-text-action-builder.mjs';
 
-                               
-               
-                               
- 
 
-                                    
-                    
- 
 
-                                              
-                          
-                        
- 
 
-                                             
-                                        
-                                    
-                                         
-                                       
- 
 
-                                             
-                         
- 
 
-                                        
-               
-                  
-                
-                                                                  
-                                                                 
- 
 
-                                    
-               
-                                   
-                                                             
- 
 
-                                    
-                       
-                 
-                
-              
-                                   
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function validateEntityAndField(entity                     , field                          )         {
   if (!entity || typeof entity !== 'object' || Array.isArray(entity)) {

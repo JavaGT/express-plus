@@ -1,39 +1,39 @@
 // rate-limit.mjs — per-key fixed-window rate limiters.
 // Buckets keyed by floor(now / windowMs); stale buckets dropped on access.
 
-                                                    
-                                                                             
 
-                                              
 
-                               
-                   
-                       
-                
-                        
-  
 
-                                
-                                        
-                                                     
-                     
-  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // The generic keyed fixed-window limiter (S5/A4). Keys an arbitrary string to
 // its own bucket with max hits per window — the engine the denial log keys per
 // (actor, reasonCode). Exists alongside the request limiter so transports and
 // the denial log share one bucketing implementation.
-                                                                                             
 
-                                   
-                                           
- 
 
-                                     
-                   
-              
-                     
-  
+
+
+
+
+
+
+
+
+
 
 function pruneBuckets(buckets                         , currentWindow        ) {
   for (const [key, bucket] of buckets) {

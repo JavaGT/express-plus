@@ -27,14 +27,14 @@ import { grant, deny, read, write, subscribe } from '../grant.mjs';
 import { schedule, schedulerSource } from '../schedule.mjs';
 import { config } from '../config.mjs';
 import { generateSecret, generateBackupCodes } from './totp.mjs';
-                                                 
+
 
 // The check-execution context the grant `.can` bodies and `checks` functions
 // receive: `is` runs a named check and resolves its boolean result. The scope
 // predicate half (compiled to SQL) is never awaited; the `.can` half is.
-                     
-                                             
- 
+
+
+
 
 function sha256hex(s        )         {
   return createHash('sha256').update(s).digest('hex');
@@ -86,16 +86,16 @@ const sessionExpirySchedulerSource = schedulerSource('Session', 'remove', sessio
 // link's share token). Anything else is rejected — fail closed. This create
 // policy mints server-side cells it owns, so it does not run validateMutation;
 // it composes the entity's trusted `insert` core (one write path).
-                              
-                                                    
-                      
- 
 
-                          
-                   
-                
-                  
- 
+
+
+
+
+
+
+
+
+
 
 function mintSession(payload                                   , { insert, mintToken }                    )          {
   const token = mintToken();
@@ -231,20 +231,20 @@ export const Inbox = entity('Inbox', {
 //   - createdBy    — the User who created this invitation
 //   - createdAt    — timestamp
 
-                         
-                                                    
- 
 
-                             
-                 
-                       
-                   
-               
-                       
-                    
-                      
-                     
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function mintInvitation(payload                   , { insert }               )          {
   const token = payload.token || randomBytes(32).toString('base64url');
@@ -311,13 +311,13 @@ export const Credential = entity('Credential', {
 //   - createdBy  — the User who created this key
 //   - expiresAt  — optional epoch ms expiration
 //   - createdAt  — timestamp of creation
-                         
-               
-                       
-                 
-                     
-                      
- 
+
+
+
+
+
+
+
 
 function mintApiKey(payload               , { insert }               )          {
   const plainToken = randomBytes(32).toString('base64url');
@@ -364,10 +364,10 @@ export const ApiKey = entity('ApiKey', {
 // Like User/Session/Credential/Invitation/ApiKey, TwoFactor is not
 // request-readable: it is reached only by trusted server code (the auth routes),
 // never exposed through the entity CRUD API.
-                       
-                   
-                  
- 
+
+
+
+
 
 function enrollTotp(payload             , { insert }               )          {
   const { secret, uri } = generateSecret(payload.username);

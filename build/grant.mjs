@@ -5,11 +5,11 @@
 // literals: a `.can` body returns `grant(read, write)` or `deny(reason)`, never
 // `'read'`. Comparing tokens by identity keeps capability references typed.
 
-                                                         
 
-                           
-                                                                            
-                                                                
+
+
+
+
 
 // Each capability is a frozen unique token. `description` is for diagnostics
 // only; identity (not the string) is what the engine compares.

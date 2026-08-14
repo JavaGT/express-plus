@@ -3,30 +3,30 @@
 // delivery.
 import { isSnapshotFieldHandle } from './scope-sql.mjs';
 
-                                                                         
 
-                          
-                        
-                                                     
- 
 
-                               
-                             
-                               
- 
 
-                             
-                          
-                                 
-                                
-                                      
-                               
-                                 
-                             
-                              
-                     
-                             
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function node(kind        , value                          = {})               {
   return Object.freeze({ kind, ...value });

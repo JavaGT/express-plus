@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import { sweepBehindCursor, upsertConsumerCursor } from './consumer-cursor.mjs';
-                                            
+
 import { txn } from './driver.mjs';
-                                                 
+
 
 const IDENTIFIER = /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/;
 const cursorName = (name        ) => `operational:${name}`;
@@ -11,60 +11,60 @@ function fail(message        )        { throw new TypeError(`operational consume
 
 function canonical(value         )         { return JSON.stringify(value)          ; }
 
-                                              
-                           
-                   
-                  
-                    
-                      
- 
 
-                                             
-                                        
-                   
-                          
- 
 
-                                         
-              
- 
 
-                                           
-                
-                   
-                  
- 
 
-                                              
-                   
-               
-                 
- 
 
-                                                                                                                        
 
-                                           
-                    
-                            
-                                                                                                     
- 
 
-                                      
-               
-                             
-                                  
-                       
-                   
-                                                              
-                                                                                  
- 
 
-                      
-                             
-                   
-                
-                  
-  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function fingerprint(consumer                     )         {
   return createHash('sha256').update(canonical({
@@ -132,19 +132,19 @@ function metadata(row        )                              {
   });
 }
 
-                                              
-                                                                       
-                                                                                                                    
-                     
- 
 
-                                       
-                             
-                                                                                 
-                                         
-                                           
-               
- 
+
+
+
+
+
+
+
+
+
+
+
+
 
 export function createOperationalConsumers(consumers                     = [], {
   writeQueue,
@@ -275,11 +275,11 @@ export function createOperationalConsumers(consumers                     = [], {
   return { engage, consumer, reconcile, declared, stop: () => { stopped = true; clearRetryTimer(); } };
 }
 
-                                                    
-               
-                                                                       
-                                                         
- 
+
+
+
+
+
 
 export function operationalConsumerAdmin(workbench                                   ) {
   return {

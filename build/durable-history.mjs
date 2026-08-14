@@ -6,139 +6,139 @@ import { tryParseScopeKey } from './scope-handle.mjs';
 
 const HISTORY_DESCRIPTOR                = Symbol('workbench.durable-history');
 
-                        
-                       
-                       
- 
 
-                              
-                       
-                         
- 
 
-                      
-                       
-                    
-                
- 
 
-                         
-                         
-                         
-                            
-                               
-                            
-                                    
-                                  
-                             
-                               
-                                       
- 
 
-                            
-                        
-                            
-                         
-                           
- 
 
-                            
-                       
-                    
-                      
-                     
-                  
-                    
-                   
- 
 
-                                     
-                              
-                         
-                         
-                       
-                         
-                 
-                      
-                    
- 
 
-                       
-                                                           
-                                                        
- 
 
-                                           
-                                         
-                                                                                
-                                                          
- 
 
-                                        
-                                                                        
-                                                  
- 
 
-                          
-                
-                   
-                            
-                            
-                    
-                                     
-                                       
-                         
- 
 
-                                   
-                                 
-                                    
-                                        
-                                                                                      
-                                                                                                   
- 
 
-                          
-                                                                                 
-                                                                           
-                                                                                                                  
-                                                             
-                                                             
-                                                                    
-                                                                                                                     
- 
 
-                               
-                
-                    
-                                                                
-                  
-                                 
-                                                      
-                    
- 
 
-                        
-                  
-                    
-                      
- 
 
-                                                
-                 
-                 
- 
 
-                                         
-                     
-                     
- 
 
-                                                
-                     
-                     
-                
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function forbidden()        {
   return Object.assign(new Error('forbidden'), { status: 403 });
@@ -309,15 +309,15 @@ export function durableHistory({ authorize, actions = {} }                      
 
 export function createDurableHistoryRuntime({
   db, descriptor, generatedActions = {}, dispatch, dispatchBatch, authorize, cursorPolicy, annotatedHistory = null,
-}   
-               
-                                                          
-                                                           
-                                                          
-                                                               
-                                                                       
-                                                              
-                                                    
+}
+
+
+
+
+
+
+
+
  )                 {
   if (!db) throw new Error('durable history requires a durable database');
   if (!descriptor?.[HISTORY_DESCRIPTOR]) {

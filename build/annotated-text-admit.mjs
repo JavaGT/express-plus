@@ -18,130 +18,130 @@ import { readSeq } from './committed-log.mjs';
 import { planAnnotationRemove, planTextOffsetEdit, planTextRangeApply } from './annotated-text-plan.mjs';
 import { mapVisibleOffsetToCanonical, authoringRedactionsForRecipient,                         } from './annotated-text-recipient-projection.mjs';
 import { projectAnnotatedTextSnapshot } from './annotated-text-snapshot.mjs';
-                                                                     
-                                                
+
+
 import { rawRow } from './entity/query.mjs';
 import { annotationRangeRows } from './annotated-text-storage.mjs';
 
-                     
-                                               
-                               
-                                 
- 
 
-                    
-                                  
-                             
- 
 
-                         
-                        
-                 
-                             
- 
 
-                        
-             
-                 
-                                   
-                                         
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // The v9 edit is validated (shape-checked) before this module runs; the loose
 // shape below reflects only the fields this admission reads, across every
 // supported and rejected edit kind.
-                       
-               
-                     
-                       
-                     
-                
-                         
-                        
-                            
- 
 
-                     
-             
-             
-                                                                               
-                    
- 
 
-                            
-               
-                              
- 
 
-                           
-             
- 
 
-                          
-             
- 
 
-                             
-                           
-                            
-                             
- 
 
-                          
-               
-                    
-                 
-                              
-                           
-                    
-                     
-               
-                
-                                          
-                   
- 
 
-                                            
-           
-                        
-                          
-                        
-             
-                               
-                 
-                                     
-                
-                  
- 
 
-                            
-             
-                 
-                             
-                               
- 
 
-                       
-                       
-                            
-                          
- 
 
-                            
-                           
-                           
-                      
-                    
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 /** Resolve the authoring stream + lease for a v9 command. */
-export function assertV9AuthoringBinding({ name, fieldName, prefix, command, db, principal }   
-               
-                    
-                 
-                     
-               
-                                          
+export function assertV9AuthoringBinding({ name, fieldName, prefix, command, db, principal }
+
+
+
+
+
+
  )                                                     {
   const stream = resolveStream({ db, prefix, streamToken: command.authoring.stream, documentId: command.id, principalType: principal?.type ?? 'principal', principalId: principal?.id ?? '' })                          ;
   if (!stream) throw new ValidationError(`${name}.${fieldName}.operation authoring stream unavailable`, { code: 'authoring-stream-unavailable' });
@@ -150,11 +150,11 @@ export function assertV9AuthoringBinding({ name, fieldName, prefix, command, db,
   return { stream, lease };
 }
 
-function loadAnnotations({ db, prefix, compiledMeta, documentId }   
-               
-                 
-                    
-                     
+function loadAnnotations({ db, prefix, compiledMeta, documentId }
+
+
+
+
  )                     {
   const rows = db.prepare(`SELECT id, family FROM ${prefix}_annotation WHERE document_id = ? ORDER BY id`).all(documentId);
   const targets = db.prepare(
@@ -173,10 +173,10 @@ function loadAnnotations({ db, prefix, compiledMeta, documentId }
   return annotations;
 }
 
-function loadRanges({ db, prefix, documentId }   
-               
-                 
-                     
+function loadRanges({ db, prefix, documentId }
+
+
+
  )                {
   const rows = annotationRangeRows(db       , prefix, documentId);
   return rows.map((row) => ({
@@ -201,7 +201,7 @@ async function assertV9AuthoringPrelude(ctx                )                    
   const cursor = readSeq(db, documentScope) + 1;
   const token = command.edit?.at?.positionToken ?? command.edit?.from?.positionToken ?? command.edit?.to?.positionToken ?? command.edit?.positionToken;
   const position = token
-    ? resolvePosition({ db, prefix, positionToken: token, leaseId: lease.id })                                       
+    ? resolvePosition({ db, prefix, positionToken: token, leaseId: lease.id })
     : null;
   if (token && !position) throw new ValidationError(`${name}.${fieldName}.operation position token unavailable`, { code: 'position-token-unavailable' });
   if (position && !position.visible_at_issue) throw new ValidationError(`${name}.${fieldName}.operation position no longer visible`, { code: 'position-no-longer-visible' });

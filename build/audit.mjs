@@ -28,16 +28,16 @@
 // security-classified events through an Auditor.
 
 import { createHash, randomUUID } from 'node:crypto';
-                                                                                        
-                                                        
+
+
 import { statusOf,                                                          } from './principal.mjs';
 
-                                                            
-                                            
+
+
 
 // The opaque-id shape as a documented alias: ids recorded on events conform to
 // isOpaqueId (bounded, whitespace-free, URL/path/alias-free).
-                              
+
 
 // ── Opaque-ID contract ───────────────────────────────────────────────────────
 // An audit id (actor.id, resourceId, and the operation string) is an OPAQUE
@@ -73,11 +73,11 @@ export function sanitizeOpaqueId(value                           )              
 // only 'anonymous'. The real status lives here so the security record can
 // attribute a denial without weakening the two-valued admission rule. The id is
 // the opaque canonical form (sanitizeOpaqueId), never raw content.
-                             
-                               
-                             
-                                   
- 
+
+
+
+
+
 
 // The one audit event schema. Enumerated fields ONLY — no payload/body/secret/
 // alias/filename/excerpt may ride an event. `operation` is the generic
@@ -86,69 +86,69 @@ export function sanitizeOpaqueId(value                           )              
 // never a domain noun. `resourceId` is an opaque id when known; `reasonCode` is
 // a closed admission code, null when the event records an allow. id/operation/
 // resourceId are sanitized to the opaque form at the emitter boundary.
-                             
-                      
-                        
-                             
-                                    
-                                              
-                                     
-                                 
-                                                  
-                                               
- 
+
+
+
+
+
+
+
+
+
+
+
 
 // Retention is ADAPTER policy, not package policy. Values are opaque duration
 // strings ('12m' / '30d' in the reference app); the package passes the VALUES
 // through untouched and the sink consumes them. The config OBJECT is
 // snapshotted at auditor construction (see AuditorOptions.retentionConfig).
-                                    
 
-                                  
-                                    
-                                      
- 
+
+
+
+
+
 
 // The raw decision record an emitter classifies. `principal` is the REAL
 // (pre-collapse) principal — the emitter records its true type/id/status via
 // statusOf, exactly the "status is an audit input" rule.
-                             
-                                
-                                                        
-                                              
-                                      
-                                 
-                                                   
- 
+
+
+
+
+
+
+
+
 
 // The injectable audit sink. The default is a no-op; the app adapter chooses
 // storage and consumes the retention value applicable to the event's class
 // (read from the auditor's retentionConfig). The event delivered to the sink
 // is the FROZEN event with sanitized (opaque) id fields.
-                            
-                                                            
- 
+
+
+
 
 export const noopAuditSink            = Object.freeze({ write() {} });
 
-                                 
-                            
-                                                                   
-                                                                               
-                                                                                
-                                                                              
-                                                                               
-                                                                
-                                            
-                              
-                             
- 
 
-                          
-                                            
-                                               
-                                                 
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // Build the audit emitters + retention passthrough for one application. A
 // per-class sink (sinks.security / sinks.diagnostic) wins over the shared sink;

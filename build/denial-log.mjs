@@ -7,39 +7,39 @@
 // denials still attributes correctly in the security record without weakening
 // the two-valued admission surface the decisions themselves saw.
 
-                                                                                        
+
 import { sanitizeOpaqueId,                                                } from './audit.mjs';
-                                                        
+
 import {                 statusOf } from './principal.mjs';
 import { createKeyedRateLimiter,                       } from './rate-limit.mjs';
 
 // The raw denial record. outcome is always 'deny' and reasonCode is REQUIRED (a
 // closed admission code). `principal` is the real (pre-collapse) principal — the
 // representative event records its true type/id/status.
-                              
-                                
-                                                        
-                                              
-                                      
-                                           
- 
 
-                                       
-                            
-                             
-                              
-                                      
- 
 
-                                
-                            
-                                                                               
-                                                                              
-                                                                   
-                                                     
-                                                                             
-                                                                    
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                         
+
+
 
 const KEY_SEPARATOR = '\u0000';
 

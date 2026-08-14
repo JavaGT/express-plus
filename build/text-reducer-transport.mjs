@@ -2,20 +2,20 @@ import { textCheckpoint, createTextState } from './annotated-text.mjs';
 
 const TEXT_REDUCER = 'workbench.text';
 
-                           
-                
-                
- 
 
-                        
-               
-                                           
- 
 
-                     
-                      
-                           
- 
+
+
+
+
+
+
+
+
+
+
+
+
 
 function textFields(entity                                 )                              {
   if (!entity) return [];
@@ -23,14 +23,14 @@ function textFields(entity                                 )                    
     descriptor.kind === 'crdt' && descriptor.type === 'text');
 }
 
-                                  
-                 
-             
-                
-                  
-                  
-                      
- 
+
+
+
+
+
+
+
+
 
 export function textReducerSeeds(entity                                 , id         )                    {
   if (id === null || id === undefined) return [];
@@ -58,11 +58,11 @@ export function textReducerCheckpoints(entity                                 , 
   }));
 }
 
-                          
-                             
-                
-                          
- 
+
+
+
+
+
 
 export function createdTextReducerSeeds(entity                                 , event                                   )                                {
   if (event?.handle?.kind !== 'created' && !event?.type?.endsWith('.created')) return undefined;

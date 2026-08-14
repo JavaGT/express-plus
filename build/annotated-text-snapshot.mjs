@@ -9,7 +9,7 @@ import { resolveStream, resolveLease, issueAuthoringSnapshot, buildAuthoringEnve
 import { readSeq } from './cursor.mjs';
 import { rawRow } from './entity/query.mjs';
 import { scopeOf } from './scope-handle.mjs';
-                                                                           
+
 import { annotationRangeRows } from './annotated-text-storage.mjs';
 
 function fail(message        )        {
@@ -133,17 +133,17 @@ function loadAnnotations({ db, prefix, descriptor, documentId }                 
 // Reads only Workbench-owned annotated-text relations and projects them before
 // an HTTP snapshot is serialized. Any malformed state or access failure throws;
 // callers deny the entire snapshot rather than falling back to canonical facts.
-async function projectAnnotatedText({ db, entity, row, principal, fieldName, descriptor, caret = null, presence = null, mintBasis = true, authoring = null }   
-          
-              
-           
-                 
-                    
-                  
-              
-                 
-                      
-                  
+async function projectAnnotatedText({ db, entity, row, principal, fieldName, descriptor, caret = null, presence = null, mintBasis = true, authoring = null }
+
+
+
+
+
+
+
+
+
+
  )               {
   const meta = getAnnotatedTextCompiledMetadata(descriptor);
   if (!meta) fail(`field '${fieldName}' is not compiled`);

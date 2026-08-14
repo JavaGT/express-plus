@@ -81,9 +81,9 @@ const GENERATION_NAME = /^[A-Za-z0-9_-]{1,128}$/;
 // S8 and S6's blob-generation enumeration feed). Content is identified by the
 // content-addressed blob generations being deleted; the recycle module locates
 // and bins those bytes wherever a retained backup still holds them.
-                                        
-                                          
-   
+
+
+
 
 // The pluggable seam that resolves a generation to the relative file name that
 // holds its immutable bytes inside a backup's blobs/ directory — the name S6's
@@ -92,100 +92,100 @@ const GENERATION_NAME = /^[A-Za-z0-9_-]{1,128}$/;
 // pending, or unlocatable, so binning fails closed instead of guessing. S6
 // provides the concrete implementation; without it a recycle manager refuses
 // to bin any backup that carries blob bytes.
-                               
-                                                                            
-  
 
-                                        
-                            
-                              
-                        
-                        
-                            
-   
 
-                                            
-                            
-                                          
-   
 
-                                            
-                            
-                                          
-                         
-   
 
-                                         
-                       
-                                                  
-                                                  
-   
 
-                                                                                                        
 
-                                                                                                        
 
-                                           
-                           
-                                               
-   
 
-                                  
-                                                                                        
-                                           
 
-                                     
-                                                                               
-                                                                              
-                                                   
-                        
-                                                                           
-                                                                               
-                                                                        
-                                        
-                                          
-                                                                          
-                                                                        
-               
-                                  
-                            
-  
 
-                              
-                                                                            
-                                                                              
-                                                                           
-                                                                          
-                                                                               
-                                                            
-                                                                              
-                          
-                                     
-                                                                            
-                                                                             
-                                                                             
-                                                                       
-                                                                             
-                                                                               
-                                                                         
-                                                          
-                                                                  
-                                 
-                                                                            
-                                                                              
-                        
-  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                    
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                        
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // The one entry.json field set that identifies a binned generation. `name` is
 // validated to be a bare file name; `binnedAt` is the canonical UTC instant.
-                           
-                                                        
-                            
-                              
-                        
-                        
-                            
-  
+
+
+
+
+
+
+
+
 
 export function createRecycleManager(options                       )                 {
   if (!options || typeof options !== 'object') {
@@ -254,9 +254,9 @@ export function createRecycleManager(options                       )            
   // manifest parsed and is a known format, but the backup never committed
   // (status !== 'complete'), so it is not a retained backup (the backup module
   // quarantines it) and binning skips it rather than binning from it.
-                     
-                                                              
-                                                                                                  
+
+
+
 
   function readManifestState(dir        )               {
     let raw        ;

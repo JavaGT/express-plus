@@ -114,16 +114,16 @@ const csrfGuard = (req     ) => SAFE_METHODS.has(req.method) || isSameOriginRequ
 // resolver; the request handler is deliberately not re-architected here.
 const anonymousPrincipalOf                  = () => anonymous;
 
-export function makeRequestHandler(source     , { principalOf = anonymousPrincipalOf, db, env = config.env, rateLimiter = null, csp, hsts, cors, requestLog = false, authorization }   
-                                        
-           
-               
-                    
-               
-                 
-             
-                       
-                                       
+export function makeRequestHandler(source     , { principalOf = anonymousPrincipalOf, db, env = config.env, rateLimiter = null, csp, hsts, cors, requestLog = false, authorization }
+
+
+
+
+
+
+
+
+
   = {}) {
   // `source` is either a plain resolved routing table (an array) or an app whose
   // table resolves asynchronously (two-phase boot). When it is an app, every

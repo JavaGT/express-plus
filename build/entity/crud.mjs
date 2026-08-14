@@ -319,11 +319,11 @@ export function materializeCreateDefaults(record     , payload     ) {
   return data;
 }
 
-export function createCrudHandlers({ record, sideTableStrategyEntries, conditionalHistory = false, conditionalCreateHistory = false }   
-              
-                                  
-                               
-                                     
+export function createCrudHandlers({ record, sideTableStrategyEntries, conditionalHistory = false, conditionalCreateHistory = false }
+
+
+
+
  ) {
   const { name, fields, verbs } = record;
   const ownerField = ownerFieldOf({ name, fields });

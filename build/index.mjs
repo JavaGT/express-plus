@@ -24,6 +24,7 @@ export { createAuditor, noopAuditSink, isOpaqueId, sanitizeOpaqueId,            
 export { createDenialAuditor,                                                                 } from './denial-log.mjs';
 export { createKeyedRateLimiter,                                                                              } from './rate-limit.mjs';
 export { router } from './app.mjs';
+export { createSchemaReport,                                                                       } from './schema-report.mjs';
 export {
   FAILURE_CATEGORIES,
   failure,

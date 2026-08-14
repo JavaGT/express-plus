@@ -17,38 +17,38 @@ export function mintToken() {
   return randomBytes(24).toString('hex');
 }
 
-                            
-                   
-                    
-                         
- 
 
-                                
-                
-                
-                                                         
-                                                     
-                    
-          
-                  
-                            
-                
-                   
-    
-                         
- 
 
-                                                   
 
-                                   
 
-                  
-                                           
-  
 
-           
-                                  
-  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 export function stateEffectEntries(entityName        , fieldName        , descriptor                      ) {
   const declared = descriptor.effects;
@@ -152,26 +152,26 @@ export function autoStateScheduleTrigger(entityName        , fieldName        , 
   });
 }
 
-                                   
-                
-                  
-                 
-                  
-                 
-                 
-                 
-                      
-                                                    
-                             
-               
- 
 
-export function validateScheduleTrigger({ name, verbName, trigger, fields, registry }   
-               
-                   
-                                   
-                 
-                    
+
+
+
+
+
+
+
+
+
+
+
+
+
+export function validateScheduleTrigger({ name, verbName, trigger, fields, registry }
+
+
+
+
+
  ) {
   const isDeadline = trigger?.kind === 'schedule.at' || trigger?.kind === 'schedule.after';
   const isTick = trigger?.kind === 'tick.hz' || trigger?.kind === 'tick.every';

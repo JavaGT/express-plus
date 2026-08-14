@@ -9,10 +9,10 @@ import { rowCapabilities } from '../row-grant.mjs';
 import { MEMBER_COLUMN, membershipOwnerCol, membershipTable } from '../scope-sql.mjs';
 import { mapMutationAction } from '../side-table-strategy.mjs';
 import { failure } from '../outcome.mjs';
-                                                              
-                                                            
-                                                      
-                                                 
+
+
+
+
 import {
   authorizeInvitationAcceptance,
   invitationAcceptancePrincipal,
@@ -25,101 +25,101 @@ export { admitInvitationAcceptance } from './invitation-acceptance-authority.mjs
 // the application runtime), so these are the minimal shapes invitation.ts reads.
 // The concrete driver and application runtime satisfy them structurally.
 
-                        
-                                      
- 
 
-                                  
-               
-                                                    
-                                 
-                                                        
-                                                                                      
-                         
- 
 
-                                                             
-                                           
-                   
-                   
- 
 
-                             
-                    
-                                                    
-                                                                                             
- 
 
-                                 
-              
-                             
-                                                                         
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // A stored/hydrated Invitation row as invitation.ts reads it: the declared
 // fields from entities.ts (Invitation declaration), all loose enough for the
 // facade to satisfy structurally.
-                         
-             
-                
-                       
-                   
-               
-                            
-                         
-                   
-                           
-                     
-                         
- 
 
-                            
-               
-                              
-                                         
-                                                    
-                                              
-                                                       
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // The acceptance authority is declared in invitation-acceptance-authority.ts
 // with `mapOperation: string` and `invitationOperation: 'update' | 'remove'`,
 // but acceptance legitimately carries `null` for both (no map change / no
 // invitation op). This is the runtime shape; the adapter below widens it at the
 // authority boundary rather than changing the authority's declared type.
-                                       
-                       
-                   
-                    
-               
-                   
-                              
-                       
-                                                  
-                    
- 
 
-                                  
-                        
-                    
-                
-                       
-                    
-                      
-                       
- 
 
-                                      
-                                       
-               
- 
 
-                                
-                                                                           
-                                                                                                                      
-                                                                  
-                                                           
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function httpError(status        , message        )                             {
   return Object.assign(new Error(message), { status });
@@ -154,11 +154,11 @@ function authorizeAcceptance(authority        , details                         
   authorizeInvitationAcceptance(authority, details                                                                  );
 }
 
-function invitationTargetFor(runtime                   , name        , role        )   
-                                 
-                    
-                
-                      
+function invitationTargetFor(runtime                   , name        , role        )
+
+
+
+
   {
   let target                        ;
   try {
@@ -199,10 +199,10 @@ function invitationTargetFor(runtime                   , name        , role     
   };
 }
 
-export async function admitInvitationCreation({ Invitation, event, principal }   
-                                       
-                                                           
-                       
+export async function admitInvitationCreation({ Invitation, event, principal }
+
+
+
  )                   {
   if (!isInvitationCreationAuthority(principal)) return false;
   const runtime = Invitation?.runtime;

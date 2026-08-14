@@ -1,16 +1,16 @@
-                      
-               
-                
-                
-                                            
-                                    
- 
 
-                           
-               
-                                                
-                                                         
- 
+
+
+
+
+
+
+
+
+
+
+
+
 
 function descriptorTsType(descriptor                        )                {
   if (!descriptor) return 'unknown';

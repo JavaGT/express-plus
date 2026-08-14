@@ -6,34 +6,34 @@
 
 import { getLog } from './log.mjs';
 
-                        
-               
-                    
-                    
- 
 
-                   
-                                  
-                                                                                           
-                                    
-                                                     
-                             
-                                          
-                
-                        
-                                          
-                                  
-                                 
-           
-                                      
-                                            
-                                                                                
-                                                                                
-                                                                              
-                                                
-                                   
-                                          
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                             
+                                   
+
+
+
+
+
 
 // The set of live apps to close on a shutdown signal.
 const liveApps = new Set         ();
@@ -70,15 +70,36 @@ export function installProcessTraps() {
   process.on('SIGTERM', onSignal);
   process.on('SIGINT', onSignal);
   process.on('unhandledRejection', (reason) => {
+    if (isBrokenPipeError(reason)) {
+      process.exit(1);
+      return;
+    }
     const log = getLog();
     log.error('system', 'unhandledRejection', { reason });
     process.stderr.write(`unhandledRejection: ${reason}\n`);
   });
   process.on('uncaughtException', (err) => {
+    // A write to a dead stdio pipe surfaces here as an async EPIPE error.
+    // Every attempt to log it fails the same way and re-enters this handler
+    // (stderr.write -> EPIPE -> uncaughtException -> ...), spinning the event
+    // loop at full CPU on an orphaned process. There is nothing left to log
+    // to, so exit — the same fate plain SIGPIPE would have delivered.
+    if (isBrokenPipeError(err)) {
+      process.exit(1);
+      return;
+    }
     const log = getLog();
     log.error('system', 'uncaughtException', { err });
     process.stderr.write(`uncaughtException: ${err?.stack ?? err}\n`);
   });
+}
+
+// A write to a closed pipe/socket raises EPIPE (or ECONNRESET) on the stream;
+// unhandled it arrives here as an uncaughtException/rejection. Detect it so
+// the trap cannot loop forever logging into a broken stderr.
+function isBrokenPipeError(err         )          {
+  const code = (err                                            )?.code;
+  return code === 'EPIPE' || code === 'ECONNRESET';
 }
 
 // The graceful-shutdown seam. `app.shutdown()` closes the live server (resolving

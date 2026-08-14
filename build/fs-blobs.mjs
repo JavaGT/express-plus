@@ -95,95 +95,95 @@ import path from 'node:path';
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
-                                    
-                    
- 
+
+
+
 
 // ─── capability declaration ────────────────────────────────────────────────
 
 // Durability of a byte store: `durable` bytes survive a process restart;
 // `ephemeral` bytes live only within the owning process.
-                                                          
+
 
 // Consistency tag a backend declares for its byte storage. `single-node-strong`
 // is the only tag shipped; multi-node backends would declare a different one.
-                                                        
+
 
 // A backend's closed, queryable declaration of what it guarantees. A backend
 // must declare honestly — lifecycle code and callers can branch on it.
-                                        
-                                           
-                                    
-                                 
-                                       
-                                             
- 
+
+
+
+
+
+
+
 
 // ─── the byte-store contract ────────────────────────────────────────────────
 // Each method's guarantee is PART OF THE TYPE: any conforming implementation
 // must keep it, because the lifecycle in blob-store.ts depends on these
 // semantics. See the module header for the narrative version.
 
-                            
-                                                                                   
-                                               
 
-     
-                                                                           
-                                                                               
-                                                                               
-                            
-     
-                                                    
 
-     
-                                                                              
-                                                                             
-                                                                                
-                                                                               
-                                                                          
-                                                                          
-                                                                            
-                                                                              
-                                                                               
-          
-     
-                                      
 
-     
-                                                                              
-                                                                             
-                                                                             
-                                                                          
-                                                                             
-                                                            
-     
-                                                                        
 
-     
-                                                                           
-                                                                             
-                                                                           
-                                                              
-     
-                                                          
 
-     
-                                                                       
-                                                                     
-                              
-     
-                                                             
- 
+
+                                             
+
+
+
+
+
+
+
+
+
+
+                            
+            
+
+
+                 
+
+
+
+
+
+
+
+
+                                
+
+
+
+
+
+
+
+
+                               
+
+
+
+
+
+
+
+
+
+
+
 
 // TEST/DEBUG-ONLY introspection handle — pathFor was RETIRED from the portable
 // ByteStore surface (S6/A2): no production caller may use a physical path to
 // authorize, read, or locate bytes. It survives only on the concrete
 // fsBlobs/memoryBlobs stores so tests can assert on the filesystem. An S3
 // implementation has no path; it may return a synthetic key or throw if called.
-                                           
-                                                           
- 
+
+
+
 
 /** True when a byte store still exposes the retired test/debug path handle. */
 export function hasPathFor(store           )                                                {
@@ -196,21 +196,21 @@ function safeId(id         )       {
   }
 }
 
-                                 
-     
-                                                                           
-                                                                       
-                                                                        
-     
-               
-     
-                                                                               
-                                                                               
-                                                                            
-                              
-     
-                       
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 export function fsBlobs({ root, stagingRoot }                )                                       {
   mkdirSync(root, { recursive: true });

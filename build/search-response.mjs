@@ -30,13 +30,13 @@
 //      never a 500 leak and never result content from a search that did not
 //      complete authorized and in time (S5/A2 mirror).
 
-                                                            
+
 
 // The closed staleness vocabulary a response may disclose. `fresh` = the index
 // reflects the source up to the current fence; `stale` = a source change
 // invalidated the index but reconciliation has not consumed it; `rebuilding` =
 // a materialization cycle is in progress (or nothing has materialized yet).
-                                                               
+
 
 // Map the registry's health state to the disclosed staleness. `failed` maps to
 // `stale`, never `fresh` and never `rebuilding`: a failed index is not current
@@ -84,18 +84,18 @@ export function boundSearchLimit(
   return Math.max(1, Math.min(value, Math.max(1, Math.floor(cap))));
 }
 
-                                    
-                                                                                
-                                                     
-                         
-                                                         
-                             
-                                                            
-                                 
-                          
-                                                            
-                           
- 
+
+
+
+
+
+
+
+
+
+
+
+
 
 // Resolve a request's window to `{ offset, limit }`. Paging and flat
 // limit/offset are mutually exclusive: a page request wins (the page is the
@@ -119,11 +119,11 @@ export function searchPageWindow(request                   )                    
 // A plugin-provided relevance value: a numeric score (bm25 rank, cosine
 // similarity) or a rank/score string. Missing and non-finite values sort AFTER
 // every present finite value (deterministic, never a NaN comparison).
-                                                            
+
 
 // The ordering of the primary rank: 'asc' (FTS-style: lower is better) or
 // 'desc' (vector-style: higher is better).
-                                         
+
 
 // The numeric reading of a rank, or null when it is missing or non-finite. A
 // numeric-string rank ('7') compares as the number 7, mirroring SQLite's text
@@ -166,11 +166,11 @@ export function compareSearchKeys(a        , b        )         {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-                                              
-                                             
-                                        
-                               
- 
+
+
+
+
+
 
 // Order hits deterministically: primary rank (in the plugin's direction), then
 // the stable key. The input is never mutated. This is the tie-break A4 (FTS
@@ -224,19 +224,19 @@ export class SearchDuplicateKeyError extends Error {
 // aborted before the run started); `timed-out` means the deadline elapsed. The
 // run's own exceptions still throw — only cancellation and timeout are reduced
 // to a closed outcome.
-                                      
-                                                     
-                                  
-                                   
 
-                                        
-                                                                             
-                                                          
-                              
-                                                                               
-                                                                      
-                                
- 
+
+
+
+
+
+
+
+
+
+
+
+
 
 // Run a plugin search under the caller's cancellation signal and a hard
 // deadline. `run` receives the combined AbortSignal so a cooperative plugin can
@@ -277,8 +277,8 @@ export async function searchWithDeadline   (
     .then((value) => ({ kind: 'completed'         , value }))
     .catch((err         ) => ({ kind: 'failed'         , err }));
 
-  const arms          
-                                                                                 
+  const arms
+
       = [runSettled];
   if (deadline) {
     timer = setTimeout(() => {
@@ -317,11 +317,11 @@ export async function searchWithDeadline   (
 // produced it, the index generation it was produced from, and the disclosed
 // staleness. Callers show the stamp so stale/rebuilding results are never
 // silently presented as current.
-                                    
-                            
-                              
-                                      
- 
+
+
+
+
+
 
 // One returned search result: the platform stamp plus the plugin hit and its
 // deterministic ordering identity. `key` is the stable, index-unique tie-break
@@ -329,55 +329,55 @@ export async function searchWithDeadline   (
 // when the excerpt's source field admitted (S4/A6: no unreadable-field
 // excerpts — an admitted row whose excerpt field denies still returns the hit,
 // just without the excerpt).
-                                                                  
-                       
-                            
-                     
-                            
- 
+
+
+
+
+
+
 
 // The closed error vocabulary of a failed response. `denied` = the search (or
 // its scope) was denied; `policy-error` = a policy body threw (S5/A2 fail
 // closed — never a 500); `not-found` = the plugin/resource does not exist;
 // `error` = the plugin search itself failed (isolated, per S4/A1).
-                                                                                    
+
 
 // The platform search response. `ok` is true only for a completed, authorized,
 // uncancelled, in-time search. `hits` are already admitted (per-result
 // authorization ran) and tie-broken; `omitted` discloses how many candidates
 // were dropped by authorization (deny → omit), so a caller can tell a bounded
 // result from a filtered one.
-                                       
-                       
-                            
-                              
-                                      
-                                                  
-                           
-                              
-                             
-                                             
- 
 
-                                            
-                            
-                              
-                                      
-                            
-                         
-                              
-                       
-                              
-      
-                            
-                               
-                              
-                                              
-                                                                         
-                                                                           
-                                                                  
-                               
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // Build a frozen search response, stamping every hit with the response's
 // `{ pluginId, generation, staleness }`. `ok` is derived FIRST — a denied,

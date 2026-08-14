@@ -10,14 +10,14 @@ import { ValidationError,                      } from './field-strategy.mjs';
 import { readProjectedCursors } from './projected-async.mjs';
 import { projectedCursorHeaders,                       } from './http-response.mjs';
 import { mayRow } from './row-grant.mjs';
-                                                   
+
 import { createAuthorizationAdapter,                           } from './authorization-adapter.mjs';
 import { scopeOf } from './scope-handle.mjs';
 import { failure,                       } from './outcome.mjs';
 import { sendFailure,               } from './http-failure.mjs';
 import { readDeletedRowAnchor } from './deleted-row-anchor.mjs';
 import { rawRow } from './entity/query.mjs';
-                                                
+
 
 // The default authorization adapter (S5/A2) — THE admission path for REST CRUD
 // dispatch. It wraps the framework row-grant (mayRow / mayVerb /
@@ -29,47 +29,47 @@ const DEFAULT_AUTHORIZATION                       = createAuthorizationAdapter()
 
 // Loose persistence/app handles. The entity compiler and kernel are authored in
 // modules that own their full shapes; these seams only need the surfaces below.
-                                
-                                                                 
-                                                       
-                                                          
- 
 
-                         
-                                      
- 
 
-                             
-               
-                                                    
-                                                                                      
-                                                        
-                         
- 
 
-                               
-               
-                             
-                                                        
-                       
- 
 
-                             
-                                                   
- 
 
-                              
-              
-                      
-                                                                
-                         
- 
 
-                                   
-                                
-                     
-                       
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // One kernel mutation through the write queue, translating the failure modes
 // shared by create/update/remove: queue starvation → 503, validation → 400
@@ -112,7 +112,7 @@ export function readScopedRow(
   principal           ,
 )                                      {
   const { sql: where, params: scopeParams } = entity.scopeFilter(principal);
-  return app.db 
+  return app.db
     .prepare(`SELECT * FROM ${entity.name} AS t0 WHERE ${where} AND t0.id = :id`)
     .get({ ...scopeParams, id });
 }
@@ -178,21 +178,21 @@ async function admitEntityRow(
   return decision.admitted;
 }
 
-                                      
-                     
-               
-                     
-                                
-                       
-                                 
-                
-                     
-                                      
-                        
-                     
-                                                                                                             
-                                       
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // DB-backed dispatch for one admitted verb. Every row admission on every verb
 // (list/read/update/remove/fieldApply) consults the authorization adapter —

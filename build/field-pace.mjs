@@ -7,9 +7,9 @@
 // ephemeral field is a per-connection write handle (drawing-canvas stroke at
 // 60Hz) whose events coalesce to ~15fps per subscriber.
 
-                     
-                                          
- 
+
+
+
 
 const coalescers = Object.freeze({
   // latest-wins: position data is loss-tolerant — the latest snapshot wins.
@@ -17,9 +17,9 @@ const coalescers = Object.freeze({
   'latest-wins': Object.freeze((_acc         , event         ) => event)             ,
 });
 
-                     
-              
- 
+
+
+
 
 function reduceSpan(events             )                                             {
   return {
@@ -28,10 +28,10 @@ function reduceSpan(events             )                                        
   };
 }
 
-                              
-                 
-                    
- 
+
+
+
+
 
 const profiles = Object.freeze({
   'pass-through': Object.freeze({ window: 0, by: null })               ,
@@ -43,12 +43,12 @@ const bounds = Object.freeze({
   maxWindow: 1000,
 });
 
-                               
-                                                  
-                                                                                           
-                                                  
-                                                              
- 
+
+
+
+
+
+
 
 // The pace strategy registry, keyed by field-kind. Only `ephemeral` for now.
 // Other field-kinds (value, text, etc.) have no entry — see resolvePace for
@@ -77,10 +77,10 @@ export function resolvePace(kind        )               {
   })                ;
 }
 
-                                     
-                   
-                                            
- 
+
+
+
+
 
 // Validate a subscriber's pace selection at subscribe time (fail-closed).
 // `pace` may be null/undefined (→ pass-through, valid for any kind), or

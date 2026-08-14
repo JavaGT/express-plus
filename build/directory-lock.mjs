@@ -35,13 +35,13 @@ export class DirectoryOwnedError extends Error {
   }
 }
 
-                                
-                       
-                             
-                                                                            
-                                                                     
-                  
- 
+
+
+
+
+
+
+
 
 // SQLITE_BUSY (5) / SQLITE_LOCKED (6) mean the lock is contended: another
 // process holds the exclusive transaction. Any other error is a real failure

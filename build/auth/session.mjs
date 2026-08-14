@@ -18,34 +18,34 @@ import { createHash } from 'node:crypto';
 // The minimal request shape session hydration reads: the raw `Cookie` header
 // (node:http exposes the string) and the `Authorization` header for Bearer keys.
 // The transport types the full request; this is the fail-closed subset.
-                       
-                                                        
- 
+
+
+
 
 // The SQLite statement/db surface session hydration uses. The concrete driver
 // (better-sqlite3-shaped) satisfies this structurally; a broken db still fails
 // closed because every lookup happens inside the try/catch below.
-                        
-                                                          
-                                     
-                                       
- 
 
-                 
-                                     
- 
+
+
+
+
+
+
+
+
 
 // The Session row projected by the hydration lookup. `type` is validated by
 // principal() against the closed union; `createdAt` is validated by
 // sessionCreatedAtMs; `status` (when the table exposes it) is validated by
 // principal() against the closed status union. A corrupt stored row therefore
 // resolves to anonymous.
-                      
-                       
-                     
-                      
-                   
- 
+
+
+
+
+
+
 
 function sha256hex(s        )         {
   return createHash('sha256').update(s).digest('hex');
@@ -238,9 +238,9 @@ export function apiKeyPrincipalOf(db       )                                  {
 // The ApiKey row projected by the Bearer lookup. `expiresAt` is an epoch-ms
 // value the driver may store as a number or a numeric string; comparing it here
 // keeps a corrupt value from granting admission.
-                     
-                     
-                      
-                             
-                       
- 
+
+
+
+
+
+

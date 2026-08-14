@@ -25,33 +25,33 @@
 // status rides on the principal only for audit/diagnostic contexts — never on
 // the admission decision's public surface. `statusOf()` is that audit reader.
 
-                                                                                
+
 
 // The closed principal-status union. The default (and the only status
 // `anonymous` may carry) is `'active'`; the non-active statuses exist so a
 // session/principal store can express disabled/expired/revoked without minting
 // a brand-new principal type per state.
-                                                                            
 
-                                
-                               
-                             
-                                                         
-                                   
- 
 
-                                                           
-                             
-                    
- 
 
-                                                            
-                                                     
-                      
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // A principal carries an id for every type except `anonymous` (identity-free).
-                                                                 
+
 
 // A typed construction-time failure, sibling to NonCompilableError and
 // UnawaitedCheckError. Raised when a principal's declared type is outside the
@@ -96,12 +96,12 @@ export function principalKeyOf(value         )                {
   return `${String(candidate.type)}:${candidate.id}`;
 }
 
-                                   
-                                                     
-                     
-                                       
-                           
- 
+
+
+
+
+
+
 
 // Build a frozen principal from a declared shape. `attributes` defaults to an
 // empty frozen object (a link principal carries `{ token }`; a user typically
@@ -109,29 +109,29 @@ export function principalKeyOf(value         )                {
 // principal literals keep compiling and behaving unchanged. The id/type/status
 // invariants are checked here so an ill-formed principal can never reach the
 // grant engine.
-                                     
-               
-             
-                                       
-                           
-                        
-                                    
-                    
-            
-                                       
-                           
-                       
-                                     
-                       
-                     
-                                       
-                           
-              
-export function principal({ type, id = null, attributes = {}, status = 'active' }   
-                 
-                     
-                                       
-                           
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+export function principal({ type, id = null, attributes = {}, status = 'active' }
+
+
+
+
   = {})            {
   if (!PRINCIPAL_TYPES.includes(type                                  )) {
     throw new UnknownPrincipalTypeError(

@@ -34,34 +34,34 @@ import { txn,               } from './driver.mjs';
 
 const CONSUMER = 'email';
 
-                        
-              
-                   
-                
- 
 
-                                                    
 
-                       
-                
-                                 
-                 
-               
- 
 
-                   
-                                                                                                    
-                           
-                                    
- 
 
-                     
-                              
-                                                                           
-                                                                       
-                                                  
-                       
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 export const noopTransport            = async ({ to, subject, body }) => {
   console.log(`[email] to=${to} subject="${subject}" body=${String(body ?? '').length} chars`);

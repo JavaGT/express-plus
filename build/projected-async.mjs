@@ -4,16 +4,16 @@ import { consumerCursorMap, upsertConsumerCursor } from './consumer-cursor.mjs';
 import { upsert,               } from './driver.mjs';
 import { tryParseScopeKey } from './scope-handle.mjs';
 
-                                                
-                           
-                                                                                                   
- 
 
-                                             
-               
-                                  
-                                                                        
- 
+
+
+
+
+
+
+
+
+
 
 export function resolveProjectedAsyncTriggerTypes(desc                               , entityName        )           {
   if (!desc.from) return [`${entityName}.created`, `${entityName}.updated`];
@@ -40,10 +40,10 @@ function projectedAsyncRow(entityRecord                            , row        
   return filteredRow;
 }
 
-                          
-                    
-                                                    
- 
+
+
+
+
 
 // Recompute every projected.async field for one row and write the results back,
 // advancing the staleness version counter per field. Returns true iff every
@@ -81,7 +81,7 @@ async function recomputeFields(entityRecord                            , entityN
   return allSucceeded;
 }
 
-                                                                                
+
 
 export function createProjectedAsyncConsumer({ entities }                                                               )                                                                              {
   return async (events, { db }) => {

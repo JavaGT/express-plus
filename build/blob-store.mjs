@@ -38,8 +38,8 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { fsBlobs, hasPathFor,                                            } from './fs-blobs.mjs';
-                                                   
-                                            
+
+
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -49,70 +49,70 @@ function safeId(id         )       {
   }
 }
 
-                                    
-                             
-                
-              
- 
 
-                               
-             
-              
-                 
-               
-                      
- 
 
-                               
-             
-                 
-              
-                 
-               
-                      
-                    
- 
 
-                                  
-              
-                                                                                          
-                     
- 
 
-                            
-                            
-                                                    
-                                                                             
-                               
-                                                                        
-                                   
-                            
-                                                                        
-                                             
-                                                                           
-                                               
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                              
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // The retired `pathFor` (S6/A2), kept ONLY behind this explicit internal/test
 // handle: absent from the portable BlobStore surface, present on the concrete
 // store only when the underlying byte store exposes a path key (fs path or
 // memory synthetic key). No production caller may use it to authorize, read, or
 // locate bytes.
-                                          
-                                                                 
- 
 
-                                   
-                
-     
-                                                                               
-                                                                           
-                                                                    
-     
-                       
-               
-                    
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 export function createBlobStore({ root, stagingRoot, db, bytes }                  )            {
   // The byte store owns where bytes live (node:fs by default; S3 later). It is

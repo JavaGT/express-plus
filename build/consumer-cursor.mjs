@@ -24,16 +24,16 @@ export function consumerCursorMap(db          , consumer        )               
   );
 }
 
-                                 
-                
-              
-                    
-                    
-                   
-                      
- 
 
-                                                           
+
+
+
+
+
+
+
+
+
 
 // Cursor-bounded reconcile sweep shared by every durable-projection consumer
 // (blob finalize, email delivery, durable effects, operational consumers).

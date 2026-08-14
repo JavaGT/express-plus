@@ -18,7 +18,7 @@
 //   map          → {Entity}_{field} ({Entity}_id, member_id [, role])
 //   log          → {Entity}_{field} ({Entity}_id, ...entry sub-fields)
 //   ephemeral   → {Entity}_{field} ({Entity}_id, client_id)
-                                            
+
 import { structCellColumn } from './field-strategy.mjs';
 import { sideTableDDL } from './side-table-strategy.mjs';
 import { frameworkLogDDL } from './committed-log.mjs';
@@ -51,36 +51,36 @@ const SUPPORTED_FIELD_TYPES                                      = Object.freeze
 // A field descriptor as the DDL generator reads it: kind, value type, and the
 // option surface that decides storage shape. Kept loose — the descriptor is
 // built by field.mjs and consumed by many layers.
-                               
-               
-                
-                
-                     
-                     
-                     
-                                      
-                                  
-                    
-                   
-                         
- 
 
-                               
-                
-                     
-                     
-                     
-                         
- 
 
-                     
-               
-                                                                          
-                                                                             
-                   
-                                     
-                                                         
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function fieldsOf(entity           )                                                            {
   return entity.fields                                                             ;

@@ -45,32 +45,32 @@ import {
   membershipOwnerCol,
   MEMBER_COLUMN,
 } from './scope-sql.mjs';
-                                            
-                                                           
 
-                        
-               
-                                         
- 
 
-                           
-                                  
-                                                                                  
-                        
- 
 
-                      
-                                       
-                                         
- 
 
-                                                                 
 
-                                       
-                                   
-                                                             
-                      
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 export function buildCheckRegistry({ fields = {}, declaredChecks = {}, entityName }                      )                {
   const registry                             = {};
@@ -250,11 +250,11 @@ function membershipHandle(
   };
 }
 
-function makeRuntimeRefHandle({ fieldName, descriptor, row, runtime }   
-                    
-                      
-                               
-                        
+function makeRuntimeRefHandle({ fieldName, descriptor, row, runtime }
+
+
+
+
  ) {
   const targetReference = (descriptor                        ).target;
   const targetName = typeof targetReference === 'string'

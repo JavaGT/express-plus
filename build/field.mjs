@@ -19,24 +19,24 @@
 // is deliberately loose: the row-grant engine invokes it as
 // `access({ is, entity: row }, defaults)` and a protecting annotation as
 // `access({ is, entity: row, annotation })`.
-                                                                                              
+
 
 // A declared `validate` option: returns `true` or a human-readable reason.
-                                                        
+
 
 // A field descriptor is frozen so no later layer can mutate a declared field.
 // `.can(fn)` returns a NEW frozen descriptor carrying the access function — it
 // never mutates the original (declarations are immutable).
-                                  
-                        
-                         
-                                                 
-                                              
-                                                       
-                                       
- 
 
-                                            
+
+
+
+
+
+
+
+
+
 
 function makeDescriptor(props              )                  {
   const descriptor                          = { access: undefined, ...props };
@@ -107,19 +107,19 @@ export {
   DATA_TIERS,
   ENTITY_TIERS,
   TIER_DESCRIPTIONS,
-                
-                  
-                   
-                   
-                       
-                    
-                       
+
+
+
+
+
+
+
 } from './live-tier.mjs';
 // `text.crdt()` — the `crdt` kind instance for collaborative text. One instance
 // of the crdt contract, not a privileged special case (ADR #9).
-                                  
-                                                
-  
+
+
+
 (text               ).crdt = (options               = {}) =>
   makeDescriptor({ kind: 'crdt', type: 'text', ...options });
 
@@ -297,7 +297,7 @@ export function list(of         , options               = {})                  {
 
 // `computed({ compute })` — a read-time computed field. It stores no column;
 // hydration recomputes it from the row every time.
-                                                 
+
 
 export function computed({ compute }                          = {})                  {
   if (typeof compute !== 'function') {
@@ -311,9 +311,9 @@ export function computed({ compute }                          = {})             
   });
 }
 
-;                                         
-                                                             
-  
+;
+
+
 (computed                   ).stored = ({ compute }                          = {}) => {
   if (typeof compute !== 'function') {
     throw new Error('computed.stored requires a compute function');
@@ -396,11 +396,11 @@ export function ephemeral(cells                          = {})                  
 //
 // Import-surface scope: this constructor delivers the descriptor the entity
 // compiler accepts. The compiler owns transition enforcement and auto lowering.
-export function state({ values, transitions, effects, auto }   
-                              
-                                        
-                                    
-                 
+export function state({ values, transitions, effects, auto }
+
+
+
+
   = {})                  {
   return makeDescriptor({
     kind: 'state',
@@ -414,15 +414,15 @@ export function state({ values, transitions, effects, auto }
 // A typed transition handle. It stringifies to a stable identifier encoding the
 // from→to pair, so the same pair always yields the same computed-object key in
 // an `effects` map — a derived identifier, never a magic string literal.
-;                        
-                                            
-                         
-                       
-                        
-                                  
-  
-(state                    
-                                                               
+;
+
+
+
+
+
+
+(state
+
  ).transition = (from         , to         )                   => {
   const handle                          = { brand: 'state-transition-handle', from, to };
   Object.defineProperty(handle, 'type', { value: `transition:${from}->${to}`, enumerable: true });

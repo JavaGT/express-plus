@@ -1,44 +1,44 @@
 import { effectEntries } from './effect-compiler.mjs';
 import { parseEventType } from './event-handle.mjs';
-                                                             
+
 import { sweepBehindCursor, upsertConsumerCursor } from './consumer-cursor.mjs';
-                                            
+
 import { txn } from './driver.mjs';
 import { getLog } from './log.mjs';
 import { tryParseScopeKey } from './scope-handle.mjs';
-                                                     
+
 
 const CONSUMER = 'effect.durable';
 
-                                           
-                  
-                                                                                                                                   
- 
 
-                                     
-                       
-                                   
- 
 
-                                     
-               
-                    
- 
 
-                            
-               
-                
-              
-                   
-                      
-                                        
- 
 
-                
-                                                                               
-                                                                               
-                                                                                           
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                           
+
+
 
 function isDurableEffectDeclaration(effect         )                                     {
   return !!effect && typeof effect === 'object' && typeof (effect                         ).durable === 'string';
@@ -109,9 +109,9 @@ async function enqueueDurableEffectsAndAdvance(db          , ev                 
   });
 }
 
-export function createDurableEffectsConsumer({ durableEffectsRegistry, jobs }   
-                                                                               
-                                
+export function createDurableEffectsConsumer({ durableEffectsRegistry, jobs }
+
+
  )                                                                                             {
   if (!jobs || !durableEffectsRegistry || durableEffectsRegistry.size === 0) return null;
   return async (events, { db }) => {
@@ -146,9 +146,9 @@ function rowToEvent(row            )                                            
   return handle ? Object.freeze({ ...ev, handle }) : Object.freeze(ev);
 }
 
-export async function reconcileDurableEffects(db          , { durableEffectsRegistry, jobs }   
-                                                                               
-                                
+export async function reconcileDurableEffects(db          , { durableEffectsRegistry, jobs }
+
+
  )                                {
   if (!jobs || !durableEffectsRegistry || durableEffectsRegistry.size === 0) return { enqueued: 0 };
   let enqueued = 0;

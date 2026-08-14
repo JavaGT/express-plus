@@ -1,9 +1,9 @@
 import { read, write, subscribe, admin } from './grant.mjs';
-                                             
+
 import { readScopedRow,                                   } from './http-crud-dispatch.mjs';
 import { createAuthorizationAdapter,                                                } from './authorization-adapter.mjs';
-                                                   
-                                                
+
+
 
 const AUTHORIZED_ROWS                = Symbol('workbench.authorizedRows');
 const VERB = new Map                    ([[read, 'read'], [write, 'update'], [subscribe, 'subscribe'], [admin, 'admin']]);
@@ -13,23 +13,23 @@ const VERB = new Map                    ([[read, 'read'], [write, 'update'], [su
 // to the pre-adapter bindAuthorizedRows loop, but through the ONE admit seam.
 const DEFAULT_AUTHORIZATION                       = createAuthorizationAdapter();
 
-                                    
-                                                      
-                      
-                                  
- 
 
-                                                                                     
 
-                                                            
-                                                                                     
 
-                                                                
-                                                                                         
-                                   
-  
 
-                                                                  
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // The resolver selects rows; it cannot decide authorization. Every selected row
 // is evaluated by Workbench's existing row-grant/check registry under the same
@@ -45,14 +45,14 @@ export function isAuthorizedRows(value         )                                
   return typeof value === 'function' && (value                        )[AUTHORIZED_ROWS] === true;
 }
 
-                     
-                        
-                                                        
- 
 
-                            
-                                                     
- 
+
+
+
+
+
+
+
 
 // Bind a registered action's authorizedRows declaration to a concrete app and
 // an authorization adapter (S5/A2). The resolver selects the affected rows;

@@ -1,11 +1,11 @@
 // Node HTTP/SSE skin for public LiveDelivery. Applications mount this handler
 // directly; it never receives raw log rows or application projection callbacks.
 
-                                                                 
 
-                                                
-                                             
-                                                                                                        
+
+
+
+
 
 const JSON_LIMIT = 1024 * 1024;
 
@@ -64,12 +64,12 @@ function writeJson(res                , value         , maxBytes = JSON_LIMIT)  
  * {path}/events?scope=<scope>&after=<cursor>` is an SSE stream whose data
  * frames are arrays of recipient envelopes. Return false for unrelated routes.
  */
-export function createLiveDeliveryHttpHandler({ delivery, principalOf, path = '/live-delivery', maxSubscriptions = 100, log = null }   
-                              
-                                                                                                         
-                
-                            
-                            
+export function createLiveDeliveryHttpHandler({ delivery, principalOf, path = '/live-delivery', maxSubscriptions = 100, log = null }
+
+
+
+
+
  ) {
   if (!delivery || typeof delivery.bootstrap !== 'function' || typeof delivery.catchup !== 'function' || typeof delivery.subscribe !== 'function') {
     throw new TypeError('delivery must be a LiveDelivery');

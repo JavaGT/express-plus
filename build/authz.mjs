@@ -2,30 +2,30 @@ import { assertGuarded } from './guard/static.mjs';
 import { buildCheckRegistry } from './registry.mjs';
 import { isRuntimeGrantClause } from './scope.mjs';
 import { compileReadScope, compileInheritScope } from './scope-sql.mjs';
-                                                        
+
 
 // The grant declaration: either a thunk returning the clause array, or an
 // `inherit(Parent, { via })` directive object (reserved for Phase 1's inherit
 // path). The thunk form is resolved here so its `.can` bodies can be statically
 // guarded at load.
-                            
-                            
-                         
- 
 
-                            
-                                  
-                  
-                                           
-                                           
- 
 
-                       
-                                    
-                                
-                     
-                    
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // Normalize the grant declaration into an array of clauses. A grant is either a
 // thunk returning an array of `scope().can()` clauses (note.mjs) or — Phase 1

@@ -30,12 +30,12 @@
 // Principal-absent (null) is the row-grant's trusted query API convention: not
 // a request path — skip field authz (mirrors mayVerb running only in dispatch).
 
-                                             
+
 import { read, write } from './grant.mjs';
 import { mayFieldOp, mayRow } from './row-grant.mjs';
-                                                   
-                                                                       
-                                                
+
+
+
 
 function isRequestPrincipal(principal         )          {
   return principal !== null && principal !== undefined;
@@ -122,16 +122,16 @@ export function annotatedTextDeniedPlaceholder()                                
   return deniedPlaceholder;
 }
 
-                                       
-                       
-                     
-               
-                  
-                         
-                     
-                          
-                                              
- 
+
+
+
+
+
+
+
+
+
+
 
 // Evaluate one side of a proposed transition. A field op (fieldName set) runs
 // field access for the transition capability; a row verb runs the row grant.
@@ -201,11 +201,11 @@ export async function admitRowTransition(request                      )         
 //
 // The decision is two-valued ({ admitted }) — no field-name echo, no reason
 // detail — so the transport renders one generic denial for every case.
-                                        
-                          
-                            
-                           
- 
+
+
+
+
+
 
 export async function admitInferenceFields(
   entity              ,

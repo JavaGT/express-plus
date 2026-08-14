@@ -31,6 +31,7 @@ export {
   migrationLedgerStateOf,
   validateMigrations,
   runMigrations,
+  NonTransactionalMigrationError,
   isReservedNamespace,
 
 

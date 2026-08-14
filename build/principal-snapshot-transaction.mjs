@@ -1,40 +1,40 @@
 import { txn } from './driver.mjs';
-                                            
+
 import { isPrincipalSnapshotDeclaration,                                   } from './principal-snapshot-declaration.mjs';
 
-                                             
-               
-             
- 
 
-                                      
-               
-                                                                                                     
- 
 
-                                         
-                                            
-                                        
-          
 
-                                               
-                                                                                
-                                                                        
-                                                             
-                                                                     
- 
 
-                                         
-                                            
-                        
-                      
- 
 
-                                
-                                  
-                                                   
-                                                               
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 export function createPrincipalSnapshotTransaction(app                      )                               {
   const registeredDeclarations = new Map                                      ();

@@ -1,26 +1,26 @@
 import { EventKind } from '../event-handle.mjs';
 
-                                                                       
-                       
-                    
-                       
-                   
-                   
-               
-                       
-                                           
-                    
- 
 
-                                     
-            
-                    
-                   
-                  
-                        
-    
-                                        
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 const invitationAcceptanceAuthorities = new WeakMap                                            ();
 

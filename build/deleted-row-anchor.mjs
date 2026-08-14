@@ -8,14 +8,14 @@
 // see the row as gone the instant it is deleted; only the explicit historical
 // read path (authorizeRow's `allowDeletedAnchor` option) consults it.
 
-                            
-                                              
-                                                                            
-  
 
-                     
-                                            
-  
+
+
+
+
+
+
+
 
 export function deletedRowAnchorTableDDL()         {
   return `CREATE TABLE IF NOT EXISTS _DeletedRowAnchor (

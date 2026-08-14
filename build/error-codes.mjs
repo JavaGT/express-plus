@@ -1,8 +1,8 @@
-                              
-                        
-                          
-                           
-  
+
+
+
+
+
 
 export const ERROR_CODES = Object.freeze({
   'auth.denied.grant':       Object.freeze({ code: 'auth.denied.grant',       status: 403, message: 'Principal lacks required grant.' }),
@@ -21,7 +21,7 @@ export const ERROR_CODES = Object.freeze({
   'authoring-stream-capacity':   Object.freeze({ code: 'authoring-stream-capacity',   status: 409, message: 'Authoring stream capacity exceeded.' }),
 }         );
 
-                                             
+
 
 export function errorCode(code                       )                 {
   const entry = (ERROR_CODES                                            )[code];

@@ -9,7 +9,7 @@ import { frameworkTableNamesWithoutAuthCompile } from './framework-table-names.m
 
 const PACKAGE_TABLES = new Set(frameworkTableNamesWithoutAuthCompile.map((name) => name.toLowerCase()));
 
-                                                        
+
 
 function identifier(name        )         {
   return `"${name.replaceAll('"', '""')}"`;

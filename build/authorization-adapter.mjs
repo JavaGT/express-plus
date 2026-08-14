@@ -33,22 +33,22 @@
 // there, never falling back to loading every row and filtering in JS.
 
 import { getLog } from './log.mjs';
-                                             
+
 import { operationCategory,                        } from './operation.mjs';
 import { collapseForAdmission, statusOf,                } from './principal.mjs';
-                                                           
+
 import { requireUser } from './route-gate.mjs';
 import {
   mayRow as moduleMayRow,
   mayVerb as moduleMayVerb,
   fieldCapabilities as moduleFieldCapabilities,
   rowCapabilities,
-                    
+
 } from './row-grant.mjs';
 import { buildCheckRegistry } from './registry.mjs';
 import { compileReadScope, rowMatchesScope,                        } from './scope-sql.mjs';
 import { DecisionTrace } from './decision-trace.mjs';
-                                                              
+
 
 // The generic resource categories. A decision's resourceCategory is always one
 // of these — framework nouns, never app nouns. `entity` is a Workbench entity
@@ -56,97 +56,97 @@ import { DecisionTrace } from './decision-trace.mjs';
 // through the same seam (keyed by category + registered name); `action` is a
 // composite (registered action) admission; `principal` is the route-gate /
 // principal-status admission.
-                              
-            
-          
-            
-            
-                  
-               
-             
 
-                                                                                                  
+
+
+
+
+
+
+
+
+
 
 // The closed reason-code vocabulary. A denial carries exactly one generic code
 // — never an app-domain name, never row content, never which non-active status
 // applied. `principal-status` is reserved for policy adapters operating under
 // an explicit audit context (A4); the default adapter's collapse path NEVER
 // emits it, so a revoked and an unknown principal stay indistinguishable.
-                                 
-               
-                      
-                  
-                   
-                     
-                 
-                      
-                       
-                   
+
+
+
+
+
+
+
+
+
+
 
 // The frozen decision every admit() returns. `trace` is null in the production
 // default and a readonly check list when tracing is enabled (env/test flag).
 // `operation` is null ONLY on an 'unknown-operation' denial — an operation the
 // adapter does not recognize is not a category, so the decision carries no
 // label under which admission could have legitimately run.
-                                    
-                             
-                                               
-                                              
-                                     
-                                                  
-                                               
-                                                       
- 
+
+
+
+
+
+
+
+
+
 
 // The operation an admit() input names: a category TOKEN or a verb/category
 // NAME string (normalized through operationCategory, fail closed on unknown).
-                                                            
+
 
 // Entity-row admission: a materialized row (or null when the principal's read
 // scope excluded it) plus the transport verb. A field admission (fieldName +
 // capability) runs the field `.can` seam instead of the row verb.
-                                   
-                              
-                        
-                                
-                                
-                        
-                                          
-                              
-                                   
-                                      
- 
+
+
+
+
+
+
+
+
+
+
+
 
 // Route-gate admission: does this principal pass the (per-verb) route gate?
 // The gate defaults to requireUser(). Non-active principals collapse to
 // anonymous BEFORE the gate runs, so a revoked and an unauthenticated caller
 // are denied identically ('anonymous').
-                                      
-                                 
-                                
-                                          
-                       
-                                      
- 
+
+
+
+
+
+
+
 
 // One row a composite (registered) action must admit against.
-                                 
-                                
-                        
-                        
-                                   
- 
+
+
+
+
+
+
 
 // Composite admission: a registered action must admit against EVERY affected
 // capability and row. All requirements are evaluated through ONE admit() call;
 // any single denial denies the whole action.
-                                   
-                              
-                                
-                                                   
-                                          
-                                      
- 
+
+
+
+
+
+
+
 
 // Plugin-resource admission (blob / search / subscription / policy): keyed by
 // category, optionally naming a resource registered on this adapter. A named
@@ -158,47 +158,47 @@ import { DecisionTrace } from './decision-trace.mjs';
 // scope this seam cannot evaluate without a database, denies 'no-row-scope').
 // `row` must carry the STORED cell form (the shape SQL returns) so the scope's
 // serialized literals compare correctly.
-                                     
-                                            
-                                
-                                          
-                                 
-                         
-                                      
- 
 
-                        
-                    
-                       
-                    
-                       
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // Resource registration for the non-entity categories. The scope predicate
 // must compile to constrained SQL here (a non-compilable scope throws
 // NonCompilableError at registration, never a silent load-all-then-filter
 // fallback). `fields`/`checks` supply the compile registry the scope may use.
-                                       
-                                            
-                        
-                                                                     
-                                                      
-                                                                        
- 
 
-                                                                                                                  
-                                                                                                                   
 
-                                              
-                  
-                    
-                      
-                                                                                                                                                                          
- 
 
-                                       
-                                                       
-                                                      
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // The env/test flag that turns dev decision traces on for the default adapter.
 // An explicit `trace` option overrides it; the production default is null

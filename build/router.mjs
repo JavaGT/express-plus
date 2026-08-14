@@ -3,7 +3,7 @@
 // The shared core of the mountable surface factory, route resolution, and
 // imperative/CRUD route building. Separated so app.mjs owns assembly only.
 
-                                                       
+
 import { requireUser, isGate } from './route-gate.mjs';
 
 // The HTTP methods an imperative router verb maps to. `r.get/post/patch/delete`
@@ -28,54 +28,54 @@ const RESOURCE_VERBS = Object.freeze([
 
 // A handler-chain member: middleware or the final handler. The chain runs with
 // `(req, res, next)` and the route layer only requires it to be callable.
-                                                           
 
-                                      
-                
-                
-                         
- 
+
+
+
+
+
+
 
 // The compiled entity record the router consumes. The entity compiler owns the
 // full shape; the router only needs the name, the resolved per-verb route gate,
 // the field map (for CRDT text apply routes), and the optional routes thunk.
-                                 
-               
-                                          
-                                                        
-                                                           
-                                       
-                    
-                         
- 
 
-                                        
-                 
-               
-             
-                                    
- 
 
-                           
-                
-                         
-              
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // The shared route spine { method, path, gate } with a discriminated tail: an
 // imperative route carries `handlers`, an entity CRUD route carries
 // { verb, entity, fieldName? }. The dispatcher discriminates structurally on the
 // presence of `handlers`.
-                              
-                 
-               
-             
-                                     
-                
-                          
-                     
-                      
- 
+
+
+
+
+
+
+
+
+
+
 
 // Join a base path and a suffix into a single clean path. The base may be '/'
 // (a router mounted bare) or '/notes'; the suffix is '' or '/:id'. Collapses any
@@ -140,53 +140,53 @@ function rebaseRoute(route             , parentBase        )              {
   });
 }
 
-                                                   
+
 
 // A router or resolvable surface mount target — anything with its own
 // declarations + resolveRoutes (a bare mountable), a router blueprint with
 // resolveFor (re-resolved per application), or a compiled entity.
-                              
-                                    
-                          
-                        
- 
 
-                               
-                                                         
- 
 
-                                                                             
+
+
+
+
+
+
+
+
+
 
 // One ordered declaration recorded by the fluent mount/use/verb calls. Resolution
 // drains these into the concrete `routes` table.
-                  
-                                                        
-                        
-                                                         
-                                                                                    
 
-                            
-                       
-                        
-                              
-                                                  
-                                                
-                         
-                                                   
-                                                    
-                                                     
-                                                      
-                                          
-                                                     
-                         
- 
 
-                                
-                        
-                                 
-                
-                      
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // A mountable surface — the shared core of the top-level app, a router mini-app,
 // and the `r` handed to an entity's `routes:(r, Entity)=>...` thunk. Two-phase

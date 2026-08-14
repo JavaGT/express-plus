@@ -1,6 +1,6 @@
 import { principalSnapshotScope, parsePrincipalSnapshotScope } from './principal-snapshot-scope.mjs';
 import { isPrincipalSnapshotDeclaration,                                   } from './principal-snapshot-declaration.mjs';
-                                            
+
 
 const PRINCIPAL_PREFIX = 'PrincipalSnapshot:';
 
@@ -42,89 +42,89 @@ function jsonValue(value         , path        )                                
   throw new TypeError(`${path} is not a JSON value`);
 }
 
-                                             
-               
-             
- 
 
-                                                                                                             
 
-                                                  
-                 
-              
-                 
- 
 
-                                                  
-                   
-                                    
-                 
- 
 
-                                               
-                
- 
 
-                                                 
-                  
- 
 
-                                                 
-                  
-                                                        
-                 
- 
 
-                                              
-                                   
-                                
-                                   
 
-                                              
-                                  
-                                   
-                                
-                                   
 
-                                                  
-                                                           
-                
-                
-                              
-                                                                                       
-                               
- 
 
-                                              
-                                          
- 
 
-                                            
-                                                                                                                                             
-                                                                                                                                                          
-                                                                                            
-                                                                                                        
-                
- 
 
-                                     
-                                            
-                                        
- 
 
-                                              
-                                            
-                                        
-                
-                 
-                                                                                       
-                               
-                              
-                  
-                   
-                 
-                    
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function revisionFor(db          , declaration                              , principal                            )         {
   const row = db.prepare(
@@ -168,9 +168,9 @@ function resolution(
   return Object.freeze({ declaration, principal: Object.freeze({ type: parsed.type, id: parsed.id }) });
 }
 
-export function createPrincipalSnapshotDelivery({ db, declarations }   
-                                  
-                                                                
+export function createPrincipalSnapshotDelivery({ db, declarations }
+
+
  )                            {
   if (!db) throw new TypeError('principal snapshot delivery requires a database');
   const database = db;

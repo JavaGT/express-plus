@@ -14,7 +14,7 @@
 // entity-load from the frozen field descriptors; there is no per-request cost.
 
 import { serializeField, structCellColumn } from './field-strategy.mjs';
-                                                                                      
+
 import * as eventHandle from './event-handle.mjs';
 import { getAnnotatedTextCompiledMetadata } from './annotated-text-field.mjs';
 
@@ -70,12 +70,12 @@ export class NonCompilableError extends Error {
 // it. A Join (reserved here, exercised when inherit lands) traverses a typed FK.
 // The AST node is an open record tagged by `node`; each lowering case reads its
 // own fields (loose by design — the op set is closed and frozen).
-                          
-                        
-                                            
-                              
-                                  
- 
+
+
+
+
+
+
 
 const TRUE          = Object.freeze({ node: 'true' })                      ;
 const FALSE          = Object.freeze({ node: 'false' })                      ;
@@ -158,23 +158,23 @@ function makeIsProxy(registry                         , where        )          
 // gte/lte) plus the special forms the field's kind adds (has for a map,
 // matches for FTS text, nearest for a vector, native event handles for a
 // membership/list/log field). Ops on a non-compilable kind throw.
-                              
-                    
-                                  
-                                  
-                                             
-                        
-                                   
-                                   
-                                    
-                                        
-                                                   
-                         
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // A field descriptor as the scope compiler reads it: kind/type/role decide which
 // ops exist, cells names a struct's sub-cells, target names a ref's FK target.
-                                               
+
 
 // A typed handle for one field, exposing the compilable value ops. This is the
 // ONE handle definition: the scope compiler reaches it through makeFieldsProxy
@@ -346,7 +346,7 @@ export function fieldHandle(
         `field '${String(name)}' is an annotatedText field and cannot be compared in scope`,
       );
     };
-    const meta = getAnnotatedTextCompiledMetadata(descriptor)   
+    const meta = getAnnotatedTextCompiledMetadata(descriptor)
                                                                                                                    ;
     const handle              = {
       fieldName: name,
@@ -484,10 +484,10 @@ export function fieldHandle(
   return handle;
 }
 
-function relationMapHandle({ refFieldName, targetEntityName, targetFieldName }   
-                       
-                           
-                          
+function relationMapHandle({ refFieldName, targetEntityName, targetFieldName }
+
+
+
  )              {
   const fail = ()        => {
     throw new NonCompilableError(
@@ -559,11 +559,11 @@ function makeFieldsProxy(fields                                 , where        ,
 // faces exclusively.
 export function harvest(
   predicate                                                    ,
-  { fields, where, registry, entityName }   
-                                    
-                  
-                                      
-                        
+  { fields, where, registry, entityName }
+
+
+
+
    ,
 )          {
   const is = makeIsProxy(registry, where);
@@ -585,19 +585,19 @@ export function harvest(
 // lowerToSql(ast, ctx) -> { sql, params }. ctx carries the base table alias and
 // a monotonic counter (via a mutable `next`) so composed fragments never collide
 // on param names. Param keys are `:p<n>_<logical>`.
-                               
-                 
-                        
-                                   
-                 
- 
 
-                               
-                 
-                
-                 
-            
- 
+
+
+
+
+
+
+
+
+
+
+
+
 
 export function lowerToSql(ast         , ctx               = {})                                                                                 {
   const alias = ctx.alias ?? 't0';
@@ -723,12 +723,12 @@ function lower2(ast         , ctx              )         {
 // The compiled read-scope template: the parameterized SQL fragment plus the
 // harvested AST (retained so a child entity's inherit directive can re-lower it
 // under a join alias — the AST is the durable artifact, the SQL one rendering).
-                                    
-              
-                                  
-                               
-               
- 
+
+
+
+
+
+
 
 // Compile a scope predicate to its read-scope SQL template at entity-load, also
 // returning the harvested AST so a child entity can re-lower it under a join
@@ -736,11 +736,11 @@ function lower2(ast         , ctx              )         {
 // rendering of it.
 export function compileReadScope(
   predicate                                                    ,
-  { fields, where, registry, entityName }   
-                                    
-                  
-                                      
-                        
+  { fields, where, registry, entityName }
+
+
+
+
    ,
 )                    {
   const ast = harvest(predicate, { fields, where, registry, entityName });
@@ -829,15 +829,15 @@ export function bindReadScope(readScope                               , principa
 // row and must never admit on a guess. `nearest` lowers to no SQL filter (1=1),
 // so it imposes no constraint and evaluates TRUE.
 
-                            
-                               
-                     
- 
+
+
+
+
 
 // The unevaluable third value: not `false`, so `not` cannot flip it to true and
 // `and` cannot sweep it away. Only `=== true` at the top admits the row.
 const UNEVALUABLE                = Symbol('scope.unevaluable');
-                                                    
+
 
 // SQL NULL on either operand: `col = NULL`, `NULL = NULL`, and `NOT (col = NULL)`
 // are all NULL in SQLite — none of them satisfy a WHERE clause.

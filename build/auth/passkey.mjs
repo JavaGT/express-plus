@@ -19,17 +19,17 @@
 //   - parseAuthenticatorData(buf) → { rpIdHash, flags, signCount }
 
 import crypto from 'node:crypto';
-                                             
+
 
 // ---- RP configuration --------------------------------------------------------
 // Sensible defaults; overridable via config.rp per-app.
 
 // The RP identity an app overrides per-app (cfg.rp) and the frozen default.
-                    
-               
-             
-                 
- 
+
+
+
+
+
 
 const defaultRp                     = Object.freeze({
   name: 'workbench',
@@ -37,9 +37,9 @@ const defaultRp                     = Object.freeze({
   origin: 'http://localhost:3000',
 });
 
-                     
-                         
- 
+
+
+
 
 // rpConfig(cfg) → frozen { name, id, origin }. Picks per-app overrides from
 // cfg.rp; absent keys fall back to the defaultRp. The shape is frozen so no
@@ -67,17 +67,17 @@ const DEFAULT_CHALLENGE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 // A stored challenge entry: the caller's data plus the creation timestamp the
 // TTL sweep and the expiry check read.
-                          
-                  
-                         
- 
 
-                                 
-                                                                 
-                                                
-                                                    
-                  
- 
+
+
+
+
+
+
+
+
+
+
 
 // createChallengeStore(ttlMs) → { set, get, consume, destroy }. An in-memory Map
 // with TTL-based expiry: entries older than ttlMs are dropped. `consume` is a
@@ -172,10 +172,10 @@ export function parseAuthenticatorData(authData        )                        
 
 // The decoder's return shape: the decoded value (number, string, Buffer, or a
 // map record) plus the offset just past the consumed bytes.
-                      
-                 
-              
- 
+
+
+
+
 
 function decodeCborLen(buf        , offset        )                               {
   const ai = buf[offset] & 0x1f;
@@ -350,30 +350,30 @@ function encodeDerLength(n        )         {
 // assertion). `response` carries the base64url-encoded ceremony payloads the
 // server verifies; the optional metadata (name/transports/backedUp) is stored
 // alongside the credential on registration.
-                               
-              
-                 
-                
-                
-                                 
-                     
-             
-                           
-                               
-                               
-                       
-                        
-    
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // The stored Credential entity row the assertion verifier reads: the credential
 // id (base64url), the public key (DER/SPKI, base64url), and the last-seen sign
 // counter (replay protection).
-                            
-                       
-                    
-                     
- 
+
+
+
+
+
 
 // verifyRegistration(challenge, credential, rp) → { credentialId, publicKey, signCount }
 // Verifies a WebAuthn registration (attestation) response.
@@ -514,12 +514,12 @@ export function buildRpIdHash(rpId        )         {
 // → Buffer. Constructs a complete authenticatorData binary from the named parts.
 // When credentialId and publicKey are provided, the attested credential data
 // section is included (flags should have AT bit 0x40 set).
-export function buildAuthenticatorData({ rpIdHash, flags, signCount, credentialId, publicKey }   
-                   
-                
-                    
-                        
-                     
+export function buildAuthenticatorData({ rpIdHash, flags, signCount, credentialId, publicKey }
+
+
+
+
+
  )         {
   const parts = [rpIdHash, Buffer.from([flags])];
   // 4-byte big-endian sign counter
@@ -545,10 +545,10 @@ export function buildAuthenticatorData({ rpIdHash, flags, signCount, credentialI
 }
 
 // buildClientDataJSON({ challenge, origin, type }) → base64url-encoded string.
-export function buildClientDataJSON({ challenge, origin, type }   
-                    
-                 
-               
+export function buildClientDataJSON({ challenge, origin, type }
+
+
+
  )         {
   const json = JSON.stringify({ challenge, origin, type });
   return Buffer.from(json, 'utf-8').toString('base64url');
@@ -565,8 +565,8 @@ export function signAssertion(privateKey           , authenticatorDataBuf       
 // cosePublicKeyFromKeyPair(keypair) → base64url of COSE-encoded P-256 public key.
 // For constructing synthetic attestation authData with the keypair's public key
 // in the COSE format an authenticator would embed.
-export function cosePublicKeyFromKeyPair(keypair   
-                                                                                
+export function cosePublicKeyFromKeyPair(keypair
+
  )         {
   const jwk = keypair.publicKey.export({ format: 'jwk' });
   const x = base64urlToBuffer(jwk.x );
@@ -597,9 +597,9 @@ export function cosePublicKeyFromKeyPair(keypair
 // buildAttestationObject({ fmt, authData }) → base64url-encoded CBOR.
 // Constructs a minimal CBOR attestation object for test registration.
 //   { "fmt": fmt, "attStmt": {}, "authData": authData }
-export function buildAttestationObject({ fmt = 'none', authData }   
-               
-                            
+export function buildAttestationObject({ fmt = 'none', authData }
+
+
  )         {
   const authDataBuf = typeof authData === 'string' ? base64urlToBuffer(authData) : authData;
   const fmtBuf = Buffer.from(fmt, 'utf-8');

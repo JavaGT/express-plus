@@ -845,6 +845,8 @@ function validateColumnList(columns         , knownColumns                      
 
 
 
+
+
 export function defineSqliteSchema(spec                   )                          {
   validateSpec(spec);
   const validated = spec                    ;
@@ -872,6 +874,10 @@ export function defineSqliteSchema(spec                   )                     
     }))),
     ...(table.primaryKey === undefined ? {} : { primaryKey: Object.freeze([...table.primaryKey]) }),
   })));
+  const externalTables = Object.freeze((validated.externalTables ?? []).map((table) => Object.freeze({
+    name: table.name,
+    columns: Object.freeze([...table.columns]),
+  })));
   const virtualTables = Object.freeze((validated.virtualTables ?? []).map((virtualTable) => Object.freeze({
     ...virtualTable,
     options: Object.freeze([...virtualTable.options]),
@@ -895,6 +901,7 @@ export function defineSqliteSchema(spec                   )                     
     name: validated.name,
     tableNames: Object.freeze(tableNames),
     tables,
+    externalTables,
     virtualTables,
     triggers,
     migrations: Object.freeze(migrations),

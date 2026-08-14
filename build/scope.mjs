@@ -16,10 +16,10 @@
 // A grant clause: the read predicate (for SQL lowering) plus the runtime
 // capability function. Frozen — a declared grant is immutable.
 
-                                  
-                              
-                                                    
-  
+
+
+
+
 
 const RUNTIME_GRANT_CLAUSE = Symbol('runtimeGrantClause');
 
@@ -36,9 +36,9 @@ export function isRuntimeGrantClause(clause         )                           
   return Boolean((clause                                                           )?.[RUNTIME_GRANT_CLAUSE]);
 }
 
-export function scope(predicate         )   
-                              
-                                       
+export function scope(predicate         )
+
+
   {
   return Object.freeze({
     predicate,

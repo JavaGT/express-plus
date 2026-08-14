@@ -10,10 +10,10 @@
 // Runtime effect execution lives in ./effect-runtime.mjs.
 
 import {
-                         
-                    
-                    
-                           
+
+
+
+
 } from './effect-runtime.mjs';
 
 export { inc, dec, self, many, executeEffect, executeEffectsForEvent } from './effect-runtime.mjs';
@@ -23,24 +23,24 @@ export { inc, dec, self, many, executeEffect, executeEffectsForEvent } from './e
 // Backing store for anyOf symbol → original handles (module lifetime).
 const anyOfTriggers = new Map                                                                    ();
 
-                           
-                                 
-                        
- 
 
-                                     
-                                            
-                        
- 
 
-                              
-               
-                    
-                                   
-                          
- 
 
-                                                                          
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function isEventHandle(handle         )                            {
   return !!handle && typeof handle === 'object' && (handle                   ).brand === 'event-handle' && typeof (handle                   ).type === 'string';
@@ -201,9 +201,9 @@ function validateWhenPredicate(fn               , { triggerHandle, sourceEntityN
 
 // Compile all declared effects for an entity at load time.
 // Returns a compiled effects map or null if no effects declared.
-export function compileEntityEffects(entityRecord                    , _allEntities         )   
-                                                         
-                                
+export function compileEntityEffects(entityRecord                    , _allEntities         )
+
+
          {
   const { name, effects } = entityRecord;
   if (!effects) return null;

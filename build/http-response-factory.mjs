@@ -5,27 +5,27 @@
 //
 // One response abstraction — no two paths building the same wrapper twice.
 
-                                                
+
 
 import { sendJson } from './http-response.mjs';
 import { canWriteResponse } from './http-response.mjs';
 
-                                        
-                     
- 
 
-                                 
-                                       
-                                       
-                                        
-                                           
-                                
-                                                                       
-                                                                  
-                                                                       
-                      
-                                  
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 /**
  * Creates an Express-style response facade wrapping a Node.js ServerResponse.

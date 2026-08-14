@@ -30,88 +30,88 @@ import {
 } from './annotated-text-authoring-stream.mjs';
 import { authoringRedactionsForRecipient } from './annotated-text-recipient-projection.mjs';
 import { getAnnotatedTextCompiledMetadata } from './annotated-text-field.mjs';
-                                                
-                                                           
-                                                         
+
+
+
 import { rawRow } from './entity/query.mjs';
 
-                         
-                                               
-                               
-                                 
- 
 
-                  
-                                      
-                             
- 
 
-                        
-                           
-                     
-                    
-                                                 
-                              
- 
 
-                     
-                             
-                     
-                
-                 
-              
-                       
-                                    
- 
 
-                   
-                   
-                                          
-                
- 
 
-                         
-              
-                         
- 
 
-                        
-                   
-             
-                                                        
-                                                       
-                       
-                 
- 
 
-                         
-             
-                 
-                
-                   
-                               
-                                                   
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // The plan's authoritative emptied-annotation disposition (mirrors
 // annotated-text-plan.ts EmptiedAnnotation): an annotation whose range an edit
 // collapsed to zero width is either `deleted` (dropped) or `orphaned` (kept
 // with its saved quote), per its declaration's `empty` policy. The fold carries
 // only the disclosure the recipient is entitled to.
-                              
-                       
-                             
-              
-                                                                                          
-                                                                                                 
- 
 
-                           
-                       
-                               
-                 
-                      
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // The v13 operated-event facts bag is one exact key set (mirrors
 // annotated-text-operated-facts.mjs and the row projection). Anything else —
@@ -421,12 +421,12 @@ export async function tryBuildAnnotatedTextFoldEnvelopes(ctx         , { db, doc
  * caller gates redacted recipients before minting). Returns null when the
  * client nonce is missing or authoring capacity is exhausted.
  */
-function mintFoldAuthoring({ db, document, principal, fence, family }   
-             
-                         
-                                          
-                
-                               
+function mintFoldAuthoring({ db, document, principal, fence, family }
+
+
+
+
+
  )                       {
   const prefix = `${document.entity.name}_${document.fieldName}`;
   if (typeof document.clientNonce !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(document.clientNonce)) {

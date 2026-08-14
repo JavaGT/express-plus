@@ -3,13 +3,13 @@
 // schedule.mjs. Runtime functions extracted to keep the declaration surface clean.
 
 import { randomUUID } from 'node:crypto';
-                                                
+
 import { getLog } from './log.mjs';
 import { machineAllows, isMachinePrincipal, machinePrincipal } from './machine-principal.mjs';
-                                                                   
+
 import { createClockRunner } from './clock-runner.mjs';
-                                                           
-                                            
+
+
 import { materializeStoredRow } from './entity/materialize-row.mjs';
 import { triggerList, schedulerSource, tickSource } from './schedule.mjs';
 import { rawRow } from './entity/query.mjs';
@@ -20,40 +20,40 @@ const DEADLINE_SCAN_INTERVAL_MS = 1000;
 // declared fields (for row materialization), and the validated schedule slots.
 // fields is optional — the schedule runtime is the only consumer of the field
 // map it reads, and typed callers legitimately carry a looser record.
-                          
-               
-                                           
-                                     
- 
+
+
+
+
+
 
 // A validated schedule trigger as schedule-compile emits it: kind discriminates
 // deadline (schedule.at/after) from tick (tick.hz/every); the compiled SQL half
 // (whileSql/whileParams) and identity (fieldName/triggerId) are attached here.
-                           
-                
-                     
-                     
-                 
-                 
-                      
-                                                       
-                                                                                        
-                    
-                                        
-                         
- 
 
-                             
-                 
-               
-                
-                                   
-                    
- 
 
-                         
-                                                                                                               
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function passesWhen(trigger                 , row                         )          {
   if (trigger.when === undefined) return true;
@@ -226,11 +226,11 @@ export function discoverTickedRows(db          , entities                       
 // deadline field changes, so a row whose timestamp changes away and later
 // back to the same value can fire again. Scheduler-originated mutations are
 // skipped (admission just created the receipt we'd otherwise delete).
-export function rearmChangedScheduleReceipts({ entity, event, principal, db }   
-                                 
-                                    
-                                                                             
-                       
+export function rearmChangedScheduleReceipts({ entity, event, principal, db }
+
+
+
+
  )         {
   const data = event?.data;
   if (!data || typeof data !== 'object') return 0;
@@ -252,10 +252,10 @@ export function rearmChangedScheduleReceipts({ entity, event, principal, db }
 
 // clearRemovedScheduleReceipts — once the projected row is gone, no deadline
 // receipt for it can be useful. Runs in the same dispatch transaction.
-export function clearRemovedScheduleReceipts({ entity, rowId, db }   
-                                 
-                  
-                       
+export function clearRemovedScheduleReceipts({ entity, rowId, db }
+
+
+
  )         {
   if (rowId == null || !db) return 0;
   let changes = 0;
@@ -269,9 +269,9 @@ export function clearRemovedScheduleReceipts({ entity, rowId, db }
 
 // pruneInactiveScheduleReceipts — removes receipts whose source no longer
 // exists in the compiled application (renamed/removed declarations).
-export function pruneInactiveScheduleReceipts({ db, entities }   
-                       
-                                                                                                   
+export function pruneInactiveScheduleReceipts({ db, entities }
+
+
  )         {
   if (!db) return 0;
   const entityList = normalizeEntityList(entities ?? []);
@@ -300,14 +300,14 @@ export function pruneInactiveScheduleReceipts({ db, entities }
 // decides the source binding and checks: tick.hz/tick.every require while and skip
 // due; schedule.at/schedule.after bind to fieldName, re-check due, and allow while
 // to be absent. Fail-closed on every mismatch.
-export function admitSystemMutation({ entity, verb, rowId, payload, principal, db, now }   
-                         
-               
-                 
-                                           
-                                                                             
-               
-                                      
+export function admitSystemMutation({ entity, verb, rowId, payload, principal, db, now }
+
+
+
+
+
+
+
  )          {
   // Machine-attribution gate: an unattributable / allowlist-less principal is
   // denied before any schedule check. This is the fail-closed discipline that
@@ -394,12 +394,12 @@ export function admitSystemMutation({ entity, verb, rowId, payload, principal, d
   return true;
 }
 
-function scanDeadlines({ db, entityList, entityMap, dispatch, now }   
-               
-                                                       
-                                         
-                          
-                    
+function scanDeadlines({ db, entityList, entityMap, dispatch, now }
+
+
+
+
+
  )       {
   const rows = discoverDueSchedules(db, entityList, now());
   for (const { entity: entityName, verb, rowId, payload, triggerId } of rows) {
@@ -421,12 +421,12 @@ function scanDeadlines({ db, entityList, entityMap, dispatch, now }
   }
 }
 
-function scanTicks({ db, entityList, dispatch, now, intervalMs = null }   
-               
-                                                       
-                          
-                    
-                             
+function scanTicks({ db, entityList, dispatch, now, intervalMs = null }
+
+
+
+
+
  )       {
   const rows = discoverTickedRows(db, entityList, now(), intervalMs);
   for (const { entity: entityName, verb, rowId, payload, triggerId } of rows) {
@@ -459,12 +459,12 @@ function scanTicks({ db, entityList, dispatch, now, intervalMs = null }
  * @param {object} [opts.clock]
  * @returns {{stop(): void}}
  */
-export function startClockTriggers({ db, entities, dispatch, now = Date.now, clock }   
-               
-                                                                   
-                          
-                     
-                             
+export function startClockTriggers({ db, entities, dispatch, now = Date.now, clock }
+
+
+
+
+
  )                   {
   const entityList = normalizeEntityList(entities);
   const entityMap = new Map(entityList.map((e) => [e.name, e]));

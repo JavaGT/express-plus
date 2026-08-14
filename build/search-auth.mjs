@@ -33,30 +33,30 @@
 // never carved from a field the principal cannot read.
 
 import { read,                 } from './grant.mjs';
-                                                
-                                                   
+
+
 import { requireUser,           } from './route-gate.mjs';
-                                                                                            
-                                                                                         
+
+
 
 // A closed admission outcome: admitted plus the adapter's closed reason code
 // (null on admit). A denied admission carries a generic code, never row content
 // and never which non-active status applied — the S5/A2 surface unchanged.
-                                  
-                             
-                                                  
- 
+
+
+
+
 
 // The registration input for a plugin's searchable source scope. `pluginId`
 // names the resource; `scope` is the principal-aware scope predicate over the
 // source entity; `fields`/`checks` supply the compile registry the scope may
 // use (the source entity's field descriptors).
-                                             
-                            
-                                                                     
-                                                      
-                                                                        
- 
+
+
+
+
+
+
 
 // The seam's own ledger of registered search resources. The adapter does not
 // expose a registration query, so the seam tracks what IT registered — a
@@ -67,15 +67,15 @@ import { requireUser,           } from './route-gate.mjs';
 // adapter A can never admit through adapter B (identity check, fail closed),
 // because a resource registered on one adapter is never presumed present on
 // another.
-                                       
-                        
-                                                                             
-                                                          
-                                         
-                                                    
-                                 
-                           
- 
+
+
+
+
+
+
+
+
+
 
 export function createSearchSourceRegistry(adapter                      )                       {
   if (
@@ -131,10 +131,10 @@ export function createSearchSourceRegistry(adapter                      )       
 export async function admitSearchSourceScope(
   adapter                      ,
   registry                      ,
-  input   
-                              
-                                  
-                         
+  input
+
+
+
    ,
 )                           {
   // The registry is bound to the adapter it was created against: a DIFFERENT
@@ -200,12 +200,12 @@ export async function admitSearchResult(
 // unreadable-field excerpt.
 export async function admitSearchExcerpt(
   adapter                      ,
-  input   
-                                  
-                                          
-                               
-                                  
-                                     
+  input
+
+
+
+
+
    ,
 )                           {
   // Fail closed on a field the source entity does not DECLARE: an unknown or
@@ -239,24 +239,24 @@ export async function admitSearchExcerpt(
 // in which case the candidate is omitted without consulting the adapter (a
 // missing row can never be shown). `excerpt` names the field the snippet was
 // carved from; the excerpt text is returned only when that field admits.
-                                        
-                     
-                       
-                            
-                                               
-                      
-                                  
-                               
-                          
-    
- 
 
-                                           
-                                                  
-                                                                                
-                                                                           
-                           
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                          
+
+
+
 
 // Admit EVERY candidate and keep only what admits (spec 2, second half). A
 // candidate whose current source row is missing is omitted outright. A row that
@@ -267,12 +267,12 @@ export async function admitSearchExcerpt(
 // on that candidate), mirroring S5/A2 fail-closed.
 export async function admitSearchHits      (
   adapter                      ,
-  input   
-                              
-                                
-                                        
-                                  
-                                                          
+  input
+
+
+
+
+
    ,
 )                                    {
   const hits                          = [];

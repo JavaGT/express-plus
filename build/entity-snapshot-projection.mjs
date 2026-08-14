@@ -6,31 +6,31 @@
 import { projectAnnotatedTextSnapshot } from './annotated-text-snapshot.mjs';
 import { projectRowForRecipient } from './entity/projection.mjs';
 import { readableFieldNames } from './field-admission.mjs';
-                                                                       
 
-                                        
-                
-                         
- 
 
-                                       
-                
-                                                
-                                                                        
- 
+
+
+
+
+
+
+
+
+
+
 
 export function hasAnnotatedTextFields(entity                      )          {
   return Object.values(entity.fields).some((descriptor) => descriptor.kind === 'annotatedText');
 }
 
-                                         
-              
-                               
-                               
-                     
-                      
-                                              
- 
+
+
+
+
+
+
+
+
 
 export async function projectEntitySnapshot({ db, entity, row, principal, authoring = null, authorization = null }                        )                                   {
   const materialized = entity.deserializeRow({ ...row });

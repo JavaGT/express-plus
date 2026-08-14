@@ -18,9 +18,9 @@ import {
 } from './annotated-text-continuous.mjs';
 import { canonicalTextOp } from './annotated-text.mjs';
 import { packOperatedFacts } from './annotated-text-operated-facts.mjs';
-                                                                           
-                                                                     
-                                                    
+
+
+
 
 function deepFreeze   (value   )    {
   if (value === null || typeof value !== 'object') return value;
@@ -31,47 +31,47 @@ function deepFreeze   (value   )    {
   return Object.freeze(value)     ;
 }
 
-                      
-                             
-                     
- 
 
-                    
-              
-             
-                     
-                                                            
-                 
-             
- 
 
-                      
-             
-                 
-                             
- 
 
-                           
-                       
-                            
-                          
- 
 
-                 
-                                                                                             
-                                                                             
-                                                                                                                         
 
-                             
-                       
-                             
-                
-                                 
-                   
-                              
-                               
-    
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function before(family                      , structuralRevision        )             {
   return Object.freeze({ structuralRevision, frontier: family.checkpoint.frontier });
@@ -101,12 +101,12 @@ function assertForwardOffset(text        , fromOffset        , toOffset        )
 }
 
 /** A range becomes empty when its visible width drops to zero after an edit. */
-function emptiedRanges({ beforeFamily, afterFamily, ranges, annotations, structureVersion }   
-                                     
-                                    
-                            
-                            
-                           
+function emptiedRanges({ beforeFamily, afterFamily, ranges, annotations, structureVersion }
+
+
+
+
+
  )                      {
   const emptied                      = [];
   for (const range of ranges) {
@@ -138,15 +138,15 @@ function materializeRangeBetween(family                      , range            
  * Plan a document-wide text insert/delete/replace. The edit names ABSOLUTE
  * offsets; the operation applies to the whole continuous family.
  */
-export function planTextOffsetEdit({ documentId, structureVersion, family, actor, lamport, edit, annotations = [], ranges = [] }   
-                     
-                           
-                               
-                
-                  
-                   
-                             
-                             
+export function planTextOffsetEdit({ documentId, structureVersion, family, actor, lamport, edit, annotations = [], ranges = [] }
+
+
+
+
+
+
+
+
  )           {
   const text = materializeText(family);
   if (edit.kind === 'text.insert') {
@@ -209,17 +209,17 @@ export function planTextOffsetEdit({ documentId, structureVersion, family, actor
 }
 
 /** Plan a document-range annotation.apply: one contiguous range, no blocks. */
-export function planTextRangeApply({ documentId, structureVersion, family, annotation, from, to, ranges = [], actorId, cardinality = 'many', sameFamilyAnnotationIds = null }   
-                     
-                           
-                               
-                         
-                                                       
-                                                     
-                             
-                  
-                               
-                                               
+export function planTextRangeApply({ documentId, structureVersion, family, annotation, from, to, ranges = [], actorId, cardinality = 'many', sameFamilyAnnotationIds = null }
+
+
+
+
+
+
+
+
+
+
  )           {
   const text = materializeText(family);
   const startOffset = from.offset;
@@ -280,13 +280,13 @@ export function planTextRangeApply({ documentId, structureVersion, family, annot
 }
 
 /** Plan a document-range annotation.remove. */
-export function planAnnotationRemove({ documentId, structureVersion, family, annotationId, annotations, ranges }   
-                     
-                           
-                               
-                       
-                            
-                            
+export function planAnnotationRemove({ documentId, structureVersion, family, annotationId, annotations, ranges }
+
+
+
+
+
+
  )           {
   const target = annotations.find((annotation) => annotation.id === annotationId);
   if (!target) throw new Error('annotation not found');

@@ -20,43 +20,43 @@ function assertBrand(label        , value         , brand                 , noun
   }
 }
 
-                                   
-                           
-                  
-                
-                                           
- 
 
-                                    
-                      
-                           
-                 
-                     
-                    
-                             
- 
 
-                                 
-               
-                            
-                          
-                          
-                               
-                                
- 
 
-                               
-                 
-                                        
- 
 
-                                               
-                            
-               
-                         
-                       
-                                         
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function fieldHandleFor(source                  , column        )                    {
   assertSqlIdentifier(`projectionSource field`, column);
@@ -111,10 +111,10 @@ function validateSourceFields(label        , source         , handles           
   }
 }
 
-                                    
-                         
-                       
- 
+
+
+
+
 
 export function principalSnapshot(name        , { principalType, output }                          )                               {
   if (typeof name !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(name)) {
@@ -143,12 +143,12 @@ export function principalSnapshot(name        , { principalType, output }       
   return result                                ;
 }
 
-                                    
-                                                              
-                                                                        
-                                                               
-                                                                                    
- 
+
+
+
+
+
+
 
 principalSnapshot.object = function object(shape                                )               {
   if (!shape || typeof shape !== 'object' || Array.isArray(shape)) {
@@ -164,12 +164,12 @@ principalSnapshot.object = function object(shape                                
   return result;
 };
 
-                       
-                          
-                          
-                               
-                                
- 
+
+
+
+
+
+
 
 principalSnapshot.many = function many(source                  , { via, key, select, orderBy }              = {})                 {
   assertBrand('principalSnapshot.many source', source, _sourceBrand, 'projectionSource');

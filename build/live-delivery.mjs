@@ -20,19 +20,19 @@
 // Internals (live-fanout, live-connection, live-admission, websocket) stay
 // private implementation of this seam — callers do not import them for wiring.
 
-                                                         
+
 
 import { createLiveDeliveryCore } from './live-delivery-core.mjs';
-                                                                                    
+
 import { createLiveEnvelopeBuilder } from './live-delivery-envelope.mjs';
 import { createLiveDeliveryWebSocket } from './live-delivery-websocket.mjs';
 import { projectRowForRecipient } from './entity/projection.mjs';
 import { readableFieldNames } from './field-admission.mjs';
-                                                                       
-                                                                  
-                                                
-                                             
-                                                     
+
+
+
+
+
 
 /**
  * Create the Live Delivery subsystem and attach it to an HTTP server.
@@ -57,15 +57,15 @@ export function createWebSocketLiveDelivery(httpServer        , {
   resolveEntity = null,
   ready = () => Promise.resolve(),
   log = null,
-}   
-                
-                           
-                                              
-                                                                         
-                           
-                                                                                 
-                                 
-                            
+}
+
+
+
+
+
+
+
+
   = {}) {
   // Shared envelope builder — one delta projector for the whole delivery seam.
   const envelopeBuilder = createLiveEnvelopeBuilder();
@@ -134,6 +134,11 @@ export function createWebSocketLiveDelivery(httpServer        , {
         if (woken.has(ev.scope)) continue;
         woken.add(ev.scope);
         core.wake(ev.scope);
+        const collection = ev.scope.includes(':') ? ev.scope.slice(0, ev.scope.indexOf(':')) : null;
+        if (collection && !woken.has(collection)) {
+          woken.add(collection);
+          core.wake(collection);
+        }
       }
     };
   }

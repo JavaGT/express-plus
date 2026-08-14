@@ -44,34 +44,34 @@
 
 // Type-only import: db-adapter.ts imports DbHandle from this module, so a
 // runtime import would cycle. ReadMirrorDescription is erased at emit.
-                                                             
+
 
 // Loose, Workbench-like db surface. A conforming driver may provide its own
 // txn/upsert; a raw handle falls back to the SQLite defaults wrapped here.
-                           
-                                               
-                                                               
-                                                     
-  
 
-                        
-                                    
-                             
-                                                                   
-                                                
-                                                                               
-                     
-                      
-                        
-                                         
-  
 
-                             
-                
-                       
-                     
-                                  
-  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // ---- SQLite default implementations (the fallback + the wrapped-handle body) ----
 

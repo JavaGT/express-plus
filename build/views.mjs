@@ -99,19 +99,19 @@ export function stripPrefix(url        , prefix         )         {
   return path.startsWith(prefix) ? path.slice(prefix.length) : path;
 }
 
-                                
-               
-                             
- 
 
-                                     
-                  
-                                                                        
-                                                                      
-                                                                               
-                                                                           
-                                                    
- 
+
+
+
+
+
+
+
+
+
+
+
+
 
 // `serveStatic(dir, options)` is a catch-all request handler factory for the
 // `app.use(prefix, fn)` seam: GET a file under `dir` at the prefix-stripped tail,
