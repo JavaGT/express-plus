@@ -139,6 +139,18 @@ test('FTS5 delivers readable excerpts and withholds excerpts from denied indexed
   assert.equal('excerpt' in withheld, false);
 });
 
+test('FTS5 uses a column match rather than literal highlight markers to select excerpts', async (t) => {
+  const kit = await setup();
+  t.after(() => close(kit));
+  kit.insert('bracket', 'literal [ bracket', 'body needle');
+  await rebuild(kit);
+
+  const outcome = await kit.registry.search('note-fts', { query: 'needle', principal: alice });
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.result.hits[0].excerptField, 'body');
+  assert.match(outcome.result.hits[0].excerpt, /needle/);
+});
+
 test('FTS5 plugin participates in fenced A3 shadow rebuild, reconcile, parity, and actual-index health', async (t) => {
   const kit = await setup();
   const bridge = createSearchStalenessBridge({ registry: kit.registry });

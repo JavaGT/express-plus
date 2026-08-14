@@ -244,24 +244,26 @@ export function createFts5Plugin(options                   )             {
         });
         const greatest = Math.max(0, ...rows.map((row) => -asNumber(row.score)));
         const candidates = rows.map((row) => {
-          const excerptIndex = options.source.fields.findIndex((_, index) => {
-            const candidate = row[`excerpt_${index}`];
-            return typeof candidate === 'string' && candidate.includes('[');
-          });
-          const fieldIndex = excerptIndex === -1 ? 0 : excerptIndex;
-          const excerpt = row[`excerpt_${fieldIndex}`];
           const id = String(row.id);
+          // A snippet from an unmatched field may contain the highlight marker in
+          // its source text. Ask FTS5 which field matched instead of inspecting
+          // the snippet, which also fails closed for cross-field expressions.
+          const fieldIndex = options.source.fields.findIndex((field) => ctx.index.query({
+            sql: `SELECT rowid FROM ${table} WHERE ${idColumn} = ? AND ${table} MATCH ? LIMIT 1`,
+            params: [id, `${field} : (${request.query})`],
+          }).length > 0);
+          const excerpt = fieldIndex === -1 ? undefined : row[`excerpt_${fieldIndex}`];
           const hit = Object.freeze({
             id,
             rank: greatest === 0 ? 1 : Math.max(0, -asNumber(row.score) / greatest),
-            excerptField: options.source.fields[fieldIndex],
+            ...(fieldIndex === -1 ? {} : { excerptField: options.source.fields[fieldIndex] }),
           });
           return {
             hit,
             key: id,
             rank: hit.rank,
             row: ctx.reader.row(options.source.entity, id) ?? null,
-            ...(typeof excerpt === 'string' ? {
+            ...(typeof excerpt === 'string' && hit.excerptField !== undefined ? {
               excerpt: {
                 entity: options.admission.entity,
                 fieldName: hit.excerptField,
