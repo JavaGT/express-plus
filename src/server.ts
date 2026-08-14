@@ -28,6 +28,7 @@ export { createBlobStore } from './blob-store.ts';
 export { compileBlobCensus } from './blob-census.ts';
 export { runMigrations } from './migrations.ts';
 export { defineSqliteSchema } from './sqlite-schema.ts';
+export { createSchemaReport, type SchemaReport, type SchemaReportObject, type SchemaLifecyclePhase } from './schema-report.ts';
 export { describeEntityStorage, describeSqliteStorage } from './sqlite-storage-description.ts';
 export { readSeq as readCommittedCursor } from './committed-log.ts';
 export { createLiveDelivery } from './live-delivery-public.ts';

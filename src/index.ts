@@ -23,6 +23,7 @@ export { createAuditor, noopAuditSink, isOpaqueId, sanitizeOpaqueId, type Opaque
 export { createDenialAuditor, type DenialAuditor, type DenialAuditorOptions, type DenialInput } from './denial-log.ts';
 export { createKeyedRateLimiter, type KeyedRateLimiter, type KeyedRateLimitOptions, type KeyedRateLimitResult } from './rate-limit.ts';
 export { router } from './app.ts';
+export { createSchemaReport, type SchemaReport, type SchemaReportObject, type SchemaLifecyclePhase } from './schema-report.ts';
 export {
   FAILURE_CATEGORIES,
   failure,

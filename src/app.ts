@@ -40,7 +40,7 @@ import {
   type OpenedSqliteDatabase,
 } from './sqlite-adapter.ts';
 import type { DbAdapterConfig, OpenedDatabase, ReadMirrorDescription } from './db-adapter.ts';
-import { executeDDL, executeFrameworkDDL, generateSideTableDDL, generatedIndexNames } from './ddl.ts';
+import { executeFrameworkDDL, generateDDL, generateSideTableDDL, generatedIndexNames } from './ddl.ts';
 import { runMigrations, validateMigrations } from './migrations.ts';
 import { runWorkbenchMigrations } from './workbench-migrations.ts';
 import { validateSchemaOwnedEntityTable } from './schema-entity-validation.ts';
@@ -64,6 +64,8 @@ import { attachApplicationLiveDelivery } from './application-live-delivery.ts';
 import { User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor } from './auth/entities.ts';
 import { config, resolveConfig } from './config.ts';
 import { buildOwnershipCensus } from './schema-census.ts';
+import { validateExactSchema } from './schema-exact-validation.ts';
+import { createSchemaReport } from './schema-report.ts';
 import path from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { makeMountable } from './router.ts';
@@ -610,12 +612,6 @@ export default function workbench({
       // pending-staleness survives restart and re-processes via drain().
       app.searchStaleness.engage(handle);
       app.searchReconcile.engage(handle);
-      app.clock.add({
-        name: 'search-reconcile',
-        intervalMs: 1_000,
-        fn: () => void app.searchReconcile.reconcileBatches().catch((err: unknown) =>
-          app.log.warn('system', 'search reconcile drain failed', { err })),
-      });
       // The queue routes its multi-statement mutations through the ONE write
       // coordinator (job-queue.ts's writeQueue option); a post-commit consumer
       // calling enqueue from inside a dispatch turn joins that turn.
@@ -696,13 +692,15 @@ export default function workbench({
     // callable for server-only/tests that prepare schema without listening, but it
     // is the same cached path `app.ready` uses — not a second DDL algorithm. An
     // adapter-backed app resolves its deferred open here first (A1 contract).
+    let latestSchemaReport: ReturnType<typeof createSchemaReport> | null = null;
+    app.schemaReport = () => latestSchemaReport;
     app.prepareSchema = async () => withLog(app.log, async () => {
       if (installPendingDb) await installPendingDb();
       if (!app.schemaReady) {
         app.schemaReady = (async () => {
           if (!app.db) throw new Error('cannot generate DDL — no db configured on the app');
-          // Framework tables come first — Log and Cursor are the durable event substrate.
-          executeFrameworkDDL(app.db);
+          // Phase 3: resolve declarations and validate the global ownership graph
+          // before lifecycle DDL can alter the database.
           await app.resolveRoutes();
           registryLocked = true;
           const schemaTables = new Map<string, any>((schema?.tables ?? []).map((table: any) => [table.name.toLowerCase(), table]));
@@ -745,9 +743,19 @@ export default function workbench({
               throw new Error(`schema table "${table.name}" conflicts with a generated entity side table`);
             }
           }
-          // A declared migration may bring an existing table up to the declared
-          // shape, so defer schema indexes and the exact physical check until it
-          // has run. Tables must exist before generated supporting tables.
+          const ownership = buildOwnershipCensus({
+            schemaDeclarations: schema ? [schema] : [],
+            entities: [...app.entities.values()],
+            plugins: app.searchPlugins.ids().map((id: string) => {
+              const plugin: SearchPlugin = app.searchPlugins.get(id)!;
+              return { id: plugin.id, ownedObjects: plugin.ownedObjects.map(({ kind, name }) => ({ kind, name })) };
+            }),
+          });
+          if (ownership.errors.length > 0) throw new Error(ownership.errors[0].message);
+
+          // Phase 4: framework bases. Phase 5 follows with ordinary/schema-owned
+          // roots and entity roots, before any supporting storage or migrations.
+          executeFrameworkDDL(app.db);
           if (schema) schema.prepare(app.db, { skipMigrations: true, skipIndexes: true });
           const seen = new Set();
           for (const entity of app.entities.values()) {
@@ -755,30 +763,65 @@ export default function workbench({
               seen.add(entity.name);
               const declaration = schemaTables.get(entity.name.toLowerCase());
               if (declaration) {
-                for (const sql of generateSideTableDDL(entity)) app.db.exec(sql);
+                // The schema owns this root table; its Workbench side tables are
+                // deliberately deferred to phase 6 below.
               } else {
-                executeDDL(entity, app.db);
+                const root = generateDDL(entity)[0];
+                if (root) app.db.exec(root);
               }
             }
           }
-          // Migrations run last, pre-traffic, after every entity table exists. Each
-          // is its own transaction (DDL + ledger-record bump atomic). Runs only when
-          // declared — an app with no migrations is untouched (no ledger table).
+
+          // Phase 6: entity-generated supporting tables. These cannot precede
+          // their roots, including roots declared by an application schema.
+          for (const entity of app.entities.values()) {
+            for (const sql of generateSideTableDDL(entity)) app.db.exec(sql);
+          }
+
+          // Phase 7: both migration lanes are transactional by contract. SQLite
+          // itself refuses VACUUM in this lane; foreign_keys changes belong to the
+          // explicit maintenance seam rather than a migration callback.
           await runWorkbenchMigrations(app.db);
           if (declaredMigrations.length) runMigrations(app.db, declaredMigrations);
+
+          // Phase 8: indexes and declared constraints are installed only after
+          // migrations can add/reshape their backing columns.
           if (schema) schema.prepare(app.db, { skipMigrations: true });
-          const ownership = buildOwnershipCensus({
-            schemaDeclarations: schema ? [schema] : [],
-            entities: [...app.entities.values()],
-            plugins: app.searchPlugins.ids().map((id: string) => {
-              const plugin: SearchPlugin = app.searchPlugins.get(id)!;
-              return {
-                id: plugin.id,
-                ownedObjects: plugin.ownedObjects.map(({ kind, name }) => ({ kind, name })),
-              };
-            }),
+          if (schema) {
+            for (const sql of schema.triggerDdl) app.db.exec(sql);
+          }
+          for (const entity of app.entities.values()) {
+            for (const sql of generateDDL(entity).filter((statement) => /^CREATE\s+(?:UNIQUE\s+)?INDEX\b/i.test(statement))) app.db.exec(sql);
+          }
+
+          // Phase 9: plugin-owned derived resources. CREATE IF NOT EXISTS makes a
+          // settled reboot non-destructive, including declared triggers.
+          if (schema) {
+            for (const sql of schema.virtualTableDdl) app.db.exec(sql);
+          }
+          app.searchStaleness.engage(app.db);
+          app.searchReconcile.engage(app.db);
+          for (const id of app.searchPlugins.ids()) {
+            const plugin: SearchPlugin = app.searchPlugins.get(id)!;
+            for (const object of plugin.ownedObjects) {
+              const existing = app.db.prepare(
+                "SELECT 1 FROM sqlite_schema WHERE lower(name) = lower(?) AND type = ?",
+              ).get(object.name, object.kind === 'virtual-table' ? 'table' : object.kind);
+              if (!existing) for (const sql of object.ddl) app.db.exec(sql);
+            }
+            const prepared = await app.searchPlugins.prepare(id);
+            if (!prepared.ok) throw new Error(`plugin "${id}" preparation failed: ${prepared.lastError?.message ?? 'unknown error'}`);
+          }
+          app.clock.add({
+            name: 'search-reconcile', intervalMs: 1_000,
+            fn: () => void app.searchReconcile.reconcileBatches().catch((err: unknown) => app.log.warn('system', 'search reconcile drain failed', { err })),
           });
-          if (ownership.errors.length > 0) throw new Error(ownership.errors[0].message);
+
+          // Phase 10: reconcile stale derived resources before validation/admission.
+          await app.searchReconcile.reconcileBatches();
+
+          // Phase 11: exact declaration drift, foreign-key consistency, and the
+          // SQLite integrity check all run over the settled schema, never rows.
           for (const entity of app.entities.values()) {
             const declaration = schemaTables.get(entity.name.toLowerCase());
             if (declaration) {
@@ -788,6 +831,17 @@ export default function workbench({
               });
             }
           }
+          const exactErrors = validateExactSchema(app.db, ownership.census, schema ? [schema] : [])
+            // A schema-owned entity root may legitimately carry a trigger that
+            // belongs to a registered derived-resource plugin (A2 ownership).
+            .filter((error) => ownership.census.get(`trigger:${error.name.toLowerCase()}`)?.kind !== 'plugin');
+          if (exactErrors.length > 0) throw new Error(exactErrors[0].message);
+          const foreignKeyErrors = app.db.prepare('PRAGMA foreign_key_check').all();
+          if (foreignKeyErrors.length > 0) throw new Error('schema integrity check failed: foreign key violation');
+          const integrityErrors = app.db.prepare('PRAGMA integrity_check').all()
+            .filter((row: Record<string, unknown>) => Object.values(row).some((value) => value !== 'ok'));
+          if (integrityErrors.length > 0) throw new Error('schema integrity check failed: SQLite integrity_check failed');
+          latestSchemaReport = createSchemaReport(app.db, ownership.census);
           return app;
         })();
       }
