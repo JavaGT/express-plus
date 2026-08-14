@@ -22,6 +22,10 @@
 //      before row — a delete/revoke keeps its stable anchor as `before`), so an
 //      update that moves a row out of the principal's scope is rejected even
 //      though the current row is in scope.
+//   4. admitInferenceFields — the sort/filter/count inference-prevention gate.
+//      A field the principal cannot read cannot be a sort key, filter key, or
+//      counted dimension; unreadable and nonexistent fields are
+//      indistinguishable (spec 3a, wired by A2 into dispatchCrud).
 //
 // Principal-absent (null) is the row-grant's trusted query API convention: not
 // a request path — skip field authz (mirrors mayVerb running only in dispatch).
@@ -179,4 +183,42 @@ export async function admitRowTransition(request: RowTransitionRequest): Promise
     return (await admitTransitionRow(request, before)) && (await admitTransitionRow(request, after));
   }
   return admitTransitionRow(request, before);
+}
+
+// Inference prevention (S5/A3 spec 3a): a principal must never be able to
+// sort, filter, or count over a field it cannot read — the readable field set
+// (readableFieldNames) is the ONLY set a list/sort/filter/count surface may
+// reference. This is the named gate those consumers run before building query
+// SQL.
+//
+// dispatchCrud (owned by A2 — the ticket defers its HTTP wiring) consumes
+// readableFieldNames THROUGH this function on the list path: it materializes
+// each row, computes the principal's readable field set once, and passes every
+// requested sort key, filter key, and counted dimension here. An unreadable key
+// denies exactly like a nonexistent key — a field the principal cannot read is
+// indistinguishable from a field that does not exist, so no query surface ever
+// reveals which field names exist or which fields other principals can read.
+//
+// The decision is two-valued ({ admitted }) — no field-name echo, no reason
+// detail — so the transport renders one generic denial for every case.
+export interface InferenceFieldRequest {
+  sort?: Iterable<string>;
+  filter?: Iterable<string>;
+  count?: Iterable<string>;
+}
+
+export async function admitInferenceFields(
+  entity: EntityRecord,
+  row: unknown,
+  principal: unknown,
+  request: InferenceFieldRequest | null | undefined,
+  authorization?: AuthorizationAdapter | null,
+): Promise<{ admitted: boolean }> {
+  const references = [...(request?.sort ?? []), ...(request?.filter ?? []), ...(request?.count ?? [])];
+  if (references.length === 0) return { admitted: true };
+  const readable = await readableFieldNames(entity, row, principal, authorization);
+  for (const fieldName of references) {
+    if (!readable.has(fieldName)) return { admitted: false };
+  }
+  return { admitted: true };
 }

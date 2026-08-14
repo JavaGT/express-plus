@@ -21,10 +21,14 @@ import type { DbHandle } from './driver.ts';
 import { BodyError, readRawBody, readRequestBody } from './http-body.ts';
 import { scopeOf, tryParseScopeKey } from './scope-handle.ts';
 import { createdTextReducerSeeds, textReducerCheckpoints } from './text-reducer-transport.ts';
+import type { TextReducerSeed } from './text-reducer-transport.ts';
 import { publicEvent } from './event-delivery.ts';
 import { parseEventType } from './event-handle.ts';
 import { createLiveEnvelopeBuilder } from './live-delivery-envelope.ts';
 import { hasAnnotatedTextFields, projectEntitySnapshot } from './entity-snapshot-projection.ts';
+import { projectRowForRecipient } from './entity/projection.ts';
+import { readableFieldNames } from './field-admission.ts';
+import type { AuthorizationAdapter } from './authorization-adapter.ts';
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.ts';
 import type { Principal } from './principal.ts';
 
@@ -79,6 +83,32 @@ interface FrameworkApp extends CrudAppLike {
 function reject(res: HttpResponseLike, status: number, message: string, details?: unknown): void {
   const workbenchFailure = failureForHttpError({ status, message, details });
   sendFailure(sendJson as unknown as SendJson, res, workbenchFailure, { status });
+}
+
+// The ONE authorization adapter every framework route consults (S5/A2). The
+// app stashes the injected adapter at listen time (serve.ts); with none
+// injected, field-admission falls back to the framework row-grant engine — the
+// default adapter's own implementation — unchanged.
+function routeAuthorization(app: FrameworkApp): AuthorizationAdapter | null {
+  return (app as { _authorization?: AuthorizationAdapter | null })._authorization ?? null;
+}
+
+// The CRDT-text reducer checkpoints this principal may receive. A CRDT
+// checkpoint is the canonical document, so it is gated on field-READ admission
+// exactly like the projected value: a CRDT text field the principal cannot
+// read carries no checkpoint to any recipient (spec 3a — an unreadable field
+// never reaches any projection surface).
+async function admittedTextReducerCheckpoints(
+  entity: CrudEntity,
+  storedRow: Parameters<typeof textReducerCheckpoints>[1] | null | undefined,
+  principal: Principal,
+  authorization: AuthorizationAdapter | null,
+): Promise<TextReducerSeed[]> {
+  const checkpoints = textReducerCheckpoints(entity, storedRow);
+  if (checkpoints.length === 0 || !storedRow) return checkpoints;
+  const materialized = entity.deserializeRow({ ...storedRow });
+  const readable = await readableFieldNames(entity as never, materialized, principal, authorization);
+  return checkpoints.filter((seed) => readable.has(seed.field));
 }
 
 // routes — resolved at request time from `/snapshot/:entity/:id` and
@@ -159,7 +189,7 @@ async function snapshotRoute(
   }
   let snapshot: Record<string, unknown>;
   try {
-    snapshot = await projectEntitySnapshot({ db: app.db, entity, row: auth.row!, principal });
+    snapshot = await projectEntitySnapshot({ db: app.db, entity, row: auth.row!, principal, authorization: routeAuthorization(app) });
     // Projection can await policy checks. Do not pair facts assembled across a
     // concurrent scope mutation with the cursor captured before those checks.
     if (hasAnnotatedTextFields(entity) && readSeq(app.db!, scopeKey) !== lastSeq) throw new Error('snapshot changed while projecting');
@@ -170,7 +200,7 @@ async function snapshotRoute(
   sendJson(res, 200, {
     snapshot,
     seq: lastSeq,
-    reducers: textReducerCheckpoints(entity, storedRow as Parameters<typeof textReducerCheckpoints>[1]),
+    reducers: await admittedTextReducerCheckpoints(entity, storedRow as Parameters<typeof textReducerCheckpoints>[1], principal, routeAuthorization(app)),
   });
   return true;
 }
@@ -200,12 +230,12 @@ async function snapshotScopeRoute(
     const storedRow = rawRow(app.db!, anchor.entity, anchor.id);
     const entity = app.entities!.get(anchor.entity)!;
     try {
-      const snapshot = await projectEntitySnapshot({ db: app.db, entity, row: anchor.row!, principal });
+      const snapshot = await projectEntitySnapshot({ db: app.db, entity, row: anchor.row!, principal, authorization: routeAuthorization(app) });
       if (readSeq(app.db!, scope) !== lastSeq) throw new Error('snapshot changed while projecting');
       sendJson(res, 200, {
         snapshot,
         cursors: { [scope]: lastSeq },
-        reducers: textReducerCheckpoints(entity, storedRow as Parameters<typeof textReducerCheckpoints>[1]),
+        reducers: await admittedTextReducerCheckpoints(entity, storedRow as Parameters<typeof textReducerCheckpoints>[1], principal, routeAuthorization(app)),
       });
     } catch {
       reject(res, 403, 'forbidden');
@@ -232,7 +262,7 @@ async function snapshotScopeRoute(
     sendJson(res, 200, {
       snapshot: scopeSnapshot,
       cursors: { [scope]: lastSeq },
-      reducers: textReducerCheckpoints(entity, storedAnchor as Parameters<typeof textReducerCheckpoints>[1]),
+      reducers: await admittedTextReducerCheckpoints(entity, storedAnchor as Parameters<typeof textReducerCheckpoints>[1], principal, routeAuthorization(app)),
     });
     return true;
   }
@@ -277,6 +307,18 @@ async function eventsSinceScopeRoute(
   }
   const envelopes = createLiveEnvelopeBuilder({ stateful: false });
   const events = [] as unknown[];
+  // Field-read admission (S5/A3): the catch-up envelopes derive their lifecycle
+  // data from the anchor row, so the row is projected to exactly the readable
+  // field subset FIRST and the readable set is handed to the envelope builder —
+  // an unreadable field never appears in any recipient lifecycle payload.
+  const authorization = routeAuthorization(app);
+  let envelopeRow = anchor.row;
+  let readableFields: ReadonlySet<string> | undefined;
+  if (anchor.row) {
+    const materialized = entity.deserializeRow({ ...anchor.row });
+    readableFields = await readableFieldNames(entity as never, materialized, principal, authorization);
+    envelopeRow = await projectRowForRecipient(entity as never, materialized, principal, { readable: readableFields, authorization });
+  }
   for (const r of rows) {
     const record = r as { scope?: unknown; seq?: unknown; eventType?: unknown; actionId?: unknown; committedAt?: unknown; data?: unknown };
     const built = envelopes.buildEnvelope({
@@ -289,8 +331,9 @@ async function eventsSinceScopeRoute(
         committedAt: record.committedAt as string,
       },
       principal,
-      row: anchor.row,
+      row: envelopeRow,
       scope,
+      ...(readableFields ? { readableFields } : {}),
     });
     const recovery = built.find((envelope) => envelope.type === 'resync');
     if (recovery) {

@@ -18,7 +18,8 @@ import { frozenJsonSnapshot } from '../frozen-json.ts';
 import { erasureDirectivePreparation } from '../erasure-directive.ts';
 import { CASCADE_DESCENDANT, CASCADE_PREAUTHORIZED } from './removal-cascade.ts';
 import { admitRow } from '../row-grant.ts';
-import { admitsInvitationRemoval } from '../auth/invitation-acceptance-authority.ts';
+import { admitRowTransition } from '../field-admission.ts';
+import { admitsInvitationRemoval, admitInvitationAcceptance } from '../auth/invitation-acceptance-authority.ts';
 import { clearAuthoringState, issueAuthoringSnapshot, buildAuthoringEnvelope } from '../annotated-text-authoring-stream.ts';
 import { admitV9AnnotatedTextEdit, assertV9AuthoringBinding as assertV9AuthoringBindingFromAdmit } from '../annotated-text-admit.ts';
 import { packOperatedFacts } from '../annotated-text-operated-facts.ts';
@@ -394,7 +395,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       }));
       return { events, privateFact: { before: null, after } };
     },
-    [`${name}.update`]: ({ payload, principal: _p, db, history, scope }: any) => {
+    [`${name}.update`]: async ({ payload, principal, db, history, scope, authorization }: any) => {
       const { id, ...rest } = payload;
       if (!id) throw Object.assign(new Error('update requires an id'), { status: 400 });
       if (Object.keys(rest).length === 0) {
@@ -482,6 +483,46 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         if (descriptor.touch) data[fieldName] = new Date();
       }
       const updateRow = rawRow(db, name, id) ?? null;
+      // Proposed-transition admission (S5/A3): the update's row grant / field
+      // access runs against BOTH the current row and the proposed after-row, so
+      // an update that moves the row out of the principal's write scope is
+      // rejected even though the current row is in scope. The current row is
+      // read through the record's query seam (the runtime db — a non-history
+      // update runs outside the transaction, where the context db is absent),
+      // exactly as the state-transition guard above does. An injected
+      // authorization adapter wired into the handler context decides; with none
+      // the framework row-grant engine — the default adapter's own
+      // implementation — runs unchanged. An unavailable current row (in-memory
+      // kernel) skips the transition check and keeps its pre-existing behavior.
+      let materializedBefore;
+      try {
+        materializedBefore = record.findById(id);
+      } catch {
+        materializedBefore = null;
+      }
+      // Invitation-acceptance updates (useCount bump) run under the acceptance
+      // authority and are admitted by the durable gate via admitInvitationAcceptance
+      // — the same authority this handler's sibling remove path honors through
+      // admitsInvitationRemoval. Their row grant never intended a write grant to
+      // the accepting user, so the transition check must not trip on it.
+      const acceptanceManagedUpdate = record.name === 'Invitation'
+        && admitInvitationAcceptance({
+          event: { handle: verbs.updated.handle as never, data: data as unknown as Record<string, unknown> },
+          principal,
+        });
+      if (materializedBefore && !acceptanceManagedUpdate) {
+        const proposedAfter = { ...materializedBefore, ...data };
+        if (!(await admitRowTransition({
+          entity: record,
+          verb: 'update',
+          before: materializedBefore,
+          after: proposedAfter,
+          principal,
+          authorization,
+        }))) {
+          throw Object.assign(new Error('forbidden'), { status: 403 });
+        }
+      }
       const result = [{
         handle: verbs.updated.handle,
         type: verbs.updated.type,

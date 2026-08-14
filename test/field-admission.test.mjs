@@ -13,11 +13,12 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import { annotatedText, entity, everyone, grant, read, ref, scope, subscribe, text, write } from '../build/index.mjs';
-import workbench from '../build/internal.mjs';
+import workbench, { generateDDL } from '../build/internal.mjs';
 import { projectRowForRecipient } from '../build/entity/projection.mjs';
-import { admitRowTransition, annotatedTextDeniedPlaceholder, mayReadField, readableFieldNames } from '../build/field-admission.mjs';
+import { admitInferenceFields, admitRowTransition, annotatedTextDeniedPlaceholder, mayReadField, readableFieldNames } from '../build/field-admission.mjs';
 import { authorizeFieldOp } from '../build/strategy/shared.mjs';
 import { authorizeSubscription } from '../build/live-admission.mjs';
+import { textCheckpoint, createTextState } from '../build/annotated-text.mjs';
 
 const alice = { type: 'user', id: 'alice' };
 const bob = { type: 'user', id: 'bob' };
@@ -245,4 +246,169 @@ test('admitRowTransition delete/revoke evaluates the stable before anchor when n
   assert.equal(await admitRowTransition({ entity: Doc, verb: 'remove', before, principal: bob }), false);
   // Absent current row fails closed.
   assert.equal(await admitRowTransition({ entity: Doc, verb: 'remove', before: null, principal: alice }), false);
+});
+
+// ---- Proposed-transition admission WIRED into the update mutation (end-to-end) ----
+
+function bootStartedDoc(t) {
+  const declaration = declareDoc();
+  const db = new DatabaseSync(':memory:');
+  for (const sql of generateDDL(declaration)) db.exec(sql);
+  db.prepare("INSERT INTO Doc (id, title, owner, secret) VALUES (?, ?, ?, ?)").run('d1', 'Report', 'alice', 'top-secret-value');
+  const app = workbench({ db, entities: [declaration] });
+  app.listen(0);
+  t.after(() => {
+    app.httpServer.close();
+    db.close();
+  });
+  return { app, db };
+}
+
+test('end-to-end: an update that moves the row out of the write scope is denied through the mutation pipeline; an in-scope update admits', async (t) => {
+  const { app, db } = bootStartedDoc(t);
+  await app.ready;
+
+  // Alice owns d1. Re-assigning ownership to bob transitions the row out of her
+  // write scope: the update must be rejected even though the CURRENT row is in
+  // scope (the acceptance criterion for proposed-transition admission).
+  const outOfScope = await app.dispatch({
+    actionId: 'reassign-owner', type: 'Doc.update',
+    payload: { id: 'd1', owner: 'bob' }, principal: alice,
+  });
+  assert.equal(outOfScope.ok, false, 'out-of-scope transition is denied');
+  assert.equal(outOfScope.failure.category, 'denied');
+  assert.equal(outOfScope.failure.message, 'forbidden');
+  const stored = db.prepare('SELECT owner FROM Doc WHERE id = ?').get('d1');
+  assert.equal(stored.owner, 'alice', 'the denied update leaves the row unchanged');
+
+  // An in-scope transition (title change, ownership unchanged) admits.
+  const inScope = await app.dispatch({
+    actionId: 'rename', type: 'Doc.update',
+    payload: { id: 'd1', title: 'Updated' }, principal: alice,
+  });
+  assert.equal(inScope.ok, true, 'in-scope transition admits');
+  assert.equal(inScope.events[0].data.title, 'Updated');
+});
+
+test('end-to-end: an update by a principal out of scope on the current row stays denied', async (t) => {
+  const { app } = bootStartedDoc(t);
+  await app.ready;
+
+  // Bob has no write capability on d1 even before any transition — the row
+  // admission denies at the current row.
+  const denied = await app.dispatch({
+    actionId: 'bob-edit', type: 'Doc.update',
+    payload: { id: 'd1', title: 'Hijacked' }, principal: bob,
+  });
+  assert.equal(denied.ok, false);
+  assert.equal(denied.failure.category, 'denied');
+});
+
+// ---- HTTP: CRDT checkpoints and catch-up lifecycle data respect field-read admission ----
+
+// A Doc whose `body` (CRDT text) and `secret` (plain text) fields are readable/
+// writable by the owner only; non-owners see the row (everyone scope) with read
+// capability but not the protected fields.
+function declareProtectedDoc() {
+  return entity('Doc', {
+    title: text(),
+    owner: text(),
+    body: text.crdt().can(async ({ is }) => (await is.owner() ? grant(read, write) : grant())),
+    secret: text().can(async ({ is }) => (await is.owner() ? grant(read, write) : grant())),
+    checks: { owner: ({ entity: row, principal }) => row.owner === principal.id },
+    grant: () => [scope(() => everyone()).can(async ({ is }) => (
+      await is.owner() ? grant(read, write, subscribe) : grant(read, subscribe)
+    ))],
+  });
+}
+
+function bootProtectedHttpApp(t, principalOf, { seed = true } = {}) {
+  const declaration = declareProtectedDoc();
+  const db = new DatabaseSync(':memory:');
+  for (const sql of generateDDL(declaration)) db.exec(sql);
+  const checkpoint = JSON.stringify(textCheckpoint(createTextState()));
+  if (seed) {
+    db.prepare("INSERT INTO Doc (id, title, owner, body, secret) VALUES (?, ?, ?, ?, ?)").run('d1', 'Report', 'alice', checkpoint, 'top-secret-value');
+  }
+  const app = workbench({ db }).mount('/docs', declaration);
+  app.listen(0, { principalOf });
+  t.after(() => {
+    app.httpServer.close();
+    db.close();
+  });
+  return { app, db, checkpoint };
+}
+
+test('HTTP snapshot carries no CRDT reducer checkpoint for an unreadable text field (and none leaks to the recipient)', async (t) => {
+  const { app } = bootProtectedHttpApp(t, () => bob);
+  await app.ready;
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+
+  const res = await fetch(`${origin}/snapshot/Doc/d1`);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  // The snapshot omits the unreadable CRDT field entirely…
+  assert.equal('body' in body.snapshot, false, 'unreadable CRDT field is omitted from the snapshot');
+  assert.equal('secret' in body.snapshot, false, 'unreadable plain field is omitted from the snapshot');
+  // …and the canonical CRDT checkpoint never rides the snapshot's reducers.
+  const reducerFields = (body.reducers ?? []).map((seed) => seed.field);
+  assert.equal(reducerFields.includes('body'), false, 'unreadable CRDT field carries no checkpoint');
+  assert.equal(JSON.stringify(body).includes('elements'), false, 'no canonical document facts leak');
+});
+
+test('HTTP snapshot keeps the CRDT reducer checkpoint for a readable field (owner control)', async (t) => {
+  const { app } = bootProtectedHttpApp(t, () => alice);
+  await app.ready;
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+
+  const res = await fetch(`${origin}/snapshot/Doc/d1`);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  const reducerFields = (body.reducers ?? []).map((seed) => seed.field);
+  assert.equal(reducerFields.includes('body'), true, 'the owner receives the readable CRDT checkpoint');
+  const bodyReducer = (body.reducers ?? []).find((seed) => seed.field === 'body');
+  assert.equal(typeof bodyReducer.checkpoint, 'object');
+  assert.equal(bodyReducer.checkpoint.version, 1);
+  assert.equal('frontier' in bodyReducer.checkpoint, true, 'the checkpoint is the canonical document');
+});
+
+test('HTTP events-since catch-up lifecycle data omits an unreadable field', async (t) => {
+  const { app } = bootProtectedHttpApp(t, () => bob, { seed: false });
+  await app.ready;
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+
+  // The owner creates the row (server-side); the reader then catches up.
+  await app.dispatch({
+    actionId: 'create-d1', type: 'Doc.create',
+    payload: { id: 'd1', title: 'Report', owner: 'alice', secret: 'top-secret-value' },
+    principal: alice,
+  });
+
+  const res = await fetch(`${origin}/events-since?scope=Doc:d1&cursor=0`);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.ok(body.events.length >= 1, 'catch-up events present');
+  const lifecycle = body.events.find((event) => event.data?.id === 'd1');
+  assert.ok(lifecycle, 'created lifecycle event present');
+  assert.equal('secret' in lifecycle.data, false, 'unreadable field absent from catch-up lifecycle data');
+  assert.equal('body' in lifecycle.data, false, 'unreadable CRDT field absent from catch-up lifecycle data');
+  assert.equal(JSON.stringify(body).includes('top-secret-value'), false, 'no unreadable field content in the catch-up payload');
+});
+
+// ---- Inference prevention: the sort/filter/count gate (spec 3a) ----
+
+test('admitInferenceFields rejects a sort/filter/count on an unreadable field without revealing the field name', async () => {
+  const { Doc } = bootDoc();
+  const row = Doc.deserializeRow({ id: 'd1', title: 'Report', owner: 'alice', secret: 'top-secret-value' });
+
+  assert.deepEqual(await admitInferenceFields(Doc, row, bob, { sort: ['title'] }), { admitted: true });
+  assert.deepEqual(await admitInferenceFields(Doc, row, bob, { sort: ['secret'] }), { admitted: false }, 'sort on an unreadable field is rejected');
+  assert.deepEqual(await admitInferenceFields(Doc, row, bob, { filter: ['secret'] }), { admitted: false }, 'filter on an unreadable field is rejected');
+  assert.deepEqual(await admitInferenceFields(Doc, row, bob, { count: ['secret'] }), { admitted: false }, 'count on an unreadable field is rejected');
+  // An unreadable field is indistinguishable from a nonexistent one (no probe surface).
+  assert.deepEqual(await admitInferenceFields(Doc, row, bob, { sort: ['bogus'] }), { admitted: false });
+  // A principal that can read the field admits.
+  assert.deepEqual(await admitInferenceFields(Doc, row, alice, { sort: ['secret'] }), { admitted: true });
+  // The two-valued decision never echoes a field name.
+  assert.equal(JSON.stringify(await admitInferenceFields(Doc, row, bob, { sort: ['secret'] })).includes('secret'), false);
 });
