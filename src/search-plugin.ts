@@ -19,8 +19,11 @@
 //      machine below.
 //   3. SCOPED SOURCE READERS — a plugin NEVER receives the raw DbHandle. It
 //      receives a SearchSourceReader scoped to exactly its declared
-//      sourceInterests: only the declared source tables are reachable, and the
-//      reader has no write verbs at all (writeCapable is a literal `false`).
+//      sourceInterests: only the declared source tables are reachable, the
+//      reader has no write verbs at all (writeCapable is a literal `false`),
+//      and every read is constrained by the interest's declared `scope`
+//      (compiled to a WHERE clause — a plugin declaring scope 'title === hello'
+//      cannot read other rows).
 //   4. FAILURE ISOLATION — an index failure marks that plugin failed (fence+1,
 //      state 'failed') with retained retry info (message, at, attempt,
 //      retryable); it never propagates as an authoritative-write error. The
@@ -212,10 +215,12 @@ export interface SearchPluginCensus {
 
 // The plugin declaration (spec 1). `contractVersion` is the S4/A1 contract
 // version the plugin targets; `version` is the plugin's own release version.
-// `health()` and `generation()` are OPTIONAL advisory hooks — the registry owns
-// the authoritative generation/fence/state and folds their reports into the
-// disclosed health (healthOf). `stalenessKey` decides which changes invalidate
-// the index (spec: stalenessKey(change) format).
+// `health()` is an OPTIONAL advisory hook — the registry owns the authoritative
+// generation/fence/state and folds a plugin-reported value into healthOf() under
+// `plugin` (healthOf never throws; a throwing health() reports null). There is
+// NO plugin-supplied generation hook: generation/fence are registry-owned
+// materialization/invalidation counts (spec 5). `stalenessKey` decides which
+// changes invalidate the index (spec: stalenessKey(change) format).
 export interface SearchPlugin {
   readonly contractVersion: number;
   readonly id: string;
@@ -229,7 +234,6 @@ export interface SearchPlugin {
   rebuild(ctx: SearchPluginContext): SearchMaterializeResult | Promise<SearchMaterializeResult>;
   search(ctx: SearchPluginContext, request: SearchRequest): SearchPluginSearchResult | Promise<SearchPluginSearchResult>;
   health?(ctx: SearchPluginContext): unknown;
-  generation?(): number;
 }
 
 export interface SearchPluginRegistryOptions {
@@ -299,10 +303,55 @@ function quoteIdentifier(name: string): string {
   return `"${name.replaceAll('"', '""')}"`;
 }
 
+// The compiled, positionalized form of one interest's declared `scope`. The
+// scope compiler lowers the predicate to a SQL fragment with NAMED params
+// (`:p1_val`); the scoped reader's handle only binds POSITIONALLY, so the named
+// placeholders are rewritten to `?` in key order and the values collected in
+// the same order (positionalize). The fragment references the base table under
+// the compiler's canonical `t0` alias, so reads alias their table `AS t0`.
+export interface CompiledScope {
+  readonly sql: string;
+  readonly args: readonly unknown[];
+}
+
+function positionalize(sql: string, params: Record<string, unknown>): CompiledScope {
+  let out = sql;
+  const args: unknown[] = [];
+  for (const [key, value] of Object.entries(params)) {
+    out = out.replaceAll(`:${key}`, '?');
+    args.push(value);
+  }
+  return { sql: out, args };
+}
+
+// Compile ONE interest's declared scope to its enforced WHERE fragment, or null
+// when the interest declares no scope. Shared by registration (validation-only)
+// and the scoped reader (enforcement): the exact same compile seam, so the
+// reader can never admit a scope registration refused. A principal-bound param
+// (is.<role>() from a ref-role field) binds NULL here — the plugin reader has
+// no principal to rebind, so such a scope admits no rows (fail closed, matching
+// anonymous-principal semantics).
+function compileInterestScope(pluginId: string, interest: SearchSourceInterest): CompiledScope | null {
+  if (interest.scope === undefined) return null;
+  const fields = interest.fields ?? {};
+  const checkRegistry = buildCheckRegistry({
+    fields,
+    entityName: interest.entity,
+  });
+  const template = compileReadScope(interest.scope, {
+    fields,
+    where: `search plugin '${pluginId}' source interest '${interest.entity}'`,
+    registry: checkRegistry as unknown as Record<string, unknown>,
+    entityName: interest.entity,
+  });
+  return positionalize(template.sql, template.params);
+}
+
 // Build the scoped source reader for ONE plugin over a concrete read handle.
 // `interests` must be the plugin's DECLARED sourceInterests (the registry
 // passes exactly those); an entity outside the declared set is refused with a
-// scoping error. The returned reader exposes no write verb and no raw handle.
+// scoping error. The returned reader exposes no write verb and no raw handle,
+// and every read enforces the interest's declared `scope` as a WHERE clause.
 export function createSearchSourceReader(
   handle: SearchSourceHandle | null,
   { plugin, interests }: { plugin: string; interests: readonly SearchSourceInterest[] },
@@ -312,6 +361,11 @@ export function createSearchSourceReader(
     fields: interest.fields ? Object.freeze({ ...interest.fields }) : undefined,
   })));
   const entities = new Set(frozenInterests.map((interest) => interest.entity));
+  const compiledScopes = new Map<string, CompiledScope>();
+  for (const interest of frozenInterests) {
+    const compiled = compileInterestScope(plugin, interest);
+    if (compiled !== null) compiledScopes.set(interest.entity, compiled);
+  }
 
   function requireEntity(entity: string): void {
     if (typeof entity !== 'string' || !BARE_SQL_IDENTIFIER.test(entity) || !entities.has(entity)) {
@@ -332,13 +386,24 @@ export function createSearchSourceReader(
   function rows(entity: string, options: { readonly ids?: readonly string[]; readonly limit?: number } = {}): readonly Record<string, unknown>[] {
     requireEntity(entity);
     const connection = requireHandle();
-    let sql = `SELECT * FROM ${quoteIdentifier(entity)}`;
+    // The declared scope is enforced on EVERY read, not just validated at
+    // registration: a plugin declaring scope 'title === hello' never receives a
+    // row whose title differs. Scope args precede the id args in the SQL, so
+    // positional binding pushes them in that order.
+    const scoped = compiledScopes.get(entity);
+    const where: string[] = [];
     const params: unknown[] = [];
+    if (scoped) {
+      where.push(`(${scoped.sql})`);
+      params.push(...scoped.args);
+    }
     const ids = options.ids;
     if (ids !== undefined && ids.length > 0) {
-      sql += ` WHERE ${quoteIdentifier('id')} IN (${ids.map(() => '?').join(', ')})`;
+      where.push(`${quoteIdentifier('id')} IN (${ids.map(() => '?').join(', ')})`);
       params.push(...ids);
     }
+    let sql = `SELECT * FROM ${quoteIdentifier(entity)} AS t0`;
+    if (where.length > 0) sql += ` WHERE ${where.join(' AND ')}`;
     if (typeof options.limit === 'number' && Number.isFinite(options.limit)) {
       sql += ` LIMIT ${Math.max(0, Math.floor(options.limit))}`;
     }
@@ -348,9 +413,12 @@ export function createSearchSourceReader(
   function row(entity: string, id: string): Record<string, unknown> | undefined {
     requireEntity(entity);
     const connection = requireHandle();
-    return connection
-      .prepare(`SELECT * FROM ${quoteIdentifier(entity)} WHERE ${quoteIdentifier('id')} = ?`)
-      .get(id);
+    // The id placeholder precedes the scope fragment, so the id is the FIRST
+    // positional arg and the scope args follow it.
+    const scoped = compiledScopes.get(entity);
+    let sql = `SELECT * FROM ${quoteIdentifier(entity)} AS t0 WHERE ${quoteIdentifier('id')} = ?`;
+    if (scoped) sql += ` AND (${scoped.sql})`;
+    return connection.prepare(sql).get(id, ...(scoped ? scoped.args : []));
   }
 
   return Object.freeze({
@@ -458,11 +526,15 @@ export function createSearchPluginRegistry(options: SearchPluginRegistryOptions 
     assertFunction(plugin.rebuild, 'rebuild', plugin.id);
     assertFunction(plugin.search, 'search', plugin.id);
     if (plugin.health !== undefined) assertFunction(plugin.health, 'health', plugin.id);
-    if (plugin.generation !== undefined) assertFunction(plugin.generation, 'generation', plugin.id);
 
     if (!Array.isArray(plugin.ownedObjects)) {
       throw new Error(`search plugin '${plugin.id}' ownedObjects must be an array`);
     }
+    // Intra-plugin duplicate detection happens BEFORE the global ownedNames
+    // pass: a plugin naming the same object twice must not slip past on its
+    // own second mention (ownedNames only gains this plugin's objects after
+    // the whole array validated).
+    const pluginOwnedNames = new Set<string>();
     for (const object of plugin.ownedObjects) {
       if (object === null || typeof object !== 'object') {
         throw new Error(`search plugin '${plugin.id}' ownedObjects entries must be objects`);
@@ -474,6 +546,12 @@ export function createSearchPluginRegistry(options: SearchPluginRegistryOptions 
         );
       }
       assertIdentifierName(object.name, `owned object name`, plugin.id);
+      if (pluginOwnedNames.has(object.name)) {
+        throw new Error(
+          `search plugin '${plugin.id}' declares owned object '${object.name}' more than once`,
+        );
+      }
+      pluginOwnedNames.add(object.name);
       if (ownedNames.has(object.name)) {
         throw new Error(
           `search plugin '${plugin.id}' declares owned object '${object.name}' which is already owned by another plugin`,
@@ -508,18 +586,9 @@ export function createSearchPluginRegistry(options: SearchPluginRegistryOptions 
           );
         }
         // Registration-time compile (S5/A2 mirror): a scope that does not
-        // compile to constrained SQL refuses the whole declaration.
-        const fields = interest.fields ?? {};
-        const checkRegistry = buildCheckRegistry({
-          fields,
-          entityName: interest.entity,
-        });
-        compileReadScope(interest.scope, {
-          fields,
-          where: `search plugin '${plugin.id}' source interest '${interest.entity}'`,
-          registry: checkRegistry as unknown as Record<string, unknown>,
-          entityName: interest.entity,
-        });
+        // compile to constrained SQL refuses the whole declaration. The SAME
+        // seam the scoped reader uses to ENFORCE the scope on every read.
+        compileInterestScope(plugin.id, interest);
       }
     }
 
@@ -564,7 +633,19 @@ export function createSearchPluginRegistry(options: SearchPluginRegistryOptions 
 
   function notifyChange(id: string, change: SearchChange): SearchNotification {
     const entry = ledgerOf(id);
-    const key = entry.plugin.stalenessKey(change);
+    // Invalidation runs INSIDE the failure boundary too: a throwing
+    // stalenessKey must not escape orchestration. It records the failure in
+    // health (fence+1, state 'failed', retained retry info) — the index can no
+    // longer be trusted to reflect the source — and the notification reports no
+    // successful invalidation.
+    let key: string | null;
+    try {
+      key = entry.plugin.stalenessKey(change);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      recordFailure(id, message, retryableOf(err));
+      return { invalidated: false, stalenessKey: null };
+    }
     if (key === null) {
       return { invalidated: false, stalenessKey: null };
     }
@@ -584,16 +665,26 @@ export function createSearchPluginRegistry(options: SearchPluginRegistryOptions 
     const entry = ledgerOf(id);
     entry.generation += 1;
     const generation = entry.generation;
+    // CAS-style fence guard: a source change that lands while this cycle is
+    // in flight means the materialized index does NOT reflect the current
+    // fence. A success may only claim 'ready' when the fence it started with
+    // is still current; otherwise the staleness is re-applied ('stale'), so an
+    // older in-flight rebuild can never overwrite a newer invalidation with a
+    // premature ready.
+    const fenceAtStart = entry.fence;
     const ctx = contextOf(id);
     try {
       const result = await run(ctx);
       // prepare success leaves the plugin building (owned objects exist, the
       // index is not materialized yet); validate/reconcile/rebuild success
-      // makes the index ready.
-      entry.state = readyOnSuccess ? 'ready' : 'building';
+      // makes the index ready — unless the fence moved mid-flight, in which
+      // case the index stays stale regardless of this cycle's success.
       entry.lastError = null;
       const counts = result && result.counts ? Object.freeze({ ...result.counts }) : entry.counts;
       entry.counts = counts;
+      entry.state = readyOnSuccess
+        ? (entry.fence === fenceAtStart ? 'ready' : 'stale')
+        : 'building';
       return {
         ok: true,
         generation,

@@ -9,6 +9,9 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   createSearchPluginRegistry,
@@ -16,6 +19,7 @@ import {
   SUPPORTED_SEARCH_PLUGIN_CONTRACT_VERSION,
 } from '../build/search-plugin.mjs';
 import { collectTableNamesFromDdl } from '../build/schema-table-census.mjs';
+import { createSqliteAdapter } from '../build/sqlite-adapter.mjs';
 import workbench from '../build/app.mjs';
 import { entity, grant, principal, read, subscribe, text, write } from '../build/index.mjs';
 
@@ -41,7 +45,6 @@ function makePlugin({
   rebuild = () => ({ counts: { documents: 0 } }),
   search = () => ({ hits: [] }),
   health,
-  generation,
 } = {}) {
   return {
     contractVersion,
@@ -56,7 +59,6 @@ function makePlugin({
     rebuild,
     search,
     health,
-    generation,
   };
 }
 
@@ -114,6 +116,20 @@ describe('search plugin registry — declaration validation', () => {
     assert.throws(
       () => registry.register(makePlugin({ id: 'two', ownedObjects: [{ kind: 'table', name: 'shared_obj', ddl: ['CREATE TABLE shared_obj (id TEXT);'] }] })),
       /already owned by another plugin/,
+    );
+  });
+
+  test('refuses a duplicate owned-object name within one plugin', () => {
+    const registry = createSearchPluginRegistry();
+    assert.throws(
+      () => registry.register(makePlugin({
+        ownedObjects: [
+          { kind: 'table', name: 'notes_idx', ddl: ['CREATE TABLE notes_idx (id TEXT);'] },
+          { kind: 'index', name: 'notes_idx', ddl: ['CREATE INDEX notes_idx ON Note(id);'] },
+        ],
+      })),
+      /declares owned object 'notes_idx' more than once/,
+      'an intra-plugin duplicate name must be refused before the object is adopted',
     );
   });
 
@@ -258,6 +274,52 @@ describe('search plugin registry — scoped source readers', () => {
     db.close();
   });
 
+  test('rows / row enforce the declared source scope on every read', () => {
+    const db = freshNoteDb();
+    db.prepare('INSERT INTO Note (id, title, body) VALUES (?, ?, ?)').run('n1', 'hello', 'world');
+    db.prepare('INSERT INTO Note (id, title, body) VALUES (?, ?, ?)').run('n2', 'secret', 'note');
+    const registry = createSearchPluginRegistry();
+    registry.register(makePlugin({
+      sourceInterests: [{
+        entity: 'Note',
+        fields: { title: { kind: 'value', type: 'text' } },
+        scope: ({ fields }) => fields.title.is('hello'),
+      }],
+    }));
+    registry.bindSource(db);
+    const reader = registry.sourceReader('notes-fts');
+
+    // The plugin declaring scope 'title === hello' must not read other rows —
+    // through any read verb, ids filter included.
+    const all = reader.rows('Note');
+    assert.deepEqual(all.map((row) => row.id), ['n1']);
+    const filtered = reader.rows('Note', { ids: ['n1', 'n2'] });
+    assert.deepEqual(filtered.map((row) => row.id), ['n1']);
+    assert.equal(reader.row('Note', 'n1').body, 'world');
+    assert.equal(reader.row('Note', 'n2'), undefined);
+    db.close();
+  });
+
+  test('a scope with multiple bound params applies all of them in order', () => {
+    const db = freshNoteDb();
+    db.prepare('INSERT INTO Note (id, title, body) VALUES (?, ?, ?)').run('n1', 'hello', 'world');
+    db.prepare('INSERT INTO Note (id, title, body) VALUES (?, ?, ?)').run('n2', 'later', 'note');
+    db.prepare('INSERT INTO Note (id, title, body) VALUES (?, ?, ?)').run('n3', 'goodbye', 'note');
+    const registry = createSearchPluginRegistry();
+    registry.register(makePlugin({
+      sourceInterests: [{
+        entity: 'Note',
+        fields: { title: { kind: 'value', type: 'text' } },
+        scope: ({ fields }) => fields.title.in(['hello', 'later']),
+      }],
+    }));
+    registry.bindSource(db);
+    const reader = registry.sourceReader('notes-fts');
+    assert.deepEqual(reader.rows('Note').map((row) => row.id), ['n1', 'n2']);
+    assert.equal(reader.row('Note', 'n3'), undefined);
+    db.close();
+  });
+
   test('a reader with no bound source fails closed on use', () => {
     const registry = createSearchPluginRegistry();
     registry.register(makePlugin());
@@ -386,6 +448,34 @@ describe('search plugin registry — failure isolation', () => {
     assert.match(state.lastError.message, /merge conflict/);
     assert.equal(state.lastError.attempt, 1);
   });
+
+  test('a throwing stalenessKey is isolated, recorded in health, and recovers', async () => {
+    const registry = createSearchPluginRegistry();
+    registry.register(makePlugin({
+      id: 'throwy-key',
+      stalenessKey: () => {
+        throw new Error('key explode');
+      },
+    }));
+    let notification;
+    assert.doesNotThrow(() => {
+      notification = registry.notifyChange('throwy-key', { entity: 'Note', rowId: 'n1', kind: 'updated' });
+    });
+    assert.equal(notification.invalidated, false);
+    let state = registry.stateOf('throwy-key');
+    assert.equal(state.state, 'failed');
+    assert.equal(state.fence, 1);
+    assert.equal(state.lastError.message, 'key explode');
+    assert.equal(state.lastError.attempt, 1);
+    assert.equal(state.lastError.retryable, true);
+
+    // The failure is isolated: a successful rebuild clears it and recovers.
+    const outcome = await registry.rebuild('throwy-key');
+    assert.equal(outcome.ok, true);
+    state = registry.stateOf('throwy-key');
+    assert.equal(state.state, 'ready');
+    assert.equal(state.lastError, null);
+  });
 });
 
 // ---- generation / fence state transitions ----------------------------------
@@ -492,6 +582,37 @@ describe('search plugin registry — generation and fence transitions', () => {
     registry.notifyChange('broken', { entity: 'Note', rowId: 'n1', kind: 'removed' });
     assert.equal(registry.stateOf('broken').fence, fenceBefore + 1);
     assert.equal(registry.stateOf('broken').state, 'failed');
+  });
+
+  test('a change landing during an in-flight rebuild ends stale, not ready', async () => {
+    const registry = createSearchPluginRegistry();
+    let releaseBuild;
+    let started = false;
+    const gate = new Promise((resolve) => {
+      releaseBuild = resolve;
+    });
+    registry.register(makePlugin({
+      id: 'gated-build',
+      rebuild: async () => {
+        started = true;
+        await gate;
+        return { counts: { documents: 5 } };
+      },
+    }));
+    const building = registry.rebuild('gated-build');
+    assert.equal(started, true, 'the rebuild is in flight before the change lands');
+    registry.notifyChange('gated-build', { entity: 'Note', rowId: 'n1', kind: 'updated' });
+    releaseBuild();
+    const outcome = await building;
+    assert.equal(outcome.ok, true, 'the in-flight rebuild itself still succeeded');
+    // The fence moved while the rebuild was in flight: the completed index does
+    // NOT reflect the current source, so it must end stale — never overwritten
+    // to ready by the older cycle.
+    const state = registry.stateOf('gated-build');
+    assert.equal(state.state, 'stale');
+    assert.equal(state.fence, 1);
+    assert.equal(state.generation, 1);
+    assert.deepEqual(state.counts, { documents: 5 });
   });
 });
 
@@ -612,5 +733,30 @@ describe('app.registerSearchPlugin surface', () => {
     });
     assert.equal(writeResult.ok, true);
     assert.equal(db.prepare('SELECT title FROM Note WHERE id = ?').get('n-1').title, 'still works');
+  });
+
+  test('a plugin registered before a deferred adapter open lands is bound after ready', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'wb-search-deferred-'));
+    try {
+      const app = workbench({ db: createSqliteAdapter({ directory: join(root, 'owned'), name: 'app', mode: 'file' }) });
+      try {
+        assert.equal(app.db, null, 'the deferred adapter has no handle before the open lands');
+        app.registerSearchPlugin(makePlugin());
+        await app.ready;
+        assert.ok(app.db, 'awaiting ready installed the deferred handle');
+        app.db.exec('CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT, body TEXT);');
+        app.db.prepare('INSERT INTO Note (id, title, body) VALUES (?, ?, ?)').run('n1', 'hello', 'world');
+        const reader = app.searchPlugins.sourceReader('notes-fts');
+        assert.deepEqual(reader.sources(), ['Note']);
+        const rows = reader.rows('Note');
+        assert.equal(rows.length, 1);
+        assert.equal(rows[0].title, 'hello');
+        assert.equal(reader.row('Note', 'n1').body, 'world');
+      } finally {
+        await app.shutdown();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

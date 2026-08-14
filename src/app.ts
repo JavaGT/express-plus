@@ -347,6 +347,10 @@ export default function workbench({
     app.searchPlugins = createSearchPluginRegistry();
     app.registerSearchPlugin = (plugin: SearchPlugin) => {
       app.searchPlugins.register(plugin);
+      // Bind the CURRENT handle when one exists. An adapter-backed app's db is
+      // null until the deferred open lands; installPendingDb binds every
+      // registered plugin to the handle when that open completes, so a plugin
+      // registered before start() still gets a bound reader after ready.
       if (app.db) app.searchPlugins.bindSource(app.db);
       return app;
     };
@@ -503,6 +507,12 @@ export default function workbench({
                 app.db = handle;
                 app._dbAdapter = opened;
                 app._isManagedPath = (opened as OpenedSqliteDatabase).isManagedPath;
+                // SEARCH PLUGIN BINDING (S4/A1): plugins registered before the
+                // deferred open lands had no db to bind at registration time
+                // (registerSearchPlugin binds only when app.db exists). Bind
+                // every registered plugin to the freshly installed handle now,
+                // so a pre-start registration works after ready.
+                app.searchPlugins.bindSource(handle);
                 attachHandleResources(handle);
                 return opened;
               });
