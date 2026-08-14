@@ -7,7 +7,7 @@
 //
 //   1. makeShadowIndexedPlugin() — the in-memory fake-index plugin the contract
 //      suite runs against. It keeps an `active` Map and a disposable `shadow`
-//      Map, records every lifecycle call (with the write-queue `owned` probe),
+//      Map, records every lifecycle callback (which must be outside the queue),
 //      and exposes corruption/failure hooks for the recovery scenarios.
 //   2. makeFakeKit(db?) — wires the plugin into a registry + staleness bridge +
 //      write queue + reconcile engine over one database, exactly as production
@@ -50,9 +50,9 @@ import { createWriteQueue } from '../build/write-queue.mjs';
 //   - commitShadow     atomically promotes the shadow over the active index.
 //   - abortShadow      discards the shadow, leaving the active index intact.
 //
-// The hooks also record `owned` (the write-queue coordinator's turn flag) at
-// each lifecycle point, so a red-line test can prove reconcile/commit run inside
-// the coordinated turn while the shadow build does NOT hold the mutex.
+// The hooks record `owned` at each lifecycle point. The strict owned-index
+// facade in makeFakeKit separately records host statement execution, proving
+// callbacks never hold the coordinator even though their writes do.
 export function makeShadowIndexedPlugin({ id = 'notes-fts', version = '1.0.0' } = {}) {
   let active = new Map();
   let shadow = null;
@@ -90,6 +90,7 @@ export function makeShadowIndexedPlugin({ id = 'notes-fts', version = '1.0.0' } 
         name: `${id.replace(/[^A-Za-z0-9_]/g, '_')}_fts`,
         ddl: [`CREATE VIRTUAL TABLE IF NOT EXISTS ${id.replace(/[^A-Za-z0-9_]/g, '_')}_fts USING fts5(title);`],
       },
+      { kind: 'table', name: 'notes_fts_state', ddl: ['CREATE TABLE IF NOT EXISTS notes_fts_state (slot TEXT PRIMARY KEY, generation INTEGER NOT NULL);'] },
     ],
     sourceInterests: [{ entity: 'Note' }],
     stalenessKey: (change) => (change.entity === 'Note' ? `${change.entity}:${change.rowId}` : null),
@@ -98,48 +99,62 @@ export function makeShadowIndexedPlugin({ id = 'notes-fts', version = '1.0.0' } 
       if (validateFails) throw new Error('validate failed (injected)');
       return { counts: { documents: active.size } };
     },
-    reconcile: (_ctx, changes) => {
+    async reconcile(ctx, changes) {
       const target = mode === 'shadow' ? shadow : active;
       const owned = probeOwned();
       calls.push({ op: 'reconcile', rowIds: changes.map((change) => change.rowId), owned });
+      await ctx.index.write({ expectedFence: ctx.fence, statements: [{ sql: "UPDATE notes_fts_state SET generation = generation WHERE slot = 'active'" }] });
       for (const change of changes) {
         if (change.kind === 'removed') target.delete(change.rowId);
         else target.set(change.rowId, { id: change.rowId, ...(change.data ?? {}) });
       }
       return { counts: { documents: target.size } };
     },
-    rebuild: (ctx) => {
+    async rebuild(ctx) {
       const owned = probeOwned();
       calls.push({ op: 'rebuild', mode, owned });
       if (rebuilder) return rebuilder(ctx);
       const target = mode === 'shadow' ? shadow : active;
       target.clear();
       for (const row of ctx.reader.rows('Note')) target.set(String(row.id), { ...row });
+      await ctx.index.write({ expectedFence: ctx.fence, statements: [{ sql: "UPDATE notes_fts_state SET generation = generation WHERE slot = 'active'" }] });
       return { counts: { documents: target.size } };
     },
-    search: () => ({ hits: [...active.keys()].map((rowId) => ({ id: rowId })) }),
-    beginShadow: () => {
+    search: (ctx) => {
+      const activeGeneration = ctx.index.query({ sql: "SELECT generation FROM notes_fts_state WHERE slot = 'active'" })[0]?.generation;
+      calls.push({ op: 'search', owned: probeOwned(), activeGeneration });
+      return { hits: [...active.keys()].map((rowId) => ({ id: rowId })) };
+    },
+    async beginShadow(ctx) {
       calls.push({ op: 'beginShadow', owned: probeOwned() });
+      await ctx.index.write({ expectedFence: ctx.fence, statements: [{ sql: "INSERT OR REPLACE INTO notes_fts_state (slot, generation) VALUES ('shadow', ?)", params: [ctx.generation] }] });
       shadow = new Map();
       mode = 'shadow';
     },
-    commitShadow: () => {
+    async commitShadow(ctx) {
       const owned = probeOwned();
       calls.push({ op: 'commitShadow', owned });
       if (commitFails) throw new Error('commitShadow failed (injected)');
+      const result = await ctx.index.write({ expectedFence: ctx.fence, statements: [
+        { sql: "INSERT OR REPLACE INTO notes_fts_state (slot, generation) SELECT 'prior', generation FROM notes_fts_state WHERE slot = 'active'" },
+        { sql: "INSERT OR REPLACE INTO notes_fts_state (slot, generation) VALUES ('active', ?) ", params: [ctx.generation] },
+      ] });
+      if (result.changes === 0) throw new Error('fence moved before durable shadow activation');
       retired = active;
       active = shadow;
       shadow = null;
       mode = 'active';
     },
-    rollbackShadow: () => {
+    async rollbackShadow(ctx) {
       calls.push({ op: 'rollbackShadow', owned: probeOwned() });
+      await ctx.index.write({ expectedFence: ctx.fence, statements: [{ sql: "UPDATE notes_fts_state SET generation = (SELECT generation FROM notes_fts_state WHERE slot = 'prior') WHERE slot = 'active'" }] });
       active = retired;
       retired = null;
       mode = 'active';
     },
-    abortShadow: () => {
+    async abortShadow(ctx) {
       calls.push({ op: 'abortShadow', owned: probeOwned() });
+      await ctx.index.write({ expectedFence: ctx.fence, statements: [{ sql: "DELETE FROM notes_fts_state WHERE slot = 'shadow'" }] });
       shadow = null;
       mode = 'active';
     },
@@ -183,7 +198,7 @@ export function makeShadowIndexedPlugin({ id = 'notes-fts', version = '1.0.0' } 
 export function makeFakeKit(db = null) {
   const handle = db ?? new DatabaseSync(':memory:');
   if (db === null) {
-    handle.exec('CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT, body TEXT);');
+    handle.exec("CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT, body TEXT); CREATE TABLE notes_fts_state (slot TEXT PRIMARY KEY, generation INTEGER NOT NULL); INSERT INTO notes_fts_state (slot, generation) VALUES ('active', 0);");
   }
   const owned = makeShadowIndexedPlugin();
   const registry = createSearchPluginRegistry();
@@ -192,6 +207,23 @@ export function makeFakeKit(db = null) {
   const bridge = createSearchStalenessBridge({ registry, now: () => 't' });
   bridge.engage(handle);
   const queue = createWriteQueue();
+  const hostCalls = [];
+  registry.bindIndex(() => ({
+    query({ sql, params = [] }) {
+      return handle.prepare(sql).all(...params);
+    },
+    async write({ expectedFence, statements }) {
+      return queue.run(() => {
+        if (registry.stateOf('notes-fts').fence !== expectedFence) return { changes: 0 };
+        let changes = 0;
+        for (const statement of statements) {
+          hostCalls.push({ sql: statement.sql, owned: queue.owned });
+          changes += handle.prepare(statement.sql).run(...(statement.params ?? [])).changes;
+        }
+        return { changes };
+      });
+    },
+  }));
   const engine = createSearchReconcileEngine({ registry, staleness: bridge, db: handle, writeQueue: queue, now: () => 't' });
   owned.setOwnedProbe(() => queue.owned);
   return {
@@ -201,6 +233,7 @@ export function makeFakeKit(db = null) {
     queue,
     engine,
     plugin: owned,
+    hostCalls,
     close: async () => {
       await queue.close();
       handle.close();
@@ -233,7 +266,8 @@ export function searchReconcileContractScenarios(_makeKit) {
         assert.deepEqual([...plugin.index.content()].map((row) => row.id).sort(), ['n1', 'n2']);
         // The build went through the SHADOW (a separate target), never the active index.
         assert.deepEqual(plugin.calls.filter((call) => call.op === 'rebuild'), [{ op: 'rebuild', mode: 'shadow', owned: false }]);
-        assert.equal(plugin.calls.some((call) => call.op === 'commitShadow' && call.owned === true), true);
+        assert.equal(plugin.calls.some((call) => call.op === 'commitShadow' && call.owned === false), true);
+        assert.equal(kit.hostCalls.some((call) => call.owned === true), true, 'owned-index statements execute inside the coordinator');
 
         // The registry — the single health authority — discloses the activation.
         assert.equal(registry.stateOf('notes-fts').state, 'ready');
@@ -254,7 +288,7 @@ export function searchReconcileContractScenarios(_makeKit) {
     {
       name: 'a mutation during the rebuild scan aborts activation (fence) and leaves the active generation intact',
       async run(kit) {
-        const { db, registry, bridge, engine, plugin } = kit;
+        const { db, registry, bridge, engine, plugin, hostCalls } = kit;
         db.prepare('INSERT INTO Note (id, title) VALUES (?, ?)').run('n1', 'one');
 
         // A healthy active generation is the baseline.
@@ -262,6 +296,7 @@ export function searchReconcileContractScenarios(_makeKit) {
         assert.equal(baseline.ok, true);
         const fenceAtStart = registry.stateOf('notes-fts').fence;
         const commitsBefore = plugin.calls.filter((call) => call.op === 'commitShadow').length;
+        const activationStatementsBefore = hostCalls.filter((call) => call.sql.includes("'prior'")).length;
         assert.equal(fenceAtStart, 0);
 
         // The next rebuild's SCAN is interrupted: a committed source change
@@ -290,6 +325,11 @@ export function searchReconcileContractScenarios(_makeKit) {
           plugin.calls.filter((call) => call.op === 'commitShadow').length,
           commitsBefore,
           'nothing from the aborted rebuild was committed',
+        );
+        assert.equal(
+          hostCalls.filter((call) => call.sql.includes("'prior'")).length,
+          activationStatementsBefore,
+          'a moved fence admits zero durable activation statements',
         );
 
         // The ACTIVE generation is untouched — the old index still serves.
@@ -429,6 +469,7 @@ export function searchReconcileContractScenarios(_makeKit) {
         assert.equal(plugin.calls.some((call) => call.op === 'rollbackShadow'), true);
         assert.equal(plugin.calls.some((call) => call.op === 'abortShadow'), true);
         assert.deepEqual(plugin.index.content().map((row) => row.id), ['n1']);
+        assert.equal(db.prepare("SELECT generation FROM notes_fts_state WHERE slot = 'active'").get().generation, 1, 'rollback restored the real prior durable generation pointer');
       },
     },
     {
@@ -495,7 +536,7 @@ export function searchReconcileContractScenarios(_makeKit) {
         assert.equal(reconciles.length, 5);
         for (const call of reconciles) {
           assert.equal(call.rowIds.length, 1);
-          assert.equal(call.owned, true, 'each materialization enters through the write coordinator');
+          assert.equal(call.owned, false, 'plugin callbacks stay outside the write coordinator');
         }
         assert.equal(registry.stateOf('notes-fts').state, 'ready');
       },
@@ -525,7 +566,7 @@ export function searchReconcileContractScenarios(_makeKit) {
         const path = join(directory, 'search.sqlite');
         try {
           const firstDb = new DatabaseSync(path);
-          firstDb.exec('CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT, body TEXT);');
+          firstDb.exec("CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT, body TEXT); CREATE TABLE notes_fts_state (slot TEXT PRIMARY KEY, generation INTEGER NOT NULL); INSERT INTO notes_fts_state (slot, generation) VALUES ('active', 0);");
           const first = makeFakeKit(firstDb);
           firstDb.prepare('INSERT INTO Note (id, title) VALUES (?, ?)').run('n1', 'one');
           first.plugin.setRebuilder(() => {
@@ -547,6 +588,8 @@ export function searchReconcileContractScenarios(_makeKit) {
             assert.equal(recovered.ok, true);
             assert.deepEqual(second.plugin.index.content(), [{ id: 'n1', title: 'one', body: null }]);
             assert.equal(second.engine.parity('notes-fts').matches, true);
+            await second.registry.search('notes-fts', { query: {} });
+            assert.equal(second.plugin.calls.at(-1).activeGeneration, 1, 'a fresh plugin instance reads the durable active generation');
           } finally {
             await second.close();
           }
