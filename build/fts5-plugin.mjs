@@ -2,63 +2,63 @@
 
 import {
   SUPPORTED_SEARCH_PLUGIN_CONTRACT_VERSION,
-  type SearchChange,
-  type SearchPlugin,
-  type SearchPluginContext,
-  type SearchPluginSearchResult,
-} from './search-plugin.ts';
-import { censusOfRows, type SearchCensus, type SearchShadowCapabilities } from './search-reconcile.ts';
 
-export type Fts5Tokenizer = 'unicode61' | 'porter' | 'trigram';
+
+
+
+} from './search-plugin.mjs';
+import { censusOfRows,                                                  } from './search-reconcile.mjs';
+
+
 
 export class Fts5QueryValidationError extends Error {
-  constructor(message: string) {
+  constructor(message        ) {
     super(message);
     this.name = 'Fts5QueryValidationError';
   }
 }
 
-export interface Fts5PluginSource {
-  readonly entity: string;
-  readonly fields: readonly string[];
-}
 
-export interface Fts5PluginOptions {
-  readonly id: string;
-  readonly version: string;
-  readonly source: Fts5PluginSource;
-  readonly tokenizer?: Fts5Tokenizer;
-  readonly snippetLength?: number;
-}
 
-export interface Fts5SearchHit extends Readonly<Record<string, unknown>> {
-  readonly id: string;
-  readonly rank: number;
-  readonly excerpt: string;
-}
 
-export interface Fts5Plugin extends SearchPlugin, SearchShadowCapabilities {
-  readonly tokenizer: Fts5Tokenizer;
-}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const TOKENIZERS = new Set<Fts5Tokenizer>(['unicode61', 'porter', 'trigram']);
+const TOKENIZERS = new Set               (['unicode61', 'porter', 'trigram']);
 const MAX_WRITE_STATEMENTS = 128;
 
-function assertIdentifier(value: string, label: string): void {
+function assertIdentifier(value        , label        )       {
   if (!IDENTIFIER.test(value)) throw new TypeError(`FTS5 ${label} must be a SQLite identifier`);
 }
 
-function tableName(entity: string, field: string): string {
+function tableName(entity        , field        )         {
   return `${entity}_${field}_fts`;
 }
 
-function ownerColumn(entity: string): string {
+function ownerColumn(entity        )         {
   return `${entity}_id`;
 }
 
 // Retained for the field strategy's scope-level FTS table declaration.
-export function fts5TableDdl(entity: string, field: string, tokenizer?: Fts5Tokenizer): string {
+export function fts5TableDdl(entity        , field        , tokenizer                )         {
   assertIdentifier(entity, 'entity');
   assertIdentifier(field, 'field');
   if (tokenizer !== undefined && !TOKENIZERS.has(tokenizer)) throw new TypeError(`unsupported FTS5 tokenizer '${tokenizer}'`);
@@ -66,34 +66,34 @@ export function fts5TableDdl(entity: string, field: string, tokenizer?: Fts5Toke
   return `CREATE VIRTUAL TABLE IF NOT EXISTS ${tableName(entity, field)} USING fts5(${field}, ${ownerColumn(entity)} UNINDEXED${configuredTokenizer});`;
 }
 
-function pluginName(id: string): string {
+function pluginName(id        )         {
   return `SearchFts_${id.replaceAll(/[^A-Za-z0-9_]/g, '_')}`;
 }
 
-function rowId(row: Readonly<Record<string, unknown>>): string {
+function rowId(row                                   )         {
   if (typeof row.id !== 'string' || row.id.length === 0) throw new TypeError('FTS5 source row requires a non-empty string id');
   return row.id;
 }
 
-function stringValues(row: Readonly<Record<string, unknown>>, fields: readonly string[]): readonly string[] {
+function stringValues(row                                   , fields                   )                    {
   return fields.map((field) => typeof row[field] === 'string' ? row[field] : '');
 }
 
-function asNumber(value: unknown): number {
+function asNumber(value         )         {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
 
-function countOf(ctx: SearchPluginContext, table: string): number {
+function countOf(ctx                     , table        )         {
   // count() is intentionally outside the owned-index SQL function allowlist.
   // The bounded capability already caps query rows, so count concrete rowids.
   return ctx.index.query({ sql: `SELECT rowid FROM ${table}` }).length;
 }
 
-function ftsShadowNames(table: string): readonly string[] {
+function ftsShadowNames(table        )                    {
   return Object.freeze(['data', 'idx', 'content', 'docsize', 'config'].map((suffix) => `${table}_${suffix}`));
 }
 
-export function createFts5Plugin(options: Fts5PluginOptions): Fts5Plugin {
+export function createFts5Plugin(options                   )             {
   assertIdentifier(options.source.entity, 'entity');
   if (!Array.isArray(options.source.fields) || options.source.fields.length === 0) throw new TypeError('FTS5 plugin requires at least one source field');
   for (const field of options.source.fields) assertIdentifier(field, 'field');
@@ -104,21 +104,21 @@ export function createFts5Plugin(options: Fts5PluginOptions): Fts5Plugin {
 
   const base = pluginName(options.id);
   const stateTable = `${base}_state`;
-  const tables = [`${base}_g0`, `${base}_g1`] as const;
+  const tables = [`${base}_g0`, `${base}_g1`]         ;
   const idColumn = `${options.source.entity}_id`;
-  let building: 0 | 1 | null = null;
-  let promoted: 0 | 1 | null = null;
+  let building               = null;
+  let promoted               = null;
 
-  function activeGeneration(ctx: SearchPluginContext): 0 | 1 {
+  function activeGeneration(ctx                     )        {
     const value = ctx.index.query({ sql: `SELECT active FROM ${stateTable} WHERE slot = 'active'` })[0]?.active;
     return value === 1 ? 1 : 0;
   }
 
-  function targetTable(ctx: SearchPluginContext): string {
+  function targetTable(ctx                     )         {
     return tables[building ?? activeGeneration(ctx)];
   }
 
-  async function writeRows(ctx: SearchPluginContext, table: string, rows: readonly Readonly<Record<string, unknown>>[]): Promise<void> {
+  async function writeRows(ctx                     , table        , rows                                              )                {
     const columns = [...options.source.fields, idColumn, 'payload'];
     const placeholders = columns.map(() => '?').join(', ');
     const sql = `INSERT INTO ${table} (${columns.join(', ')}) VALUES (${placeholders})`;
@@ -131,8 +131,8 @@ export function createFts5Plugin(options: Fts5PluginOptions): Fts5Plugin {
     }
   }
 
-  async function replaceRows(ctx: SearchPluginContext, table: string, changes: readonly SearchChange[]): Promise<void> {
-    const statements: { readonly sql: string; readonly params?: readonly unknown[] }[] = [];
+  async function replaceRows(ctx                     , table        , changes                         )                {
+    const statements                                                                   = [];
     for (const change of changes) {
       if (change.entity !== options.source.entity) continue;
       statements.push({ sql: `DELETE FROM ${table} WHERE ${idColumn} = ?`, params: [change.rowId] });
@@ -152,15 +152,15 @@ export function createFts5Plugin(options: Fts5PluginOptions): Fts5Plugin {
     }
   }
 
-  const plugin: Fts5Plugin = {
+  const plugin             = {
     contractVersion: SUPPORTED_SEARCH_PLUGIN_CONTRACT_VERSION,
     id: options.id,
     version: options.version,
     tokenizer,
     ownedObjects: Object.freeze([
-      { kind: 'table' as const, name: stateTable, ddl: [`CREATE TABLE IF NOT EXISTS ${stateTable} (slot TEXT PRIMARY KEY CHECK (slot = 'active'), active INTEGER NOT NULL CHECK (active IN (0, 1)), previous INTEGER NOT NULL CHECK (previous IN (0, 1)));`] },
+      { kind: 'table'         , name: stateTable, ddl: [`CREATE TABLE IF NOT EXISTS ${stateTable} (slot TEXT PRIMARY KEY CHECK (slot = 'active'), active INTEGER NOT NULL CHECK (active IN (0, 1)), previous INTEGER NOT NULL CHECK (previous IN (0, 1)));`] },
       ...tables.map((name) => ({
-        kind: 'virtual-table' as const,
+        kind: 'virtual-table'         ,
         name,
         // payload is retained only for exact index/source census comparison. Search
         // queries never select it, so indexed source data cannot leak in a hit.
@@ -171,7 +171,7 @@ export function createFts5Plugin(options: Fts5PluginOptions): Fts5Plugin {
       // Lifecycle creation visits virtual tables first, making these fallback
       // DDL entries no-ops on every healthy boot.
       ...tables.flatMap((table) => ftsShadowNames(table).map((name) => ({
-        kind: 'table' as const,
+        kind: 'table'         ,
         name,
         ddl: [`-- ${name} is created by its declared FTS5 virtual table.`],
       }))),
@@ -201,7 +201,7 @@ export function createFts5Plugin(options: Fts5PluginOptions): Fts5Plugin {
       await writeRows(ctx, table, rows);
       return { counts: { documents: countOf(ctx, table) } };
     },
-    search(ctx, request): SearchPluginSearchResult {
+    search(ctx, request)                           {
       if (typeof request.query !== 'string' || request.query.trim().length === 0) {
         throw new Fts5QueryValidationError('FTS5 query must be a non-empty string');
       }
@@ -231,12 +231,12 @@ export function createFts5Plugin(options: Fts5PluginOptions): Fts5Plugin {
       building = activeGeneration(ctx) === 0 ? 1 : 0;
       await ctx.index.write({ expectedFence: ctx.fence, statements: [{ sql: `DELETE FROM ${tables[building]}` }] });
     },
-    indexCensus(ctx): SearchCensus {
+    indexCensus(ctx)               {
       const rows = ctx.index.query({ sql: `SELECT payload FROM ${targetTable(ctx)} ORDER BY ${idColumn} ASC` }).map((row) => {
         if (typeof row.payload !== 'string') throw new Error('FTS5 index payload is corrupt');
-        const parsed = JSON.parse(row.payload) as unknown;
+        const parsed = JSON.parse(row.payload)           ;
         if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('FTS5 index payload is corrupt');
-        return parsed as Record<string, unknown>;
+        return parsed                           ;
       });
       return Object.freeze({ [options.source.entity]: censusOfRows(rows) });
     },
