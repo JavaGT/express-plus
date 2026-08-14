@@ -20,6 +20,8 @@ import { frozenJsonSnapshot } from '../frozen-json.ts';
 import { markAnnotatedEntityProjection } from '../annotated-text-history.ts';
 import type { DbHandle } from '../driver.ts';
 import type { SideTableStrategyEntry, ProjectionEvent } from '../side-table-strategy.ts';
+import { annotatedTextDeniedPlaceholder, readableFieldNames } from '../field-admission.ts';
+import type { AuthorizationAdapter } from '../authorization-adapter.ts';
 import { rawRow } from './query.ts';
 
 type Row = Record<string, unknown>;
@@ -584,6 +586,43 @@ function buildProjectedComputeRow(storedRow: Row, fields: Fields): Row {
     }
   }
   return row;
+}
+
+export interface RecipientRowProjectionOptions {
+  authorization?: AuthorizationAdapter | null;
+  // Precomputed readable field set (avoids re-running admission when the caller
+  // already computed it, e.g. the snapshot call site's annotated-text loop).
+  readable?: ReadonlySet<string>;
+}
+
+// The single recipient read projection (S5/A3 — field-read admission path).
+// Given a materialized row, return exactly the field subset the principal can
+// READ: unreadable fields are OMITTED, and an unreadable annotated-text field
+// REDACTS to the explicit restricted placeholder (the existing recipient
+// projection's wire shape — no canonical document facts are loaded). `id`
+// always survives so the row stays addressable. This is the ONE source the
+// live-delivery envelopes, the snapshot call site, and (via A2's HTTP wiring)
+// the REST read path consume — a field the principal cannot read never reaches
+// any recipient projection.
+export async function projectRowForRecipient(
+  entity: { fields?: Fields },
+  row: Row | null | undefined,
+  principal: unknown,
+  options: RecipientRowProjectionOptions = {},
+): Promise<Row> {
+  if (!row || typeof row !== 'object') return (row ?? {}) as Row;
+  const readable = options.readable ?? (await readableFieldNames(entity as never, row, principal, options.authorization));
+  const projected: Row = {};
+  if (Object.prototype.hasOwnProperty.call(row, 'id')) projected.id = row.id;
+  const fields = (entity?.fields ?? {}) as Fields;
+  for (const [fieldName, descriptor] of Object.entries(fields)) {
+    if (readable.has(fieldName)) {
+      if (Object.prototype.hasOwnProperty.call(row, fieldName)) projected[fieldName] = row[fieldName];
+    } else if (descriptor?.kind === 'annotatedText') {
+      projected[fieldName] = annotatedTextDeniedPlaceholder();
+    }
+  }
+  return projected;
 }
 
 export function createEntityProjection({ name, fields, verbs, storedComputedFields, sideTableStrategyEntries, conditionalHistory = false, conditionalCreateHistory = false }: {

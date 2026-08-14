@@ -14,6 +14,8 @@ import { compileSnapshots, captureSnapshot, authorizeSnapshot, projectSnapshot }
 import { hasAnnotatedTextFields, projectEntitySnapshot } from './entity-snapshot-projection.mjs';
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
 import { rawRow } from './entity/query.mjs';
+import { projectRowForRecipient } from './entity/projection.mjs';
+import { mayReadField, readableFieldNames } from './field-admission.mjs';
 import { mayRow } from './row-grant.mjs';
                                                                        
 import { ensureStream, ensureLease, hashClientNonce, resolveStream, resolveLease, acknowledgeAndPruneSnapshot } from './annotated-text-authoring-stream.mjs';
@@ -244,6 +246,10 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, authorization, 
     const row = db.prepare(`SELECT * FROM ${document.entity.name} AS t0 WHERE ${sql} AND t0.id = :id`)
       .get({ ...params, id: document.documentId });
     if (!row || !(await admitSubscribeRow(document.entity         , row, principal))) return null;
+    // Field-read admission (S5/A3) on the annotated-text field: a principal who
+    // cannot READ the field must not receive document content, snapshot
+    // recovery, or fold envelopes — the same admission the row projection runs.
+    if (!(await mayReadField(document.entity         , document.fieldName, row, principal, authorization))) return null;
     return row;
   }
 
@@ -260,7 +266,17 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, authorization, 
       // envelope grammar uses only metadata plus the recipient-hydrated row.
       const { data: _data, eventData: _eventData, ...event } = context.event;
       const handle = tryParseScopeKey(context.scope);
-      const base = { ...context, event, composite: !!handle && composites.has(handle.entity) };
+      // Field-read projection (S5/A3): the envelope grammar sees only the
+      // recipient's readable field subset — lifecycle data, deltas, and reducer
+      // seeds alike — so a field the principal cannot read never reaches the
+      // recipient.
+      let readableFields                                 ;
+      let row = context.row;
+      if (row) {
+        readableFields = await readableFieldNames(context.entity         , row, context.principal, authorization);
+        row = await projectRowForRecipient(context.entity         , row, context.principal, { readable: readableFields, authorization });
+      }
+      const base = { ...context, row, readableFields, event, composite: !!handle && composites.has(handle.entity) };
       // Document-bound annotated-text operated events may fold as a single
       // recipient-safe CRDT transition instead of an opaque snapshot recovery.
       // tryBuildAnnotatedTextFoldEnvelopes returns null to fall through to the
@@ -394,7 +410,7 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, authorization, 
         const authoring = document.descriptor?.kind === 'annotatedText' && typeof document.clientNonce === 'string' && /^[A-Za-z0-9_-]{43}$/.test(document.clientNonce)
           ? (() => { const prefix = `${document.entity.name}_${document.fieldName}`; const stream = ensureStream({ db: db         , prefix, documentId: document.documentId, principalType: principal.type ?? 'principal', principalId: principal.id ?? '' }); const lease = ensureLease({ db: db         , prefix, streamId: stream.id, clientNonceHash: hashClientNonce(document.clientNonce) }); return lease ? { streamToken: stream.id, leaseToken: lease.id, leaseId: lease.id, fence: before } : null; })()
           : null;
-        const snapshot = await projectEntitySnapshot({ db: db         , entity: document.entity         , row, principal, authoring });
+        const snapshot = await projectEntitySnapshot({ db: db         , entity: document.entity         , row, principal, authoring, authorization });
         if (readSeq(db, scope) !== before) return { kind: 'retry' };
         const annotated = (snapshot                       )[document.fieldName];
         const envelope = annotated?.authoring;
@@ -414,7 +430,7 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, authorization, 
           const direct = tryParseScopeKey(snapshotScope);
           const entity = direct && resolveEntity(direct.entity);
           if (!entity || !hasAnnotatedTextFields(entity         )) return row;
-          return projectEntitySnapshot({ db: db         , entity: entity         , row, principal: recipient });
+          return projectEntitySnapshot({ db: db         , entity: entity         , row, principal: recipient, authorization });
         },
       });
        return result;

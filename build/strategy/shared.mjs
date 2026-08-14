@@ -10,11 +10,53 @@ import { randomUUID } from 'node:crypto';
                                               
 import { mayFieldOp } from '../row-grant.mjs';
                                                     
+                                                                        
+                                                 
+import { failure } from '../outcome.mjs';
 
-export async function authorizeFieldOp(record         , fieldName        , capability        , row         , principal         )                {
-  if (principal && !(await mayFieldOp(record                , fieldName, capability                         , row, principal))) {
-    throw { status: 403, message: 'forbidden' };
+// The generic field-denial reason code from the A2 adapter's closed vocabulary
+// (S5/A3). A rejected field write carries this code; the production HTTP failure
+// stays category 'denied' → 403 with the generic 'forbidden' message — never the
+// field name, so an attacker cannot distinguish a protected field from a missing
+// one.
+const FIELD_ACCESS_DENIED_REASON = 'no-field-access';
+
+// The 403 a denied field write raises. Carries the generic reason code (never a
+// field name) and a WorkbenchFailure so HTTP dispatch maps it to
+// failure('denied', 'forbidden') without echoing anything app-specific.
+function deniedFieldError(reasonCode        )                                                                   {
+  const error = new Error('forbidden')                                                                    ;
+  error.status = 403;
+  error.failure = failure('denied', 'forbidden');
+  error.reasonCode = reasonCode;
+  return error;
+}
+
+export async function authorizeFieldOp(record         , fieldName        , capability        , row         , principal         , authorization                              = null)                {
+  if (!principal) return;
+  if (authorization) {
+    const decision = await authorization.admit({
+      category: 'entity',
+      verb: 'update',
+      operation: 'update',
+      principal: principal             ,
+      entity: record                ,
+      row,
+      fieldName,
+      capability: capability                         ,
+      resourceId: rowIdOf(row),
+    });
+    if (!decision.admitted) throw deniedFieldError(decision.reasonCode ?? FIELD_ACCESS_DENIED_REASON);
+    return;
   }
+  if (!(await mayFieldOp(record                , fieldName, capability                         , row, principal))) {
+    throw deniedFieldError(FIELD_ACCESS_DENIED_REASON);
+  }
+}
+
+function rowIdOf(row         )                {
+  const id = (row                                       )?.id;
+  return typeof id === 'string' || typeof id === 'number' ? String(id) : null;
 }
 
 export function requireFieldDispatch(entityName        , fieldName        , dispatch         )       {

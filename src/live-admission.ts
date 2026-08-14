@@ -90,7 +90,10 @@ function buildInterest(interest: Record<string, unknown>, entity: LiveEntityReco
         throw new Error('Fields interest must be data, not a closure.');
       }
       if (!entity.fields || !(key in entity.fields)) {
-        throw new Error(`Unknown field ${key} in interest.`);
+        // Inference prevention (S5/A3): never distinguish an existing-but-absent
+        // from a genuinely-unknown field name in the failure — a field name in
+        // the error would let a principal probe which fields exist.
+        throw new Error('Unknown field in interest.');
       }
       if (hasAnnotatedText(entity) && entity.fields[key]?.kind === 'ephemeral') {
         throw new Error('Ephemeral interest is unavailable for annotated-text entities.');

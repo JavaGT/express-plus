@@ -26,6 +26,8 @@ import { createLiveDeliveryCore } from './live-delivery-core.ts';
 import type { CoreProjectContext, LiveDeliveryCore } from './live-delivery-core.ts';
 import { createLiveEnvelopeBuilder } from './live-delivery-envelope.ts';
 import { createLiveDeliveryWebSocket } from './live-delivery-websocket.ts';
+import { projectRowForRecipient } from './entity/projection.ts';
+import { readableFieldNames } from './field-admission.ts';
 import type { AuthorizationAdapter } from './authorization-adapter.ts';
 import type { LiveEntityRecord, MayVerb } from './live-fanout.ts';
 import type { Principal } from './principal.ts';
@@ -70,13 +72,22 @@ export function createWebSocketLiveDelivery(httpServer: Server, {
 
   // Committed-event delivery core — the single authority for committed events.
   // The projectRecipient uses the shared envelope builder for delta/reducer
-  // parity with the fan-out path.
+  // parity with the fan-out path, after the recipient read projection (S5/A3)
+  // has confined the row and delta/reducer grammar to readable fields.
   const core: LiveDeliveryCore = createLiveDeliveryCore({
     db: db as LiveDatabase,
     entities: resolveEntity ? (name: string) => resolveEntity(name) as LiveEntityRecord | undefined : new Map(),
     mayVerb,
     authorization,
-    projectRecipient: (ctx: CoreProjectContext) => envelopeBuilder.buildEnvelope(ctx as unknown as Parameters<typeof envelopeBuilder.buildEnvelope>[0]),
+    projectRecipient: async (ctx: CoreProjectContext) => {
+      let readableFields: ReadonlySet<string> | undefined;
+      let row = ctx.row;
+      if (row) {
+        readableFields = await readableFieldNames(ctx.entity as never, row, ctx.principal, authorization);
+        row = await projectRowForRecipient(ctx.entity as never, row, ctx.principal, { readable: readableFields, authorization });
+      }
+      return envelopeBuilder.buildEnvelope({ ...ctx, row, readableFields } as unknown as Parameters<typeof envelopeBuilder.buildEnvelope>[0]);
+    },
     log,
   });
 

@@ -43,6 +43,9 @@ export interface EnvelopeContext {
   scope: string;
   composite?: boolean;
   document?: unknown;
+  // The principal's readable field subset (S5/A3). When present, native-field
+  // deltas and text reducer seeds for unreadable fields are withheld.
+  readableFields?: ReadonlySet<string>;
 }
 
 export interface LiveEnvelope {
@@ -157,10 +160,19 @@ export function createLiveEnvelopeBuilder({ stateful = true, includeActionId = t
     // Delta baselines and reducer seeds belong to the connection-owned WebSocket
     // path; sharing either between recipients would make delivery state unsafe.
     if (deltaProjector) {
-      const delta = deltaProjector.project(ctx.entity, id, ctx.row, event);
-      if (delta !== undefined) envelope.delta = delta;
+      // Field-read admission (S5/A3): a native delta names its field explicitly
+      // (the whole committed data under the field key), so it is withheld when
+      // the principal cannot read that field. Updated-event deltas are already
+      // confined to the projected row + lifecycle data (readable fields only).
+      const fieldReadable = ctx.readableFields == null || evHandle.kind !== EventKind.native || ctx.readableFields.has(evHandle.field as string);
+      if (fieldReadable) {
+        const delta = deltaProjector.project(ctx.entity, id, ctx.row, event);
+        if (delta !== undefined) envelope.delta = delta;
+      }
       const reducers = createdTextReducerSeeds(ctx.entity, event);
-      if (reducers) envelope.reducers = reducers;
+      if (reducers) {
+        envelope.reducers = ctx.readableFields == null ? reducers : reducers.filter((seed) => ctx.readableFields!.has(seed.field));
+      }
     }
 
     return [envelope];

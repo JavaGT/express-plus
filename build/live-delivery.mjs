@@ -26,6 +26,8 @@ import { createLiveDeliveryCore } from './live-delivery-core.mjs';
                                                                                     
 import { createLiveEnvelopeBuilder } from './live-delivery-envelope.mjs';
 import { createLiveDeliveryWebSocket } from './live-delivery-websocket.mjs';
+import { projectRowForRecipient } from './entity/projection.mjs';
+import { readableFieldNames } from './field-admission.mjs';
                                                                        
                                                                   
                                                 
@@ -70,13 +72,22 @@ export function createWebSocketLiveDelivery(httpServer        , {
 
   // Committed-event delivery core — the single authority for committed events.
   // The projectRecipient uses the shared envelope builder for delta/reducer
-  // parity with the fan-out path.
+  // parity with the fan-out path, after the recipient read projection (S5/A3)
+  // has confined the row and delta/reducer grammar to readable fields.
   const core                   = createLiveDeliveryCore({
     db: db                ,
     entities: resolveEntity ? (name        ) => resolveEntity(name)                                 : new Map(),
     mayVerb,
     authorization,
-    projectRecipient: (ctx                    ) => envelopeBuilder.buildEnvelope(ctx                                                                  ),
+    projectRecipient: async (ctx                    ) => {
+      let readableFields                                 ;
+      let row = ctx.row;
+      if (row) {
+        readableFields = await readableFieldNames(ctx.entity         , row, ctx.principal, authorization);
+        row = await projectRowForRecipient(ctx.entity         , row, ctx.principal, { readable: readableFields, authorization });
+      }
+      return envelopeBuilder.buildEnvelope({ ...ctx, row, readableFields }                                                                  );
+    },
     log,
   });
 
