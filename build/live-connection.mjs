@@ -5,17 +5,17 @@
 // registration delegates to the injected fanout handle. The transport wiring
 // (WebSocket upgrade, CSWSH check, principalOf) stays in live-delivery.mjs.
 
-                                          
+
 
 import { FrameSender, FrameParser } from './websocket.mjs';
 import { authorizeSubscription, parseSubscribeMsg } from './live-admission.mjs';
 import { failure, isWorkbenchFailure, sanitizeUnexpectedFailure } from './outcome.mjs';
 import { anonymous } from './principal.mjs';
-                                                
-                                                                       
-                                             
-                                                                                                            
-                                                                                
+
+
+
+
+
 
 function requestIdOf(msg                         )                              {
   const value = msg?.requestId;
@@ -24,32 +24,32 @@ function requestIdOf(msg                         )                              
   return undefined;
 }
 
-                       
-                 
-                   
-                     
-                       
-                 
- 
 
-                           
-                                                             
-                                                            
-                                                                     
- 
 
-                                        
-                           
-                                 
-                                                                                
-                          
-                                              
-                          
-                                        
-                      
-                            
-                                  
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 export class LiveConnection {
   #socket        ;
@@ -316,6 +316,7 @@ export class LiveConnection {
           principal: this.#principal ?? anonymous,
           scope,
           after: this.#currentSeq(scope),
+          rule: result.interest.rule         ,
           signal: ac.signal,
           paused: true,
           deliver: async (batch) => {
@@ -375,6 +376,19 @@ export class LiveConnection {
       }
     }
 
+    try {
+      // Fanout owns the connection-scoped collection cap. Register before the
+      // acknowledgement so the check and registration are one synchronous step.
+      this.#fanout.addSubscription(scope, this, result.fields, result.pace, { ...result.interest, carets: result.carets });
+    } catch (err) {
+      coreSubscription?.unsubscribe?.();
+      requestController?.abort();
+      this.#coreAcs.delete(scope);
+      this.#coreActivations.delete(scope);
+      this.error(failure('conflict', 'Too many collection subscriptions are active.'), requestId);
+      return;
+    }
+
     const response                          = {
       type: 'subscribed',
       scope,
@@ -418,8 +432,7 @@ export class LiveConnection {
       requestController?.abort();
       return;
     }
-    if (this.#coreAcs.get(scope) === undefined) return;
-    this.#fanout.addSubscription(scope, this, result.fields, result.pace, { ...result.interest, carets: result.carets });
+    if (this.#coreAcs.get(scope) === undefined) this.#fanout.removeSubscription(scope, this);
   }
 
   #close()                {

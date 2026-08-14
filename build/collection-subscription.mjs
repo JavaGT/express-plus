@@ -61,9 +61,8 @@ export function createCollectionSubscription({ db, entity, principal, rule, mayV
       ? compiled.sql.replace(' ORDER BY ', ` AND (${scopeSql}) ORDER BY `)
       : compiled.sql.replace(' ORDER BY ', ` WHERE (${scopeSql}) ORDER BY `);
     const raw = db.prepare(sql).all({ ...compiled.params, ...scopeParams });
-    const overflow = raw.length > compiled.boundedResultPolicy.limit ? compiled.boundedResultPolicy.overflowMarker ?? true : null;
     const rows                            = [];
-    for (const value of raw.slice(0, compiled.boundedResultPolicy.limit)) {
+    for (const value of raw) {
       const hydrated = entity.hydrate ? entity.hydrate(value, principal) : value;
       if (!hydrated) continue;
       const allowed = authorization
@@ -72,11 +71,13 @@ export function createCollectionSubscription({ db, entity, principal, rule, mayV
       if (!allowed) continue;
       const projected = await projectRowForRecipient(entity         , hydrated, principal, { authorization });
       rows.push(Object.fromEntries(Object.entries(projected).filter(([field]) => compiled.select.includes(field))));
+      if (rows.length > compiled.boundedResultPolicy.limit) break;
     }
-    return { rows, overflow };
+    const overflow = rows.length > compiled.boundedResultPolicy.limit ? compiled.boundedResultPolicy.overflowMarker : null;
+    return { rows: rows.slice(0, compiled.boundedResultPolicy.limit), overflow };
   }
 
-  async function refresh()                                   {
+  async function refreshNow()                                   {
     if (closed) return null;
     const { rows, overflow } = await admittedRows();
     const before = new Map(previous.map((row, index) => [String(row.id), index]));
@@ -93,13 +94,19 @@ export function createCollectionSubscription({ db, entity, principal, rule, mayV
     return Object.freeze({ type: 'collection', additions: Object.freeze(additions), removals: Object.freeze(removals), reorderings: Object.freeze(reorderings), rows: Object.freeze(rows), overflow });
   }
 
+  function refresh()                                   {
+    const result = tail.then(refreshNow, refreshNow);
+    tail = result.then(() => {}, () => {});
+    return result;
+  }
+
   function notify()                {
     if (closed) return Promise.resolve();
     if (pending >= maxPendingDeliveries) return Promise.reject(new CollectionSubscriptionBackpressureError('Collection subscription pending-delivery limit exceeded.'));
     pending += 1;
     const run = async () => {
       try {
-        const change = await refresh();
+        const change = await refreshNow();
         if (change) await deliver(change);
       } finally {
         pending -= 1;

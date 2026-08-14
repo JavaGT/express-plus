@@ -196,7 +196,7 @@ export async function authorizeSubscription(
   if (!isCollection && fanout.subscriptionCount(conn) >= MAX_SUBS_PER_CONN && !fanout.hasSubscription(conn, entityName, idStr)) {
     return { admitted: false, failure: failure('conflict', 'Too many subscriptions are active.') };
   }
-  const collectionCount = (fanout as LiveFanoutHandle & { collectionSubscriptionCount?: (connection: LiveConn) => number }).collectionSubscriptionCount?.(conn) ?? 0;
+  const collectionCount = fanout.collectionSubscriptionCount(conn);
   if (isCollection && collectionCount >= MAX_COLLECTION_SUBS_PER_CONN) {
     return { admitted: false, failure: failure('conflict', 'Too many collection subscriptions are active.') };
   }

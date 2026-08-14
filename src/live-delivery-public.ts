@@ -455,9 +455,8 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, authorization, 
         if (invalidationRecovery(db as never, input.scope, liveScope.kind, after).status !== 'current') {
           return this.bootstrap({ principal: input.principal, scope: input.scope, document: input.document });
         }
-        // Collection identity and its revision cursor are now carried through
-        // recovery. Its authorized materialization/delivery remains #103's
-        // implementation, so do not route it through the row-only core.
+        // Collection state is materialized by its compiled rule at transport
+        // subscription time; an unruled public catch-up cannot disclose it.
         if (liveScope.kind === 'collection') return { kind: 'revoked' };
       }
       if (input.document) {

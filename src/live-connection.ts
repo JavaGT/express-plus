@@ -316,6 +316,7 @@ export class LiveConnection {
           principal: this.#principal ?? anonymous,
           scope,
           after: this.#currentSeq(scope),
+          rule: result.interest.rule as never,
           signal: ac.signal,
           paused: true,
           deliver: async (batch) => {
@@ -375,6 +376,19 @@ export class LiveConnection {
       }
     }
 
+    try {
+      // Fanout owns the connection-scoped collection cap. Register before the
+      // acknowledgement so the check and registration are one synchronous step.
+      this.#fanout.addSubscription(scope, this, result.fields, result.pace, { ...result.interest, carets: result.carets });
+    } catch (err) {
+      coreSubscription?.unsubscribe?.();
+      requestController?.abort();
+      this.#coreAcs.delete(scope);
+      this.#coreActivations.delete(scope);
+      this.error(failure('conflict', 'Too many collection subscriptions are active.'), requestId);
+      return;
+    }
+
     const response: Record<string, unknown> = {
       type: 'subscribed',
       scope,
@@ -418,8 +432,7 @@ export class LiveConnection {
       requestController?.abort();
       return;
     }
-    if (this.#coreAcs.get(scope) === undefined) return;
-    this.#fanout.addSubscription(scope, this, result.fields, result.pace, { ...result.interest, carets: result.carets });
+    if (this.#coreAcs.get(scope) === undefined) this.#fanout.removeSubscription(scope, this);
   }
 
   #close(): Promise<void> {

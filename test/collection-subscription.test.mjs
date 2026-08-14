@@ -58,13 +58,45 @@ test('a malformed or non-compilable collection rule fails during registration', 
 test('collection admission compiles rules only after subscription authorization', async () => {
   const { db, entity, rule } = setup();
   try {
-    const deps = { resolveEntity: (name) => name === 'Note' ? entity : null, mayVerb: async () => true, db, fanout: { subscriptionCount: () => 0, hasSubscription: () => false }, authorization: { admit: async () => ({ admitted: true }) } };
+    const deps = { resolveEntity: (name) => name === 'Note' ? entity : null, mayVerb: async () => true, db, fanout: { subscriptionCount: () => 0, collectionSubscriptionCount: () => 0, hasSubscription: () => false }, authorization: { admit: async () => ({ admitted: true }) } };
     const admitted = await authorizeSubscription({ scope: 'Note', rule }, { principal: { type: 'user', id: 'u1' } }, deps);
     assert.equal(admitted.admitted, true);
     assert.ok('sql' in admitted.interest.rule, 'admission retains the registration-time compiled rule');
 
     const denied = await authorizeSubscription({ scope: 'Note', rule: { ...rule, filters: [{ field: 'missing' }] } }, { principal: { type: 'user', id: 'u1' } }, { ...deps, authorization: { admit: async () => ({ admitted: false }) } });
     assert.deepEqual(denied, { admitted: false, failure: { category: 'denied', message: 'Forbidden.' } });
+  } finally {
+    db.close();
+  }
+});
+
+test('collection rules reject unknown and malformed optional grammar', () => {
+  const { entity, rule } = setup();
+  for (const invalid of [
+    { ...rule, unknown: true },
+    { ...rule, select: 42 },
+    { ...rule, filters: null },
+    { ...rule, parent: null },
+    { ...rule, sort: [{ field: 'rank', extra: true }] },
+  ]) {
+    assert.throws(() => compileSubscriptionRule(invalid, entity), /Invalid collection subscription rule/);
+  }
+  assert.equal(compileSubscriptionRule({ ...rule, boundedResultPolicy: { limit: 1, overflowMarker: null } }, entity).boundedResultPolicy.overflowMarker, null);
+});
+
+test('collection bounds only admitted rows and serializes direct refreshes', async () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec("CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT, rank INTEGER); INSERT INTO Note VALUES ('hidden', 'Hidden', 0), ('a', 'A', 1), ('b', 'B', 2)");
+  try {
+    const entity = { name: 'Note', fields: { title: {}, rank: {} }, scopeFilter: () => ({ sql: '1=1', params: {} }) };
+    const subscription = createCollectionSubscription({
+      db, entity, principal: { type: 'user', id: 'u1' }, authorization: { admit: async ({ row }) => ({ admitted: row.id !== 'hidden' }) }, mayVerb: async () => true,
+      rule: { resourceKind: 'Note', sort: [{ field: 'rank' }], boundedResultPolicy: { limit: 2, overflowMarker: 'more' } }, deliver: () => {},
+    });
+    const [first, second] = await Promise.all([subscription.refresh(), subscription.refresh()]);
+    assert.deepEqual(first.rows.map((row) => row.id), ['a', 'b']);
+    assert.equal(first.overflow, null, 'an inaccessible row neither consumes a slot nor overflows it');
+    assert.equal(second, null, 'concurrent refreshes observe a serialized baseline');
   } finally {
     db.close();
   }

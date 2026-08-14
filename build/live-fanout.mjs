@@ -15,78 +15,79 @@
 // records, connections, database, fan-out handles) that the admission,
 // connection, core, and public delivery modules all consume.
 
-                                                
+
 import { anonymous, principalKeyOf } from './principal.mjs';
 import { mayRow } from './row-grant.mjs';
 import { PACE_STRATEGIES } from './field-pace.mjs';
-                                                   
+
 import { createDeltaProjector } from './field-delta.mjs';
 import { EventKind, parseEventType } from './event-handle.mjs';
-                                                             
+
 import { scopeOf, tryParseScopeKey } from './scope-handle.mjs';
-                                                     
+
 import { createdTextReducerSeeds } from './text-reducer-transport.mjs';
 import { publicEvent } from './event-delivery.mjs';
-                                                                       
+
 import { readableFieldNames } from './field-admission.mjs';
 import { projectRowForRecipient } from './entity/projection.mjs';
 
 // ---- Shared live-delivery type vocabulary ---------------------------------
 
-                                  
-                
-                
-                         
- 
+
+
+
+
+
 
 /** The subset of a compiled entity record the live-delivery seams rely on. */
-                                   
-               
-                                           
-                                                                                                
-                                                                                           
-                                                                                        
-                         
- 
 
-                       
-                           
-               
-                                                  
-                       
-                                
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // A row read from the SQLite layer. The optional lastSeq keeps the shape
 // compatible with cursor.ts's narrow CursorDatabase contract.
-                                                          
-                   
- 
 
-                                
-                                                          
-                                                 
-                                       
- 
 
-                               
-                                      
-                          
- 
+
+
+
+
+
+
+
+
+
+
+
+
 
 /** Structural connection contract — the LiveConnection class satisfies it. */
-                           
-                      
-                           
-                                       
-                            
- 
 
-                                       
-                                      
-                 
-                           
-                                    
- 
+
+
+
+
+
+
+
+
+
+
+
+
 
 // ---- Revocation contract (S5/A5, spec item 4) ------------------------------
 //
@@ -113,11 +114,11 @@ import { projectRowForRecipient } from './entity/projection.mjs';
 // BEFORE first delivery, so a subscription registered AFTER a revocation still
 // receives the revoked state on first delivery — there is no window where a
 // revoked reader keeps a live feed.
-                                     
-                                                         
-                                                             
 
-                                                                                                        
+
+
+
+
 
 // Deterministic rejection for a malformed revocation descriptor at the publish
 // seam (revoke()). A listener can never observe an ambiguous descriptor it
@@ -162,49 +163,50 @@ export function normalizeRevocationScope(principal                              
   return { category, key };
 }
 
-                           
-                 
-                
-                       
-                    
-                                              
-                    
-                                 
-                                                
- 
 
-                                       
-               
-                 
-               
-                                 
-                                      
-                         
- 
 
-                                   
-                                                                                                                                                            
-                                                          
-                                  
-                                            
-                                                                                
-                                                                                    
-                                                                          
-                                                                                                                      
-                                                                                                                   
-                                                                             
-                                                            
-                                                         
-                                                                                
-                                                                             
-                                                                             
-                                                                               
-                                                                                
-                                                                     
-                                                                             
-                                                                                                                                                                                     
-                
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // ---- Live fan-out -----------------------------------------------------------
 
@@ -285,6 +287,11 @@ export function createLiveFanout({ mayVerb = null, authorization = null }       
     return connSubs.get(conn)?.size ?? 0;
   }
 
+  function collectionSubscriptionCount(conn          )         {
+    return [...(connSubs.get(conn) ?? [])]
+      .filter((scope) => Boolean(byScope.get(scope)?.get(conn)?.interest?.rule)).length;
+  }
+
   // hasSubscription(conn, scopeOrEntity, id?) — two-arg form checks by scope
   // key; three-arg form derives the key via Scope handle.
   function hasSubscription(conn          , scopeOrEntity        , id          )          {
@@ -297,7 +304,7 @@ export function createLiveFanout({ mayVerb = null, authorization = null }       
   function addSubscription(a                                         , b          , c                                          = null, d                                 = null, e                                 = null)       {
     // The legacy positional form is (entity, id, conn, fields, pace): the same
     // `e` slot carries interest for scope-keyed calls and pace for legacy calls.
-    if (typeof a === 'string' && a.includes(':')) {
+    if (typeof a === 'string' && (a.includes(':') || e?.rule)) {
       addSubscriptionScope(a, b, c, d, e ?? {});
       return;
     }
@@ -317,6 +324,9 @@ export function createLiveFanout({ mayVerb = null, authorization = null }       
   function addSubscriptionScope(scope        , conn          , fields                              = null, pace                     = null, interest                          = {})       {
     if (!byScope.has(scope)) byScope.set(scope, new Map());
     const previous = byScope.get(scope) .get(conn);
+    if (interest.rule && !previous?.interest?.rule && collectionSubscriptionCount(conn) >= 32) {
+      throw new Error('Collection subscription limit exceeded.');
+    }
     const nextCarets = (interest.carets                        ) ?? [];
     const previousCarets = (previous?.interest?.carets                        ) ?? [];
     const removedCarets = previousCarets.filter((field) => !nextCarets.includes(field));
@@ -337,7 +347,7 @@ export function createLiveFanout({ mayVerb = null, authorization = null }       
   }
 
   function removeSubscription(a                                         , b          , c          )       {
-    if (typeof a === 'string' && a.includes(':')) {
+    if (typeof a === 'string' && (a.includes(':') || c === undefined)) {
       removeSubscriptionScope(a, b);
       return;
     }
@@ -696,6 +706,7 @@ export function createLiveFanout({ mayVerb = null, authorization = null }       
     removeSubscription,
     removeAll,
     subscriptionCount,
+    collectionSubscriptionCount,
     hasSubscription,
     recipients,
     hasCaretInterest,

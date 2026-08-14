@@ -41,6 +41,9 @@ import { anonymous, principalKeyOf } from './principal.ts';
 import type { FrameworkLog } from './log.ts';
 import type { LiveDatabase, LiveEntityRecord, MayVerb, RevocationListener, RevocationResourceScope } from './live-fanout.ts';
 import { normalizeRevocationScope } from './live-fanout.ts';
+import { createCollectionSubscription } from './collection-subscription.ts';
+import type { CollectionSubscription } from './collection-subscription.ts';
+import type { CompiledSubscriptionRule, SubscriptionRule } from './subscription-rule.ts';
 
 let nextSubId = 1;
 
@@ -88,6 +91,8 @@ interface CoreSub {
   document: unknown;
   activation?: Promise<number>;
   resyncEnvelope?: unknown;
+  collection?: CollectionSubscription;
+  collectionInitialized?: boolean;
   // Set of PENDING revocation events this subscription has been woken by (canonical
   // keys). A SET, not a single marker: multiple distinct revocations published
   // before the next catchUp are all retained and each gets a re-authorization
@@ -108,6 +113,7 @@ export interface CoreSubscribeInput {
   paused?: boolean;
   allowTerminal?: boolean;
   document?: unknown;
+  rule?: SubscriptionRule | CompiledSubscriptionRule;
 }
 
 export interface CoreActivation {
@@ -418,6 +424,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
     const sub = subs.get(subId);
     if (!sub) return undefined;
     sub.active = false;
+    sub.collection?.close();
     if (sub.signal && typeof sub.signal.removeEventListener === 'function') {
       try { sub.signal.removeEventListener('abort', sub._abortHandler as () => void); } catch { /* ignore */ }
     }
@@ -467,6 +474,24 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
         sub.revokeWakes.clear();
         revocationsOwed += pendingRevocations.length;
         const revocationDriven = revocationsOwed > 0;
+        if (sub.collection) {
+          const revision = readRevision(db as never, sub.scope);
+          if (!sub.collectionInitialized || revision !== sub.cursor) {
+            try {
+              await sub.collection.notify();
+            } catch (err) {
+              log?.error?.('live', 'collection delivery failed', { scope: sub.scope, err: String(err) });
+              removeSub(subId);
+              throw err;
+            }
+            if (!sub.active) return;
+            sub.collectionInitialized = true;
+            sub.cursor = revision;
+          }
+          revocationsOwed -= 1;
+          if (sub.dirty || revocationsOwed > 0) continue;
+          return;
+        }
         const handle = tryParseScopeKey(sub.scope);
         if (!handle) { removeSub(subId); log?.error?.('live', 'invalid scope', { scope: sub.scope }); throw new Error(`invalid scope '${sub.scope}'`); }
         if (isLiveEntity(sub.entityRec)) {
@@ -668,11 +693,12 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
     }
   }
 
-  async function subscribe({ principal, scope, after = 0, signal, deliver, revoke = null, paused = false, allowTerminal = false, document = null }: CoreSubscribeInput): Promise<CoreActivation | undefined> {
+  async function subscribe({ principal, scope, after = 0, signal, deliver, revoke = null, paused = false, allowTerminal = false, document = null, rule }: CoreSubscribeInput): Promise<CoreActivation | undefined> {
     if (closed) throw new Error('live-delivery-core is closed');
     if (signal?.aborted) return;
-    const handle = tryParseScopeKey(scope);
-    if (!handle) {
+    const parsedHandle = tryParseScopeKey(scope);
+    const liveScope = parsedHandle ? null : classifyLiveScope(scope, resolveEntity);
+    if (!parsedHandle && !liveScope) {
       log?.error?.('live', 'invalid scope', { scope });
       throw new Error(`invalid scope '${scope}'`);
     }
@@ -682,16 +708,13 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
     if (typeof deliver !== 'function') {
       throw new Error('deliver must be a function');
     }
-    let entityRec: LiveEntityRecord;
-    try {
-      entityRec = entityRecord(handle.entity);
-    } catch {
-      log?.error?.('live', 'entity not found', { scope, entity: handle.entity });
-      throw new Error(`entity '${handle.entity}' not found for scope '${scope}'`);
-    }
-    let auth = reauthFor(entityRec, principal, handle);
-    if (!auth) {
-      const terminalAuth = isLiveEntity(entityRec) ? reauthFor(entityRec, principal, handle, true) : null;
+    const entityRec = parsedHandle ? entityRecord(parsedHandle.entity) : liveScope!.entity;
+    const isCollection = !parsedHandle;
+    if (isCollection && !rule) throw new Error(`collection scope '${scope}' requires a rule`);
+    const handle = parsedHandle;
+    let auth = handle ? reauthFor(entityRec, principal, handle) : null;
+    if (!isCollection && !auth) {
+      const terminalAuth = isLiveEntity(entityRec) ? reauthFor(entityRec, principal, parsedHandle!, true) : null;
       const unread = allowTerminal && !isLiveEntity(entityRec) ? readSince(db as never, scope, after) : [];
       if (terminalAuth && terminalAuth.terminal && readRevision(db as never, scope) > after) {
         auth = terminalAuth;
@@ -713,6 +736,18 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
     if (closed) throw new Error('live-delivery-core is closed');
     const subId = generateSubId();
     const sub: CoreSub = { entityRec, principal, deliver, revoke, signal, cursor: after, pending: false, dirty: false, paused, scope, active: true, document, revokeWakes: new Set() };
+    if (isCollection) {
+      sub.collection = createCollectionSubscription({
+        db,
+        entity: entityRec,
+        principal,
+        rule: rule!,
+        mayVerb: mayVerb!,
+        authorization,
+        deliver: (change) => sub.deliver([change]),
+      });
+      sub.collectionInitialized = false;
+    }
     subs.set(subId, sub);
     let set = byScope.get(scope);
     if (!set) { set = new Set(); byScope.set(scope, set); }

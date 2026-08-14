@@ -188,6 +188,7 @@ export interface LiveFanoutHandle {
   removeSubscription(scope: string, conn: LiveConn): void;
   removeAll(conn: LiveConn): void;
   subscriptionCount(conn: LiveConn): number;
+  collectionSubscriptionCount(conn: LiveConn): number;
   hasSubscription(conn: LiveConn, scopeOrEntity: string, id?: unknown): boolean;
   recipients(scope: string, field: string): Array<[LiveConn, LiveSubscriptionSpec]>;
   hasCaretInterest(conn: LiveConn, scope: string, field: string): boolean;
@@ -286,6 +287,11 @@ export function createLiveFanout({ mayVerb = null, authorization = null }: { may
     return connSubs.get(conn)?.size ?? 0;
   }
 
+  function collectionSubscriptionCount(conn: LiveConn): number {
+    return [...(connSubs.get(conn) ?? [])]
+      .filter((scope) => Boolean(byScope.get(scope)?.get(conn)?.interest?.rule)).length;
+  }
+
   // hasSubscription(conn, scopeOrEntity, id?) — two-arg form checks by scope
   // key; three-arg form derives the key via Scope handle.
   function hasSubscription(conn: LiveConn, scopeOrEntity: string, id?: unknown): boolean {
@@ -298,7 +304,7 @@ export function createLiveFanout({ mayVerb = null, authorization = null }: { may
   function addSubscription(a: string | ScopeHandle | LiveEntityRecord, b: LiveConn, c: Record<string, true> | null | undefined = null, d: PaceProfile | null | undefined = null, e: Record<string, unknown> | null = null): void {
     // The legacy positional form is (entity, id, conn, fields, pace): the same
     // `e` slot carries interest for scope-keyed calls and pace for legacy calls.
-    if (typeof a === 'string' && a.includes(':')) {
+    if (typeof a === 'string' && (a.includes(':') || e?.rule)) {
       addSubscriptionScope(a, b, c, d, e ?? {});
       return;
     }
@@ -318,6 +324,9 @@ export function createLiveFanout({ mayVerb = null, authorization = null }: { may
   function addSubscriptionScope(scope: string, conn: LiveConn, fields: Record<string, true> | null = null, pace: PaceProfile | null = null, interest: Record<string, unknown> = {}): void {
     if (!byScope.has(scope)) byScope.set(scope, new Map());
     const previous = byScope.get(scope)!.get(conn);
+    if (interest.rule && !previous?.interest?.rule && collectionSubscriptionCount(conn) >= 32) {
+      throw new Error('Collection subscription limit exceeded.');
+    }
     const nextCarets = (interest.carets as string[] | undefined) ?? [];
     const previousCarets = (previous?.interest?.carets as string[] | undefined) ?? [];
     const removedCarets = previousCarets.filter((field) => !nextCarets.includes(field));
@@ -338,7 +347,7 @@ export function createLiveFanout({ mayVerb = null, authorization = null }: { may
   }
 
   function removeSubscription(a: string | ScopeHandle | LiveEntityRecord, b: LiveConn, c?: unknown): void {
-    if (typeof a === 'string' && a.includes(':')) {
+    if (typeof a === 'string' && (a.includes(':') || c === undefined)) {
       removeSubscriptionScope(a, b);
       return;
     }
@@ -697,6 +706,7 @@ export function createLiveFanout({ mayVerb = null, authorization = null }: { may
     removeSubscription,
     removeAll,
     subscriptionCount,
+    collectionSubscriptionCount,
     hasSubscription,
     recipients,
     hasCaretInterest,
