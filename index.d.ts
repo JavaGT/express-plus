@@ -1611,12 +1611,11 @@ export interface ReadMirrorDescription {
   readonly options?: Readonly<Record<string, unknown>>;
 }
 
-/** The opened read-mirror surface: `prepare`/`exec` are rejector-wrapped; `raw` is the underlying connection (still mode=ro). */
+/** The opened read-mirror surface: `prepare`/`exec` are rejector-wrapped; no raw engine handle is exposed. */
 export interface ReadMirrorHandle {
   prepare(sql: string): { run(...args: unknown[]): { changes: number }; get(...args: unknown[]): Record<string, unknown> | undefined; all(...args: unknown[]): Record<string, unknown>[] };
   exec(sql: string): unknown;
   close(): void;
-  readonly raw: unknown;
 }
 
 /** A statement class a read-mirror rejector refuses (`write`/`ddl`/`pragma` mutations). */

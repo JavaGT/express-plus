@@ -326,11 +326,11 @@ export function setForeignKeys(db: DbHandle, enabled: boolean): void {
 
 // Serialized wiring lives in src/maintenance.ts (the write coordinator turn);
 // this is the raw PRAGMA bracket, kept here so driver.ts stays the single
-// source of the statement text. The body may be sync OR async: a thenable is
-// awaited BEFORE the restore, so `foreign_keys` stays OFF while the body is
-// still running (an async body that yields must not see enforcement re-enabled
-// under it), and the restore runs on every exit path — fulfilled, rejected, or
-// a synchronous throw.
+// source of the statement text. The body may be sync OR async; the result is
+// assimilated through Promise.resolve so `foreign_keys` stays OFF while the
+// body is still running (an async body that yields must not see enforcement
+// re-enabled under it), and the restore runs on every exit path — fulfilled,
+// rejected, a synchronous throw, or a thenable whose `then` getter throws.
 export function withForeignKeysDisabled<T>(db: DbHandle, fn: () => T | Promise<T>): T | Promise<T> {
   setForeignKeys(db, false);
   let value: T | Promise<T>;
@@ -341,8 +341,12 @@ export function withForeignKeysDisabled<T>(db: DbHandle, fn: () => T | Promise<T
     throw err;
   }
   const restore = () => setForeignKeys(db, true);
-  if (value && typeof (value as Promise<T>).then === 'function') {
-    return (value as Promise<T>).then(
+  // Assimilate through Promise.resolve so a throwing `then` getter is routed
+  // into a rejected promise instead of escaping un-restored. The surrounding
+  // try/catch is defensive: even if Promise.resolve itself threw synchronously,
+  // the restore to `foreign_keys = ON` still runs before the error escapes.
+  try {
+    return Promise.resolve(value).then(
       (resolved) => {
         restore();
         return resolved;
@@ -352,7 +356,8 @@ export function withForeignKeysDisabled<T>(db: DbHandle, fn: () => T | Promise<T
         throw err;
       },
     );
+  } catch (err) {
+    restore();
+    throw err;
   }
-  restore();
-  return value;
 }

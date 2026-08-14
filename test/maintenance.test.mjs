@@ -128,6 +128,24 @@ test('an async body that throws still restores foreign_keys to ON', async () => 
   }
 });
 
+test('a thenable whose `then` getter throws still restores foreign_keys to ON', async () => {
+  const { db, app } = fkApp();
+  try {
+    const evilThenable = {
+      get then() {
+        throw new Error('then getter exploded');
+      },
+    };
+    await assert.rejects(
+      app.withForeignKeysDisabled(() => evilThenable),
+      /then getter exploded/,
+    );
+    assert.equal(foreignKeysSetting(db), 1, 'restored to ON even though the thenable\'s `then` getter threw');
+  } finally {
+    db.close();
+  }
+});
+
 test('the seam serializes behind an in-flight coordinated write', async () => {
   const { db, app } = fkApp();
   try {
