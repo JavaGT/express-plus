@@ -1,5 +1,5 @@
 import { lowerToSql } from '../scope-sql.ts';
-import { cosineSimilarity, applyNearest, type NearestSpec } from '../vector.ts';
+import { applyNearest, type NearestSpec } from '../vector.ts';
 
 type Row = Record<string, unknown>;
 type HydrateFn = (row: Row, principal?: unknown, dispatch?: unknown) => Row;
@@ -155,15 +155,6 @@ export function installEntityQueries(
       throw new Error(`nearest() requires a positive integer k, got ${k}`);
     }
     const rows = db.prepare(`SELECT * FROM ${name} AS t0`).all().map(deserializeStoredCells);
-    const scored = rows.map((row) => {
-      let vec: unknown = row[fieldName];
-      if (typeof vec === 'string') {
-        try { vec = JSON.parse(vec); } catch { vec = null; }
-      }
-      return { row, similarity: cosineSimilarity(queryVec, vec) };
-    });
-    scored.sort((a, b) => b.similarity - a.similarity);
-    const topK = scored.slice(0, k);
-    return topK.map(({ row }) => hydrate(row));
+    return applyNearest(rows, { field: fieldName, query: queryVec, k }).map(hydrate);
   };
 }

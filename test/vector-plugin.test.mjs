@@ -8,7 +8,7 @@ import { createSearchStalenessBridge } from '../build/search-staleness.mjs';
 import { createSearchReconcileEngine } from '../build/search-reconcile.mjs';
 import { createWriteQueue } from '../build/write-queue.mjs';
 
-function setup({ dimensions = 2, owns } = {}) {
+function setup({ dimensions = 2, owns = () => true } = {}) {
   const db = new DatabaseSync(':memory:');
   db.exec('CREATE TABLE Note (id TEXT PRIMARY KEY, embedding TEXT, embedding_model TEXT, owner TEXT);');
   const registry = createSearchPluginRegistry();
@@ -88,6 +88,27 @@ test('vector plugin rejects model-space mismatch and unauthorized source ownersh
   assert.match(ownerOutcome.lastError.message, /not owned/);
 });
 
+test('vector plugin refuses sources without ownership and contains ownership predicate errors', async (t) => {
+  assert.throws(() => createVectorPlugin({
+    id: 'unowned-vectors',
+    version: '1.0.0',
+    source: { entity: 'Note', vector: 'embedding', model: 'embedding_model' },
+    modelSpace: { model: 'embed-v1', dimensions: 2 },
+  }), /requires an ownership predicate/);
+
+  const kit = setup({ owns: () => { throw new Error('ownership backend unavailable'); } });
+  t.after(() => kit.db.close());
+  kit.insert('n1', [1, 0]);
+  const outcome = await kit.registry.rebuild('note-vectors');
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.lastError.message, /ownership could not be verified/);
+  assert.equal(kit.plugin.indexCensus({}).Note.count, 0);
+  assert.throws(
+    () => kit.plugin.validateSourceRow({ id: 'n1', embedding: [1, 0], embedding_model: 'embed-v1' }),
+    (error) => error instanceof VectorPluginValidationError && error.code === 'unauthorized-source-ownership',
+  );
+});
+
 test('model or dimension changes create a new generation and refuse cross-space queries', async (t) => {
   const kit = setup();
   t.after(() => kit.db.close());
@@ -96,6 +117,10 @@ test('model or dimension changes create a new generation and refuse cross-space 
   const before = kit.plugin.generationIdentity;
   kit.plugin.setModelSpace({ model: 'embed-v2', dimensions: 3 });
   assert.notEqual(kit.plugin.generationIdentity, before);
+  const changed = kit.registry.stateOf('note-vectors');
+  assert.equal(changed.state, 'building');
+  assert.ok(changed.generation > 1);
+  assert.deepEqual(changed.counts, {});
   const outcome = await kit.registry.search('note-vectors', { query: { model: 'embed-v1', vector: [1, 0] } });
   assert.equal(outcome.ok, false);
   assert.match(outcome.lastError.message, /requires 'embed-v2'/);
@@ -131,6 +156,21 @@ test('vector search honors an already-cancelled request', async (t) => {
   controller.abort();
   const result = await kit.registry.search('note-vectors', {
     query: { model: 'embed-v1', vector: [1, 0] },
+    signal: controller.signal,
+  });
+  assert.equal(result.cancelled, true);
+  assert.equal(result.result, null);
+});
+
+test('vector search yields so an abort stops a large scoring pass', async (t) => {
+  const kit = setup({ dimensions: 64 });
+  t.after(() => kit.db.close());
+  for (let index = 0; index < 4_000; index += 1) kit.insert(`n${index}`, Array(64).fill(1));
+  await rebuild(kit);
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 0);
+  const result = await kit.registry.search('note-vectors', {
+    query: { model: 'embed-v1', vector: Array(64).fill(1) },
     signal: controller.signal,
   });
   assert.equal(result.cancelled, true);

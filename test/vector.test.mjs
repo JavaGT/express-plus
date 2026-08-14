@@ -111,6 +111,14 @@ test('cosine similarity: null/undefined/non-array returns 0', () => {
   assert.equal(cosineSimilarity([1, 2, 3], null), 0);
 });
 
+test('nearest helpers break equal scores with locale-independent ids', async (t) => {
+  const { Entity } = await serveVecItems(t, { dimensions: 2 });
+  Entity.insert({ id: 'a', label: 'lowercase', embedding: [0, 1] });
+  Entity.insert({ id: 'A', label: 'uppercase', embedding: [0, 1] });
+  Entity.insert({ id: 'Z', label: 'upper-z', embedding: [0, 1] });
+  assert.deepEqual(Entity.nearest('embedding', [1, 0], 3).map((row) => row.id), ['A', 'Z', 'a']);
+});
+
 // ---- validation tests ----
 
 test('reject vector of wrong dimensions at mutation time', async (t) => {

@@ -3,67 +3,67 @@
 // Embeddings are supplied by the application's worker in source rows. This
 // plugin stores and compares them; it deliberately has no model dependency.
 
-import { nearestVectorsInterruptibly } from './vector.ts';
-import { SUPPORTED_SEARCH_PLUGIN_CONTRACT_VERSION, type SearchChange, type SearchMaterializeResult, type SearchPlugin, type SearchPluginContext, type SearchPluginSearchResult, type SearchRequest } from './search-plugin.ts';
-import { censusOfRows, type SearchShadowCapabilities } from './search-reconcile.ts';
+import { nearestVectorsInterruptibly } from './vector.mjs';
+import { SUPPORTED_SEARCH_PLUGIN_CONTRACT_VERSION,                                                                                                                                                 } from './search-plugin.mjs';
+import { censusOfRows,                               } from './search-reconcile.mjs';
 
-export type VectorPluginValidationCode =
-  | 'dimension-mismatch'
-  | 'non-finite-value'
-  | 'model-space-mismatch'
-  | 'unauthorized-source-ownership'
-  | 'invalid-vector';
+
+
+
+
+
+
 
 export class VectorPluginValidationError extends Error {
-  readonly code: VectorPluginValidationCode;
+           code                            ;
 
-  constructor(code: VectorPluginValidationCode, message: string) {
+  constructor(code                            , message        ) {
     super(message);
     this.name = 'VectorPluginValidationError';
     this.code = code;
   }
 }
 
-export interface VectorModelSpace {
-  readonly model: string;
-  readonly dimensions: number;
-}
 
-export interface VectorPluginSource {
-  readonly entity: string;
-  readonly vector: string;
-  readonly model: string;
-  // The source reader only constrains declared table scopes. Every vector source
-  // must additionally prove that each row belongs to this plugin's index.
-  readonly owns: (row: Readonly<Record<string, unknown>>) => boolean;
-}
 
-export interface VectorPluginOptions {
-  readonly id: string;
-  readonly version: string;
-  readonly source: VectorPluginSource;
-  readonly modelSpace: VectorModelSpace;
-}
 
-export interface VectorSearchQuery {
-  readonly model: string;
-  readonly vector: readonly number[];
-}
 
-export interface VectorPlugin extends SearchPlugin, SearchShadowCapabilities {
-  readonly generationIdentity: string;
-  readonly modelSpace: VectorModelSpace;
-  validateSourceRow(row: Readonly<Record<string, unknown>>): void;
-  setModelSpace(modelSpace: VectorModelSpace): void;
-}
 
-interface IndexedVector {
-  readonly id: string;
-  readonly vector: readonly number[];
-  readonly source: Readonly<Record<string, unknown>>;
-}
 
-function assertModelSpace(modelSpace: VectorModelSpace): void {
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function assertModelSpace(modelSpace                  )       {
   if (typeof modelSpace.model !== 'string' || modelSpace.model.length === 0) {
     throw new TypeError('vector model-space requires a non-empty model identity');
   }
@@ -72,16 +72,16 @@ function assertModelSpace(modelSpace: VectorModelSpace): void {
   }
 }
 
-function generationIdentity(modelSpace: VectorModelSpace, sequence: number): string {
+function generationIdentity(modelSpace                  , sequence        )         {
   return `${modelSpace.model}:${modelSpace.dimensions}:${sequence}`;
 }
 
 function validateVector(
-  value: unknown,
-  model: unknown,
-  modelSpace: VectorModelSpace,
-  sourceId: string,
-): readonly number[] {
+  value         ,
+  model         ,
+  modelSpace                  ,
+  sourceId        ,
+)                    {
   if (model !== modelSpace.model) {
     throw new VectorPluginValidationError(
       'model-space-mismatch',
@@ -107,26 +107,26 @@ function validateVector(
 
 // Creates an in-memory index owned exclusively by this plugin. Lifecycle source
 // reads happen through SearchPluginContext.reader, never through a raw database.
-export function createVectorPlugin(options: VectorPluginOptions): VectorPlugin {
+export function createVectorPlugin(options                     )               {
   if (typeof options.source.owns !== 'function') {
     throw new TypeError('vector plugin source requires an ownership predicate');
   }
   let modelSpace = Object.freeze({ ...options.modelSpace });
   assertModelSpace(modelSpace);
   let sequence = 0;
-  let active = new Map<string, IndexedVector>();
-  let shadow: Map<string, IndexedVector> | null = null;
+  let active = new Map                       ();
+  let shadow                                    = null;
 
-  function target(): Map<string, IndexedVector> {
+  function target()                             {
     return shadow ?? active;
   }
 
-  function ingest(targetIndex: Map<string, IndexedVector>, row: Readonly<Record<string, unknown>>): void {
+  function ingest(targetIndex                            , row                                   )       {
     const id = row.id;
     if (typeof id !== 'string' || id.length === 0) {
       throw new VectorPluginValidationError('unauthorized-source-ownership', 'vector source row requires a non-empty id');
     }
-    let owned: boolean;
+    let owned         ;
     try {
       owned = options.source.owns(row) === true;
     } catch {
@@ -147,14 +147,14 @@ export function createVectorPlugin(options: VectorPluginOptions): VectorPlugin {
     targetIndex.set(id, Object.freeze({ id, vector, source: Object.freeze({ ...row }) }));
   }
 
-  function rebuild(ctx: SearchPluginContext): SearchMaterializeResult {
+  function rebuild(ctx                     )                          {
     const next = target();
     next.clear();
     for (const row of ctx.reader.rows(options.source.entity)) ingest(next, row);
     return { counts: { vectors: next.size } };
   }
 
-  function reconcile(ctx: SearchPluginContext, changes: readonly SearchChange[]): SearchMaterializeResult {
+  function reconcile(ctx                     , changes                         )                          {
     const next = target();
     for (const change of changes) {
       if (change.entity !== options.source.entity) continue;
@@ -171,19 +171,19 @@ export function createVectorPlugin(options: VectorPluginOptions): VectorPlugin {
     return { counts: { vectors: next.size } };
   }
 
-  async function search(_ctx: SearchPluginContext, request: SearchRequest): Promise<SearchPluginSearchResult> {
+  async function search(_ctx                     , request               )                                    {
     if (request.signal?.aborted) return { hits: [] };
-    const query = request.query as VectorSearchQuery;
+    const query = request.query                     ;
     const vector = validateVector(query?.vector, query?.model, modelSpace, 'query');
     const limit = request.limit ?? active.size;
-    const hits: Readonly<Record<string, unknown>>[] = [];
+    const hits                                      = [];
     const entries = await nearestVectorsInterruptibly([...active.values()], vector, Math.max(1, limit), request.signal);
     if (request.signal?.aborted) return { hits: [] };
     for (const entry of entries) hits.push(entry.source);
     return { hits };
   }
 
-  const plugin: VectorPlugin = {
+  const plugin               = {
     contractVersion: SUPPORTED_SEARCH_PLUGIN_CONTRACT_VERSION,
     id: options.id,
     version: options.version,
@@ -196,7 +196,7 @@ export function createVectorPlugin(options: VectorPluginOptions): VectorPlugin {
       return modelSpace;
     },
     validateSourceRow(row) {
-      const scratch = new Map<string, IndexedVector>();
+      const scratch = new Map                       ();
       ingest(scratch, row);
     },
     setModelSpace(nextModelSpace) {

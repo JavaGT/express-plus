@@ -34,9 +34,77 @@ export function nearestVectors<T extends { readonly id: string; readonly vector:
   }
   return entries
     .map((entry) => ({ entry, score: cosineSimilarity(query, entry.vector) }))
-    .sort((a, b) => b.score - a.score || a.entry.id.localeCompare(b.entry.id))
+    .sort(compareVectorCandidates)
     .slice(0, limit)
     .map(({ entry }) => entry);
+}
+
+interface VectorCandidate<T> {
+  readonly entry: T;
+  readonly score: number;
+}
+
+function compareIds(a: string, b: string): number {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
+function compareVectorCandidates<T extends { readonly id: string }>(a: VectorCandidate<T>, b: VectorCandidate<T>): number {
+  if (a.score > b.score) return -1;
+  if (a.score < b.score) return 1;
+  return compareIds(a.entry.id, b.entry.id);
+}
+
+// Ranks a large index without monopolizing the event loop. The heap retains only
+// the requested top-K entries, and each batch yields so cancellation can stop it.
+export async function nearestVectorsInterruptibly<T extends { readonly id: string; readonly vector: unknown }>(
+  entries: readonly T[],
+  query: unknown,
+  limit: number,
+  signal?: AbortSignal,
+): Promise<readonly T[]> {
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    throw new RangeError(`nearest vector limit must be a positive safe integer, got ${String(limit)}`);
+  }
+  const heap: VectorCandidate<T>[] = [];
+  const push = (candidate: VectorCandidate<T>): void => {
+    heap.push(candidate);
+    let child = heap.length - 1;
+    while (child > 0) {
+      const parent = Math.floor((child - 1) / 2);
+      if (compareVectorCandidates(heap[child], heap[parent]) <= 0) break;
+      [heap[child], heap[parent]] = [heap[parent], heap[child]];
+      child = parent;
+    }
+  };
+  const replaceWorst = (candidate: VectorCandidate<T>): void => {
+    heap[0] = candidate;
+    let parent = 0;
+    while (true) {
+      const left = parent * 2 + 1;
+      const right = left + 1;
+      let worst = parent;
+      if (left < heap.length && compareVectorCandidates(heap[left], heap[worst]) > 0) worst = left;
+      if (right < heap.length && compareVectorCandidates(heap[right], heap[worst]) > 0) worst = right;
+      if (worst === parent) return;
+      [heap[parent], heap[worst]] = [heap[worst], heap[parent]];
+      parent = worst;
+    }
+  };
+
+  for (let index = 0; index < entries.length; index += 1) {
+    if (signal?.aborted) return [];
+    const entry = entries[index];
+    const candidate = { entry, score: cosineSimilarity(query, entry.vector) };
+    if (heap.length < limit) push(candidate);
+    else if (compareVectorCandidates(candidate, heap[0]) < 0) replaceWorst(candidate);
+    if ((index + 1) % 128 === 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      if (signal?.aborted) return [];
+    }
+  }
+  return heap.sort(compareVectorCandidates).map(({ entry }) => entry);
 }
 
 // nearest(db, entityName, fieldName, queryVec, k) — a standalone helper for
@@ -60,7 +128,11 @@ export function nearest(
     const similarity = cosineSimilarity(queryVec, vec);
     return { row, similarity };
   });
-  scored.sort((a, b) => b.similarity - a.similarity);
+  scored.sort((a, b) => {
+    if (a.similarity > b.similarity) return -1;
+    if (a.similarity < b.similarity) return 1;
+    return compareIds(String(a.row.id ?? ''), String(b.row.id ?? ''));
+  });
   const topK = scored.slice(0, k);
   return topK.map(({ row }) => (hydrateFn ? hydrateFn(row) : row));
 }
@@ -84,6 +156,10 @@ export function applyNearest(rows: Record<string, unknown>[], nearest: NearestSp
     const similarity = cosineSimilarity(query, vec);
     return { row, similarity };
   });
-  scored.sort((a, b) => b.similarity - a.similarity);
+  scored.sort((a, b) => {
+    if (a.similarity > b.similarity) return -1;
+    if (a.similarity < b.similarity) return 1;
+    return compareIds(String(a.row.id ?? ''), String(b.row.id ?? ''));
+  });
   return scored.slice(0, k).map(({ row }) => row);
 }

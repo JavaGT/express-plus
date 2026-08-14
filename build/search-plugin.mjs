@@ -286,6 +286,10 @@ export const SUPPORTED_SEARCH_PLUGIN_CONTRACT_VERSION = 1;
 
 
 
+
+
+
+
 // A bare SQL identifier: letters, digits, underscores, no leading digit. Owned
 // object names and source-interest entities are validated against this, so the
 // scoped reader's `SELECT * FROM <name>` interpolation is safe (fail closed —
@@ -480,6 +484,7 @@ export function createSearchSourceReader(
 
 
 
+
 function retryableOf(err         )          {
   return !(err instanceof NonCompilableError);
 }
@@ -502,8 +507,19 @@ export function createSearchPluginRegistry(options                              
     return entry;
   }
 
+  function synchronizeGenerationIdentity(entry              )       {
+    if (entry.plugin.generationIdentity === entry.generationIdentity) return;
+    entry.generationIdentity = entry.plugin.generationIdentity;
+    entry.generation += 1;
+    entry.fence += 1;
+    entry.state = 'building';
+    entry.counts = Object.freeze({});
+    entry.lastError = null;
+  }
+
   function stateOf(id        )                     {
     const entry = ledgerOf(id);
+    synchronizeGenerationIdentity(entry);
     return {
       id,
       version: entry.plugin.version,
@@ -517,6 +533,7 @@ export function createSearchPluginRegistry(options                              
 
   function contextOf(id        )                      {
     const entry = ledgerOf(id);
+    synchronizeGenerationIdentity(entry);
     return {
       id,
       version: entry.plugin.version,
@@ -651,6 +668,7 @@ export function createSearchPluginRegistry(options                              
       counts: Object.freeze({}),
       lastError: null,
       attempts: 0,
+      generationIdentity: plugin.generationIdentity,
     });
   }
 
@@ -712,6 +730,7 @@ export function createSearchPluginRegistry(options                              
     run                                                                                                        ,
   )                                  {
     const entry = ledgerOf(id);
+    synchronizeGenerationIdentity(entry);
     entry.generation += 1;
     const generation = entry.generation;
     // CAS-style fence guard: a source change that lands while this cycle is
@@ -776,6 +795,7 @@ export function createSearchPluginRegistry(options                              
 
   async function search(id        , request               )                               {
     const entry = ledgerOf(id);
+    synchronizeGenerationIdentity(entry);
     // The S4/A6 search composition seam. The registry — never the plugin —
     // owns the result window, cancellation/timeout, and the authoritative index
     // metadata:

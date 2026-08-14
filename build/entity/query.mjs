@@ -1,33 +1,33 @@
 import { lowerToSql } from '../scope-sql.mjs';
-import { cosineSimilarity, applyNearest,                  } from '../vector.mjs';
+import { applyNearest,                  } from '../vector.mjs';
 
-                                   
-                                                                            
-                                       
 
-                  
-                                               
-                                           
-                                 
-  
 
-           
-                                  
-  
 
-                      
-              
-                                  
-                              
-  
 
-                                         
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // The one shape every caller's db satisfies: only `get` on a prepared statement
 // is used, so a driver or app handle returning `unknown` from `get` still works.
-                 
-                                                             
-  
+
+
+
 
 // One shared raw-stored-row read: `SELECT * FROM <entity> WHERE id = ?` exactly
 // as the inline sites wrote it. Returns the stored cells as they are — no
@@ -43,12 +43,12 @@ export function rawRow(
   return db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(id)                   ;
 }
 
-export function makeQueryBuilder({ name, predicate, hydrate, defaultLimit = null, db }   
-               
-                     
-                     
-                               
-         
+export function makeQueryBuilder({ name, predicate, hydrate, defaultLimit = null, db }
+
+
+
+
+
  ) {
   const where = lowerToSql(predicate                                    )                 ;
   const state                                                                                = {
@@ -96,11 +96,11 @@ export function makeQueryBuilder({ name, predicate, hydrate, defaultLimit = null
 
 export function installEntityQueries(
   record                            ,
-  { name, hydrate, deserializeStoredCells, db }   
-                 
-                       
-                                          
-           
+  { name, hydrate, deserializeStoredCells, db }
+
+
+
+
    ,
 ) {
   record.findOne = (predicate         ) => {
@@ -113,8 +113,8 @@ export function installEntityQueries(
 
   record.findAll = (predicate          ) => {
     if (predicate === undefined) {
-      const rows = db.prepare(`SELECT * FROM ${name} AS t0`).all().map(hydrate)             
-                                                     
+      const rows = db.prepare(`SELECT * FROM ${name} AS t0`).all().map(hydrate)
+
        ;
       rows.select = (...handles               ) => {
         const cols = handles.map((h) => h.fieldName);
@@ -155,15 +155,6 @@ export function installEntityQueries(
       throw new Error(`nearest() requires a positive integer k, got ${k}`);
     }
     const rows = db.prepare(`SELECT * FROM ${name} AS t0`).all().map(deserializeStoredCells);
-    const scored = rows.map((row) => {
-      let vec          = row[fieldName];
-      if (typeof vec === 'string') {
-        try { vec = JSON.parse(vec); } catch { vec = null; }
-      }
-      return { row, similarity: cosineSimilarity(queryVec, vec) };
-    });
-    scored.sort((a, b) => b.similarity - a.similarity);
-    const topK = scored.slice(0, k);
-    return topK.map(({ row }) => hydrate(row));
+    return applyNearest(rows, { field: fieldName, query: queryVec, k }).map(hydrate);
   };
 }

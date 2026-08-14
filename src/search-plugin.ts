@@ -249,6 +249,10 @@ export interface SearchPlugin {
   readonly version: string;
   readonly ownedObjects: readonly SearchOwnedObject[];
   readonly sourceInterests: readonly SearchSourceInterest[];
+  // An optional plugin-owned identity for index content that is invalidated by
+  // configuration, rather than by a source-row change (for example a model-space).
+  // The registry observes it and marks its authoritative ledger unmaterialized.
+  readonly generationIdentity?: string;
   stalenessKey(change: SearchChange): string | null;
   prepare(ctx: SearchPluginContext): void | Promise<void>;
   validate(ctx: SearchPluginContext): void | Promise<void>;
@@ -478,6 +482,7 @@ interface PluginLedger {
   counts: SearchPluginCounts;
   lastError: SearchRetryInfo | null;
   attempts: number;
+  generationIdentity: string | undefined;
 }
 
 function retryableOf(err: unknown): boolean {
@@ -502,8 +507,19 @@ export function createSearchPluginRegistry(options: SearchPluginRegistryOptions 
     return entry;
   }
 
+  function synchronizeGenerationIdentity(entry: PluginLedger): void {
+    if (entry.plugin.generationIdentity === entry.generationIdentity) return;
+    entry.generationIdentity = entry.plugin.generationIdentity;
+    entry.generation += 1;
+    entry.fence += 1;
+    entry.state = 'building';
+    entry.counts = Object.freeze({});
+    entry.lastError = null;
+  }
+
   function stateOf(id: string): SearchPluginHealth {
     const entry = ledgerOf(id);
+    synchronizeGenerationIdentity(entry);
     return {
       id,
       version: entry.plugin.version,
@@ -517,6 +533,7 @@ export function createSearchPluginRegistry(options: SearchPluginRegistryOptions 
 
   function contextOf(id: string): SearchPluginContext {
     const entry = ledgerOf(id);
+    synchronizeGenerationIdentity(entry);
     return {
       id,
       version: entry.plugin.version,
@@ -651,6 +668,7 @@ export function createSearchPluginRegistry(options: SearchPluginRegistryOptions 
       counts: Object.freeze({}),
       lastError: null,
       attempts: 0,
+      generationIdentity: plugin.generationIdentity,
     });
   }
 
@@ -712,6 +730,7 @@ export function createSearchPluginRegistry(options: SearchPluginRegistryOptions 
     run: (ctx: SearchPluginContext) => void | SearchMaterializeResult | Promise<void | SearchMaterializeResult>,
   ): Promise<SearchLifecycleOutcome> {
     const entry = ledgerOf(id);
+    synchronizeGenerationIdentity(entry);
     entry.generation += 1;
     const generation = entry.generation;
     // CAS-style fence guard: a source change that lands while this cycle is
@@ -776,6 +795,7 @@ export function createSearchPluginRegistry(options: SearchPluginRegistryOptions 
 
   async function search(id: string, request: SearchRequest): Promise<SearchSearchOutcome> {
     const entry = ledgerOf(id);
+    synchronizeGenerationIdentity(entry);
     // The S4/A6 search composition seam. The registry — never the plugin —
     // owns the result window, cancellation/timeout, and the authoritative index
     // metadata:
