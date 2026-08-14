@@ -6,7 +6,7 @@ import workbench, { createClock, entity, Session, executeFrameworkDDL } from '..
 import { generateDDL } from '../build/ddl.mjs';
 import { createServer, durableMutationVariant } from '../build/pipeline.mjs';
 import { principal as makePrincipal } from '../build/principal.mjs';
-import { admitSystemMutation, schedulerSource, startClockTriggers } from '../build/schedule.mjs';
+import { admitSystemMutation, machinePrincipal, schedulerSource, startClockTriggers } from '../build/schedule.mjs';
 
 // ============================================================
 // Schedule clock-dispatch (deadline) tests — startClockTriggers.
@@ -234,7 +234,7 @@ test('admitSystemMutation admits an exact-match scheduler dispatch', () => {
   for (const sql of generateDDL(Blog)) db.exec(sql);
   db.prepare('INSERT INTO AdmitSched (id, status, publishedAt) VALUES (?, ?, ?)').run('x1', 'draft', Date.now() - 1000);
 
-  const principal = makePrincipal({ type: 'system', attributes: { source: schedulerSource('AdmitSched', 'update', 'publishedAt') } });
+  const principal = machinePrincipal({ id: schedulerSource('AdmitSched', 'update', 'publishedAt'), operations: ['update'] });
   const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 'x1',
     payload: { id: 'x1', status: 'published' }, principal, db, now: Date.now(),
@@ -259,7 +259,7 @@ test('admitSystemMutation DENIES wrong payload', () => {
   for (const sql of generateDDL(Blog)) db.exec(sql);
   db.prepare('INSERT INTO AdmitWrongPayload (id, status, publishedAt) VALUES (?, ?, ?)').run('x2', 'draft', Date.now() - 1000);
 
-  const principal = makePrincipal({ type: 'system', attributes: { source: schedulerSource('AdmitWrongPayload', 'update', 'publishedAt') } });
+  const principal = machinePrincipal({ id: schedulerSource('AdmitWrongPayload', 'update', 'publishedAt'), operations: ['update'] });
   const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 'x2',
     payload: { id: 'x2', status: 'hijacked' }, principal, db, now: Date.now(),
@@ -284,7 +284,7 @@ test('admitSystemMutation DENIES row deleted between discover + dispatch', () =>
   for (const sql of generateDDL(Blog)) db.exec(sql);
   // No row inserted — row was "deleted" after discovery.
 
-  const principal = makePrincipal({ type: 'system', attributes: { source: schedulerSource('AdmitTOCTOU', 'update', 'publishedAt') } });
+  const principal = machinePrincipal({ id: schedulerSource('AdmitTOCTOU', 'update', 'publishedAt'), operations: ['update'] });
   const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 'gone',
     payload: { id: 'gone', status: 'published' }, principal, db, now: Date.now(),
@@ -485,9 +485,7 @@ test('Session expiry scheduler allowance remains bound to its declared source an
       },
     }),
   });
-  const exactPrincipal = makePrincipal({
-    type: 'system', attributes: { source: schedulerSource('Session', 'remove', Session.schedule.remove.triggerId) },
-  });
+  const exactPrincipal = machinePrincipal({ id: schedulerSource('Session', 'remove', Session.schedule.remove.triggerId), operations: ['remove'] });
   const dispatch = (actionId, { type = 'Session.remove', payload = { id: 'expired' }, principal = exactPrincipal } = {}) =>
     server.dispatch({ actionId, type, payload, principal });
   const assertDeniedWithoutEffects = async (actionId, request) => {
@@ -499,7 +497,7 @@ test('Session expiry scheduler allowance remains bound to its declared source an
   };
 
   await assertDeniedWithoutEffects('wrong-source', {
-    principal: makePrincipal({ type: 'system', attributes: { source: 'Session.remove.other' } }),
+    principal: machinePrincipal({ id: 'Session.remove.other', operations: ['remove'] }),
   });
   await assertDeniedWithoutEffects('wrong-verb', { type: 'Session.update' });
   await assertDeniedWithoutEffects('wrong-payload', { payload: { id: 'expired', unexpected: true } });

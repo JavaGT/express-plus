@@ -407,6 +407,9 @@ export interface JobQueue {
     payload?: unknown;
     id?: string;
     scope?: string;
+    // Optional machine attribution (S5/A5): the attributable machine principal
+    // this job runs under. Must be a machinePrincipal; anything else throws.
+    principal?: import('../index.d.ts').MachinePrincipal;
   }): JobRow;
   claim(workerId: string, options?: { kind?: string; scope?: string }): JobRow | null;
   heartbeat(jobId: string, workerId: string, options?: { now?: () => number }): boolean;
@@ -432,11 +435,22 @@ export interface JobQueue {
   work(
     kind: string,
     fn: (job: JobRow) => unknown | Promise<unknown>,
-    options?: { pollIntervalMs?: number },
+    options: {
+      // S5/A5: the attributable machine principal the worker runs under.
+      principal: import('../index.d.ts').MachinePrincipal;
+      // The handler/context allowlist: the operations this handler performs.
+      // Dispatch validates the executing principal against it and denies on
+      // mismatch (fail closed — the fn is never invoked).
+      operations: readonly string[];
+      pollIntervalMs?: number;
+    },
   ): {
     once: () => Promise<{
       job: JobRow;
       result: SubmitResultOk | { accepted: false };
+      // Present on a fail-closed denial: the operation the executing principal
+      // was not granted (fn was never invoked).
+      denied?: string;
     } | null>;
     stop: () => void;
     workerId: string;

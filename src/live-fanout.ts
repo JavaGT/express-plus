@@ -16,7 +16,7 @@
 // connection, core, and public delivery modules all consume.
 
 import type { Principal } from './principal.ts';
-import { anonymous } from './principal.ts';
+import { anonymous, principalKeyOf } from './principal.ts';
 import { mayRow } from './row-grant.ts';
 import { PACE_STRATEGIES } from './field-pace.ts';
 import type { PaceProfile } from './field-pace.ts';
@@ -85,6 +85,33 @@ export interface LiveSubscriptionSpec {
   interest: Record<string, unknown>;
 }
 
+// ---- Revocation contract (S5/A5, spec item 4) ------------------------------
+//
+// `resourceScope` is the NORMALIZED revocation descriptor (category + stable
+// key) that subscribers and S4/S6 registrations key on:
+//
+//   - { category: 'entity', key: 'Note:n1' }   — a resource's access revoked;
+//     matches live subscriptions on that exact scope key.
+//   - { category: 'principal', key: 'user:u1' } — a principal's access revoked;
+//     matches every live subscription whose principal key equals the key.
+//
+// PUBLISHER: the package calls revoke() from the single mutation/admission
+// path where a grant/access is revoked (subscription admission denial,
+// delivery-time reauthorization denial, or an adapter's explicit revocation),
+// firing the registered listeners exactly once per call and immediately
+// re-authorizing the affected subscriptions (event-driven — no wait for the
+// next event batch).
+//
+// BOOTSTRAP: bootstrap/catchup always re-authorize against current state
+// BEFORE first delivery, so a subscription registered AFTER a revocation still
+// receives the revoked state on first delivery — there is no window where a
+// revoked reader keeps a live feed.
+export type RevocationResourceScope =
+  | { readonly category: 'entity'; readonly key: string }
+  | { readonly category: 'principal'; readonly key: string };
+
+export type RevocationListener = (principal: Principal, resourceScope: RevocationResourceScope) => void;
+
 interface PaceBufferEntry {
   conn: LiveConn;
   scope: string;
@@ -115,6 +142,14 @@ export interface LiveFanoutHandle {
   hasCaretInterest(conn: LiveConn, scope: string, field: string): boolean;
   setOnCaretInterestChange(callback: ((conn: LiveConn, scope: string, removedFields: string[]) => void) | null): void;
   setOnCaretInterestAdded(callback: ((conn: LiveConn, scope: string, addedFields: string[]) => void) | null): void;
+  // S5/A5 revocation contract: register a listener (S4/S6 adapters) notified
+  // when a revocation is published; returns an unsubscribe.
+  onRevocation(listener: RevocationListener): () => void;
+  // Publish a revocation for a principal + resource scope. Fires the registered
+  // listeners exactly once and immediately evicts the affected subscriptions
+  // (matching by scope key or principal key) from the fan-out registry, so a
+  // revoked reader receives nothing further without waiting for the next emit.
+  revoke(principal: Principal, resourceScope: RevocationResourceScope): void;
   emit(entityRecord: LiveEntityRecord, id: unknown, row: Record<string, unknown> | undefined, committedEvent: FanoutCommittedEvent, options?: { hydrated?: boolean }): Promise<void>;
   close(): void;
 }
@@ -131,6 +166,7 @@ export function createLiveFanout({ mayVerb = null }: { mayVerb?: MayVerb | null 
   const paceBuffers = new Map<string, PaceBufferEntry>();
   let onCaretInterestChange: ((conn: LiveConn, scope: string, removedFields: string[]) => void) | null = null;
   let onCaretInterestAdded: ((conn: LiveConn, scope: string, addedFields: string[]) => void) | null = null;
+  const revocationListeners: RevocationListener[] = [];
 
   const deltaProjector = createDeltaProjector();
 
@@ -258,6 +294,37 @@ export function createLiveFanout({ mayVerb = null }: { mayVerb?: MayVerb | null 
 
   function setOnCaretInterestAdded(callback: ((conn: LiveConn, scope: string, addedFields: string[]) => void) | null): void {
     onCaretInterestAdded = callback;
+  }
+
+  function onRevocation(listener: RevocationListener): () => void {
+    revocationListeners.push(listener);
+    return () => {
+      const idx = revocationListeners.indexOf(listener);
+      if (idx !== -1) revocationListeners.splice(idx, 1);
+    };
+  }
+
+  // Publish a revocation. Fires the registered listeners exactly once (isolated
+  // per listener) and immediately evicts the affected subscriptions from the
+  // fan-out registry — matching by scope key (entity scope) or principal key
+  // (principal scope) — so a revoked reader receives nothing further. This is
+  // the event-driven counterpart to the core's committed revocation path: the
+  // fan-out no longer waits for the next emit to re-authorize a revoked reader.
+  function revoke(principal: Principal, resourceScope: RevocationResourceScope): void {
+    for (const listener of revocationListeners) {
+      try { listener(principal, resourceScope); } catch { /* per-listener isolation */ }
+    }
+    if (resourceScope.category === 'entity') {
+      const subs = byScope.get(resourceScope.key);
+      if (subs) {
+        for (const conn of [...subs.keys()]) removeSubscription(resourceScope.key, conn);
+      }
+      return;
+    }
+    for (const conn of [...connSubs.keys()]) {
+      if (conn.closed) continue;
+      if (principalKeyOf(conn.principal) === resourceScope.key) removeAll(conn);
+    }
   }
 
   async function flushPacedBuffer(key: string): Promise<void> {
@@ -443,6 +510,8 @@ export function createLiveFanout({ mayVerb = null }: { mayVerb?: MayVerb | null 
     hasCaretInterest,
     setOnCaretInterestChange,
     setOnCaretInterestAdded,
+    onRevocation,
+    revoke,
     emit,
     close,
   };

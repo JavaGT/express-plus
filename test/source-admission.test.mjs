@@ -1,66 +1,16 @@
-// Source-based admission helpers — unit tests for principalFrom and effectSource.
+// Source-based admission helpers — unit tests for effectSource.
 //
-// These helpers support the scheduler/tick analogue by providing authoring
-// utilities for minting and checking bounded system principals tagged with a
-// source identifier. Tests cover construction, validation, and the intended
-// admitsEffects integration pattern.
+// principalFrom was REMOVED (S5/A5 kill decision, workbench#75): the scheduler
+// clock dispatch now mints `machinePrincipal({ id, operations })` instead of an
+// id-less system principal. effectSource remains the effects admission helper.
+// See test/principal-from.test.mjs for the kill-decision assertions and
+// test/machine-principal.test.mjs for the attributable replacement.
 //
 // Import pattern mirrors effects-auth.test.mjs (explicit relative imports).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { principal, principalFrom, effectSource } from '../build/internal.mjs';
-
-// ---- principalFrom construction ----
-
-test('principalFrom(source) returns a frozen system principal with attributes.source', () => {
-  const p = principalFrom('Blog.publish');
-  assert.equal(p.type, 'system');
-  assert.equal(p.id, null);
-  assert.equal(p.attributes.source, 'Blog.publish');
-  assert.ok(Object.isFrozen(p));
-  assert.ok(Object.isFrozen(p.attributes));
-});
-
-test('principalFrom rejects empty string', () => {
-  assert.throws(
-    () => principalFrom(''),
-    Error,
-    'principalFrom(source): source must be a non-empty string',
-  );
-});
-
-test('principalFrom rejects non-string: number', () => {
-  assert.throws(
-    () => principalFrom(123),
-    Error,
-    'principalFrom(source): source must be a non-empty string',
-  );
-});
-
-test('principalFrom rejects non-string: null', () => {
-  assert.throws(
-    () => principalFrom(null),
-    Error,
-    'principalFrom(source): source must be a non-empty string',
-  );
-});
-
-test('principalFrom rejects non-string: undefined', () => {
-  assert.throws(
-    () => principalFrom(undefined),
-    Error,
-    'principalFrom(source): source must be a non-empty string',
-  );
-});
-
-test('principalFrom rejects non-string: object', () => {
-  assert.throws(
-    () => principalFrom({}),
-    Error,
-    'principalFrom(source): source must be a non-empty string',
-  );
-});
+import { principal, effectSource } from '../build/internal.mjs';
 
 // ---- effectSource construction ----
 
@@ -97,11 +47,6 @@ test('effectSource rejects an effect principal with a mismatched source entity',
   const check = effectSource('Blog.publish');
   const p = principal({ type: 'system', attributes: { effect: 'Blog.other' } });
   assert.equal(check({ principal: p }), false);
-});
-
-test('effectSource does not admit a scheduler principal with the same source string', () => {
-  const check = effectSource('Blog.publish');
-  assert.equal(check({ principal: principalFrom('Blog.publish') }), false);
 });
 
 test('effectSource rejects a user principal (non-system)', () => {

@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { executeFrameworkDDL } from '../build/ddl.mjs';
 import { createJobQueue } from '../build/job-queue.mjs';
+import { machinePrincipal } from '../build/schedule.mjs';
 import workbench from '../build/app.mjs';
 import {
   makeBlog, makePost,
@@ -72,7 +73,7 @@ test('search-index: createPost enqueues a job; worker populates PostSearchIndex'
   assert.equal(payload.profile, undefined, 'no profile in payload');
 
   // Run the in-process worker deterministically.
-  const worker = app.jobs.work(SEARCH_INDEX_KIND, searchIndexWorkerFn(app), { pollIntervalMs: Infinity });
+  const worker = app.jobs.work(SEARCH_INDEX_KIND, searchIndexWorkerFn(app), { principal: machinePrincipal({ id: 'worker:search', operations: ['execute', 'update'] }), operations: ['update'], pollIntervalMs: Infinity });
   const result = await worker.once();
   assert.ok(result, 'worker claimed and completed a job');
   assert.equal(result.job.kind, SEARCH_INDEX_KIND);
@@ -131,7 +132,7 @@ test('search-index: updatePost also enqueues a job', async (t) => {
   });
 
   // consume the initial job
-  const worker = app.jobs.work(SEARCH_INDEX_KIND, searchIndexWorkerFn(app), { pollIntervalMs: Infinity });
+  const worker = app.jobs.work(SEARCH_INDEX_KIND, searchIndexWorkerFn(app), { principal: machinePrincipal({ id: 'worker:search', operations: ['execute', 'update'] }), operations: ['update'], pollIntervalMs: Infinity });
   await worker.once();
 
   // Clear the job and index table so we can prove the update enqueues fresh work.
@@ -170,7 +171,7 @@ test('search-index: missing post → retried → dead-lettered (substrate policy
 
   queue.enqueue({ kind: SEARCH_INDEX_KIND, payload: { postId: 'fake-missing-post' } });
 
-  const worker = queue.work(SEARCH_INDEX_KIND, searchIndexWorkerFn({ db }), { pollIntervalMs: Infinity });
+  const worker = queue.work(SEARCH_INDEX_KIND, searchIndexWorkerFn({ db }), { principal: machinePrincipal({ id: 'worker:search', operations: ['execute', 'update'] }), operations: ['update'], pollIntervalMs: Infinity });
 
   // Attempt 1: worker throws (no post with that id) → retried.
   const r1 = await worker.once();

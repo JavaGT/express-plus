@@ -109,6 +109,35 @@ export function statusOf(principal: Principal): PrincipalStatus;
 // stays on the original principal for statusOf().
 export function collapseForAdmission(principal: Principal): Principal;
 
+// The attributable machine/system principal (S5/A5). Operational work — the
+// schedule clock dispatch, the job-queue worker, and a consuming app's
+// operational runtime — runs under a machinePrincipal: a `system` identity with
+// a stable id and an EXPLICIT granted operation allowlist. It can never mint
+// `user`, and its attributes are derived ONLY from { id, operations } (frozen),
+// so it cannot carry attributes that satisfy a human identity check. An
+// operation outside the allowlist is denied (fail closed); "internal" is never
+// an implicit grant.
+export interface MachinePrincipal extends Principal {
+  readonly type: 'system';
+  readonly id: string;
+  readonly attributes: Readonly<{
+    source: string;
+    machine: true;
+    operations: readonly string[];
+  }>;
+}
+
+export function machinePrincipal(options: {
+  id: string;
+  operations: readonly string[];
+}): MachinePrincipal;
+export function isMachinePrincipal(value: unknown): value is MachinePrincipal;
+export function machineAllows(
+  principal: Principal | null | undefined,
+  operation: string | { readonly operation: string } | null | undefined,
+): boolean;
+export function machineOperations(principal: Principal | null | undefined): readonly string[] | null;
+
 // Raised by principal() when a status outside the closed union is declared
 // (fail closed, sibling to the type-union error).
 export class UnknownPrincipalStatusError extends Error {

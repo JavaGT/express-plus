@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { entity, generateDDL } from '../build/internal.mjs';
-import { admitSystemMutation, tickSource } from '../build/schedule.mjs';
+import { admitSystemMutation, machinePrincipal, tickSource } from '../build/schedule.mjs';
 
 // ============================================================
 // SETUP HELPERS
@@ -51,7 +51,7 @@ test('admitSystemMutation ADMITS on present-row + while-holds + matching payload
   const now = Date.now();
 
   const source = tickSource('AdmitTick', 'update');
-  const principal = { type: 'system', attributes: { source } };
+  const principal = machinePrincipal({ id: source, operations: ['update'] });
 
   const granted = admitSystemMutation({
     entity: AdmitTick,
@@ -100,7 +100,7 @@ test('admitSystemMutation DENIES wrong source', () => {
   seedRow(db, 'AdmitTick', 'row1', 'moving');
   const now = Date.now();
 
-  const principal = { type: 'system', attributes: { source: 'Other.update' } };
+  const principal = machinePrincipal({ id: 'Other.update', operations: ['update'] });
   const granted = admitSystemMutation({
     entity: AdmitTick,
     verb: 'update',
@@ -125,7 +125,7 @@ test('admitSystemMutation DENIES undeclared verb (verb not in entity.schedule)',
   const now = Date.now();
 
   const source = tickSource('AdmitTick', 'remove'); // 'remove' not declared
-  const principal = { type: 'system', attributes: { source } };
+  const principal = machinePrincipal({ id: source, operations: ['remove'] });
   const granted = admitSystemMutation({
     entity: AdmitTick,
     verb: 'remove',
@@ -150,7 +150,7 @@ test('admitSystemMutation DENIES missing row (TOCTOU)', () => {
   const now = Date.now();
 
   const source = tickSource('AdmitTick', 'update');
-  const principal = { type: 'system', attributes: { source } };
+  const principal = machinePrincipal({ id: source, operations: ['update'] });
   const granted = admitSystemMutation({
     entity: AdmitTick,
     verb: 'update',
@@ -176,7 +176,7 @@ test('admitSystemMutation DENY while-fails (row does not satisfy while predicate
   const now = Date.now();
 
   const source = tickSource('AdmitTick', 'update');
-  const principal = { type: 'system', attributes: { source } };
+  const principal = machinePrincipal({ id: source, operations: ['update'] });
   const granted = admitSystemMutation({
     entity: AdmitTick,
     verb: 'update',
@@ -201,7 +201,7 @@ test('admitSystemMutation DENY arbitrary payload (hijack attempt)', () => {
   const now = Date.now();
 
   const source = tickSource('AdmitTick', 'update');
-  const principal = { type: 'system', attributes: { source } };
+  const principal = machinePrincipal({ id: source, operations: ['update'] });
   // Declared payload is { status: 'stopped' }, but this tries to send { status: 'hijacked' }
   const granted = admitSystemMutation({
     entity: AdmitTick,
@@ -240,7 +240,7 @@ test('admitSystemMutation DENIES a schedule.at trigger with a tick-style source'
 
   // Use the tickSource-derived source string — but the trigger is schedule.at, not tick.
   const source = tickSource('AdmitSchedAt', 'update');
-  const principal = { type: 'system', attributes: { source } };
+  const principal = machinePrincipal({ id: source, operations: ['update'] });
   const granted = admitSystemMutation({
     entity: schedAt,
     verb: 'update',
@@ -276,7 +276,7 @@ test('admitSystemMutation: no due-check runs (tick row with no date field still 
   const now = Date.now();
 
   const source = tickSource('NoDateTick', 'update');
-  const principal = { type: 'system', attributes: { source } };
+  const principal = machinePrincipal({ id: source, operations: ['update'] });
   const granted = admitSystemMutation({
     entity: NoDate,
     verb: 'update',
@@ -314,7 +314,7 @@ test('admitSystemMutation DENIES a schedule.after trigger with a tick-style sour
   const now = Date.now();
 
   const source = tickSource('AdmitSchedAfter', 'update');
-  const principal = { type: 'system', attributes: { source } };
+  const principal = machinePrincipal({ id: source, operations: ['update'] });
   const granted = admitSystemMutation({
     entity: schedAfter,
     verb: 'update',
@@ -350,10 +350,7 @@ test('one keyed tick principal cannot authorize a sibling tick on the same verb'
   });
   for (const sql of generateDDL(MultiTick)) db.exec(sql);
   seedRow(db, 'MultiTickAuthority', 'row1', 'moving');
-  const principal = {
-    type: 'system',
-    attributes: { source: tickSource('MultiTickAuthority', 'update', 'advance') },
-  };
+  const principal = machinePrincipal({ id: tickSource('MultiTickAuthority', 'update', 'advance'), operations: ['update'] });
   const base = {
     entity: MultiTick,
     verb: 'update',

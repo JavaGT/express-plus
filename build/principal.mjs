@@ -199,17 +199,13 @@ export function collapseForAdmission(principal           )            {
   return anonymous;
 }
 
-// Mint a bounded system principal tagged with a source identifier. Used by the
-// scheduler/tick analogue to re-enter dispatch with a traceable system identity.
-// Fail-closed: source must be a non-empty string (Error otherwise).
-// NOTE: This uses `attributes.source` — distinct from effects which use
-// `attributes.effect` (effect-compiler.mjs:282) to avoid breaking effect tests.
-export function principalFrom(source        )            {
-  if (typeof source !== 'string' || source === '') {
-    throw new Error('principalFrom(source): source must be a non-empty string');
-  }
-  return principal({ type: 'system', attributes: { source } });
-}
+// principalFrom — REMOVED (S5/A5 kill decision, workbench#75). The scheduler
+// clock dispatch previously minted an ID-LESS `system` principal via
+// principalFrom; it now mints an attributable `machinePrincipal({ id, operations })`
+// (machine-principal.mjs), so no id-less system principal reaches an admission
+// decision as an implicit grant. Effects keep their own mint
+// (`principal({ type: 'system', attributes: { effect } })`), which is a
+// distinct mechanism with its own explicit admission.
 
 // A check-expression helper that admits a principal whose `attributes.source`
 // matches the given source. Returns a function: ({principal}) => boolean.

@@ -6,7 +6,7 @@ import workbench, { createClock, entity, executeFrameworkDDL } from '../build/in
 import { generateDDL } from '../build/ddl.mjs';
 import { createServer, durableMutationVariant } from '../build/pipeline.mjs';
 import { principal as makePrincipal } from '../build/principal.mjs';
-import { admitSystemMutation, startClockTriggers, tickSource } from '../build/schedule.mjs';
+import { admitSystemMutation, machinePrincipal, startClockTriggers, tickSource } from '../build/schedule.mjs';
 
 // ============================================================
 // Tick fire-path via startClockTriggers + admission tests.
@@ -208,7 +208,7 @@ test('admitSystemMutation rechecks when and rejects Promise-returning guards', (
   });
   for (const sql of generateDDL(Enemy)) db.exec(sql);
   db.prepare('INSERT INTO TickWhenAdmission (id, status, enabled) VALUES (?, ?, ?)').run('r1', 'alive', 'yes');
-  const principal = makePrincipal({ type: 'system', attributes: { source: tickSource('TickWhenAdmission', 'update') } });
+  const principal = machinePrincipal({ id: tickSource('TickWhenAdmission', 'update'), operations: ['update'] });
 
   assert.throws(
     () => admitSystemMutation({
@@ -250,7 +250,7 @@ test('admitSystemMutation rejects a payload function that returns a Promise', ()
       verb: 'update',
       rowId: 'row1',
       payload: { status: 'done' },
-      principal: makePrincipal({ type: 'system', attributes: { source: tickSource('AsyncTickPayload', 'update') } }),
+      principal: machinePrincipal({ id: tickSource('AsyncTickPayload', 'update'), operations: ['update'] }),
       db,
       now: Date.now(),
     }),
@@ -277,7 +277,7 @@ test('admitSystemMutation denies when the current row no longer passes when', ()
   });
   for (const sql of generateDDL(Enemy)) db.exec(sql);
   db.prepare('INSERT INTO TickWhenChanged (id, status, enabled) VALUES (?, ?, ?)').run('r1', 'alive', 'no');
-  const principal = makePrincipal({ type: 'system', attributes: { source: tickSource('TickWhenChanged', 'update') } });
+  const principal = machinePrincipal({ id: tickSource('TickWhenChanged', 'update'), operations: ['update'] });
 
   const admitted = admitSystemMutation({
     entity: Enemy,
@@ -312,7 +312,7 @@ test('admitSystemMutation admits an exact-match dispatch', () => {
   for (const sql of generateDDL(Blog)) db.exec(sql);
   db.prepare('INSERT INTO AdmitDirect (id, status) VALUES (?, ?)').run('x1', 'alive');
 
-  const principal = makePrincipal({ type: 'system', attributes: { source: tickSource('AdmitDirect', 'update') } });
+  const principal = machinePrincipal({ id: tickSource('AdmitDirect', 'update'), operations: ['update'] });
   const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 'x1',
     payload: { id: 'x1', status: 'moving' }, principal, db, now: Date.now(),
@@ -337,7 +337,7 @@ test('admitSystemMutation DENIES wrong payload', () => {
   for (const sql of generateDDL(Blog)) db.exec(sql);
   db.prepare('INSERT INTO AdmitWrongPayload (id, status) VALUES (?, ?)').run('x2', 'alive');
 
-  const principal = makePrincipal({ type: 'system', attributes: { source: tickSource('AdmitWrongPayload', 'update') } });
+  const principal = machinePrincipal({ id: tickSource('AdmitWrongPayload', 'update'), operations: ['update'] });
   const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 'x2',
     payload: { id: 'x2', status: 'hijacked' }, principal, db, now: Date.now(),
@@ -362,7 +362,7 @@ test('admitSystemMutation DENIES row deleted between discover + dispatch', () =>
   for (const sql of generateDDL(Blog)) db.exec(sql);
   // No row inserted — row was "deleted" after discovery.
 
-  const principal = makePrincipal({ type: 'system', attributes: { source: tickSource('AdmitTOCTOU', 'update') } });
+  const principal = machinePrincipal({ id: tickSource('AdmitTOCTOU', 'update'), operations: ['update'] });
   const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 'gone',
     payload: { id: 'gone', status: 'moving' }, principal, db, now: Date.now(),
@@ -413,7 +413,7 @@ test('admitSystemMutation admits and denies the 3-part scheduler source through 
   const now = Date.now();
   db.prepare('INSERT INTO AdmitSystemSchedule (id, publishedAt, status) VALUES (?, ?, ?)').run('s1', now - 1000, 'draft');
 
-  const principal = makePrincipal({ type: 'system', attributes: { source: 'AdmitSystemSchedule.update.publishedAt' } });
+  const principal = machinePrincipal({ id: 'AdmitSystemSchedule.update.publishedAt', operations: ['update'] });
   const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 's1',
     payload: { id: 's1', status: 'published' }, principal, db, now,

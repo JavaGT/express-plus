@@ -41,6 +41,7 @@ export { serveStatic } from './views.ts';
 export { sessionCookie, sessionPrincipalOf, sessionTokenOf, apiKeyPrincipalOf, parseCookies, SESSION_COOKIE } from './auth/session.ts';
 export { inc, dec, self, many, effect } from './effect-compiler.ts';
 export { schedule, tick, simulate } from './schedule.ts';
+export { machinePrincipal, isMachinePrincipal, machineAllows, machineOperations } from './machine-principal.ts';
 export { membership } from './auth/membership.ts';
 export { snapshot, object, one, keyed, select, include, orderBy, count, related, user, tombstones } from './snapshot.ts';
 export { createInvitationApi } from './auth/invitation.ts';

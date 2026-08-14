@@ -41,6 +41,7 @@ export { serveStatic } from './views.mjs';
 export { sessionCookie, sessionPrincipalOf, sessionTokenOf, apiKeyPrincipalOf, parseCookies, SESSION_COOKIE } from './auth/session.mjs';
 export { inc, dec, self, many, effect } from './effect-compiler.mjs';
 export { schedule, tick, simulate } from './schedule.mjs';
+export { machinePrincipal, isMachinePrincipal, machineAllows, machineOperations } from './machine-principal.mjs';
 export { membership } from './auth/membership.mjs';
 export { snapshot, object, one, keyed, select, include, orderBy, count, related, user, tombstones } from './snapshot.mjs';
 export { createInvitationApi } from './auth/invitation.mjs';

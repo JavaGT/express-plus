@@ -73,6 +73,8 @@ import { appendEvents, readSeq, type AppendedEvent } from './committed-log.ts';
 import type { DbHandle } from './driver.ts';
 import type { Clock } from './clock.ts';
 import { rawRow } from './entity/query.ts';
+import { operationCategory } from './operation.ts';
+import { machineAllows, isMachinePrincipal, type MachinePrincipal } from './machine-principal.ts';
 
 const STATES = { QUEUED: 'queued', CLAIMED: 'claimed', RUNNING: 'running', COMPLETED: 'completed', FAILED: 'failed', CANCELLED: 'cancelled' } as const;
 
@@ -153,6 +155,24 @@ function ctEqualHex(a: string, b: string) {
   return timingSafeEqual(ab, bb);
 }
 
+// Normalize a handler's declared operations (the handler/context allowlist,
+// S5/A5 spec item 2) to closed-vocabulary names. Unknown vocabulary is a
+// construction-time error (fail closed loudly at setup), and an empty list is a
+// misconfiguration — a handler that performs work must declare it.
+function normalizeDeclaredOperations(operations: readonly string[], context: string): readonly string[] {
+  if (!Array.isArray(operations) || operations.length === 0) {
+    throw new Error(`${context}: operations must be a non-empty array (the handler's declared allowed operations)`);
+  }
+  return Object.freeze(
+    operations.map((operation, index) => {
+      if (typeof operation !== 'string' || operation.length === 0) {
+        throw new Error(`${context}: operations[${index}] must be a non-empty operation name`);
+      }
+      return operationCategory(operation).operation;
+    }),
+  );
+}
+
 export function createJobQueue({
   db,
   sharedSecret,
@@ -174,6 +194,11 @@ export function createJobQueue({
   const secretHash = sha256hex(sharedSecret);
   let timer: ReturnType<typeof setInterval> | null = null;
   let reaperWatcher: { remove(): void } | null = null;
+  // Machine attribution (S5/A5): a job enqueued with a machine principal is
+  // attributed to it (the attributable operational identity for audit). The
+  // allowlist ENFORCEMENT is the handler/context check in work() — this map is
+  // the attribution record, not a second enforcement seam.
+  const attributedJobs = new Map<string, MachinePrincipal>();
 
   // Run a mutation through the write coordinator when one is configured; a
   // standalone queue runs synchronously. The result is the body's value, or a
@@ -281,15 +306,21 @@ export function createJobQueue({
   // Enqueue a job. A post-commit consumer (or an imperative handler) calls this;
   // the queue owns the lifecycle from here. Mints an id when absent; preserves a
   // caller-supplied id (caller-owned, like entity ids). Routes through the write
-  // coordinator when one is configured.
-  function enqueue({ kind, payload = null, id, scope }: { kind?: string; payload?: unknown; id?: string; scope?: string } = {}): JobRow | null | Promise<JobRow | null> {
+  // coordinator when one is configured. `principal` is the optional machine
+  // attribution (S5/A5): the attributable machine principal this job runs under.
+  // Fail closed: a non-machine principal is rejected at construction.
+  function enqueue({ kind, payload = null, id, scope, principal }: { kind?: string; payload?: unknown; id?: string; scope?: string; principal?: MachinePrincipal } = {}): JobRow | null | Promise<JobRow | null> {
     return coordinated(() => {
       if (!kind) throw new Error('enqueue: kind is required');
+      if (principal != null && !isMachinePrincipal(principal)) {
+        throw new Error('enqueue: principal must be an attributable machine principal (machinePrincipal({ id, operations })) — a raw system or human principal is never a job attribution');
+      }
       const jobId = id ?? randomUUID();
       const t = now();
       db.prepare(
         'INSERT INTO _Job (id, kind, payload, status, enqueuedAt, scope, workerId, claimedAt, leaseUntil) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL)',
       ).run(jobId, kind, payload != null ? JSON.stringify(payload) : null, STATES.QUEUED, t, scope ?? null);
+      if (principal) attributedJobs.set(jobId, principal);
       const job = parseJob(rawRow(db, '_Job', jobId));
       if (job && job.scope != null) {
         emit(buildEvent(job, 'enqueued', t));
@@ -593,23 +624,63 @@ export function createJobQueue({
   // worker is a privileged path: a synthetic workerId, no _Worker row, no bearer
   // (the same trust boundary as enqueue()).
   //
+  // S5/A5 machine attribution: the worker runs under an attributable machine
+  // principal (`principal`, required — operational work never runs unattributed),
+  // and the handler declares its allowed operations via `operations` (the
+  // handler/context API). Dispatch validates the executing principal against
+  // that context and denies on mismatch: if any declared operation is not in the
+  // principal's allowlist (or in the job's enqueue-time attribution allowlist,
+  // when one was attached), the job FAILS CLOSED — the fn is never invoked and
+  // the job is recorded as failed with a denial reason. "Internal" is never an
+  // implicit grant.
+  //
   // `once()` runs one claim→fn→submit cycle and returns the result (or null when
   // nothing claimable) — awaitable for deterministic tests. The poll loop calls
   // once() on `pollIntervalMs`. `stop()` halts the loop. The fn's thrown error →
   // failed result → substrate retry/dead-letter policy; its return value →
   // completed result.
-  function work(kind: string, fn: (job: JobRow) => unknown | Promise<unknown>, { pollIntervalMs: intervalMs = pollIntervalMs }: { pollIntervalMs?: number } = {}) {
+  function work(kind: string, fn: (job: JobRow) => unknown | Promise<unknown>, { principal, operations, pollIntervalMs: intervalMs = pollIntervalMs }: { principal: MachinePrincipal; operations: readonly string[]; pollIntervalMs?: number }): { once(): Promise<{ job: JobRow; result: SubmitResult; denied?: string } | null>; stop(): void; workerId: string } {
     if (!kind) throw new Error('work: kind is required');
     if (typeof fn !== 'function') throw new Error('work: fn must be a function');
+    if (!isMachinePrincipal(principal)) {
+      throw new Error('work: an attributable machine principal is required (machinePrincipal({ id, operations })) — operational work never runs unattributed');
+    }
+    const declared = normalizeDeclaredOperations(operations, 'work');
     const workerId = `in-process:${kind}:${randomUUID()}`;
     let pollTimer: ReturnType<typeof setInterval> | null = null;
     let pollWatcher: { remove(): void } | null = null;
     let stopped = false;
 
+    // Fail-closed allowlist-via-context check: the executing principal (and, when
+    // present, the job's enqueue-time attribution) must be granted every operation
+    // the handler's context declares. Returns the first ungranted operation, or
+    // undefined when everything is granted.
+    function deniedOperation(principalLike: MachinePrincipal): string | undefined {
+      return declared.find((operation) => !machineAllows(principalLike, operation));
+    }
+
     async function once() {
       const job = await claim(workerId, { kind });
       if (!job) return null;
       await heartbeat(job.id, workerId);
+      let denied = deniedOperation(principal);
+      if (denied === undefined) {
+        const attributed = attributedJobs.get(job.id);
+        if (attributed) denied = deniedOperation(attributed);
+      }
+      if (denied !== undefined) {
+        // Fail closed: the fn is never invoked. Record the denial as a failed
+        // result so the job cannot linger claimed (the substrate's uniform
+        // retry/dead-letter policy applies to the recorded failure).
+        const result = await submitResult(job.id, workerId, {
+          status: STATES.FAILED,
+          output: { denied: true, operation: denied, error: `machine operation '${denied}' not granted to the executing principal` },
+        });
+        getLog().warn('system', 'job worker denied: operation not in the executing machine principal allowlist', {
+          kind, jobId: job.id, operation: denied,
+        });
+        return { job, result, denied };
+      }
       let result: SubmitResult;
       try {
         const output = await fn(job);

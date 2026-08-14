@@ -7,6 +7,7 @@ import { generateDDL } from '../build/ddl.mjs';
 import {
   admitSystemMutation,
   clearRemovedScheduleReceipts,
+  machinePrincipal,
   pruneInactiveScheduleReceipts,
   rearmChangedScheduleReceipts,
   schedulerSource,
@@ -48,7 +49,7 @@ test('admitSystemMutation admits a matching scheduler dispatch (in-txn due + whi
   const now = Date.now();
   db.prepare('INSERT INTO BlogAdmit (id, publishedAt, status) VALUES (?, ?, ?)').run('row1', now - 1000, 'draft');
 
-  const principal = { type: 'system', attributes: { source: 'BlogAdmit.update.publishedAt' } };
+  const principal = machinePrincipal({ id: 'BlogAdmit.update.publishedAt', operations: ['update'] });
   const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 'row1',
     payload: { published: true }, principal, db, now,
@@ -61,7 +62,7 @@ test('admitSystemMutation DENIES a future-due row (not due at dispatch time)', (
   const now = Date.now();
   db.prepare('INSERT INTO BlogAdmit (id, publishedAt, status) VALUES (?, ?, ?)').run('row1', now + 100_000, 'draft');
 
-  const principal = { type: 'system', attributes: { source: 'BlogAdmit.update.publishedAt' } };
+  const principal = machinePrincipal({ id: 'BlogAdmit.update.publishedAt', operations: ['update'] });
   const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 'row1',
     payload: { published: true }, principal, db, now,
@@ -75,7 +76,7 @@ test('admitSystemMutation DENIES when while no longer holds (in-txn re-check)', 
   // due AND status is 'archived' (NOT 'draft') — while fails.
   db.prepare('INSERT INTO BlogAdmit (id, publishedAt, status) VALUES (?, ?, ?)').run('row1', now - 1000, 'archived');
 
-  const principal = { type: 'system', attributes: { source: 'BlogAdmit.update.publishedAt' } };
+  const principal = machinePrincipal({ id: 'BlogAdmit.update.publishedAt', operations: ['update'] });
   const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 'row1',
     payload: { published: true }, principal, db, now,
@@ -88,7 +89,7 @@ test('admitSystemMutation DENIES an arbitrary payload (security: scheduler canno
   const now = Date.now();
   db.prepare('INSERT INTO BlogAdmit (id, publishedAt, status) VALUES (?, ?, ?)').run('row1', now - 1000, 'draft');
 
-  const principal = { type: 'system', attributes: { source: 'BlogAdmit.update.publishedAt' } };
+  const principal = machinePrincipal({ id: 'BlogAdmit.update.publishedAt', operations: ['update'] });
   // A payload the schedule did NOT declare (owner hijack attempt):
   const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 'row1',
@@ -103,7 +104,7 @@ test('admitSystemMutation DENIES a principal whose source is not this entity/ver
   db.prepare('INSERT INTO BlogAdmit (id, publishedAt, status) VALUES (?, ?, ?)').run('row1', now - 1000, 'draft');
 
   // A scheduler principal for a DIFFERENT source must not admit this dispatch.
-  const principal = { type: 'system', attributes: { source: 'OtherEntity.update.publishedAt' } };
+  const principal = machinePrincipal({ id: 'OtherEntity.update.publishedAt', operations: ['update'] });
   const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 'row1',
     payload: { published: true }, principal, db, now,
@@ -116,7 +117,7 @@ test('admitSystemMutation DENIES a verb the entity did not declare a schedule fo
   const now = Date.now();
   db.prepare('INSERT INTO BlogAdmit (id, publishedAt, status) VALUES (?, ?, ?)').run('row1', now - 1000, 'draft');
 
-  const principal = { type: 'system', attributes: { source: 'BlogAdmit.remove.publishedAt' } };
+  const principal = machinePrincipal({ id: 'BlogAdmit.remove.publishedAt', operations: ['remove'] });
   const granted = admitSystemMutation({
     entity: Blog, verb: 'remove', rowId: 'row1',
     payload: {}, principal, db, now,
@@ -141,7 +142,7 @@ test('admitSystemMutation DENIES a missing row (TOCTOU: row deleted between disc
   const { db, Blog } = setupEntity();
   const now = Date.now();
   // No row inserted — pretend it was deleted after discovery.
-  const principal = { type: 'system', attributes: { source: 'BlogAdmit.update.publishedAt' } };
+  const principal = machinePrincipal({ id: 'BlogAdmit.update.publishedAt', operations: ['update'] });
   const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 'gone',
     payload: { published: true }, principal, db, now,
@@ -168,7 +169,7 @@ test('admitSystemMutation recomputes the `with` function-form payload from the C
   const now = Date.now();
   db.prepare('INSERT INTO TodoAdmit (id, title, dueAt) VALUES (?, ?, ?)').run('t1', 'buy milk', now - 1000);
 
-  const principal = { type: 'system', attributes: { source: 'TodoAdmit.update.dueAt' } };
+  const principal = machinePrincipal({ id: 'TodoAdmit.update.dueAt', operations: ['update'] });
   const granted = admitSystemMutation({
     entity: Todo, verb: 'update', rowId: 't1',
     payload: { title: 'buy milk [DONE]' }, principal, db, now,
@@ -200,10 +201,7 @@ test('admitSystemMutation: schedule.after due = row.field + delay <= now', () =>
   const now = Date.now();
   // createdAt 10s ago + 5s delay = 5s before now → DUE
   db.prepare('INSERT INTO TaskAfter (id, createdAt, status) VALUES (?, ?, ?)').run('k1', now - 10_000, 'open');
-  const principal = {
-    type: 'system',
-    attributes: { source: `TaskAfter.update.${Task.schedule.update.triggerId}` },
-  };
+  const principal = machinePrincipal({ id: `TaskAfter.update.${Task.schedule.update.triggerId}`, operations: ['update'] });
   const granted = admitSystemMutation({
     entity: Task, verb: 'update', rowId: 'k1',
     payload: { status: 'stale' }, principal, db, now,
@@ -270,10 +268,7 @@ test('a deadline receipt makes successful admission one-shot', () => {
   const { db, Blog } = setupEntity();
   const now = Date.now();
   db.prepare('INSERT INTO BlogAdmit (id, publishedAt, status) VALUES (?, ?, ?)').run('once', now - 1000, 'draft');
-  const principal = {
-    type: 'system',
-    attributes: { source: `BlogAdmit.update.${Blog.schedule.update.triggerId}` },
-  };
+  const principal = machinePrincipal({ id: `BlogAdmit.update.${Blog.schedule.update.triggerId}`, operations: ['update'] });
   const request = {
     entity: Blog,
     verb: 'update',
@@ -300,10 +295,7 @@ test('a changed deadline replaces its old receipt instead of growing receipt his
     verb: 'update',
     rowId: 'moved',
     payload: { published: true },
-    principal: {
-      type: 'system',
-      attributes: { source: `BlogAdmit.update.${Blog.schedule.update.triggerId}` },
-    },
+    principal: machinePrincipal({ id: `BlogAdmit.update.${Blog.schedule.update.triggerId}`, operations: ['update'] }),
     db,
     now,
   };
@@ -488,10 +480,7 @@ test('deadline receipt rolls back with the mutation transaction', () => {
     verb: 'update',
     rowId: 'retry',
     payload: { published: true },
-    principal: {
-      type: 'system',
-      attributes: { source: `BlogAdmit.update.${Blog.schedule.update.triggerId}` },
-    },
+    principal: machinePrincipal({ id: `BlogAdmit.update.${Blog.schedule.update.triggerId}`, operations: ['update'] }),
     db,
     now,
   };
@@ -510,10 +499,7 @@ test('a denied deadline payload does not consume its one-shot receipt', () => {
     entity: Blog,
     verb: 'update',
     rowId: 'deny-first',
-    principal: {
-      type: 'system',
-      attributes: { source: `BlogAdmit.update.${Blog.schedule.update.triggerId}` },
-    },
+    principal: machinePrincipal({ id: `BlogAdmit.update.${Blog.schedule.update.triggerId}`, operations: ['update'] }),
     db,
     now,
   };
@@ -531,7 +517,7 @@ test('e2e: a bound scheduler dispatch is ADMITTED through the wired dispatch hoo
     actionId: 'sched-1',
     type: 'BlogE2E.update',
     payload: { id: 'b1', status: 'published' },
-    principal: makePrincipal({ type: 'system', attributes: { source: 'BlogE2E.update.publishedAt' } }),
+    principal: machinePrincipal({ id: 'BlogE2E.update.publishedAt', operations: ['update'] }),
   });
   assert.equal(res.ok, true, 'scheduler principal dispatched the declared payload on a due+while-holding row');
   assert.ok(res.events?.length >= 1, 'the update event was committed');
@@ -549,7 +535,7 @@ test('e2e: a scheduler principal sending an UNDECLARED payload is DENIED (write-
     actionId: 'sched-2',
     type: 'BlogE2E.update',
     payload: { id: 'b2', status: 'hijacked' }, // wrong value: schedule declared { status: 'published' }
-    principal: makePrincipal({ type: 'system', attributes: { source: 'BlogE2E.update.publishedAt' } }),
+    principal: machinePrincipal({ id: 'BlogE2E.update.publishedAt', operations: ['update'] }),
   });
   assert.equal(res.ok, false, 'undeclared payload → deny; the scheduler principal cannot write-anything');
 });
@@ -563,7 +549,7 @@ test('e2e: a scheduler principal with the WRONG source is DENIED', async () => {
     actionId: 'sched-3',
     type: 'BlogE2E.update',
     payload: { id: 'b3', status: 'published' },
-    principal: makePrincipal({ type: 'system', attributes: { source: 'Other.update.publishedAt' } }),
+    principal: machinePrincipal({ id: 'Other.update.publishedAt', operations: ['update'] }),
   });
   assert.equal(res.ok, false, 'wrong source → deny; principal must bind to the declared schedule');
 });
@@ -577,10 +563,7 @@ test('e2e: production ISO transaction time still denies a future deadline', asyn
     actionId: 'sched-future-iso-now',
     type: 'BlogE2E.update',
     payload: { id: 'future', status: 'published' },
-    principal: makePrincipal({
-      type: 'system',
-      attributes: { source: 'BlogE2E.update.publishedAt' },
-    }),
+    principal: machinePrincipal({ id: 'BlogE2E.update.publishedAt', operations: ['update'] }),
   });
   assert.equal(res.ok, false, 'a future deadline is never admitted through the production pipeline');
   assert.equal(
@@ -598,7 +581,7 @@ test('e2e: a scheduler dispatch on a NON-draft row (while-fails) is DENIED', asy
     actionId: 'sched-4',
     type: 'BlogE2E.update',
     payload: { id: 'b4', status: 'published' },
-    principal: makePrincipal({ type: 'system', attributes: { source: 'BlogE2E.update.publishedAt' } }),
+    principal: machinePrincipal({ id: 'BlogE2E.update.publishedAt', operations: ['update'] }),
   });
   assert.equal(res.ok, false, 'while no longer holds → deny (the declared will still governs)');
 });

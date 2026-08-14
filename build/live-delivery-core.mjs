@@ -35,8 +35,9 @@ import { mayRow } from './row-grant.mjs';
 import { tryParseScopeKey } from './scope-handle.mjs';
                                                      
                                                 
+import { principalKeyOf } from './principal.mjs';
                                              
-                                                                                
+                                                                                                                             
 
 let nextSubId = 1;
 
@@ -84,6 +85,10 @@ function deniedError(scope        )                            {
                     
                                
                            
+                                                                              
+                                                                                
+                                                           
+                                              
                              
  
 
@@ -124,6 +129,15 @@ function deniedError(scope        )                            {
                             
                                                  
                                                                                        
+                                                                        
+                                                                    
+                                                         
+                                                                               
+                                                                               
+                                                                                
+                                                                              
+                                      
+                                                                             
                 
                                                                                     
                                                                             
@@ -139,6 +153,53 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
   const subs = new Map                 ();
   const byScope = new Map                     ();
   let closed = false;
+  // S5/A5 revocation contract: registered listeners (S4/S6 adapters) are fired
+  // exactly once per published revocation, and the affected subscriptions are
+  // re-authorized immediately (event-driven, not per-batch).
+  const revocationListeners                       = [];
+
+  // Does a subscription fall inside a published revocation's resource scope?
+  // entity scope ⇒ its scope key equals the key; principal scope ⇒ its
+  // principal's key equals the key.
+  function revocationMatches(sub         , resourceScope                         )          {
+    if (resourceScope.category === 'entity') return sub.scope === resourceScope.key;
+    return principalKeyOf(sub.principal) === resourceScope.key;
+  }
+
+  // Publish a revocation: fire the registered listeners once, then immediately
+  // wake every affected subscription so it re-reads + re-authorizes NOW (no wait
+  // for the next event batch). A woken subscription that then fails
+  // reauthorization is terminated; it carries the revokeWake marker so its
+  // termination does not re-publish (exactly-once per revocation class).
+  function publishRevocation(principal           , resourceScope                         )       {
+    for (const listener of revocationListeners) {
+      try { listener(principal, resourceScope); } catch { /* per-listener isolation */ }
+    }
+    for (const [subId, sub] of [...subs.entries()]) {
+      if (!sub.active || !revocationMatches(sub, resourceScope)) continue;
+      sub.revokeWake = resourceScope;
+      if (sub.paused) {
+        sub.dirty = true;
+      } else if (sub.pending) {
+        sub.dirty = true;
+      } else {
+        catchUp(subId).catch(() => {});
+      }
+    }
+  }
+
+  function onRevocation(listener                    )             {
+    revocationListeners.push(listener);
+    return () => {
+      const idx = revocationListeners.indexOf(listener);
+      if (idx !== -1) revocationListeners.splice(idx, 1);
+    };
+  }
+
+  function revoke(principal           , resourceScope                         )       {
+    if (closed) return;
+    publishRevocation(principal, resourceScope);
+  }
 
   function entityRecord(name        )                   {
     const record = resolveEntity(name);
@@ -298,6 +359,11 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
       while (true) {
         if (!sub.active) return;
         sub.dirty = false;
+        // A revocation publish waked this subscription (revokeWake set): its
+        // reauthorization failure is the manifestation of that already-published
+        // revocation, so it must not publish again — exactly once per class.
+        const revocationScope = sub.revokeWake;
+        sub.revokeWake = null;
         const handle = tryParseScopeKey(sub.scope);
         if (!handle) { removeSub(subId); log?.error?.('live', 'invalid scope', { scope: sub.scope }); throw new Error(`invalid scope '${sub.scope}'`); }
         let events                                                            ;
@@ -318,8 +384,18 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
         const deliverableEvents = auth
           ? events
           : terminalRemoval ? events : [];
-        if (!auth && !terminalRemoval) { removeSub(subId); log?.error?.('live', 'reauth denied', { scope: sub.scope }); return; }
-        if (auth && !(await checkMayRow(sub.entityRec, auth.row, sub.principal))) { removeSub(subId); log?.error?.('live', 'mayRow denied', { scope: sub.scope }); return; }
+        if (!auth && !terminalRemoval) {
+          // Reauthorization denied at delivery time: the single admission path
+          // where access revocation manifests. Publish once (unless this wake
+          // already WAS a published revocation) so listeners hear it and the
+          // OTHER affected subscriptions are re-authorized immediately.
+          if (!revocationScope) publishRevocation(sub.principal, { category: 'entity', key: sub.scope });
+          removeSub(subId); log?.error?.('live', 'reauth denied', { scope: sub.scope }); return;
+        }
+        if (auth && !(await checkMayRow(sub.entityRec, auth.row, sub.principal))) {
+          if (!revocationScope) publishRevocation(sub.principal, { category: 'entity', key: sub.scope });
+          removeSub(subId); log?.error?.('live', 'mayRow denied', { scope: sub.scope }); return;
+        }
         if (!sub.active) return;
         const resyncEnvelope = sub.resyncEnvelope;
         if (events.length === 0 && !resyncEnvelope) {
@@ -587,5 +663,5 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
     }
   }
 
-  return { bootstrap, catchup, subscribe, wake, resync, resyncEntity, close, snapshot, exceedsCatchupLimit };
+  return { bootstrap, catchup, subscribe, wake, resync, resyncEntity, onRevocation, revoke, close, snapshot, exceedsCatchupLimit };
 }

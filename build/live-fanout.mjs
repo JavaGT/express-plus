@@ -16,7 +16,7 @@
 // connection, core, and public delivery modules all consume.
 
                                                 
-import { anonymous } from './principal.mjs';
+import { anonymous, principalKeyOf } from './principal.mjs';
 import { mayRow } from './row-grant.mjs';
 import { PACE_STRATEGIES } from './field-pace.mjs';
                                                    
@@ -85,6 +85,33 @@ import { publicEvent } from './event-delivery.mjs';
                                     
  
 
+// ---- Revocation contract (S5/A5, spec item 4) ------------------------------
+//
+// `resourceScope` is the NORMALIZED revocation descriptor (category + stable
+// key) that subscribers and S4/S6 registrations key on:
+//
+//   - { category: 'entity', key: 'Note:n1' }   — a resource's access revoked;
+//     matches live subscriptions on that exact scope key.
+//   - { category: 'principal', key: 'user:u1' } — a principal's access revoked;
+//     matches every live subscription whose principal key equals the key.
+//
+// PUBLISHER: the package calls revoke() from the single mutation/admission
+// path where a grant/access is revoked (subscription admission denial,
+// delivery-time reauthorization denial, or an adapter's explicit revocation),
+// firing the registered listeners exactly once per call and immediately
+// re-authorizing the affected subscriptions (event-driven — no wait for the
+// next event batch).
+//
+// BOOTSTRAP: bootstrap/catchup always re-authorize against current state
+// BEFORE first delivery, so a subscription registered AFTER a revocation still
+// receives the revoked state on first delivery — there is no window where a
+// revoked reader keeps a live feed.
+                                     
+                                                         
+                                                             
+
+                                                                                                        
+
                            
                  
                 
@@ -115,6 +142,14 @@ import { publicEvent } from './event-delivery.mjs';
                                                                           
                                                                                                                       
                                                                                                                    
+                                                                             
+                                                            
+                                                         
+                                                                                
+                                                                             
+                                                                             
+                                                                               
+                                                                             
                                                                                                                                                                                      
                 
  
@@ -131,6 +166,7 @@ export function createLiveFanout({ mayVerb = null }                             
   const paceBuffers = new Map                         ();
   let onCaretInterestChange                                                                            = null;
   let onCaretInterestAdded                                                                          = null;
+  const revocationListeners                       = [];
 
   const deltaProjector = createDeltaProjector();
 
@@ -258,6 +294,37 @@ export function createLiveFanout({ mayVerb = null }                             
 
   function setOnCaretInterestAdded(callback                                                                         )       {
     onCaretInterestAdded = callback;
+  }
+
+  function onRevocation(listener                    )             {
+    revocationListeners.push(listener);
+    return () => {
+      const idx = revocationListeners.indexOf(listener);
+      if (idx !== -1) revocationListeners.splice(idx, 1);
+    };
+  }
+
+  // Publish a revocation. Fires the registered listeners exactly once (isolated
+  // per listener) and immediately evicts the affected subscriptions from the
+  // fan-out registry — matching by scope key (entity scope) or principal key
+  // (principal scope) — so a revoked reader receives nothing further. This is
+  // the event-driven counterpart to the core's committed revocation path: the
+  // fan-out no longer waits for the next emit to re-authorize a revoked reader.
+  function revoke(principal           , resourceScope                         )       {
+    for (const listener of revocationListeners) {
+      try { listener(principal, resourceScope); } catch { /* per-listener isolation */ }
+    }
+    if (resourceScope.category === 'entity') {
+      const subs = byScope.get(resourceScope.key);
+      if (subs) {
+        for (const conn of [...subs.keys()]) removeSubscription(resourceScope.key, conn);
+      }
+      return;
+    }
+    for (const conn of [...connSubs.keys()]) {
+      if (conn.closed) continue;
+      if (principalKeyOf(conn.principal) === resourceScope.key) removeAll(conn);
+    }
   }
 
   async function flushPacedBuffer(key        )                {
@@ -443,6 +510,8 @@ export function createLiveFanout({ mayVerb = null }                             
     hasCaretInterest,
     setOnCaretInterestChange,
     setOnCaretInterestAdded,
+    onRevocation,
+    revoke,
     emit,
     close,
   };

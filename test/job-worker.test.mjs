@@ -17,8 +17,15 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { executeFrameworkDDL } from '../build/ddl.mjs';
 import { createJobQueue } from '../build/job-queue.mjs';
+import { machinePrincipal } from '../build/schedule.mjs';
 
 const SECRET = 'worker-test-secret';
+
+// S5/A5: every in-process worker runs under an attributable machine principal
+// with an explicit allowlist; the handler declares the operations it performs
+// via its context (work options), and dispatch validates one against the other.
+const WORKER = machinePrincipal({ id: 'worker:test', operations: ['execute', 'update'] });
+const HANDLER_OPS = ['execute'];
 
 function freshQueue({ leaseMs = 100_000, now, maxAttempts = 3, backoffMs = 1000, ...rest } = {}) {
   const db = new DatabaseSync(':memory:');
@@ -36,7 +43,7 @@ test('work once() runs a job of its kind and marks it completed; fn sees the pay
   const w = queue.work('send-title', async (job) => {
     seen.push(job.payload);
     return { sent: true };
-  }, { pollIntervalMs: Infinity });
+  }, { principal: WORKER, operations: HANDLER_OPS, pollIntervalMs: Infinity });
   const res = await w.once();
   assert.equal(res.job.kind, 'send-title');
   assert.deepEqual(seen, [{ title: 'Hi', n: 1 }]);
@@ -53,7 +60,7 @@ test('work only claims jobs matching its kind (other kinds stay queued)', async 
   queue.enqueue({ kind: 'a', payload: { x: 1 } });
   queue.enqueue({ kind: 'b', payload: { x: 2 } });
   const ran = [];
-  const w = queue.work('a', async (job) => { ran.push(job.kind); return {}; }, { pollIntervalMs: Infinity });
+  const w = queue.work('a', async (job) => { ran.push(job.kind); return {}; }, { principal: WORKER, operations: HANDLER_OPS, pollIntervalMs: Infinity });
   await w.once();
   assert.deepEqual(ran, ['a']);
   assert.equal(db.prepare('SELECT status FROM _Job WHERE kind=?').get('b').status, 'queued');
@@ -65,7 +72,7 @@ test('a failed job is retried until maxAttempts, then dead-lettered (terminal fa
   let t = 1000;
   const { db, queue } = freshQueue({ now: () => t, maxAttempts: 3, backoffMs: 10 });
   queue.enqueue({ kind: 'flaky', payload: {} });
-  const w = queue.work('flaky', async () => { throw new Error('boom'); }, { pollIntervalMs: Infinity });
+  const w = queue.work('flaky', async () => { throw new Error('boom'); }, { principal: WORKER, operations: HANDLER_OPS, pollIntervalMs: Infinity });
   // attempt 1 → fail → re-queued (availableAt = 1010)
   const r1 = await w.once();
   assert.equal(r1.result.retried, true);
@@ -99,7 +106,7 @@ test('a retried job is not claimable until availableAt (backoff gate)', async ()
     calls += 1;
     if (calls === 1) throw new Error('first-fail');
     return { ok: true };
-  }, { pollIntervalMs: Infinity });
+  }, { principal: WORKER, operations: HANDLER_OPS, pollIntervalMs: Infinity });
   // attempt 1 fails → availableAt = 7000
   await w.once();
   // still within backoff → not claimable
@@ -120,7 +127,7 @@ test('work stop() halts the poll loop (no job runs after stop)', async () => {
   const { db, queue } = freshQueue();
   queue.enqueue({ kind: 'late', payload: {} });
   const ran = [];
-  const w = queue.work('late', async () => { ran.push(true); return {}; }, { pollIntervalMs: 5 });
+  const w = queue.work('late', async () => { ran.push(true); return {}; }, { principal: WORKER, operations: HANDLER_OPS, pollIntervalMs: 5 });
   w.stop();
   // give a poll loop ample time to NOT run
   await new Promise((r) => setTimeout(r, 30));

@@ -4,8 +4,8 @@
 
 import { randomUUID } from 'node:crypto';
 import type { Principal } from './principal.ts';
-import { principalFrom } from './principal.ts';
 import { getLog } from './log.ts';
+import { machineAllows, isMachinePrincipal, machinePrincipal } from './machine-principal.ts';
 import type { RunnerHandle, SharedClock } from './clock-runner.ts';
 import { createClockRunner } from './clock-runner.ts';
 import type { FieldDescriptor } from './field-strategy.ts';
@@ -291,12 +291,15 @@ export function pruneInactiveScheduleReceipts({ db, entities }: {
   return changes;
 }
 
-// admitSystemMutation — IN-TXN admission for scheduled/ticked system principals.
+// admitSystemMutation — IN-TXN admission for scheduled/ticked MACHINE principals.
 // Called from the dispatch spine's in-txn hook after a declared clock trigger
-// fired. The trigger's declared kind decides the source binding and checks:
-// tick.hz/tick.every require while and skip due; schedule.at/schedule.after bind
-// to fieldName, re-check due, and allow while to be absent. Fail-closed on every
-// mismatch.
+// fired. S5/A5 machine attribution: admission requires an attributable machine
+// principal (machinePrincipal) whose explicit operations allowlist contains the
+// dispatched operation — a raw/legacy `system` principal carries no allowlist and
+// is DENIED ("internal" is never an implicit grant). The trigger's declared kind
+// decides the source binding and checks: tick.hz/tick.every require while and skip
+// due; schedule.at/schedule.after bind to fieldName, re-check due, and allow while
+// to be absent. Fail-closed on every mismatch.
 export function admitSystemMutation({ entity, verb, rowId, payload, principal, db, now }: {
   entity: ScheduleEntity;
   verb: string;
@@ -306,10 +309,19 @@ export function admitSystemMutation({ entity, verb, rowId, payload, principal, d
   db: DbHandle;
   now?: number | Date | string | null;
 }): boolean {
-  if (!principal || typeof principal !== 'object') return false;
-  if (principal.type !== 'system') return false;
+  // Machine-attribution gate: an unattributable / allowlist-less principal is
+  // denied before any schedule check. This is the fail-closed discipline that
+  // replaced the id-less system principal mint (workbench#75).
+  if (!isMachinePrincipal(principal)) return false;
   const source = principal.attributes?.source;
   if (typeof source !== 'string' || source === '') return false;
+
+  // Allowlist-via-context (spec item 2): the executing principal's operation is
+  // validated against the trigger context (the declared verb). A verb the
+  // allowlist does not grant is denied on mismatch. `verb` is the same operation
+  // the machine principal was minted with by the clock dispatch, so this
+  // admits exactly the declared schedule will.
+  if (!machineAllows(principal, verb)) return false;
 
   const trigger = (triggerList(entity?.schedule?.[verb]) as ScheduleTrigger[]).find((t) => {
     if (typeof t.triggerId !== 'string' || t.triggerId === '') return false;
@@ -397,7 +409,11 @@ function scanDeadlines({ db, entityList, entityMap, dispatch, now }: {
       const trigger = (triggerList(entity.schedule?.[verb]) as ScheduleTrigger[]).find((t) => t.triggerId === triggerId);
       if (!trigger?.fieldName) continue;
       const source = schedulerSource(entityName, verb, triggerId);
-      const principal = principalFrom(source);
+      // S5/A5: the clock dispatch mints an ATTRIBUTABLE machine principal whose
+      // explicit operations allowlist is derived from the trigger's declared
+      // context (the verb it fires). Admission re-checks that allowlist against
+      // the dispatched operation; an operation outside it is denied (fail closed).
+      const principal = machinePrincipal({ id: source, operations: [verb] });
       dispatch({ actionId: randomUUID(), type: `${entityName}.${verb}`, principal, payload: { id: rowId, ...payload } });
     } catch (err) {
       getLog().warn('system', 'schedule clock-dispatch (deadline) failed', { err, entity: entityName, verb, rowId });
@@ -416,7 +432,9 @@ function scanTicks({ db, entityList, dispatch, now, intervalMs = null }: {
   for (const { entity: entityName, verb, rowId, payload, triggerId } of rows) {
     try {
       const source = tickSource(entityName, verb, triggerId);
-      const principal = principalFrom(source);
+      // S5/A5: attributable machine principal for the tick dispatch, derived
+      // from the trigger's declared context (the verb it fires).
+      const principal = machinePrincipal({ id: source, operations: [verb] });
       dispatch({ actionId: randomUUID(), type: `${entityName}.${verb}`, principal, payload: { id: rowId, ...payload } });
     } catch (err) {
       getLog().warn('system', 'schedule clock-dispatch (tick) failed', { err, entity: entityName, verb, rowId });

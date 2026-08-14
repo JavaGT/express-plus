@@ -204,3 +204,15 @@ export {
   clearRemovedScheduleReceipts,
   pruneInactiveScheduleReceipts,
 } from './schedule-runtime.mjs';
+// The attributable machine principal the schedule clock dispatch runs under
+// (S5/A5). Re-exported here so the schedule seam and its consumers share one
+// identity mint — the dispatch already mints internally; a caller that needs to
+// construct or validate one uses this same surface.
+export {
+  machinePrincipal,
+  isMachinePrincipal,
+  machineAllows,
+  machineOperations,
+                        
+                             
+} from './machine-principal.mjs';
