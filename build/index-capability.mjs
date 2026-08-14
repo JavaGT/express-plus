@@ -5,30 +5,30 @@
 // making the settled ownership census the execution authority.
 
 import { constants } from 'node:sqlite';
-import { txn, type DbHandle } from './driver.ts';
-import type { CensusEntry } from './schema-census.ts';
-import type { SearchOwnedIndex } from './search-plugin.ts';
+import { txn,               } from './driver.mjs';
 
-export interface SearchIndexStatement {
-  readonly sql: string;
-  readonly params?: readonly unknown[];
-}
 
-export interface SearchIndexAuthorizerHandle extends DbHandle {
-  setAuthorizer(callback: ((actionCode: number, arg1: string | null, arg2: string | null, dbName: string | null, triggerOrView: string | null) => number) | null): void;
-  enableLoadExtension?(allow: boolean): void;
-}
 
-export interface SearchOwnedIndexCapabilityOptions {
-  readonly db: SearchIndexAuthorizerHandle;
-  readonly census: ReadonlyMap<string, CensusEntry>;
-  readonly writeCoordinator: { run<T>(fn: () => T | Promise<T>): Promise<T> };
-  readonly fenceOf: (pluginId: string) => number;
-  readonly maxStatements?: number;
-  readonly maxRows?: number;
-}
 
-const DENIED_ACTIONS = new Set<number>([
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+const DENIED_ACTIONS = new Set        ([
   constants.SQLITE_ALTER_TABLE, constants.SQLITE_ANALYZE, constants.SQLITE_ATTACH,
   constants.SQLITE_CREATE_INDEX, constants.SQLITE_CREATE_TABLE, constants.SQLITE_CREATE_TEMP_INDEX,
   constants.SQLITE_CREATE_TEMP_TABLE, constants.SQLITE_CREATE_TEMP_TRIGGER, constants.SQLITE_CREATE_TEMP_VIEW,
@@ -51,22 +51,22 @@ const ALLOWED_FUNCTIONS = new Set([
   'bm25', 'fts5', 'fts5_source_id', 'highlight', 'match', 'snippet',
 ]);
 
-function ownedBy(census: ReadonlyMap<string, CensusEntry>, pluginId: string, name: string | null): boolean {
+function ownedBy(census                                  , pluginId        , name               )          {
   if (name === null) return false;
-  for (const kind of ['table', 'virtual-table', 'index', 'trigger'] as const) {
+  for (const kind of ['table', 'virtual-table', 'index', 'trigger']         ) {
     const entry = census.get(`${kind}:${name.toLowerCase()}`);
     if (entry?.owner === pluginId && (entry.kind === 'plugin' || entry.kind === 'sqlite-artifact')) return true;
   }
   return false;
 }
 
-function isOwnedVirtualTable(census: ReadonlyMap<string, CensusEntry>, pluginId: string, name: string | null): boolean {
+function isOwnedVirtualTable(census                                  , pluginId        , name               )          {
   if (name === null) return false;
   const entry = census.get(`virtual-table:${name.toLowerCase()}`);
   return entry?.kind === 'plugin' && entry.owner === pluginId;
 }
 
-function assertStatement(statement: SearchIndexStatement): void {
+function assertStatement(statement                      )       {
   if (!statement || typeof statement.sql !== 'string' || statement.sql.length === 0) {
     throw new TypeError('owned-index statement requires non-empty SQL');
   }
@@ -78,7 +78,7 @@ function assertStatement(statement: SearchIndexStatement): void {
 // Creates per-plugin facades after the lifecycle census has settled. There is no
 // fallback for drivers without SQLite's authorizer: capability binding fails
 // closed rather than attempting incomplete SQL inspection.
-export function createSearchOwnedIndexCapability(options: SearchOwnedIndexCapabilityOptions): (pluginId: string) => SearchOwnedIndex {
+export function createSearchOwnedIndexCapability(options                                   )                                         {
   const { db, census, writeCoordinator, fenceOf } = options;
   const maxStatements = options.maxStatements ?? 128;
   const maxRows = options.maxRows ?? 10_000;
@@ -95,7 +95,7 @@ export function createSearchOwnedIndexCapability(options: SearchOwnedIndexCapabi
     throw new TypeError('owned-index capability maxRows must be a positive safe integer');
   }
 
-  function execute<T>(pluginId: string, mode: 'query' | 'write', statement: SearchIndexStatement, run: () => T): T {
+  function execute   (pluginId        , mode                   , statement                      , run         )    {
     assertStatement(statement);
     // FTS5 asks SQLite for the connection data version while it applies a
     // virtual-table operation. Permit that one engine-internal pragma only after
@@ -130,12 +130,12 @@ export function createSearchOwnedIndexCapability(options: SearchOwnedIndexCapabi
     }
   }
 
-  return (pluginId: string): SearchOwnedIndex => {
-    const index: SearchOwnedIndex = {
-    query(statement: SearchIndexStatement) {
+  return (pluginId        )                   => {
+    const index                   = {
+    query(statement                      ) {
       return execute(pluginId, 'query', statement, () => db.prepare(statement.sql).all(...(statement.params ?? [])));
     },
-    async write({ expectedFence, statements }: { readonly expectedFence: number; readonly statements: readonly SearchIndexStatement[] }) {
+    async write({ expectedFence, statements }                                                                                          ) {
       if (!Number.isSafeInteger(expectedFence) || expectedFence < 0) throw new TypeError('owned-index expectedFence must be a non-negative safe integer');
       if (!Array.isArray(statements) || statements.length === 0 || statements.length > maxStatements) {
         throw new Error(`owned-index write requires 1 to ${maxStatements} statements`);
@@ -156,7 +156,7 @@ export function createSearchOwnedIndexCapability(options: SearchOwnedIndexCapabi
             }
           }
           return { changes: totalChanges() - before };
-        }) as Promise<{ readonly changes: number }>;
+        })                                         ;
       });
     },
     };

@@ -176,8 +176,9 @@ export interface SearchPluginContext {
   readonly fence: number;
 }
 
-// Narrow plugin-owned storage capability. It intentionally has neither a raw
-// database handle nor prepare/exec/transaction verbs.
+// Narrow plugin-owned storage capability. The app binds it only after the
+// ownership census settles; it intentionally has neither a raw database handle
+// nor prepare/exec/transaction verbs.
 export interface SearchOwnedIndex {
   query(request: { readonly sql: string; readonly params?: readonly unknown[] }): readonly Record<string, unknown>[];
   write(request: { readonly expectedFence: number; readonly statements: readonly { readonly sql: string; readonly params?: readonly unknown[] }[] }): Promise<{ readonly changes: number }>;

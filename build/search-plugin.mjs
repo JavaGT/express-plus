@@ -176,8 +176,9 @@ export const SUPPORTED_SEARCH_PLUGIN_CONTRACT_VERSION = 2;
 
 
 
-// Narrow plugin-owned storage capability. It intentionally has neither a raw
-// database handle nor prepare/exec/transaction verbs.
+// Narrow plugin-owned storage capability. The app binds it only after the
+// ownership census settles; it intentionally has neither a raw database handle
+// nor prepare/exec/transaction verbs.
 
 
 

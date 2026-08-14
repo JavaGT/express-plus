@@ -235,11 +235,13 @@ test('entity, live-state, and plugin-index writes enter through the one coordina
 
 test('owned-index statements are census-authorized, atomic, fenced, and host-executed inside the coordinator', async () => {
   const db = new DatabaseSync(':memory:');
-  db.exec('CREATE TABLE SearchIndex (id TEXT PRIMARY KEY, value TEXT); CREATE TABLE Source (id TEXT PRIMARY KEY); CREATE VIRTUAL TABLE SearchFts USING fts5(value);');
+  db.exec('CREATE TABLE SearchIndex (id TEXT PRIMARY KEY, value TEXT); CREATE TABLE Source (id TEXT PRIMARY KEY); CREATE TABLE _Log (id TEXT PRIMARY KEY); CREATE TABLE OtherPluginIndex (id TEXT PRIMARY KEY); CREATE VIRTUAL TABLE SearchFts USING fts5(value);');
   const app = workbench({ db });
   let fence = 4;
   const census = new Map([
     ['table:searchindex', { kind: 'plugin', owner: 'notes', objectKind: 'table', name: 'SearchIndex' }],
+    ['table:searchaudit', { kind: 'plugin', owner: 'notes', objectKind: 'table', name: 'SearchAudit' }],
+    ['trigger:searchindex_audit', { kind: 'plugin', owner: 'notes', objectKind: 'trigger', name: 'SearchIndex_audit' }],
     // An FTS shadow artifact has the same plugin attribution as its declared virtual table.
     ['table:searchindex_data', { kind: 'sqlite-artifact', owner: 'notes', objectKind: 'shadow-table', name: 'SearchIndex_data' }],
     ['table:source', { kind: 'entity', owner: 'Source', objectKind: 'table', name: 'Source' }],
@@ -259,7 +261,7 @@ test('owned-index statements are census-authorized, atomic, fenced, and host-exe
     writeCoordinator: app.writeCoordinator,
     fenceOf: () => fence,
     maxStatements: 2,
-    maxRows: 2,
+    maxRows: 20,
   })('notes');
 
   // A plugin callback runs outside the coordinator; invoking its capability is
@@ -278,10 +280,40 @@ test('owned-index statements are census-authorized, atomic, fenced, and host-exe
   assert.equal(db.prepare("SELECT 1 FROM SearchIndex WHERE id = 'b'").get(), undefined, 'a failed batch rolls back every statement');
 
   await assert.rejects(
-    index.write({ expectedFence: 4, statements: [{ sql: "INSERT INTO SearchIndex VALUES ('c', 'three'), ('d', 'four'), ('e', 'five')" }] }),
+    index.write({ expectedFence: 4, statements: [{ sql: `INSERT INTO SearchIndex VALUES ${Array.from({ length: 21 }, (_, i) => `('c${i}', 'three')`).join(', ')}` }] }),
     /batch limit/,
   );
   assert.equal(db.prepare("SELECT 1 FROM SearchIndex WHERE id = 'c'").get(), undefined, 'a row-limit breach rolls back its statement');
+
+  db.exec(`CREATE TABLE SearchAudit (id TEXT PRIMARY KEY, value TEXT);
+    CREATE TRIGGER SearchIndex_audit AFTER INSERT ON SearchIndex BEGIN
+      INSERT INTO SearchAudit VALUES (new.id || '-1', new.value);
+      INSERT INTO SearchAudit VALUES (new.id || '-2', new.value);
+      INSERT INTO SearchAudit VALUES (new.id || '-3', new.value);
+      INSERT INTO SearchAudit VALUES (new.id || '-4', new.value);
+      INSERT INTO SearchAudit VALUES (new.id || '-5', new.value);
+      INSERT INTO SearchAudit VALUES (new.id || '-6', new.value);
+      INSERT INTO SearchAudit VALUES (new.id || '-7', new.value);
+      INSERT INTO SearchAudit VALUES (new.id || '-8', new.value);
+      INSERT INTO SearchAudit VALUES (new.id || '-9', new.value);
+      INSERT INTO SearchAudit VALUES (new.id || '-10', new.value);
+      INSERT INTO SearchAudit VALUES (new.id || '-11', new.value);
+      INSERT INTO SearchAudit VALUES (new.id || '-12', new.value);
+      INSERT INTO SearchAudit VALUES (new.id || '-13', new.value);
+      INSERT INTO SearchAudit VALUES (new.id || '-14', new.value);
+      INSERT INTO SearchAudit VALUES (new.id || '-15', new.value);
+      INSERT INTO SearchAudit VALUES (new.id || '-16', new.value);
+      INSERT INTO SearchAudit VALUES (new.id || '-17', new.value);
+      INSERT INTO SearchAudit VALUES (new.id || '-18', new.value);
+      INSERT INTO SearchAudit VALUES (new.id || '-19', new.value);
+      INSERT INTO SearchAudit VALUES (new.id || '-20', new.value);
+    END;`);
+  await assert.rejects(
+    index.write({ expectedFence: 4, statements: [{ sql: "INSERT INTO SearchIndex VALUES ('triggered', 'no')" }] }),
+    /batch limit/,
+  );
+  assert.equal(db.prepare("SELECT 1 FROM SearchIndex WHERE id = 'triggered'").get(), undefined, 'a trigger-driven row-limit breach rolls back the source row');
+  assert.equal(db.prepare("SELECT 1 FROM SearchAudit WHERE id = 'triggered-1'").get(), undefined, 'a trigger-driven row-limit breach rolls back every trigger row');
 
   fence = 5;
   const moved = await index.write({ expectedFence: 4, statements: [{ sql: 'INSERT INTO SearchIndex VALUES (?, ?)', params: ['moved', 'no'] }] });
@@ -291,14 +323,24 @@ test('owned-index statements are census-authorized, atomic, fenced, and host-exe
   assert.deepEqual(index.query({ sql: 'SELECT id, value FROM SearchIndex' }).map((row) => ({ ...row })), [{ id: 'a', value: 'one' }]);
   await index.write({ expectedFence: 5, statements: [{ sql: 'INSERT INTO SearchFts (value) VALUES (?)', params: ['needle'] }] });
   assert.equal(index.query({ sql: "SELECT value FROM SearchFts WHERE SearchFts MATCH 'needle'" })[0].value, 'needle', 'FTS shadow artifacts inherit census ownership');
+  const ftsAuxiliary = index.query({ sql: "SELECT bm25(SearchFts), highlight(SearchFts, 0, '<', '>'), snippet(SearchFts, 0, '[', ']', '...', 5) FROM SearchFts WHERE SearchFts MATCH 'needle'" });
+  assert.equal(ftsAuxiliary.length, 1, 'FTS5 auxiliary functions are explicitly allowed');
+  assert.ok(index.query({ sql: '/* owned comment */ SELECT id FROM SearchIndex' }).length > 0, 'comments do not prevent an owned statement from running');
+  await assert.rejects(async () => index.query({ sql: '/* comment */ SELECT id FROM SearchIndex UNION SELECT id FROM Source' }), /not authorized|authorization|prohibited/i, 'compound SQL cannot smuggle an unowned read');
+  assert.ok(index.query({ sql: 'SELECT * FROM SearchFts_data' }).length > 0, 'census-owned FTS shadow tables remain reachable');
   for (const sql of [
     'SELECT * FROM Source',
+    'SELECT * FROM _Log',
+    'SELECT * FROM sqlite_schema',
+    'SELECT * FROM OtherPluginIndex',
     "INSERT INTO Source VALUES ('s')",
     'PRAGMA user_version',
+    'PRAGMA data_version = 1',
     'BEGIN',
     'COMMIT',
     'ROLLBACK',
     'CREATE TABLE denied (id TEXT)',
+    'ALTER TABLE SearchIndex RENAME TO renamed',
     'DROP TABLE SearchIndex',
     "ATTACH DATABASE ':memory:' AS other",
     'DETACH DATABASE other',
@@ -309,6 +351,7 @@ test('owned-index statements are census-authorized, atomic, fenced, and host-exe
       : () => index.write({ expectedFence: 5, statements: [{ sql }] });
     await assert.rejects(async () => operation(), /not authorized|authorization|prohibited|owned-index/i, `${sql} must be refused by SQLite's authorizer`);
   }
+  await assert.rejects(async () => index.query({ sql: 'SELECT load_extension(?)', params: ['/tmp/denied'] }), /not authorized|authorization|prohibited/i, 'an unallowlisted function is refused');
   db.close();
 });
 
