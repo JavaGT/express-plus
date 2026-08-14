@@ -79,6 +79,10 @@ function observedSchemaObjects(db                                               
     }));
 }
 
+function schemaObjectKey(object                                                  )         {
+  return `${object.type}:${object.name.toLowerCase()}`;
+}
+
 function ownerDescription(census                                                      , name        , kind                                                  = 'table')         {
   const entry = census.get(`${kind}:${name.toLowerCase()}`)
     ?? (kind === 'table' ? census.get(`virtual-table:${name.toLowerCase()}`) : undefined);
@@ -382,6 +386,10 @@ export default function workbench({
     // One construction path: a bare-string app gets the same treatment as a
     // pre-built handle. (seam-review §2.1, priority #7.)
     if (db) db = wrapDriver(db);
+    // The final ownership census must distinguish objects the lifecycle just
+    // created (migrations and derived-resource DDL) from objects that were
+    // already present but never declared. The latter remain census failures.
+    let schemaBeforeLifecycle = db ? new Set(observedSchemaObjects(db).map(schemaObjectKey)) : null;
 
     if (schema !== undefined && (!schema || typeof schema.prepare !== 'function' || !Array.isArray(schema.tables))) {
       throw new TypeError('schema must be a SqliteSchemaResult');
@@ -653,6 +661,7 @@ export default function workbench({
                 // backup manager constructs without manual mutation.
                 (opened                        ).writeCoordinator = app.writeCoordinator;
                 const handle = wrapDriver(opened.handle);
+                if (!handle) throw new Error('database adapter opened without a handle');
                 runtime.db = handle;
                 app.db = handle;
                 app._dbAdapter = opened;
@@ -663,6 +672,7 @@ export default function workbench({
                 // every registered plugin to the freshly installed handle now,
                 // so a pre-start registration works after ready.
                 app.searchPlugins.bindSource(handle);
+                schemaBeforeLifecycle = new Set(observedSchemaObjects(handle).map(schemaObjectKey));
                 attachHandleResources(handle);
                 return opened;
               });
@@ -870,24 +880,36 @@ export default function workbench({
               const plugin               = app.searchPlugins.get(id) ;
               return { id: plugin.id, ownedObjects: plugin.ownedObjects.map(({ kind, name }) => ({ kind, name })) };
             }),
-            observed: observedSchemaObjects(app.db),
+            observed: observedSchemaObjects(app.db)
+              .filter((object) => schemaBeforeLifecycle?.has(schemaObjectKey(object)) ?? true),
           });
-          latestSchemaReport = createSchemaReport(app.db, settledOwnership.census);
+          // Migrations intentionally own their DDL imperatively, and derived
+          // resources may create SQLite artifacts lazily. They are lifecycle
+          // participants when introduced during this boot, but an object that
+          // predates the boot still has to be declared by the normal census.
+          const settledCensus = new Map(settledOwnership.census);
+          for (const object of observedSchemaObjects(app.db)) {
+            if (schemaBeforeLifecycle?.has(schemaObjectKey(object))) continue;
+            settledCensus.set(schemaObjectKey(object), {
+              kind: 'framework', owner: 'lifecycle', objectKind: object.type, name: object.name,
+            });
+          }
+          latestSchemaReport = createSchemaReport(app.db, settledCensus);
           if (settledOwnership.errors.length > 0) throw new Error(settledOwnership.errors[0].message);
-          const exactErrors = validateExactSchema(app.db, settledOwnership.census, schema ? [schema] : [], { validateCensus: true })
+          const exactErrors = validateExactSchema(app.db, settledCensus, schema ? [schema] : [], { validateCensus: true })
             // A schema-owned entity root may legitimately carry a trigger that
             // belongs to a registered derived-resource plugin (A2 ownership).
-            .filter((error) => settledOwnership.census.get(`trigger:${error.name.toLowerCase()}`)?.kind !== 'plugin');
+            .filter((error) => settledCensus.get(`trigger:${error.name.toLowerCase()}`)?.kind !== 'plugin');
            if (exactErrors.length > 0) throw new Error(exactErrors[0].message);
           const foreignKeyErrors = app.db.prepare('PRAGMA foreign_key_check').all();
           if (foreignKeyErrors.length > 0) {
             const violation = foreignKeyErrors[0]                           ;
-            throw new Error(`${ownerDescription(settledOwnership.census, String(violation.table))} has a foreign key violation`);
+              throw new Error(`${ownerDescription(settledCensus, String(violation.table))} has a foreign key violation`);
           }
           // The global PRAGMA output names pages rather than schema objects. Run
           // it once per census relation so a failure always has its declared
           // owner, without exposing table data in the diagnostic.
-          for (const entry of settledOwnership.census.values()) {
+          for (const entry of settledCensus.values()) {
             if (entry.objectKind !== 'table' && entry.objectKind !== 'virtual-table') continue;
             const findings = app.db.prepare(`PRAGMA integrity_check(${quotedSqlLiteral(entry.name)})`).all()
               .flatMap((row                         ) => Object.values(row).filter((value)                  => typeof value === 'string' && value !== 'ok'));

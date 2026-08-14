@@ -441,6 +441,15 @@ test('app migrations run as the stop-the-world boot lane — outside the coordin
   db.close();
 });
 
+test('the lifecycle census still rejects a table that predates boot', async () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE Intruder (id INTEGER PRIMARY KEY)');
+  const app = workbench({ db });
+
+  await assert.rejects(() => app.prepareSchema(), /observed table "Intruder" is not declared/);
+  db.close();
+});
+
 test('the workbench package migration lane runs stop-the-world — outside the coordinator', async () => {
   const db = new DatabaseSync(':memory:');
   const app = workbench({ db });
