@@ -674,3 +674,101 @@ test('restore fails closed when the origin manifest has no matching binned-gener
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('a complete manifest with a missing or non-array blobGenerations census makes bin() report the backup failed, never throw (review #85 finding 5)', { timeout: 120000 }, async () => {
+  const root = tempRoot();
+  const dir = join(root, 'owned');
+  try {
+    const opened = openSqliteAdapter({ directory: dir, name: 'app' });
+    try {
+      opened.handle.exec('CREATE TABLE note (id TEXT PRIMARY KEY)');
+      const result1 = await managerFor(opened, { blobs: blobSeam(['gen-a']) }).backup();
+      const result2 = await managerFor(opened, { blobs: blobSeam(['gen-a']) }).backup();
+      assert.equal(result1.ok && result2.ok, true);
+      const manifestPath = join(result1.directory, 'manifest.json');
+      const validManifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+
+      const recycle = createRecycleManager({ root: dir, blobs: resolveSeam });
+
+      // A complete manifest with the census MISSING is malformed: bin() must
+      // report that backup failed (it may still hold the deleted bytes) and
+      // never throw — the healthy backup still bins, so other backups proceed.
+      const withoutCensus = { ...validManifest };
+      delete withoutCensus.blobGenerations;
+      writeFileSync(manifestPath, `${JSON.stringify(withoutCensus, null, 2)}\n`);
+      const missing = await recycle.bin({ generations: ['gen-a'] });
+      assert.equal(missing.ok, false, 'bin() does not claim success while a backup holds an unverifiable manifest');
+      assert.deepEqual(missing.binned, [{ backupId: result2.backupId, generations: ['gen-a'] }], 'the healthy backup still bins');
+      assert.equal(missing.failed.length, 1);
+      assert.equal(missing.failed[0].backupId, result1.backupId);
+      assert.deepEqual(missing.failed[0].generations, ['gen-a']);
+      assert.match(missing.failed[0].error, /blobGenerations/);
+      assert.equal(existsSync(join(result1.directory, 'blobs', 'gen-a.blob')), true, 'the malformed backup was untouched');
+
+      // A non-array census is the same fail-closed answer.
+      writeFileSync(manifestPath, `${JSON.stringify({ ...validManifest, blobGenerations: 'gen-a' }, null, 2)}\n`);
+      const notArray = await recycle.bin({ generations: ['gen-a'] });
+      assert.equal(notArray.ok, false);
+      assert.equal(notArray.failed.length, 1);
+      assert.equal(notArray.failed[0].backupId, result1.backupId);
+      assert.match(notArray.failed[0].error, /blobGenerations/);
+      assert.equal(existsSync(join(result1.directory, 'blobs', 'gen-a.blob')), true, 'the malformed backup was untouched again');
+    } finally {
+      opened.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a malformed binnedGenerations re-mark makes restore() and bin() fail closed, never throw (review #85 finding 5)', { timeout: 120000 }, async () => {
+  const root = tempRoot();
+  const dir = join(root, 'owned');
+  try {
+    const opened = openSqliteAdapter({ directory: dir, name: 'app' });
+    try {
+      opened.handle.exec('CREATE TABLE note (id TEXT PRIMARY KEY)');
+      const result = await managerFor(opened, { blobs: blobSeam(['gen-a']) }).backup();
+      assert.equal(result.ok, true);
+      const backupDir = result.directory;
+      const recycle = createRecycleManager({ root: dir, blobs: resolveSeam });
+      await recycle.bin({ generations: ['gen-a'] });
+      const manifestPath = join(backupDir, 'manifest.json');
+      const validManifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+      const entryDir = join(dir, 'recycle', result.backupId, 'gen-a');
+
+      // A binnedGenerations ENTRY with the wrong field types is malformed:
+      // restore() reads the re-mark to verify it, so it must fail closed rather
+      // than throw a TypeError while scanning the records.
+      writeFileSync(
+        manifestPath,
+        `${JSON.stringify({ ...validManifest, binnedGenerations: [{ generation: 'gen-a', name: 'gen-a.blob', size: 'wrong-type', binnedAt: 'not-a-date' }] }, null, 2)}\n`,
+      );
+      const restored = await recycle.restore({ backupId: result.backupId, generation: 'gen-a' });
+      assert.equal(restored.ok, false);
+      assert.match(restored.error, /malformed|binnedGenerations/);
+      assert.equal(existsSync(join(backupDir, 'blobs', 'gen-a.blob')), false, 'the bytes were not moved back into the malformed backup');
+      assert.equal(existsSync(join(entryDir, 'gen-a.blob')), true, 'the bin entry stays');
+      assert.deepEqual(manifestOf(backupDir).binnedGenerations[0].size, 'wrong-type', 'the malformed manifest was not rewritten');
+
+      // A binnedGenerations VALUE that is not an array is the same fail-closed
+      // answer for restore() — and bin() reports the backup failed too, never a
+      // throw, never ok:true for that backup.
+      writeFileSync(manifestPath, `${JSON.stringify({ ...validManifest, binnedGenerations: { gen: 'not-an-array' } }, null, 2)}\n`);
+      const again = await recycle.restore({ backupId: result.backupId, generation: 'gen-a' });
+      assert.equal(again.ok, false);
+      assert.match(again.error, /malformed|binnedGenerations/);
+      const binResult = await recycle.bin({ generations: ['gen-a'] });
+      assert.equal(binResult.ok, false);
+      assert.equal(binResult.binned.length, 0, 'nothing was reported binned for the malformed backup');
+      assert.equal(binResult.failed.length, 1);
+      assert.equal(binResult.failed[0].backupId, result.backupId);
+      assert.match(binResult.failed[0].error, /binnedGenerations/);
+      assert.equal(existsSync(join(entryDir, 'gen-a.blob')), true, 'the bin entry still holds the bytes');
+    } finally {
+      opened.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

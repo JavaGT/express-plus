@@ -292,6 +292,27 @@ export function createRecycleManager(options: RecycleManagerOptions): RecycleMan
         reason: `the backup manifest declares status '${typeof manifest.status === 'string' ? manifest.status : 'unknown'}' — not a retained backup`,
       };
     }
+    // SHAPE VALIDATION (review #85 finding 5): a manifest that parses can still
+    // be structurally malformed — the required blobGenerations census missing or
+    // not an array of strings, or a binnedGenerations re-mark that is not an
+    // array of well-formed records. bin()/restore()/purge() read both fields, so
+    // a malformed value gets the SAME fail-closed answer as an unreadable
+    // manifest: the backup is reported a per-backup failure, never ok:true for
+    // that backup, and never a thrown bin()/restore().
+    if (!isStringArray(manifest.blobGenerations)) {
+      return {
+        ok: false,
+        kind: 'unreadable',
+        reason: 'the backup manifest is malformed: blobGenerations must be an array of generation ids — its contents cannot be verified',
+      };
+    }
+    if (manifest.binnedGenerations !== undefined && !isBinnedGenerationArray(manifest.binnedGenerations)) {
+      return {
+        ok: false,
+        kind: 'unreadable',
+        reason: 'the backup manifest is malformed: binnedGenerations must be an array of binned-generation records — its contents cannot be verified',
+      };
+    }
     return { ok: true, manifest };
   }
 
@@ -769,6 +790,44 @@ function validateRetentionDays(retentionDays: number | undefined): number {
     throw new TypeError('recycle retentionDays must be a positive integer (the recovery period before the expiry sweep destroys binned content)');
   }
   return days;
+}
+
+// A complete manifest records the blob-generation census as an array of
+// generation-id strings (src/backup.ts BackupManifest); anything else is a
+// malformed manifest and must fail closed wherever it is read.
+function isStringArray(value: unknown): boolean {
+  return Array.isArray(value) && value.every((entry) => typeof entry === 'string');
+}
+
+// The binned-generations re-mark is written only by this module: an array of
+// records carrying a generation id, a bare blob file name, the byte size, and
+// canonical UTC timestamps (purgedAt appears once the bytes were destroyed).
+// A record that does not match this shape is malformed — fail closed instead of
+// letting bin/restore/purge guess at its fields or throw while scanning it.
+function isBinnedGenerationArray(value: unknown): boolean {
+  return Array.isArray(value) && value.every(isBinnedGenerationRecord);
+}
+
+function isBinnedGenerationRecord(record: unknown): boolean {
+  if (typeof record !== 'object' || record === null || Array.isArray(record)) return false;
+  const r = record as Readonly<Record<string, unknown>>;
+  return (
+    typeof r.generation === 'string' &&
+    r.generation !== '' &&
+    typeof r.name === 'string' &&
+    r.name !== '' &&
+    r.name !== '.' &&
+    r.name !== '..' &&
+    !r.name.includes('/') &&
+    !r.name.includes('\\') &&
+    !path.isAbsolute(r.name) &&
+    typeof r.size === 'number' &&
+    Number.isInteger(r.size) &&
+    r.size >= 0 &&
+    typeof r.binnedAt === 'string' &&
+    !Number.isNaN(Date.parse(r.binnedAt)) &&
+    (r.purgedAt === undefined || (typeof r.purgedAt === 'string' && !Number.isNaN(Date.parse(r.purgedAt))))
+  );
 }
 
 // Errors can carry content-bearing payloads; a bounded, control-character-
