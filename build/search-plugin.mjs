@@ -58,182 +58,182 @@ export const SUPPORTED_SEARCH_PLUGIN_CONTRACT_VERSION = 1;
 // the source up to the current fence; `stale` = a source change invalidated the
 // index but reconciliation has not consumed it; `failed` = the last
 // materialization attempt threw (retry info retained).
-                                                                          
+
 
 // The kinds of DB object a plugin may declare ownership of. The S2 ownership
 // census ingests these (table/index/trigger/virtual-table).
-                                                                                    
+
 
 // The plugin's own index statistics, folded into health after a successful
 // materialization (e.g. { documents: 42, tokens: 1337 }).
-                                                                  
+
 
 // A DB object the plugin owns: the object kind, its name, and the DDL
 // statements that create it. `ddl` entries are census-ingestible in the
 // framework's { source, sql } DdlEntry shape (schema-table-census.ts), and
 // `metadata` rides along as census metadata.
-                                    
-                                       
-                        
-                                  
-                                                        
- 
+
+
+
+
+
+
 
 // A source resource the plugin indexes. `entity` names the source table; the
 // optional `fields` supply the field descriptors a declared `scope` may
 // reference; an optional `scope` predicate must compile to constrained SQL at
 // registration (S5/A2 mirror) or the declaration is refused.
-                                       
-                          
-                                                      
-                                                                      
- 
 
-                                                                 
+
+
+
+
+
+
 
 // A source change offered to a plugin. `stalenessKey(change)` maps it to the
 // index partition it invalidates, or null when the change does not affect the
 // plugin's index.
-                               
-                          
-                         
-                                  
-                                                    
- 
 
-                                
-                          
-                           
-                               
-                          
-                           
-                                                                              
-                                                                            
-                                                                             
-                                                                             
-                                                                          
-                                
-                                                                                
-                                                                             
-                                                                             
-                                                                        
-                                
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                    
+
+
+
+
+
+
+
+
+
 
 // The materialization summary a reconcile/rebuild reports; `counts` becomes the
 // plugin's disclosed index statistics.
-                                          
-                                       
- 
+
+
+
 
 // The plugin-side search return: the hits. The registry stamps the
 // authoritative generation/fence/state onto the disclosed SearchSearchOutcome —
 // a plugin cannot spoof its own health.
-                                           
-                                    
- 
+
+
+
 
 // The minimal read handle the scoped source reader needs. Intentionally NOT the
 // raw DbHandle type: the reader is built over a structurally read-only subset,
 // so a plugin can never reach exec/run/transaction through it.
-                                     
-                         
-                                                         
-                                                                   
-    
- 
+
+
+
+
+
+
 
 // Retained retry info for the last failure (spec 4: an index failure marks the
 // plugin failed WITH retained retry info).
-                                  
-                           
-                      
-                           
-                              
- 
+
+
+
+
+
+
 
 // The disclosed health/generation shape (spec 5). `generation` counts
 // materialization cycles; `fence` counts source invalidations; a consumer
 // holding results stamped with an older fence knows they are stale.
-                                     
-                      
-                           
-                              
-                         
-                                    
-                                      
-                                             
- 
+
+
+
+
+
+
+
+
+
 
 // The context every plugin lifecycle method receives. It carries ONLY the
 // plugin's identity and its scoped source reader — never a raw handle.
-                                      
-                      
-                           
-                                      
-                              
-                         
- 
+
+
+
+
+
+
+
 
 // The scoped source reader handed to a plugin. Reachable sources are exactly
 // the plugin's declared sourceInterests; the reader exposes no write verb and
 // no raw handle (`writeCapable` is the literal `false` — the red-line proof).
-                                     
-                          
-                               
-                                                      
-                               
-                                                                                                                                    
-                                                                       
- 
 
-                                         
-                       
-                              
-                         
-                                    
-                                      
-                                             
-                                                  
- 
 
-                                      
-                       
-                              
-                         
-                                    
-                                      
-                                                                                                                                                        
-                                             
-                                                                              
-                                                                             
-                                                                              
-                                                     
-                              
-                             
- 
 
-                                     
-                                
-                                       
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // Census-ingestible DDL entry — the same { source, sql } shape the framework's
 // table census consumes (schema-table-census.ts / framework-table-names.ts).
-                                          
-                          
-                       
- 
 
-                                                                     
-                         
-                           
- 
 
-                                     
-                                                       
-                                                        
- 
+
+
+
+
+
+
+
+
+
+
+
+
 
 // The plugin declaration (spec 1). `contractVersion` is the S4/A1 contract
 // version the plugin targets; `version` is the plugin's own release version.
@@ -243,54 +243,63 @@ export const SUPPORTED_SEARCH_PLUGIN_CONTRACT_VERSION = 1;
 // NO plugin-supplied generation hook: generation/fence are registry-owned
 // materialization/invalidation counts (spec 5). `stalenessKey` decides which
 // changes invalidate the index (spec: stalenessKey(change) format).
-                               
-                                   
-                      
-                           
-                                                      
-                                                            
-                                                    
-                                                          
-                                                           
-                                                                                                                                    
-                                                                                                
-                                                                                                                         
-                                             
- 
 
-                                              
-                     
-                                                                             
-                                                                               
-                                                                           
-                                                                
-                           
- 
 
-                                       
-                        
-                                       
-                           
-                                            
-                           
-                               
-                                          
-                                                                          
-                                                      
-                                               
-                                                                     
-                                                       
-                                                        
-                                                                                           
-                                                       
-                                                                           
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // A bare SQL identifier: letters, digits, underscores, no leading digit. Owned
 // object names and source-interest entities are validated against this, so the
 // scoped reader's `SELECT * FROM <name>` interpolation is safe (fail closed —
 // a plugin needing an exotic identifier is refused rather than interpolated).
 const BARE_SQL_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+// The S4/A2 staleness ledger's reserved table name (search-staleness.ts uses it
+// as the default ledger table). A plugin source interest or owned object that
+// collides with the ledger would read or clobber framework operational state as
+// if it were plugin-owned domain data, so the registry REFUSES declarations
+// that use it (namespace guarantee, review #109 finding 4). A bridge built with
+// a custom tableName is the caller's own naming choice; the guarantee covers
+// the framework default.
+export const SEARCH_STALENESS_LEDGER_TABLE = '_SearchStaleness';
 
 const OWNED_OBJECT_KINDS                                     = new Set([
   'table',
@@ -336,10 +345,10 @@ function quoteIdentifier(name        )         {
 // placeholders are rewritten to `?` in key order and the values collected in
 // the same order (positionalize). The fragment references the base table under
 // the compiler's canonical `t0` alias, so reads alias their table `AS t0`.
-                                
-                       
-                                    
- 
+
+
+
+
 
 function positionalize(sql        , params                         )                {
   let out = sql;
@@ -461,15 +470,15 @@ export function createSearchSourceReader(
 // Per-plugin health ledger: the registry's authoritative state plus retry
 // accounting. A successful materialization folds result counts; a failure bumps
 // fence (the index no longer matches the source) and records retry info.
-                        
-                       
-                     
-                
-                           
-                             
-                                    
-                   
- 
+
+
+
+
+
+
+
+
+
 
 function retryableOf(err         )          {
   return !(err instanceof NonCompilableError);
@@ -576,6 +585,11 @@ export function createSearchPluginRegistry(options                              
         );
       }
       assertIdentifierName(object.name, `owned object name`, plugin.id);
+      if (object.name === SEARCH_STALENESS_LEDGER_TABLE) {
+        throw new Error(
+          `search plugin '${plugin.id}' owns object '${object.name}' which collides with the reserved staleness ledger table (${SEARCH_STALENESS_LEDGER_TABLE})`,
+        );
+      }
       if (pluginOwnedNames.has(object.name)) {
         throw new Error(
           `search plugin '${plugin.id}' declares owned object '${object.name}' more than once`,
@@ -603,6 +617,11 @@ export function createSearchPluginRegistry(options                              
         throw new Error(`search plugin '${plugin.id}' sourceInterests entries must be objects`);
       }
       assertIdentifierName(interest.entity, 'source interest entity', plugin.id);
+      if (interest.entity === SEARCH_STALENESS_LEDGER_TABLE) {
+        throw new Error(
+          `search plugin '${plugin.id}' declares a source interest in '${interest.entity}' which collides with the reserved staleness ledger table (${SEARCH_STALENESS_LEDGER_TABLE})`,
+        );
+      }
       if (interestEntities.has(interest.entity)) {
         throw new Error(
           `search plugin '${plugin.id}' declares source interest '${interest.entity}' more than once`,

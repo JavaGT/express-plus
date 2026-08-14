@@ -37,9 +37,9 @@ import {
   openMemoryAdapter,
   openSqliteAdapter,
   SQLITE_DATA_FILENAME,
-                            
+
 } from './sqlite-adapter.mjs';
-                                                                                              
+
 import { executeDDL, executeFrameworkDDL, generateSideTableDDL, generatedIndexNames } from './ddl.mjs';
 import { runMigrations } from './migrations.mjs';
 import { runWorkbenchMigrations } from './workbench-migrations.mjs';
@@ -116,18 +116,18 @@ function isDbAdapterConfig(value         )                           {
 // registry), so a future non-SQLite backend is expressible without framework
 // changes. It cannot be opened synchronously, so workbench defers the open to
 // the first boot boundary (see installPendingDb below).
-                          
-                                  
-                                      
-                                     
-                                                                          
-                                                                         
-                                                                         
-                                                                         
-                                                                          
-                                       
-                               
- 
+
+
+
+
+                                                            
+
+
+
+
+
+
+
 
 function isDbAdapter(value         )                          {
   if (value == null || typeof value !== 'object') return false;
@@ -246,7 +246,7 @@ export default function workbench({
   const explicitBlobRoot = blobOpts
     && typeof blobOpts.writePending !== 'function'
     && blobOpts?.root
-    ? blobOpts.root          
+    ? blobOpts.root
     : null;
   let blobRoot                = explicitBlobRoot;
   let blobStagingRoot                = null;
@@ -765,7 +765,21 @@ export default function workbench({
     // Live delivery attaches before startup, when the kernel has not yet captured
     // its post-commit consumers. The app owns registry and authorization wiring;
     // callers provide only transport policy and declared aggregate snapshots.
-    app.attachLiveDelivery = (options     ) => attachApplicationLiveDelivery(app, options);
+    app.attachLiveDelivery = (options     ) => {
+      const result = attachApplicationLiveDelivery(app, options);
+      // S5/A5 revocation → S4/A2 bridge wiring (review #109 finding 2): every
+      // revocation the live-delivery core publishes (a committed deletion, a
+      // delivery-time reauthorization denial, or an app mutation's explicit
+      // revoke) is fenced + recorded as a high-priority rebuild directive in
+      // the staleness ledger. The listener is registered after the core exists
+      // (attachApplicationLiveDelivery builds it), so the live reader and the
+      // search index are invalidated by the SAME published revocation.
+      const core = (app._applicationLiveDelivery       )?.core;
+      if (core && typeof core.onRevocation === 'function') {
+        core.onRevocation(app.searchStaleness.onRevocation);
+      }
+      return result;
+    };
 
     app.listen = (portOrOptionsOrCallback     , optionsOrCallback     ) => {
       // One listen path, Express-compatible overload:

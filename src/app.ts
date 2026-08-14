@@ -765,7 +765,21 @@ export default function workbench({
     // Live delivery attaches before startup, when the kernel has not yet captured
     // its post-commit consumers. The app owns registry and authorization wiring;
     // callers provide only transport policy and declared aggregate snapshots.
-    app.attachLiveDelivery = (options: any) => attachApplicationLiveDelivery(app, options);
+    app.attachLiveDelivery = (options: any) => {
+      const result = attachApplicationLiveDelivery(app, options);
+      // S5/A5 revocation → S4/A2 bridge wiring (review #109 finding 2): every
+      // revocation the live-delivery core publishes (a committed deletion, a
+      // delivery-time reauthorization denial, or an app mutation's explicit
+      // revoke) is fenced + recorded as a high-priority rebuild directive in
+      // the staleness ledger. The listener is registered after the core exists
+      // (attachApplicationLiveDelivery builds it), so the live reader and the
+      // search index are invalidated by the SAME published revocation.
+      const core = (app._applicationLiveDelivery as any)?.core;
+      if (core && typeof core.onRevocation === 'function') {
+        core.onRevocation(app.searchStaleness.onRevocation);
+      }
+      return result;
+    };
 
     app.listen = (portOrOptionsOrCallback: any, optionsOrCallback: any) => {
       // One listen path, Express-compatible overload:

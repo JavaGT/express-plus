@@ -106,6 +106,10 @@ export function attachApplicationLiveDelivery(app: ApplicationLiveApp, {
     handler,
     path,
     wake: owned.delivery.wake,
+    // The committed-event core behind the public delivery protocol. Exposed so
+    // the app can register S5/A5 onRevocation listeners (e.g. the S4/A2 search
+    // staleness bridge) against the SAME core the SSE/WebSocket skins present.
+    core: owned.core,
     close: owned.close,
     mountWebSocket: (httpServer: Parameters<typeof createLiveDeliveryWebSocket>[0]) => {
       if (!wsTransport) {

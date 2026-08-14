@@ -2,45 +2,45 @@
 // export: the app supplies its own entity registry and authorization engine,
 // while callers provide only transport policy and declared aggregate snapshots.
 
-                                                 
+
 
 import { createOwnedLiveDelivery } from './live-delivery-public.mjs';
 import { createLiveDeliveryHttpHandler } from './live-delivery-http.mjs';
 import { createLiveDeliveryWebSocket } from './live-delivery-websocket.mjs';
 import { mayVerb } from './row-grant.mjs';
-                                                                       
+
 import { validatePrincipalSnapshotDeclarations } from './principal-snapshot-delivery.mjs';
 import { collapseForAdmission,                } from './principal.mjs';
-                                             
-                                                                       
 
-                                                 
-                                                                            
-                
-                            
-                                 
-                                          
-                            
-                                       
- 
 
-                              
-                          
-                        
-                               
-                                     
-                                  
-                           
-                   
-                                          
-                                                     
-                    
-                              
-                                                     
-                                                                                             
-    
-                                                                                                     
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 export function attachApplicationLiveDelivery(app                    , {
   principalOf,
@@ -106,6 +106,10 @@ export function attachApplicationLiveDelivery(app                    , {
     handler,
     path,
     wake: owned.delivery.wake,
+    // The committed-event core behind the public delivery protocol. Exposed so
+    // the app can register S5/A5 onRevocation listeners (e.g. the S4/A2 search
+    // staleness bridge) against the SAME core the SSE/WebSocket skins present.
+    core: owned.core,
     close: owned.close,
     mountWebSocket: (httpServer                                                   ) => {
       if (!wsTransport) {

@@ -15,12 +15,13 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 import { createSearchStalenessBridge, SEARCH_STALENESS_PRIORITY_HIGH, SEARCH_STALENESS_PRIORITY_ORDINARY } from '../build/search-staleness.mjs';
-import { createSearchPluginRegistry, SUPPORTED_SEARCH_PLUGIN_CONTRACT_VERSION } from '../build/search-plugin.mjs';
+import { createSearchPluginRegistry, SUPPORTED_SEARCH_PLUGIN_CONTRACT_VERSION, SEARCH_STALENESS_LEDGER_TABLE } from '../build/search-plugin.mjs';
 import { createServer, durableMutationVariant } from '../build/pipeline.mjs';
 import { executeFrameworkDDL } from '../build/ddl.mjs';
 import { createSqliteAdapter } from '../build/sqlite-adapter.mjs';
+import { createWriteQueue } from '../build/write-queue.mjs';
 import workbench from '../build/app.mjs';
-import { principal } from '../build/index.mjs';
+import { entity, grant, principal, read, subscribe, text, write } from '../build/index.mjs';
 
 // ---- helpers ---------------------------------------------------------------
 
@@ -389,6 +390,121 @@ describe('staleness bridge — revocation and erasure priority', () => {
     assert.deepEqual(pending[0].affected.map((a) => a.pluginId), [plugin.plugin.id]);
     db.close();
   });
+
+  test('erasure then ordinary update for the same key drains as a rebuild, never a priority-1 reconcile (review #109 finding 1)', async () => {
+    const db = freshNoteDb();
+    const { plugin, bridge } = setupBridge(db);
+    // High-priority erasure first, then an ORDINARY update for the SAME key.
+    // The coalesced record must keep the highest-priority semantics — a
+    // priority-1 'source-change' would reconcile instead of rebuild,
+    // re-disclosing protected content.
+    bridge.notifySourceChange({
+      entity: 'Note', rowId: 'n1', kind: 'removed', committedAt: '2026-08-15T00:00:00.000Z', erasure: true,
+    });
+    bridge.notifySourceChange({
+      entity: 'Note', rowId: 'n1', kind: 'updated', data: { title: 'ordinary-later' }, committedAt: '2026-08-15T00:00:01.000Z',
+    });
+
+    const pending = bridge.pending();
+    assert.equal(pending.length, 1, 'one source key → one coalesced record');
+    assert.equal(pending[0].priority, SEARCH_STALENESS_PRIORITY_HIGH, 'the high-priority channel survives the ordinary update');
+    assert.equal(pending[0].kind, 'erasure', 'the record keeps the high-priority erasure, not the ordinary update');
+
+    const summary = await bridge.drain();
+    assert.equal(summary.rebuilt, 1, 'drain rebuilds');
+    assert.equal(summary.reconciled, 0, 'never reconciles a high-priority record');
+    assert.ok(plugin.calls.some((call) => call.op === 'rebuild'));
+    assert.ok(!plugin.calls.some((call) => call.op === 'reconcile'));
+    db.close();
+  });
+
+  test('ordinary then erasure coalesces to a rebuild carrying the erasure semantics (review #109 finding 1)', async () => {
+    const db = freshNoteDb();
+    const { plugin, bridge } = setupBridge(db);
+    // Ordinary update first, then a high-priority erasure for the SAME key:
+    // the incoming erasure REPLACES the ordinary record outright.
+    bridge.notifySourceChange({
+      entity: 'Note', rowId: 'n1', kind: 'updated', data: { title: 'ordinary-first' }, committedAt: '2026-08-15T00:00:00.000Z',
+    });
+    bridge.notifySourceChange({
+      entity: 'Note', rowId: 'n1', kind: 'removed', committedAt: '2026-08-15T00:00:01.000Z', erasure: true,
+    });
+
+    const pending = bridge.pending();
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].kind, 'erasure', 'the erasure payload/semantics win the coalescing');
+    assert.equal(pending[0].priority, SEARCH_STALENESS_PRIORITY_HIGH);
+
+    const summary = await bridge.drain();
+    assert.equal(summary.rebuilt, 1, 'the erasure record rebuilds');
+    assert.equal(summary.reconciled, 0);
+    assert.ok(plugin.calls.some((call) => call.op === 'rebuild'));
+    assert.ok(!plugin.calls.some((call) => call.op === 'reconcile'));
+    db.close();
+  });
+
+  test('a revocation then an ordinary update for the same key keeps the high-priority rebuild (review #109 finding 1)', async () => {
+    const db = freshNoteDb();
+    const { plugin, bridge } = setupBridge(db);
+    bridge.onRevocation(principal({ type: 'user', id: 'u1' }), { category: 'entity', key: 'Note:n1' });
+    bridge.notifySourceChange({
+      entity: 'Note', rowId: 'n1', kind: 'updated', data: { title: 'post-revocation' }, committedAt: '2026-08-15T00:00:00.000Z',
+    });
+
+    const pending = bridge.pending();
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].kind, 'revocation', 'the coalesced record stays a revocation');
+    assert.equal(pending[0].priority, SEARCH_STALENESS_PRIORITY_HIGH);
+
+    const summary = await bridge.drain();
+    assert.equal(summary.rebuilt, 1);
+    assert.equal(summary.reconciled, 0);
+    assert.ok(plugin.calls.some((call) => call.op === 'rebuild'));
+    assert.ok(!plugin.calls.some((call) => call.op === 'reconcile'));
+    db.close();
+  });
+
+  test('coalescing unions affected sets across priorities so no affected plugin is dropped (review #109 finding 1)', async () => {
+    const db = freshNoteDb();
+    const registry = createSearchPluginRegistry();
+    const pluginA = makeIndexedPlugin({ id: 'plugin-a' });
+    const pluginB = makeIndexedPlugin({ id: 'plugin-b' });
+    // plugin-b refuses ordinary updates, so only a removal/revocation affects it.
+    pluginB.plugin.stalenessKey = (change) => (
+      change.entity === 'Note' && change.kind === 'removed' ? `${change.entity}:${change.rowId}` : null
+    );
+    pluginB.plugin.ownedObjects = [
+      { kind: 'virtual-table', name: 'plugin_b_fts', ddl: ['CREATE VIRTUAL TABLE IF NOT EXISTS plugin_b_fts USING fts5(title);'] },
+    ];
+    registry.register(pluginA.plugin);
+    registry.register(pluginB.plugin);
+    registry.bindSource(db);
+    const bridge = createSearchStalenessBridge({ registry, now: () => 't' });
+    bridge.engage(db);
+
+    // Ordinary update affects only plugin-a...
+    bridge.notifySourceChange({ entity: 'Note', rowId: 'n1', kind: 'updated', committedAt: 't0' });
+    // ...then a revocation affects BOTH. The merged record keeps the revocation
+    // semantics AND the union of affected plugins, so plugin-a is not dropped.
+    bridge.onRevocation(principal({ type: 'user', id: 'u1' }), { category: 'entity', key: 'Note:n1' });
+
+    const pending = bridge.pending();
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].kind, 'revocation');
+    assert.equal(pending[0].priority, SEARCH_STALENESS_PRIORITY_HIGH);
+    assert.deepEqual(
+      [...pending[0].affected].map((entry) => entry.pluginId).sort(),
+      ['plugin-a', 'plugin-b'],
+      'the ordinary update\'s affected plugin survives the coalescing',
+    );
+
+    const summary = await bridge.drain();
+    assert.equal(summary.rebuilt, 1, 'one record drained as a rebuild');
+    assert.equal(summary.retained, 0);
+    assert.ok(pluginA.calls.some((call) => call.op === 'rebuild'));
+    assert.ok(pluginB.calls.some((call) => call.op === 'rebuild'), 'the ordinary update\'s affected plugin is rebuilt too');
+    db.close();
+  });
 });
 
 // ---- app wiring --------------------------------------------------------------
@@ -459,5 +575,166 @@ describe('staleness bridge — plugin-declared trigger census', () => {
     assert.equal(triggers[0].ddl.length, 1);
     assert.match(triggers[0].ddl[0], /CREATE TRIGGER/);
     db.close();
+  });
+});
+
+// ---- coordinated ledger deletion (review #109 finding 3) ----------------------
+
+describe('staleness bridge — coordinated ledger deletion', () => {
+  test('drain deletes the ledger record inside the coordinated write turn', async () => {
+    const db = freshNoteDb();
+    const queue = createWriteQueue();
+    const ownedAtDelete = [];
+    // A prepare probe that records writeQueue.owned at the moment the ledger
+    // DELETE executes. If drain() deleted the record OUTSIDE the coordinated
+    // turn, the probe would record false.
+    const probe = {
+      prepare(sql) {
+        const stmt = db.prepare(sql);
+        if (/^DELETE FROM _SearchStaleness/.test(sql.trim())) {
+          return {
+            run: (...args) => {
+              ownedAtDelete.push(queue.owned);
+              return stmt.run(...args);
+            },
+          };
+        }
+        return stmt;
+      },
+    };
+    const registry = createSearchPluginRegistry();
+    registry.register(makeIndexedPlugin().plugin);
+    registry.bindSource(db);
+    const bridge = createSearchStalenessBridge({ registry, now: () => 't' });
+    bridge.engage(probe);
+    bridge.bindWriteQueue(queue);
+
+    bridge.notifySourceChange({ entity: 'Note', rowId: 'n1', kind: 'created', committedAt: '2026-08-15T00:00:00.000Z' });
+    assert.equal(bridge.pending().length, 1);
+
+    const summary = await bridge.drain();
+    assert.equal(summary.processed, 1);
+    assert.deepEqual(ownedAtDelete, [true], 'the ledger DELETE runs inside the coordinated turn');
+    assert.equal(bridge.pending().length, 0, 'the processed record was deleted');
+    await queue.close();
+    db.close();
+  });
+});
+
+// ---- reserved-name guard (review #109 finding 4) -------------------------------
+
+describe('staleness bridge — reserved-name guard', () => {
+  test('registry refuses a plugin source interest in the reserved staleness ledger name', () => {
+    const registry = createSearchPluginRegistry();
+    const { plugin } = makeIndexedPlugin();
+    plugin.sourceInterests = [{ entity: SEARCH_STALENESS_LEDGER_TABLE }];
+    assert.throws(
+      () => registry.register(plugin),
+      /reserved staleness ledger table/,
+    );
+  });
+
+  test('registry refuses an owned object named the reserved staleness ledger name', () => {
+    const registry = createSearchPluginRegistry();
+    const { plugin } = makeIndexedPlugin();
+    plugin.ownedObjects = [
+      { kind: 'table', name: SEARCH_STALENESS_LEDGER_TABLE, ddl: [`CREATE TABLE ${SEARCH_STALENESS_LEDGER_TABLE} (id TEXT);`] },
+    ];
+    assert.throws(
+      () => registry.register(plugin),
+      /reserved staleness ledger table/,
+    );
+  });
+
+  test('a plugin declaring the reserved name is never registered', () => {
+    const registry = createSearchPluginRegistry();
+    const { plugin } = makeIndexedPlugin();
+    plugin.sourceInterests = [{ entity: SEARCH_STALENESS_LEDGER_TABLE }];
+    assert.throws(() => registry.register(plugin), /reserved staleness ledger table/);
+    assert.equal(registry.size, 0, 'the refused declaration left no plugin behind');
+  });
+
+  test('the bridge refuses a source change whose entity is the ledger table itself', () => {
+    const db = freshNoteDb();
+    const { bridge } = setupBridge(db);
+    assert.throws(
+      () => bridge.notifySourceChange({
+        entity: SEARCH_STALENESS_LEDGER_TABLE, rowId: 'x', kind: 'created', committedAt: '2026-08-15T00:00:00.000Z',
+      }),
+      /collides with the staleness ledger table name/,
+    );
+    assert.equal(bridge.pending().length, 0);
+    db.close();
+  });
+});
+
+// ---- production wiring (review #109 finding 2) ---------------------------------
+
+describe('staleness bridge — production wiring (app seams)', () => {
+  test('a committed entity mutation records into the ledger through the app post-commit consumer', async (t) => {
+    const db = new DatabaseSync(':memory:');
+    const note = entity('Note', { title: text(), grant: () => grant(read, write, subscribe) });
+    const app = workbench({ db, entities: [note] });
+    app.registerSearchPlugin(makeIndexedPlugin().plugin);
+    t.after(async () => {
+      await app.shutdown();
+      db.close();
+    });
+    await app.start();
+
+    const outcome = await app.dispatch({
+      actionId: randomUUID(),
+      type: 'Note.create',
+      payload: { id: 'n1', title: 'hello' },
+      principal: principal({ type: 'user', id: 'u1' }),
+    });
+    assert.equal(outcome.ok, true, 'the authoritative mutation commits');
+
+    const pending = app.searchStaleness.pending();
+    assert.equal(pending.length, 1, 'the committed mutation recorded a staleness record');
+    assert.equal(pending[0].sourceResource, 'Note');
+    assert.equal(pending[0].sourceKey, 'n1');
+    assert.equal(pending[0].kind, 'source-change');
+    assert.equal(pending[0].tier, 'history');
+    assert.ok(
+      typeof pending[0].committedAt === 'string' && pending[0].committedAt.length > 0,
+      'the record carries the committedAt post-commit proof',
+    );
+  });
+
+  test('a live-delivery revocation fences the plugin and records a high-priority rebuild', async (t) => {
+    const db = new DatabaseSync(':memory:');
+    const note = entity('Note', { title: text(), grant: () => grant(read, subscribe) });
+    const app = workbench({ db, entities: [note] });
+    app.registerSearchPlugin(makeIndexedPlugin().plugin);
+    app.attachLiveDelivery({ principalOf: () => principal({ type: 'user', id: 'u1' }) });
+    t.after(async () => {
+      await app.shutdown();
+      db.close();
+    });
+    await app.start();
+
+    // Materialize a healthy index so the fence baseline is observable.
+    await app.searchPlugins.rebuild('notes-fts');
+    const fenceBefore = app.searchPlugins.stateOf('notes-fts').fence;
+    assert.equal(app.searchPlugins.stateOf('notes-fts').state, 'ready');
+
+    // Publish a revocation through the SAME committed live core the transports
+    // present (the app wired the bridge's onRevocation as a core listener).
+    app._applicationLiveDelivery.core.revoke(
+      principal({ type: 'user', id: 'u1' }),
+      { category: 'entity', key: 'Note:n1' },
+    );
+
+    const pending = app.searchStaleness.pending();
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].kind, 'revocation');
+    assert.equal(pending[0].priority, SEARCH_STALENESS_PRIORITY_HIGH);
+    assert.equal(
+      app.searchPlugins.stateOf('notes-fts').fence,
+      fenceBefore + 1,
+      'the revocation fences the plugin immediately (no fresh disclosure)',
+    );
+    assert.equal(app.searchPlugins.stateOf('notes-fts').state, 'stale');
   });
 });

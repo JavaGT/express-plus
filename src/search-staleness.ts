@@ -36,16 +36,21 @@
 //      ownedObjects; the bridge reports them through triggerCensus()).
 //
 // SEAM: S3 owns the post-commit plumbing that FEEDS this bridge (kernel.ts /
-// app.ts post-commit consumers). The bridge is the S4-side consumer of that
-// seam: `app.searchStaleness.notifySourceChange(change)` for source changes
-// (history-tier commits AND no-history-tier live writes) and
-// `app.searchStaleness.onRevocation(principal, resourceScope)` as the S5/A5
-// revocation listener. A3 (JavaGT/workbench#107) owns the reconcile engine and
-// its scheduling; this module owns the durable ledger, the dispatch priority,
-// and the drain loop it exposes.
+// app.ts post-commit consumers), and this module EXPORTS the consumer that
+// bridge installs: `createSearchStalenessConsumer(bridge)` maps every committed
+// lifecycle event to a source change (committedAt proof included) and calls
+// `bridge.notifySourceChange(...)` — the kernel registers it as the
+// 'search-staleness' post-commit consumer. The S5/A5 revocation side is wired
+// through the live-delivery core: app.ts registers `bridge.onRevocation` as a
+// core onRevocation listener when live delivery attaches, so a committed
+// deletion, a delivery-time reauthorization denial, or an app mutation's
+// explicit revoke fences + records a high-priority rebuild directive. A3
+// (JavaGT/workbench#107) owns the reconcile engine and its scheduling; this
+// module owns the durable ledger, the dispatch priority, and the drain loop it
+// exposes.
 
 import type { DbHandle } from './driver.ts';
-import type { SearchChange, SearchChangeKind, SearchPluginRegistry } from './search-plugin.ts';
+import { SEARCH_STALENESS_LEDGER_TABLE, type SearchChange, type SearchChangeKind, type SearchPluginRegistry } from './search-plugin.ts';
 import type { Principal } from './principal.ts';
 import { normalizeRevocationScope, type RevocationResourceScope } from './live-fanout.ts';
 
@@ -148,7 +153,11 @@ export interface SearchStalenessBridgeOptions {
 }
 
 const BARE_SQL_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const DEFAULT_TABLE_NAME = '_SearchStaleness';
+// The ledger's default table name is the registry's RESERVED name
+// (SEARCH_STALENESS_LEDGER_TABLE): the registry refuses a plugin declaration
+// whose source interest or owned object collides with it, so the ledger can
+// never be read as plugin-owned source data or clobbered by plugin DDL.
+const DEFAULT_TABLE_NAME = SEARCH_STALENESS_LEDGER_TABLE;
 // A pseudo source resource for principal-scope revocations. Real source
 // entities are bare SQL identifiers, so '$principal' can never collide.
 const PRINCIPAL_RESOURCE = '$principal';
@@ -243,12 +252,13 @@ interface StalenessRow {
   committedAt: string;
 }
 
-function parseRecord(row: StalenessRow): SearchStalenessRecord {
-  let affected: SearchStalenessAffected[];
+// Parse the JSON-encoded affected array of a ledger row, refusing a corrupt
+// column (the row is then reported as corrupt instead of silently dropped).
+function parseAffected(affected: string, context: string): SearchStalenessAffected[] {
   try {
-    const parsed = JSON.parse(row.affected);
+    const parsed = JSON.parse(affected);
     if (!Array.isArray(parsed)) throw new Error('not an array');
-    affected = parsed.map((entry: unknown) => {
+    return parsed.map((entry: unknown) => {
       const record = entry as { pluginId?: unknown; stalenessKey?: unknown } | null;
       if (!record || typeof record.pluginId !== 'string' || typeof record.stalenessKey !== 'string') {
         throw new Error('malformed affected entry');
@@ -256,8 +266,12 @@ function parseRecord(row: StalenessRow): SearchStalenessRecord {
       return { pluginId: record.pluginId, stalenessKey: record.stalenessKey };
     });
   } catch {
-    throw new Error(`search staleness ledger has a corrupt affected column for '${row.sourceResource}:${row.sourceKey}'`);
+    throw new Error(`search staleness ledger has a corrupt affected column for '${context}'`);
   }
+}
+
+function parseRecord(row: StalenessRow): SearchStalenessRecord {
+  const affected = parseAffected(row.affected, `${row.sourceResource}:${row.sourceKey}`);
   return Object.freeze({
     sourceResource: row.sourceResource,
     sourceKey: row.sourceKey,
@@ -306,20 +320,56 @@ export function createSearchStalenessBridge(options: SearchStalenessBridgeOption
     const connection = requireDb();
     ensureTable();
     const at = now();
+    // The coalescing merge keeps the HIGHEST-priority semantics (review #109
+    // finding 1): the ledger holds ONE row per (sourceResource, sourceKey), and
+    // a newer ordinary notification must never overwrite a pending
+    // revocation/erasure's kind/payload — a priority-1 row whose kind is
+    // 'source-change' would reconcile instead of rebuild, re-disclosing
+    // protected content. When the pending row is HIGHER priority the record
+    // keeps its kind/payload/affected/tier/committedAt and the ordinary change
+    // is subsumed (a rebuild re-reads committed state, so it covers it). When
+    // priorities are EQUAL the newest payload wins. In every case the affected
+    // sets are UNIONED so no affected plugin is dropped by the collapse.
+    let merged = row;
+    const existing = connection.prepare(
+      `SELECT priority, kind, affected, payload, tier, committedAt FROM ${tableName}
+       WHERE sourceResource = ? AND sourceKey = ?`,
+    ).get(row.sourceResource, row.sourceKey) as Pick<StalenessRow, 'priority' | 'kind' | 'affected' | 'tier' | 'committedAt'> & { payload: string } | undefined;
+    if (existing) {
+      const existingAffected = parseAffected(existing.affected, `${row.sourceResource}:${row.sourceKey}`);
+      const keepExisting = existing.priority > row.priority;
+      const winning = keepExisting ? existingAffected : row.affected;
+      const losing = keepExisting ? row.affected : existingAffected;
+      // Union by pluginId; a later entry wins the collision, so the winning
+      // (high-priority, or on ties newest) stalenessKey is retained.
+      const byPlugin = new Map<string, SearchStalenessAffected>();
+      for (const entry of [...losing, ...winning]) byPlugin.set(entry.pluginId, entry);
+      merged = keepExisting
+        ? {
+          ...row,
+          kind: existing.kind as SearchStalenessKind,
+          priority: existing.priority,
+          affected: [...byPlugin.values()],
+          payload: existing.payload,
+          tier: existing.tier as 'history' | 'live' | null,
+          committedAt: existing.committedAt,
+        }
+        : { ...row, affected: [...byPlugin.values()] };
+    }
     connection.prepare(
       `INSERT INTO ${tableName}
          (sourceResource, sourceKey, kind, priority, affected, payload, tier, changedAt, committedAt)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(sourceResource, sourceKey) DO UPDATE SET
          kind = excluded.kind,
-         priority = MAX(priority, excluded.priority),
+         priority = excluded.priority,
          affected = excluded.affected,
          payload = excluded.payload,
          tier = excluded.tier,
          changedAt = excluded.changedAt,
          committedAt = excluded.committedAt`,
-    ).run(row.sourceResource, row.sourceKey, row.kind, row.priority,
-      JSON.stringify(row.affected), row.payload, row.tier, at, row.committedAt);
+    ).run(merged.sourceResource, merged.sourceKey, merged.kind, merged.priority,
+      JSON.stringify(merged.affected), merged.payload, merged.tier, at, merged.committedAt);
   }
 
   function readAll(): StalenessRow[] {
@@ -384,8 +434,17 @@ export function createSearchStalenessBridge(options: SearchStalenessBridgeOption
     return [key.slice(0, index), key.slice(index + 1)];
   }
 
+  // Route a ledger write or plugin materialization through the ONE write
+  // coordinator (S1/A5): inside a coordinated turn, a nested call joins the
+  // turn (write-queue reentrancy); without a bound queue the work runs
+  // directly. Every ledger write the bridge performs — processRecord's
+  // reconcile/rebuild AND drain's delete — enters through here, so a ledger
+  // mutation can never interleave with an authoritative write or another drain.
+  function coordinated<T>(fn: () => Promise<T> | T): Promise<T> {
+    return writeQueue ? writeQueue.run(fn) : Promise.resolve().then(fn);
+  }
+
   async function processRecord(record: SearchStalenessRecord): Promise<{ kind: 'reconcile' | 'rebuild' }> {
-    const run = (fn: () => Promise<unknown> | unknown) => (writeQueue ? writeQueue.run(fn) : Promise.resolve().then(fn));
     if (record.kind === 'source-change') {
       let change: SearchChange;
       try {
@@ -405,7 +464,7 @@ export function createSearchStalenessBridge(options: SearchStalenessBridgeOption
         throw new Error(`staleness record '${record.sourceResource}:${record.sourceKey}' has a corrupt change payload`);
       }
       for (const affected of record.affected) {
-        const outcome = await run(() => registry.reconcile(affected.pluginId, [change])) as { ok: boolean };
+        const outcome = await coordinated(() => registry.reconcile(affected.pluginId, [change])) as { ok: boolean };
         if (!outcome.ok) {
           const state = registry.stateOf(affected.pluginId);
           throw new Error(state.lastError ? state.lastError.message : `reconcile failed for '${affected.pluginId}'`);
@@ -417,7 +476,7 @@ export function createSearchStalenessBridge(options: SearchStalenessBridgeOption
     // newly-unauthorized rows are absent (or out of the plugin's scope) in
     // committed state, so a successful rebuild cannot contain them.
     for (const affected of record.affected) {
-      const outcome = await run(() => registry.rebuild(affected.pluginId)) as { ok: boolean };
+      const outcome = await coordinated(() => registry.rebuild(affected.pluginId)) as { ok: boolean };
       if (!outcome.ok) {
         const state = registry.stateOf(affected.pluginId);
         throw new Error(state.lastError ? state.lastError.message : `rebuild failed for '${affected.pluginId}'`);
@@ -443,6 +502,14 @@ export function createSearchStalenessBridge(options: SearchStalenessBridgeOption
 
   function notifySourceChange(input: SearchSourceChangeInput): SearchStalenessNotice {
     const normalized = normalizeSourceChange(input);
+    // Reserved-name guard (review #109 finding 4): a change whose entity is the
+    // ledger's own table name can never be a real source change — it would key
+    // a record by the ledger itself. The registry refuses plugin declarations
+    // using the reserved name; this second guard also covers a bridge built
+    // with a custom tableName.
+    if (normalized.entity === tableName) {
+      fail(`entity '${normalized.entity}' collides with the staleness ledger table name`);
+    }
     const change: SearchChange = {
       entity: normalized.entity,
       rowId: normalized.rowId,
@@ -498,8 +565,15 @@ export function createSearchStalenessBridge(options: SearchStalenessBridgeOption
     let retained = 0;
     for (const record of pending()) {
       try {
-        const outcome = await processRecord(record);
-        deleteRecord(record);
+        // Process AND delete inside the SAME coordinated turn (review #109
+        // finding 3): the ledger DELETE is a write like the materialization it
+        // follows, so it can never interleave with an authoritative write or
+        // another drain. A processRecord failure skips the delete, retaining
+        // the record for the next drain (the summary's `retained`).
+        const outcome = await coordinated(() => processRecord(record).then((result) => {
+          deleteRecord(record);
+          return result;
+        }));
         if (outcome.kind === 'reconcile') reconciled += 1;
         else rebuilt += 1;
       } catch (err) {
@@ -551,4 +625,72 @@ export function createSearchStalenessBridge(options: SearchStalenessBridgeOption
     triggerCensus,
     stalenessDdl: () => searchStalenessDdl(tableName),
   });
+}
+
+// Map one pipeline-finalized committed event to a source change for the bridge.
+// A lifecycle event (created/updated/removed) and a field/native mutation
+// (which changes an existing row like an update) map to a SearchChange; the
+// event's `committedAt` (present on finalized events) is the post-commit proof
+// the bridge requires. Anything without an entity, a row id, or a committedAt
+// is skipped — never a fabricated change.
+function sourceChangeFromCommittedEvent(event: unknown): SearchSourceChangeInput | null {
+  if (event === null || typeof event !== 'object') return null;
+  const value = event as { type?: unknown; handle?: unknown; data?: unknown; committedAt?: unknown };
+  const handle = value.handle as { brand?: unknown; entity?: unknown; kind?: unknown } | undefined;
+  let entity: unknown;
+  let kind: unknown;
+  if (handle && handle.brand === 'event-handle') {
+    entity = handle.entity;
+    kind = handle.kind;
+  } else if (typeof value.type === 'string') {
+    const [entityName, kindName, ...rest] = value.type.split('.');
+    entity = entityName;
+    kind = rest.length > 0 ? 'updated' : kindName;
+  } else {
+    return null;
+  }
+  const data = value.data;
+  const rowId = data !== null && typeof data === 'object' && 'id' in data
+    ? (data as { id?: unknown }).id
+    : undefined;
+  const committedAt = value.committedAt;
+  if (typeof entity !== 'string' || entity.length === 0
+    || typeof rowId !== 'string' || rowId.length === 0
+    || typeof committedAt !== 'string' || committedAt.length === 0) {
+    return null;
+  }
+  let changeKind: SearchChangeKind;
+  if (kind === 'created') changeKind = 'created';
+  else if (kind === 'removed') changeKind = 'removed';
+  else changeKind = 'updated';
+  return {
+    entity,
+    rowId,
+    kind: changeKind,
+    ...(data !== undefined && data !== null && typeof data === 'object' ? { data: data as Readonly<Record<string, unknown>> } : {}),
+    committedAt,
+    tier: 'history',
+  };
+}
+
+// The S3 post-commit consumer that FEEDS this bridge (review #109 finding 2).
+// The kernel installs it as the 'search-staleness' descriptor, so a committed
+// entity mutation records into the durable ledger with its committedAt proof.
+// A throwing notification is isolated (post-commit fan-out contract: it can
+// never undo a committed dispatch); the durable record itself is best-effort
+// for the commit→notify window (no cursor), which the 'best-effort-external-
+// consumer' classification states honestly.
+export function createSearchStalenessConsumer(bridge: Pick<SearchStalenessBridge, 'notifySourceChange'>) {
+  return async (events: readonly unknown[]): Promise<void> => {
+    for (const event of events) {
+      const change = sourceChangeFromCommittedEvent(event);
+      if (change === null) continue;
+      try {
+        bridge.notifySourceChange(change);
+      } catch {
+        // post-commit isolation: a staleness-notification failure never undoes
+        // the committed dispatch
+      }
+    }
+  };
 }

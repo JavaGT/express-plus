@@ -292,6 +292,15 @@ export interface SearchPluginRegistry {
 // a plugin needing an exotic identifier is refused rather than interpolated).
 const BARE_SQL_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+// The S4/A2 staleness ledger's reserved table name (search-staleness.ts uses it
+// as the default ledger table). A plugin source interest or owned object that
+// collides with the ledger would read or clobber framework operational state as
+// if it were plugin-owned domain data, so the registry REFUSES declarations
+// that use it (namespace guarantee, review #109 finding 4). A bridge built with
+// a custom tableName is the caller's own naming choice; the guarantee covers
+// the framework default.
+export const SEARCH_STALENESS_LEDGER_TABLE = '_SearchStaleness';
+
 const OWNED_OBJECT_KINDS: ReadonlySet<SearchOwnedObjectKind> = new Set([
   'table',
   'index',
@@ -576,6 +585,11 @@ export function createSearchPluginRegistry(options: SearchPluginRegistryOptions 
         );
       }
       assertIdentifierName(object.name, `owned object name`, plugin.id);
+      if (object.name === SEARCH_STALENESS_LEDGER_TABLE) {
+        throw new Error(
+          `search plugin '${plugin.id}' owns object '${object.name}' which collides with the reserved staleness ledger table (${SEARCH_STALENESS_LEDGER_TABLE})`,
+        );
+      }
       if (pluginOwnedNames.has(object.name)) {
         throw new Error(
           `search plugin '${plugin.id}' declares owned object '${object.name}' more than once`,
@@ -603,6 +617,11 @@ export function createSearchPluginRegistry(options: SearchPluginRegistryOptions 
         throw new Error(`search plugin '${plugin.id}' sourceInterests entries must be objects`);
       }
       assertIdentifierName(interest.entity, 'source interest entity', plugin.id);
+      if (interest.entity === SEARCH_STALENESS_LEDGER_TABLE) {
+        throw new Error(
+          `search plugin '${plugin.id}' declares a source interest in '${interest.entity}' which collides with the reserved staleness ledger table (${SEARCH_STALENESS_LEDGER_TABLE})`,
+        );
+      }
       if (interestEntities.has(interest.entity)) {
         throw new Error(
           `search plugin '${plugin.id}' declares source interest '${interest.entity}' more than once`,

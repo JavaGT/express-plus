@@ -31,7 +31,14 @@ function toRuntime(source) {
   const stripped = stripTypeScriptTypes(source, {
     filename: 'module.ts',
   });
-  return stripped.replaceAll(/from\s+(['"])(\.\.?\/[^'"]+)\.ts\1/g, 'from $1$2.mjs$1')
+  // stripTypeScriptTypes blanks stripped type-only constructs (import type,
+  // export type, interface) with whitespace, which would otherwise leave
+  // trailing-whitespace lines in every type-heavy module (git's --check flags
+  // them). The src tree has no trailing whitespace, so trimming every line is
+  // semantically safe — no template-literal content changes.
+  return stripped
+    .replaceAll(/[ \t]+$/gm, '')
+    .replaceAll(/from\s+(['"])(\.\.?\/[^'"]+)\.ts\1/g, 'from $1$2.mjs$1')
     .replaceAll(/import\s+(['"])(\.\.?\/[^'"]+)\.ts\1/g, 'import $1$2.mjs$1')
     .replaceAll(/import\s*\(\s*(['"])(\.\.?\/[^'"]+)\.ts\1\s*\)/g, 'import($1$2.mjs$1)');
 }
