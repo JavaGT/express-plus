@@ -368,6 +368,19 @@ test('a matching expression index passes and a matching partial index passes', (
   }
 });
 
+test('a parenthesized expression index retains its declared collation', () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    const schema = scopeSchema({
+      indexes: [{ name: 'Article_lower_nocase', expression: ['(lower(title) COLLATE NOCASE)'] }],
+    });
+    schema.prepare(db);
+    assert.deepEqual(check(db, [schema]), []);
+  } finally {
+    db.close();
+  }
+});
+
 test('a partial index with a different WHERE predicate is an index-mismatch drift', () => {
   const db = new DatabaseSync(':memory:');
   try {

@@ -305,7 +305,7 @@ function declaredIndexCollations(
 )           {
   const columns = new Map(table.columns.map((column) => [folded(column.name), column]));
   const expressionCollation = (expression        )         => {
-    const match = expression.match(/\s+COLLATE\s+("(?:""|[^"])+"|[A-Za-z_][A-Za-z0-9_]*)\s*(?:ASC|DESC)?\s*$/i);
+    const match = expression.match(/\s+COLLATE\s+("(?:""|[^"])+"|[A-Za-z_][A-Za-z0-9_]*)\s*(?:ASC|DESC)?\s*\)*\s*$/i);
     return match === null ? 'BINARY' : match[1].replace(/^"|"$/g, '').replaceAll('""', '');
   };
   return [
