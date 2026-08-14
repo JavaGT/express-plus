@@ -28,6 +28,7 @@ import { protectedArtefactCapability } from './protected-artefact-store.ts';
 import type { AuthorizationAdapter } from './authorization-adapter.ts';
 import type { DataTier } from './live-tier.ts';
 import { isAtomicOperation } from './atomic-operations.ts';
+import { writeInvalidationInTxn } from './invalidation-ledger.ts';
 
 // `action(type)` — declare an imperative request type. The handler that turns it
 // into events is attached later by the entity/dispatch wiring.
@@ -510,13 +511,22 @@ export function liveMutationVariant({
         }
       }
 
-      // Revision bump per touched resource, then the minimized receipt. The
-      // receipt records the FIRST resource's key and THAT resource's new
+      // Revision bump and invalidation marker share this transaction with the
+      // projection. The ledger proves live reconnect cursors without retaining
+      // the mutation payload or creating a second history.
+      // The receipt records the FIRST resource's key and THAT resource's new
       // revision (single-resource actions are the live norm; multi-resource
       // atomicity is the S3/A6 surface).
       const touched = new Map<string, number>();
       for (const ev of finalizedEvents) {
-        touched.set(ev.scope, bumpRevision(db as DbHandle, ev.scope));
+        const revision = bumpRevision(db as DbHandle, ev.scope);
+        touched.set(ev.scope, revision);
+        writeInvalidationInTxn(db as DbHandle, {
+          resourceKey: ev.scope,
+          kind: 'resource',
+          revision,
+          updatedAt: now,
+        });
       }
       const resourceKey = finalizedEvents[0]?.scope ?? (owningScope as string);
       const committedRevision = touched.get(resourceKey) ?? readLiveRevision(db as DbHandle, resourceKey);
