@@ -780,6 +780,7 @@ export interface AnnotatedTextHttpSession {
   clearCaret?(): boolean;
   onCaret?(listener: OnCaret): () => void;
   reconnect(): Promise<void>;
+  recoverFromUnresolvableRange(): void;
   subscribe(listener: (document: AnnotatedTextDocument | null) => void): () => void;
   close(): void;
 }

@@ -838,7 +838,8 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {}, 
    * leftover nodes are removed. Returns true when the DOM changed.
    */
   function recoverFromResolutionFailure() {
-    if (typeof session.reconnect === 'function') session.reconnect();
+    if (typeof session.recoverFromUnresolvableRange === 'function') session.recoverFromUnresolvableRange();
+    else if (typeof session.reconnect === 'function') session.reconnect();
   }
 
   function paintDisplay(span, document, text, draftEdit) {

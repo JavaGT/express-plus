@@ -296,37 +296,6 @@ export function applyOffsetTextEdit(family, from, to, text) {
   return next;
 }
 
-function scalarStart(text, offset) {
-  if (offset > 0 && offset < text.length && text.charCodeAt(offset) >= 0xdc00 && text.charCodeAt(offset) <= 0xdfff
-    && text.charCodeAt(offset - 1) >= 0xd800 && text.charCodeAt(offset - 1) <= 0xdbff) return offset - 1;
-  return offset;
-}
-
-function scalarEnd(text, offset) {
-  if (offset > 0 && offset < text.length && text.charCodeAt(offset) >= 0xdc00 && text.charCodeAt(offset) <= 0xdfff
-    && text.charCodeAt(offset - 1) >= 0xd800 && text.charCodeAt(offset - 1) <= 0xdbff) return offset + 1;
-  return offset;
-}
-
-/** Advance a family copy so its materialized text equals `afterText`. */
-export function familyMatchingText(family, afterText) {
-  assertTrustedFamily(family);
-  if (typeof afterText !== 'string') fail('familyMatchingText requires a string');
-  const beforeText = materializeText(family);
-  if (beforeText === afterText) return family;
-  let from = 0;
-  while (from < beforeText.length && from < afterText.length && beforeText[from] === afterText[from]) from += 1;
-  let beforeEnd = beforeText.length;
-  let afterEnd = afterText.length;
-  while (beforeEnd > from && afterEnd > from && beforeText[beforeEnd - 1] === afterText[afterEnd - 1]) {
-    beforeEnd -= 1;
-    afterEnd -= 1;
-  }
-  from = scalarStart(beforeText, scalarStart(afterText, from));
-  beforeEnd = scalarEnd(beforeText, beforeEnd);
-  return applyOffsetTextEdit(family, from, beforeEnd, afterText.slice(from, scalarEnd(afterText, afterEnd)));
-}
-
 function deepFreeze(value) {
   if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
   for (const child of Object.values(value)) deepFreeze(child);

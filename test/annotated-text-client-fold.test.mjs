@@ -8,7 +8,6 @@ import {
   textOperationForOffsetEdit, resolveOffsetToEndpoint,
 } from '../build/annotated-text-continuous.mjs';
 import {
-  applyOffsetTextEdit, createTextFamily as createPublicFamily, projectEndpointToOffset,
   restoreTextFamily,
 } from '../public/workbench-annotated-text-continuous.mjs';
 import {
@@ -198,109 +197,273 @@ test('session.family tracks every pending insert before its fold arrives', async
   await Promise.allSettled([first, second]);
 });
 
-test('draft paint moves the marker and stays correct while an earlier edit awaits its fold', async () => {
-  const server = seedHelloWorld();
-  const start = resolveOffsetToEndpoint(server, 6, server.checkpoint.frontier, 'right');
-  const end = resolveOffsetToEndpoint(server, 11, server.checkpoint.frontier, 'right');
-  const family = createPublicFamily('d1', server.checkpoint);
-  const document = {
-    version: 2, text: 'hello world',
-    ranges: [{ annotationId: 'c1', start, end }],
-    annotations: [{ id: 'c1', family: 'note', fields: {} }],
-  };
+test('queued delete of a repeated character keeps the same anchor through fold', async () => {
+  const A = 'a'.repeat(32);
+  const B = 'b'.repeat(32);
+  const insertOp = ['workbench.text', 1, [A, 1], 1, [], ['insert', ['root'], 'aaa']];
+  const baseFamily = createTextFamily('d1', textCheckpoint(applyTextOp(createTextState(), insertOp)));
+  const start = resolveOffsetToEndpoint(baseFamily, 1, baseFamily.checkpoint.frontier, 'left');
+  const end = resolveOffsetToEndpoint(baseFamily, 3, baseFamily.checkpoint.frontier, 'right');
+  const deleteOp = textOperationForOffsetEdit(baseFamily, { kind: 'text.delete', from: { offset: 0 }, to: { offset: 1 } }, B, 2);
+  const nextFamily = applyTextOperation(baseFamily, deleteOp);
+  const nextText = materializeText(nextFamily);
+  assert.equal(nextText, 'aa');
+  const publicNext = restoreTextFamily(textFamilyCheckpoint(nextFamily));
+  assert.equal(resolveRangeOffsets({ annotationId: 'c1', start, end }, publicNext).start, 0);
+
+  const sources = [];
+  let number = 0;
+  let releaseReceipt;
+  const receiptGate = new Promise((resolve) => { releaseReceipt = resolve; });
+  const session = createAnnotatedTextHttpSession({
+    typingBurstIdleMs: 0,
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: Document, field: Document.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => 'action-1',
+    fetchImpl: async (url, options) => {
+      if (options?.method === 'POST') {
+        if (url.includes('/authoring/ack')) return { ok: true, status: 200, json: async () => ({ ok: true, acknowledgedThrough: number }) };
+        await receiptGate;
+        return { ok: true, status: 200, json: async () => ({ ok: true, actionId: 'action-1', confirmedThrough: 2 }) };
+      }
+      const cursor = ++number;
+      const seeded = number === 1 ? baseFamily : nextFamily;
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          kind: 'snapshot',
+          snapshot: {
+            body: {
+              kind: 'workbench.annotatedText.recipient', version: 2,
+              text: number === 1 ? 'aaa' : nextText,
+              ranges: [{ annotationId: 'c1', start, end }],
+              annotations: [{ id: 'c1', family: 'note', fields: {} }],
+              orphans: [], measurements: [],
+            },
+          },
+          cursor,
+          authoring: authoringEnvelope(cursor, textFamilyCheckpoint(seeded)),
+        }),
+      };
+    },
+    eventSourceFactory: () => {
+      const source = { close() {}, onmessage: null, onerror: null };
+      sources.push(source);
+      return source;
+    },
+  });
+  await session.ready;
+  const pending = session.delete({
+    mutationId: 'del-a',
+    from: { offset: 0, affinity: 'right' },
+    to: { offset: 1, affinity: 'left' },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(session.document.text, 'aa');
+  const optimistic = resolveRangeOffsets(session.document.ranges[0], session.family);
+  assert.deepEqual(optimistic, { annotationId: 'c1', start: 0, end: 2 });
+
+  sources[0].onmessage({ data: JSON.stringify([{
+    type: 'event', entity: 'Project', id: 'p1', seq: 2, seqSpan: [2, 2],
+    event: { type: 'FoldDoc.body.operated', scope: 'annotated-text:d1', seq: 2, actionId: 'action-1' },
+    fold: {
+      kind: 'annotatedText', version: 5, field: 'body', baseCursor: 1, fence: 2,
+      text: { reducer: 'workbench.text', operations: [deleteOp] },
+      projection: { text: nextText },
+      dispositions: [],
+      familyElementCount: Object.keys(nextFamily.checkpoint.elements).length,
+      authoring: {
+        acknowledgementFence: 2,
+        stream: token('stream'), lease: token('lease'), snapshot: token('snapshot2'),
+        positionFrames: [{ positionToken: token('position2') }],
+      },
+    },
+  }]) });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  releaseReceipt();
+  const result = await pending;
+  assert.equal(result.ok, true, result.failure?.message);
+  assert.equal((await result.settlement.wait()).status, 'reconciled');
+  assert.equal(session.document.text, 'aa');
+  assert.deepEqual(resolveRangeOffsets(session.document.ranges[0], session.family), optimistic);
+  session.close();
+});
+
+test('draft paint uses the queued display family while an earlier insert awaits its fold', async () => {
+  const baseFamily = seedHelloWorld();
+  const start = resolveOffsetToEndpoint(baseFamily, 6, baseFamily.checkpoint.frontier, 'right');
+  const end = resolveOffsetToEndpoint(baseFamily, 11, baseFamily.checkpoint.frontier, 'right');
+  const pending = [];
+  let number = 0;
+  const session = createAnnotatedTextHttpSession({
+    typingBurstIdleMs: 0,
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: Document, field: Document.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => 'action-1',
+    fetchImpl: async (url, options) => {
+      if (options?.method === 'POST') {
+        if (url.includes('/authoring/ack')) return { ok: true, status: 200, json: async () => ({ ok: true, acknowledgedThrough: number }) };
+        return new Promise((resolve) => pending.push(resolve));
+      }
+      const cursor = ++number;
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          kind: 'snapshot',
+          snapshot: {
+            body: {
+              kind: 'workbench.annotatedText.recipient', version: 2,
+              text: 'hello world',
+              ranges: [{ annotationId: 'c1', start, end }],
+              annotations: [{ id: 'c1', family: 'note', fields: {} }],
+              orphans: [], measurements: [],
+            },
+          },
+          cursor,
+          authoring: authoringEnvelope(cursor, textFamilyCheckpoint(baseFamily)),
+        }),
+      };
+    },
+    eventSourceFactory: () => ({ close() {}, onmessage: null, onerror: null }),
+  });
+  await session.ready;
+  const first = session.insert({ mutationId: 'ins-1', at: { offset: 0, affinity: 'right' }, text: '^' });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
   const dom = new JSDOM('<div id="editor"></div>');
   const element = dom.window.document.getElementById('editor');
-  const calls = [];
-  let listener = null;
-  let releaseReplace;
-  const replaceGate = new Promise((resolve) => { releaseReplace = resolve; });
-  const session = {
-    document,
-    family,
-    replace: async (input) => {
-      calls.push(input);
-      await replaceGate;
-      return { ok: true };
-    },
-    reconnect() {},
-    subscribe(next) { listener = next; return () => { listener = null; }; },
-  };
   const binding = bindAnnotatedTextEditor({ element, session });
-  assert.equal(element.querySelector('[data-annotation-ids="c1"]')?.textContent, 'world');
-
-  const select = (offset) => {
-    const span = element.querySelector('[data-block-id="b"]');
-    const walker = span.ownerDocument.createTreeWalker(span, 4);
-    let remaining = offset;
-    let node;
-    while ((node = walker.nextNode())) {
-      if (remaining <= node.data.length) {
-        const range = dom.window.document.createRange();
-        range.setStart(node, remaining);
-        range.collapse(true);
-        const selection = dom.window.getSelection();
-        selection.removeAllRanges();
-        selection.addRange(range);
-        return;
-      }
-      remaining -= node.data.length;
-    }
-  };
-  const type = (data) => {
-    element.dispatchEvent(new dom.window.InputEvent('beforeinput', {
-      bubbles: true, cancelable: true, inputType: 'insertText', data,
-    }));
-  };
-
-  element.focus();
-  select(0);
-  type('^');
   assert.equal(element.textContent, '^hello world');
   assert.equal(element.querySelector('[data-annotation-ids="c1"]')?.textContent, 'world');
 
-  await new Promise((resolve) => setTimeout(resolve, 110));
-  assert.equal(calls.length, 1);
-
-  const optimisticFamily = applyOffsetTextEdit(family, 0, 0, '^');
-  session.document = { ...document, text: '^hello world' };
-  session.family = optimisticFamily;
-  listener?.(session.document);
-  assert.equal(element.querySelector('[data-annotation-ids="c1"]')?.textContent, 'world');
-
-  select(1);
-  type('!');
+  const span = element.querySelector('[data-block-id="b"]');
+  const walker = span.ownerDocument.createTreeWalker(span, 4);
+  const firstNode = walker.nextNode();
+  const range = dom.window.document.createRange();
+  range.setStart(firstNode, 1);
+  range.collapse(true);
+  const selection = dom.window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+  element.dispatchEvent(new dom.window.InputEvent('beforeinput', {
+    bubbles: true, cancelable: true, inputType: 'insertText', data: '!',
+  }));
   assert.equal(element.textContent, '^!hello world');
   assert.equal(element.querySelector('[data-annotation-ids="c1"]')?.textContent, 'world');
-  assert.equal(projectEndpointToOffset(applyOffsetTextEdit(optimisticFamily, 1, 1, '!'), start), 8);
-
-  releaseReplace();
   binding.close();
+  session.close();
+  for (const resolve of pending) resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
+  await Promise.allSettled([first]);
 });
 
-test('a render-time endpoint resolution failure recovers by snapshot instead of painting stale ranges', () => {
-  const server = seedHelloWorld();
-  const family = createPublicFamily('d1', server.checkpoint);
+test('a lost-anchor snapshot recovers through a replacement snapshot', async () => {
+  const baseFamily = seedHelloWorld();
   const lost = {
     point: ['point', ['element', [['deadbeefdeadbeefdeadbeefdeadbeef', 99], 0]], 'left'],
     basisFrontier: [['deadbeefdeadbeefdeadbeefdeadbeef', 99]],
   };
-  const document = {
-    version: 2, text: 'hello world',
-    ranges: [{ annotationId: 'c1', start: lost, end: lost }],
-    annotations: [{ id: 'c1', family: 'note', fields: {} }],
-  };
+  const start = resolveOffsetToEndpoint(baseFamily, 6, baseFamily.checkpoint.frontier, 'right');
+  const end = resolveOffsetToEndpoint(baseFamily, 11, baseFamily.checkpoint.frontier, 'right');
+  const snapshotRequests = [];
+  let number = 0;
+  const session = createAnnotatedTextHttpSession({
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: Document, field: Document.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => 'action-1',
+    fetchImpl: async (url, options) => {
+      if (options?.method === 'POST') {
+        if (url.includes('/authoring/ack')) return { ok: true, status: 200, json: async () => ({ ok: true, acknowledgedThrough: number }) };
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }
+      const cursor = ++number;
+      snapshotRequests.push(cursor);
+      const body = number === 1
+        ? {
+          kind: 'workbench.annotatedText.recipient', version: 2,
+          text: 'hello world',
+          ranges: [{ annotationId: 'c1', start: lost, end: lost }],
+          annotations: [{ id: 'c1', family: 'note', fields: {} }],
+          orphans: [], measurements: [],
+        }
+        : {
+          kind: 'workbench.annotatedText.recipient', version: 2,
+          text: 'hello world',
+          ranges: [{ annotationId: 'c1', start, end }],
+          annotations: [{ id: 'c1', family: 'note', fields: {} }],
+          orphans: [], measurements: [],
+        };
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          kind: 'snapshot', snapshot: { body }, cursor,
+          authoring: authoringEnvelope(cursor, textFamilyCheckpoint(baseFamily)),
+        }),
+      };
+    },
+    eventSourceFactory: () => ({ close() {}, onmessage: null, onerror: null }),
+  });
+  await session.ready;
   const dom = new JSDOM('<div id="editor"></div>');
   const element = dom.window.document.getElementById('editor');
-  let reconnects = 0;
-  const session = {
-    document, family,
-    replace: async () => ({ ok: true }),
-    reconnect() { reconnects += 1; },
-    subscribe() { return () => {}; },
-  };
   const binding = bindAnnotatedTextEditor({ element, session });
-  assert.ok(reconnects >= 1);
-  assert.equal(element.querySelector('[data-annotation-ids="c1"]'), null);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.ok(snapshotRequests.length >= 2, 'lost-anchor paint must recover via snapshot');
+  assert.deepEqual(resolveRangeOffsets(session.document.ranges[0], session.family), { annotationId: 'c1', start: 6, end: 11 });
+  assert.equal(element.querySelector('[data-annotation-ids="c1"]')?.textContent, 'world');
+  binding.close();
+  session.close();
+});
+
+test('a replacement snapshot that still cannot resolve an endpoint closes the session', async () => {
+  const baseFamily = seedHelloWorld();
+  const lost = {
+    point: ['point', ['element', [['deadbeefdeadbeefdeadbeefdeadbeef', 99], 0]], 'left'],
+    basisFrontier: [['deadbeefdeadbeefdeadbeefdeadbeef', 99]],
+  };
+  const snapshotRequests = [];
+  let number = 0;
+  const session = createAnnotatedTextHttpSession({
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: Document, field: Document.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => 'action-1',
+    fetchImpl: async (url, options) => {
+      if (options?.method === 'POST') {
+        if (url.includes('/authoring/ack')) return { ok: true, status: 200, json: async () => ({ ok: true, acknowledgedThrough: number }) };
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }
+      const cursor = ++number;
+      snapshotRequests.push(cursor);
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          kind: 'snapshot',
+          snapshot: {
+            body: {
+              kind: 'workbench.annotatedText.recipient', version: 2,
+              text: 'hello world',
+              ranges: [{ annotationId: 'c1', start: lost, end: lost }],
+              annotations: [{ id: 'c1', family: 'note', fields: {} }],
+              orphans: [], measurements: [],
+            },
+          },
+          cursor,
+          authoring: authoringEnvelope(cursor, textFamilyCheckpoint(baseFamily)),
+        }),
+      };
+    },
+    eventSourceFactory: () => ({ close() {}, onmessage: null, onerror: null }),
+  });
+  await session.ready;
+  const dom = new JSDOM('<div id="editor"></div>');
+  const element = dom.window.document.getElementById('editor');
+  const binding = bindAnnotatedTextEditor({ element, session });
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  const recovered = snapshotRequests.length;
+  assert.equal(recovered, 2, 'one replacement snapshot, then latch');
+  session.recoverFromUnresolvableRange();
+  session.recoverFromUnresolvableRange();
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(snapshotRequests.length, recovered, 'a latched unresolvable snapshot must not reconnect again');
   binding.close();
 });
 
