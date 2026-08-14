@@ -414,6 +414,15 @@ export default function workbench({
     // reference it) — one mutex, never a second one.
     app.writeQueue = createWriteQueue();
     app.writeCoordinator = app.writeQueue;
+    // OWNERSHIP BINDING (S1/A3 backup, review #82 finding 2): the adapter-opened
+    // source declares the SAME coordinator as the app — so a backup manager
+    // built over `app.writeCoordinator` + the app's opened source
+    // (`createBackupManager({ source: app._dbAdapter, writeCoordinator:
+    // app.writeCoordinator })`) works without manual mutation, while a
+    // coordinator bound to any DIFFERENT source still refuses at construction.
+    // The app opened the db BEFORE this coordinator existed, so the binding
+    // fills it in now that the coordinator is real.
+    if (openedDb) openedDb.writeCoordinator = app.writeCoordinator;
     // The shared-state PRAGMA maintenance seam (S1/A5): withForeignKeysDisabled
     // runs inside a coordinated write turn and restores foreign_keys = ON even
     // on throw. The app db may arrive later (deferred adapter open), so the
@@ -471,6 +480,11 @@ export default function workbench({
             opening = Promise.resolve()
               .then(() => adapter.open())
               .then((opened) => {
+                // OWNERSHIP BINDING (S1/A3 backup): the deferred adapter open
+                // lands AFTER the write coordinator exists — bind the app's
+                // coordinator onto the opened source so an adapter-backed
+                // backup manager constructs without manual mutation.
+                (opened as OpenedSqliteDatabase).writeCoordinator = app.writeCoordinator;
                 const handle = wrapDriver(opened.handle);
                 runtime.db = handle;
                 app.db = handle;

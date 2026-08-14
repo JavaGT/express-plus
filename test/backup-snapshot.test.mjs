@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync, existsSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -436,6 +436,75 @@ test('a materializer reporting a size mismatch (wrong bytes on disk) makes the b
       assert.equal(result.status, 'partial');
       assert.equal(result.manifest.status, 'partial', 'unverified bytes can never be complete');
       assert.deepEqual(result.diagnostic.detail.missingGenerations, ['gen-a']);
+    } finally {
+      opened.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a materializer reporting a symlink inside blobs/ pointing outside is a missing generation — partial, never complete', { timeout: 120000 }, async () => {
+  const root = tempRoot();
+  const dir = join(root, 'owned');
+  try {
+    const opened = openSqliteAdapter({ directory: dir, name: 'app' });
+    try {
+      // The reported entry is a symlink planted inside blobs/ whose target
+      // lives OUTSIDE the backup directory. Verification is lstat-based: a
+      // symlink is refused outright, and its realpath would escape the blob
+      // dir — either way the generation is missing, never a complete byte.
+      const outside = join(root, 'outside.bin');
+      writeFileSync(outside, 'outside-bytes');
+      const blobs = {
+        census: () => ['gen-a'],
+        materialize: (generation, destDir) => {
+          symlinkSync(outside, join(destDir, `${generation}.blob`));
+          return [{ name: `${generation}.blob`, size: 'outside-bytes'.length }];
+        },
+      };
+      const result = await managerFor(opened, { blobs }).backup();
+      assert.equal(result.ok, false);
+      assert.equal(result.status, 'partial');
+      assert.equal(result.quarantined, true);
+      assert.equal(result.manifest.status, 'partial', 'a symlinked byte can never be complete');
+      assert.deepEqual(result.diagnostic.detail.missingGenerations, ['gen-a']);
+      assert.equal(readdirSync(join(dir, 'backups')).length, 0, 'backups/ holds nothing after the partial');
+    } finally {
+      opened.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a materializer reporting a legitimate contained file passes verification — even with an unreported symlink present', { timeout: 120000 }, async () => {
+  const root = tempRoot();
+  const dir = join(root, 'owned');
+  try {
+    const opened = openSqliteAdapter({ directory: dir, name: 'app' });
+    try {
+      // A real regular file INSIDE blobs/ whose realpath stays inside the blob
+      // directory's realpath passes lstat + realpath containment and the size
+      // check → complete. A symlink planted in the same dir but NOT reported
+      // cannot fail the generation: only reported entries are verified.
+      const outside = join(root, 'outside.bin');
+      writeFileSync(outside, 'outside-bytes');
+      const blobs = {
+        census: () => ['gen-a'],
+        materialize: (generation, destDir) => {
+          const name = `${generation}.blob`;
+          const content = 'contained-bytes';
+          writeFileSync(join(destDir, name), content);
+          symlinkSync(outside, join(destDir, 'unreported-link'));
+          return [{ name, size: content.length }];
+        },
+      };
+      const result = await managerFor(opened, { blobs }).backup();
+      assert.equal(result.ok, true, 'a contained reported file passes verification');
+      assert.equal(result.status, 'complete');
+      assert.equal(result.manifest.status, 'complete');
+      assert.equal(existsSync(join(result.directory, 'blobs', 'gen-a.blob')), true);
     } finally {
       opened.close();
     }

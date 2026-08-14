@@ -46,9 +46,11 @@ import { createHash, randomBytes } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -80,7 +82,16 @@ export const DEFAULT_RETENTION: Readonly<BackupRetentionConfig> = Object.freeze(
 // stats every reported file against the reported size before a backup may be
 // complete — an empty report, a reported-but-unwritten file, or a size
 // mismatch marks the generation missing (partial, quarantined, never
-// complete).
+// complete). Verification is lstat + realpath CONTAINED: a reported file must
+// be a regular file whose realpath stays inside the blob directory's realpath,
+// so a symlink inside blobs/ pointing outside is a missing generation, never a
+// complete byte.
+//
+// There is a brief window between verification and the manifest write: blob
+// bytes are immutable and content-addressed, so no WRITER can swap them, and a
+// same-user attacker with filesystem write access to the owned directory could
+// equally rewrite the manifest/snapshot themselves — the window is documented,
+// not defended against (an adversary there owns the backup directory outright).
 export type MaterializedBlobFile = Readonly<{ readonly name: string; readonly size: number }>;
 
 export type BackupBlobSource = {
@@ -540,7 +551,13 @@ export function createBackupManager(options: BackupManagerOptions): BackupManage
 
     // Manifest LAST: a `complete` manifest implies the snapshot and every
     // blob byte already landed. A crash before this point leaves no manifest,
-    // so the next reconcile quarantines the dir.
+    // so the next reconcile quarantines the dir. The verification just above
+    // and this write are NOT one atomic filesystem op — the byte window is
+    // documented in the module header: blob bytes are immutable/content-
+    // addressed so no writer can swap them, and anyone who can alter files in
+    // the owned directory could rewrite the manifest itself. Verification is a
+    // gate on what the materializer claims, not a defense against a directory
+    // owner.
     try {
       writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
     } catch (err) {
@@ -708,6 +725,13 @@ type MaterializationVerification = Readonly<{ ok: true } | { ok: false; reason: 
 // regular file, and match the reported byte size exactly. Any deviation — an
 // absent report, an empty one, a malformed entry, a path outside the blob dir,
 // or a size mismatch — fails the generation.
+//
+// CONTAINMENT: statSync FOLLOWS symlinks, so a symlink planted inside blobs/
+// pointing outside would masquerade as a verified blob byte. Verification is
+// lstat + realpath based: the reported entry itself must be a regular file (a
+// symlink is refused outright), and its realpath must stay inside the blob
+// directory's OWN realpath — so neither a symlink inside blobs/ nor a symlinked
+// parent chain can launder a file outside the backup as a contained blob byte.
 function verifyMaterialization(
   generation: string,
   destBlobDir: string,
@@ -719,6 +743,15 @@ function verifyMaterialization(
   if (report.length === 0) {
     return { ok: false, reason: `materialize for ${generation} reported no files — its bytes were not written` };
   }
+  // Resolve the blob directory ONCE to its real path (it exists — the manager
+  // created it before materialize ran); every reported file must resolve
+  // inside it.
+  let realBlobDir: string;
+  try {
+    realBlobDir = realpathSync(destBlobDir);
+  } catch {
+    return { ok: false, reason: `materialize for ${generation} ran before the blob directory existed` };
+  }
   for (const entry of report) {
     if (!entry || typeof entry.name !== 'string' || typeof entry.size !== 'number' || !Number.isInteger(entry.size) || entry.size < 0) {
       return { ok: false, reason: `materialize for ${generation} reported a malformed file entry` };
@@ -727,9 +760,18 @@ function verifyMaterialization(
     if (name === '' || name === '.' || name === '..' || name.includes('/') || name.includes('\\') || path.isAbsolute(name)) {
       return { ok: false, reason: `materialize for ${generation} reported a path outside the blob directory` };
     }
+    const entryPath = path.join(destBlobDir, name);
     let stat: ReturnType<typeof statSync>;
     try {
-      stat = statSync(path.join(destBlobDir, name));
+      const link = lstatSync(entryPath);
+      if (link.isSymbolicLink()) {
+        return { ok: false, reason: `materialize for ${generation} reported a symlink, which cannot be a verified blob byte: ${name}` };
+      }
+      const resolved = realpathSync(entryPath);
+      if (resolved !== realBlobDir && !resolved.startsWith(realBlobDir + path.sep)) {
+        return { ok: false, reason: `materialize for ${generation} resolved outside the blob directory: ${name}` };
+      }
+      stat = statSync(resolved);
     } catch {
       return { ok: false, reason: `materialize for ${generation} reported a file that was not written: ${name}` };
     }
