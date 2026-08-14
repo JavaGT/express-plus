@@ -11,6 +11,28 @@
 import { readSeq as cursorReadSeq, type CursorDatabase } from './cursor.ts';
 import type { EventIdentityHandle } from './event-handle.ts';
 import { prepareCached, txn, type DbHandle } from './driver.ts';
+import { noHistoryReceiptTableDDL } from './no-history-receipt.ts';
+import { liveRevisionTableDDL } from './live-revision.ts';
+
+// The no-history lane (S3/A2) surfaces through this module alongside the
+// durable _Log/_ActionReceipt surfaces, so the boot DDL and the kernel have one
+// aggregate import. The minimized receipt and the per-resource revision are
+// owned by no-history-receipt.ts and live-revision.ts; this module only
+// aggregates their DDL into frameworkLogDDL() and re-exports their accessors.
+export {
+  noHistoryReceiptTableDDL,
+  insertNoHistoryReceipt,
+  noHistoryReceiptFor,
+  type NoHistoryReceipt,
+  type NoHistoryReceiptInput,
+} from './no-history-receipt.ts';
+export {
+  liveRevisionTableDDL,
+  bumpRevision,
+  readRevision,
+  guardExpectedRevision,
+  expectedRevisionConflict,
+} from './live-revision.ts';
 
 // ---- DDL ----
 
@@ -90,7 +112,18 @@ export function historyCursorTableDDL() {
 }
 
 export function frameworkLogDDL() {
-  return [logTableDDL(), logIndexDDL(), cursorTableDDL(), actionReceiptTableDDL(), committedRevisionTableDDL(), historyCursorTableDDL()];
+  return [
+    logTableDDL(),
+    logIndexDDL(),
+    cursorTableDDL(),
+    actionReceiptTableDDL(),
+    committedRevisionTableDDL(),
+    historyCursorTableDDL(),
+    // S3/A2 no-history lane: the minimized receipt + per-resource revision.
+    // Existing _Log/_ActionReceipt tables and their invariants are untouched.
+    noHistoryReceiptTableDDL(),
+    liveRevisionTableDDL(),
+  ];
 }
 
 // ---- read ----

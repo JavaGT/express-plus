@@ -21,7 +21,7 @@ export { everyone, never, anyOf, inherit, NonCompilableError, bindReadScope, row
 export { principal, anonymous, UnknownPrincipalTypeError, UnknownPrincipalStatusError, effectSource, statusOf, collapseForAdmission, isPrincipalStatus } from './principal.mjs';
 export { requireUser, allowAnonymous, isGate, resolveRouteGate, routeGateFor, ROUTE_VERBS } from './route-gate.mjs';
 export * as operations from './operation.mjs';
-export { action, event, createServer, createClient, durableMutationVariant, noAdmission, noBlobAdapter, NOW } from './pipeline.mjs';
+export { action, event, createServer, createClient, durableMutationVariant, liveMutationVariant, noAdmission, noBlobAdapter, NOW } from './pipeline.mjs';
 export { durableHistory, createDurableHistoryRuntime } from './durable-history.mjs';
 export { erasureDirective, erasureDirectivePreparation, prepareErasureDirective, applyErasureDirective, isErasureDirective, isErasureDirectivePreparation } from './erasure-directive.mjs';
 export { buildKernel, POST_COMMIT_CONSUMER_KINDS } from './kernel.mjs';
@@ -61,35 +61,35 @@ export {
   createBackupManager,
   BACKUP_FORMAT_VERSION,
   DEFAULT_RETENTION,
-                     
-                            
-                    
-                        
-                             
-                      
-                                  
-                        
-                    
-                     
-                  
-                              
+
+
+
+
+
+
+
+
+
+
+
+
 } from './backup.mjs';
 export {
   createRecycleManager,
   RECYCLE_FORMAT_VERSION,
   DEFAULT_RECYCLE_RETENTION_DAYS,
-                      
-                             
-                       
-                       
-                       
-                        
-                           
-                           
-                          
-                          
-                            
-                            
+
+
+
+
+
+
+
+
+
+
+
+
 } from './backup/recycle.mjs';
 export {
   createRecoveryManager,
@@ -97,18 +97,18 @@ export {
   parseRecoveryCliArgs,
   runRecoveryCli,
   RECOVERY_CLI_USAGE,
-                       
-                              
-                      
-                        
-                                  
-                              
-                           
-                     
-                       
-                      
-                      
-                           
-                         
-                       
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 } from './recovery.mjs';

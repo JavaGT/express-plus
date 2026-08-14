@@ -9,8 +9,30 @@
 // committedAt (ISO string). Per-scope seq is monotonic; PRIMARY KEY (scope, seq).
 
 import { readSeq as cursorReadSeq,                     } from './cursor.mjs';
-                                                             
+
 import { prepareCached, txn,               } from './driver.mjs';
+import { noHistoryReceiptTableDDL } from './no-history-receipt.mjs';
+import { liveRevisionTableDDL } from './live-revision.mjs';
+
+// The no-history lane (S3/A2) surfaces through this module alongside the
+// durable _Log/_ActionReceipt surfaces, so the boot DDL and the kernel have one
+// aggregate import. The minimized receipt and the per-resource revision are
+// owned by no-history-receipt.ts and live-revision.ts; this module only
+// aggregates their DDL into frameworkLogDDL() and re-exports their accessors.
+export {
+  noHistoryReceiptTableDDL,
+  insertNoHistoryReceipt,
+  noHistoryReceiptFor,
+
+
+} from './no-history-receipt.mjs';
+export {
+  liveRevisionTableDDL,
+  bumpRevision,
+  readRevision,
+  guardExpectedRevision,
+  expectedRevisionConflict,
+} from './live-revision.mjs';
 
 // ---- DDL ----
 
@@ -90,7 +112,18 @@ export function historyCursorTableDDL() {
 }
 
 export function frameworkLogDDL() {
-  return [logTableDDL(), logIndexDDL(), cursorTableDDL(), actionReceiptTableDDL(), committedRevisionTableDDL(), historyCursorTableDDL()];
+  return [
+    logTableDDL(),
+    logIndexDDL(),
+    cursorTableDDL(),
+    actionReceiptTableDDL(),
+    committedRevisionTableDDL(),
+    historyCursorTableDDL(),
+    // S3/A2 no-history lane: the minimized receipt + per-resource revision.
+    // Existing _Log/_ActionReceipt tables and their invariants are untouched.
+    noHistoryReceiptTableDDL(),
+    liveRevisionTableDDL(),
+  ];
 }
 
 // ---- read ----
@@ -275,69 +308,69 @@ export function retentionPrune(db          , cutoffIso        ) {
 
 // ---- shared shapes ----
 
-                                                                         
 
-                         
-                
-              
-                    
-                    
-                   
-                      
- 
 
-                                          
-                                       
- 
 
-                             
-                 
-               
-                     
-                     
-                    
-                       
- 
 
-                                
-                
-              
-               
-                 
-                   
-                      
- 
 
-                           
-                
-              
- 
 
-                                
-                
-                   
-                      
-                        
-                      
-                              
-                            
-                            
-                              
-                           
-                    
-                                     
-                                       
-                                
- 
 
-                                  
-                             
-                       
-                               
-                            
-                     
-                       
-                                      
-                                        
-                                 
- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

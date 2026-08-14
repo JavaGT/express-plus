@@ -21,7 +21,7 @@ export { everyone, never, anyOf, inherit, NonCompilableError, bindReadScope, row
 export { principal, anonymous, UnknownPrincipalTypeError, UnknownPrincipalStatusError, effectSource, statusOf, collapseForAdmission, isPrincipalStatus } from './principal.ts';
 export { requireUser, allowAnonymous, isGate, resolveRouteGate, routeGateFor, ROUTE_VERBS } from './route-gate.ts';
 export * as operations from './operation.ts';
-export { action, event, createServer, createClient, durableMutationVariant, noAdmission, noBlobAdapter, NOW } from './pipeline.ts';
+export { action, event, createServer, createClient, durableMutationVariant, liveMutationVariant, noAdmission, noBlobAdapter, NOW } from './pipeline.ts';
 export { durableHistory, createDurableHistoryRuntime } from './durable-history.ts';
 export { erasureDirective, erasureDirectivePreparation, prepareErasureDirective, applyErasureDirective, isErasureDirective, isErasureDirectivePreparation } from './erasure-directive.ts';
 export { buildKernel, POST_COMMIT_CONSUMER_KINDS } from './kernel.ts';

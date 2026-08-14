@@ -12,7 +12,7 @@
 
 // Lazy import of effect compiler (avoids circular dependency at module load time).
 import { readSeq } from './committed-log.ts';
-import { appendEvents, receiptFor, eventsFromReceipt, insertReceipt } from './committed-log.ts';
+import { appendEvents, receiptFor, eventsFromReceipt, insertReceipt, noHistoryReceiptFor, insertNoHistoryReceipt, bumpRevision, readRevision as readLiveRevision, guardExpectedRevision } from './committed-log.ts';
 import { lifecycleVerb, parseEventType } from './event-handle.ts';
 import { prepareCached, txn, type DbHandle, type DbStatement } from './driver.ts';
 import { isPlainObject, ValidationError } from './field-strategy.ts';
@@ -26,6 +26,7 @@ import { applyErasureDirective, isErasureDirective, isErasureDirectivePreparatio
 import { declarePostCommitEffectsInTxn } from './post-commit-effects.ts';
 import { protectedArtefactCapability } from './protected-artefact-store.ts';
 import type { AuthorizationAdapter } from './authorization-adapter.ts';
+import type { DataTier } from './live-tier.ts';
 
 // `action(type)` — declare an imperative request type. The handler that turns it
 // into events is attached later by the entity/dispatch wiring.
@@ -300,6 +301,247 @@ export function durableMutationVariant({
   return Object.freeze(variant);
 }
 
+// liveMutationVariant — the no-history mutation lane (S3/A2, #100).
+//
+// A live-tier entity's mutation must NOT quietly write every mutation into
+// `_Log` (that would preserve history despite the tier's purpose). This variant
+// runs the SAME in-txn row-change machinery as the durable variant — pre/post
+// admission, projection consumers that materialize the current row, in-txn blob
+// adoption, and effect recursion — but with the durable _Log append REPLACED by
+// the no-history core: bump the resource/collection revision, write the
+// MINIMIZED idempotency receipt, and never touch `_Log` or `_Cursor`. No `_Log`
+// row is ever produced for a live entity through this variant.
+//
+// The durable `_ActionReceipt` is also skipped for a live-only commit: it
+// retains the request payload, which the no-history receipt must not
+// (considerations #8/#9). The minimized `_NoHistoryReceipt` IS the idempotency
+// proof; a retried (scope, actionId) settles to the same outcome without a
+// second apply.
+//
+// The expected-revision guard is the S3/A6 hook surface: an edit may carry
+// `expectedRevision` in its request payload; a mismatch rejects the action with
+// a safe `conflict` classification before any row change lands — no blind
+// last-write-wins.
+//
+// All writes join the caller's write-coordinator transaction (BEGIN IMMEDIATE);
+// this variant never opens its own.
+export function liveMutationVariant({
+  projectionConsumers = [],
+  admission = noAdmission(),
+  blobAdapter = noBlobAdapter(),
+  effectsRegistry = null,
+  executeEffectsForEvent = null,
+  postCommitConsumers = [],
+  maxEffectDepth = 8,
+}: {
+  projectionConsumers?: any[];
+  admission?: {
+    beforeProjection: (context: any) => Promise<unknown>;
+    afterProjection: (context: any) => Promise<unknown>;
+  };
+  blobAdapter?: { adoptInTxn: (db: unknown, events: unknown[]) => Promise<unknown> };
+  effectsRegistry?: unknown;
+  executeEffectsForEvent?: unknown;
+  postCommitConsumers?: Array<(events: unknown, context: unknown) => Promise<unknown> | unknown>;
+  maxEffectDepth?: number;
+} = {}) {
+  if (!Number.isInteger(maxEffectDepth) || maxEffectDepth < 0) {
+    throw new Error('liveMutationVariant: maxEffectDepth must be a non-negative integer');
+  }
+  const effectsExecutor = effectEventsFor(effectsRegistry, executeEffectsForEvent);
+  const variant = {
+    name: 'live.mutation',
+    async applyInTxn(db: unknown, events: any[], {
+      now,
+      actionId,
+      principal,
+      depth = 0,
+      payload,
+      type,
+      scope: owningScope,
+      privateFact,
+      claimedBlobs,
+    }: {
+      now: string;
+      actionId: string;
+      principal: unknown;
+      depth?: number;
+      payload?: unknown;
+      type?: unknown;
+      scope?: unknown;
+      privateFact?: unknown;
+      claimedBlobs?: unknown;
+    }) {
+      // Retry backstop: an already-receipted (scope, actionId) never applies a
+      // second time — not even when the pre-handler dedupe missed (batch retry,
+      // effect re-entrancy). No row change, no revision bump, no receipt re-
+      // write; the existing receipt IS the settled outcome.
+      if (noHistoryReceiptFor(db as DbHandle, owningScope as string, actionId)) {
+        return [];
+      }
+
+      const finalizedEvents: any[] = [];
+
+      // Pre-projection admission — runs IN-TXN against the PRE-mutation row,
+      // before the row change and before the receipt. Denial leaves zero
+      // footprint, exactly as on the durable lane.
+      for (const e of events) {
+        const withHandle = eventWithParsedHandle(e);
+        const verb = lifecycleVerb(withHandle.handle);
+        if (!verb) continue;
+        requireAdmission(await admission.beforeProjection({
+          entityName: withHandle.handle.entity,
+          verb,
+          principal,
+          eventType: withHandle.type,
+          event: withHandle,
+          db,
+          now,
+          payload,
+        }));
+      }
+
+      // No-history sequence allocation: events carry a transaction-local seq so
+      // projections and consumers observe a monotonic per-scope order, but no
+      // `_Cursor` row is read or written — the durable sequence space is never
+      // consumed by a live entity.
+      const liveSeqs = new Map<string, number>();
+      const nextLiveSeq = (eventScope: string): number => {
+        const seq = (liveSeqs.get(eventScope) ?? 0) + 1;
+        liveSeqs.set(eventScope, seq);
+        return seq;
+      };
+      for (const e of events) {
+        const withHandle = eventWithParsedHandle(e);
+        const eventScope = withHandle.scope;
+        const data = resolveNowTokens(withHandle.data ?? {}, now);
+        const ev = { ...withHandle, data, seq: nextLiveSeq(eventScope), actionId, committedAt: now };
+        finalizedEvents.push(eventWithHandle(ev, withHandle.handle));
+      }
+
+      // Expected-revision guard (S3/A2 hook; the full atomic-op surface is
+      // S3/A6). Optimistic concurrency for the no-history lane: an edit may
+      // carry expectedRevision; a mismatch rejects the whole action with a safe
+      // classification before any row change lands — no blind last-write-wins.
+      const expectedRevision = isPlainObject(payload) ? (payload as Record<string, unknown>).expectedRevision : undefined;
+      if (expectedRevision !== undefined) {
+        const guardScope = finalizedEvents[0]?.scope ?? owningScope;
+        guardExpectedRevision(db as DbHandle, guardScope as string, expectedRevision);
+      }
+
+      // Projection consumers — materialize entity rows from the events. Batch
+      // commits use type '$batch'; admit a projection when its action is one of
+      // the submitted batch members (same event-type filter still applies).
+      const batchActionTypes = type === '$batch' && Array.isArray(payload)
+        ? new Set(payload.map((action) => action?.type).filter((value) => typeof value === 'string'))
+        : null;
+      for (const consumer of projectionConsumers) {
+        for (const ev of finalizedEvents) {
+          if (consumer.eventTypes.includes(ev.type)) {
+            if (consumer.actionType !== undefined && consumer.actionType !== type
+              && !(batchActionTypes?.has(consumer.actionType))) continue;
+            if (consumer.privateFact === true) {
+              if (privateFact === undefined) throw new TypeError('private-fact projection requires a canonical private fact');
+              consumer.apply(ev, db, Object.freeze({ privateFact, ...(claimedBlobs ? { claimedBlobs } : {}) }));
+            } else if (claimedBlobs) {
+              consumer.apply(ev, db, Object.freeze({ claimedBlobs }));
+            } else {
+              consumer.apply(ev, db);
+            }
+          }
+        }
+      }
+
+      // Blob adoption is in-txn and atomic with the projection + receipt writes.
+      await blobAdapter.adoptInTxn(db, finalizedEvents);
+
+      // Post-projection admission — runs IN-TXN after projection. Create
+      // row-grants need this deep visibility: the row exists only after the
+      // projection consumer has materialized it.
+      for (const ev of finalizedEvents) {
+        const verb = lifecycleVerb(ev.handle);
+        if (!verb) continue;
+        requireAdmission(await admission.afterProjection({
+          entityName: ev.handle.entity,
+          verb,
+          principal,
+          eventType: ev.type,
+          event: ev,
+          db,
+          now,
+          payload,
+        }));
+      }
+
+      // Effects recurse through this SAME named variant (identical depth
+      // semantics to the durable lane — ADR #6, #22).
+      if (effectsExecutor) {
+        for (const ev of finalizedEvents) {
+          const effectEvents = effectsExecutor(ev, { now, actionId, db });
+          if (effectEvents && effectEvents.length > 0) {
+            if (depth >= maxEffectDepth) {
+              throw new Error(
+                `Effect reentrancy depth limit exceeded (max: ${maxEffectDepth}). ` +
+                'This is a runtime backstop against runaway effect chains (ADR #22).',
+              );
+            }
+            const effectPrincipal = effectEvents[0]?._effectPrincipal ?? principal;
+            await variant.applyInTxn(db, effectEvents, {
+              now,
+              actionId,
+              principal: effectPrincipal,
+              depth: depth + 1,
+              payload,
+              type,
+              scope: owningScope,
+            });
+          }
+        }
+      }
+
+      // Revision bump per touched resource, then the minimized receipt. The
+      // receipt records the FIRST resource's key and THAT resource's new
+      // revision (single-resource actions are the live norm; multi-resource
+      // atomicity is the S3/A6 surface).
+      const touched = new Map<string, number>();
+      for (const ev of finalizedEvents) {
+        touched.set(ev.scope, bumpRevision(db as DbHandle, ev.scope));
+      }
+      const resourceKey = finalizedEvents[0]?.scope ?? (owningScope as string);
+      const committedRevision = touched.get(resourceKey) ?? readLiveRevision(db as DbHandle, resourceKey);
+      const actor = principal as { type?: unknown; id?: unknown } | null | undefined;
+      insertNoHistoryReceipt(db as DbHandle, {
+        scope: owningScope as string,
+        actionId,
+        resourceKey,
+        committedRevision,
+        outcome: 'committed',
+        actorType: typeof actor?.type === 'string' ? actor.type : null,
+        actorId: typeof actor?.id === 'string' ? actor.id : null,
+        safeErrorClassification: null,
+        committedAt: now,
+      });
+
+      return finalizedEvents;
+    },
+    requiresPrivateFact(events: any[], actionType: unknown) {
+      return projectionConsumers.some((consumer) => consumer.privateFact === true
+        && (consumer.actionType === undefined || consumer.actionType === actionType)
+        && events.some((event) => consumer.eventTypes.includes(event.type)));
+    },
+    async afterCommit(events: unknown, context: unknown) {
+      for (const consumer of postCommitConsumers) {
+        try {
+          await consumer(events, context);
+        } catch {
+          // a post-commit fan-out failure never undoes the committed dispatch
+        }
+      }
+    },
+  };
+  return Object.freeze(variant);
+}
+
 // createServer({ handlers, authorize, db, effects }) — the server-side mutation handler
 // (SPEC §7). It runs one pipeline for every action: dedupe by action id → run the
 // handler → authorize + assign each emitted event a per-scope monotonic sequence
@@ -423,6 +665,32 @@ function checkDurableBatchDedupe(db: unknown, scope: string, actionId: string, a
   return Object.freeze({ ...successOutcome(eventsFromReceipt(db as DbHandle, receipt, parseEventType), true), resultData: receipt.resultData });
 }
 
+// No-history lane dedupe (S3/A2): a retried (scope, actionId) reads its
+// minimized `_NoHistoryReceipt` and settles to the same outcome WITHOUT a
+// second apply. There are no stored events to replay — the no-history receipt
+// carries none by design — so the retry returns an empty event set plus the
+// receipt's committed revision as resultData.
+function checkLiveDedupe(db: unknown, scope: string, actionId: string) {
+  const receipt = noHistoryReceiptFor(db as DbHandle, scope, actionId);
+  if (!receipt) return null;
+  return Object.freeze({
+    ...successOutcome([], true),
+    resultData: Object.freeze({ actionId, resourceKey: receipt.resourceKey, committedRevision: receipt.committedRevision }),
+  });
+}
+
+// The stable event handle for tier routing. A handler-emitted event may be a
+// raw `{ type, ... }` with no attached handle — parse it; an unparseable type
+// yields undefined (treated as the durable lane, i.e. no live routing).
+function handleOfEvent(event: any): any {
+  if (event?.handle?.brand === 'event-handle') return event.handle;
+  try {
+    return parseEventType(event.type);
+  } catch {
+    return undefined;
+  }
+}
+
 // commitEvents — the durable transaction brace shared by `dispatch` and
 // `dispatchBatch`: BEGIN IMMEDIATE → durable variant applyInTxn → COMMIT →
 // post-commit fan-out, with ROLLBACK on execution error. Expected failures are
@@ -433,7 +701,7 @@ function checkDurableBatchDedupe(db: unknown, scope: string, actionId: string, a
 // the `payload` value stays per-caller. Throws non-403 errors after rolling back;
 // Post-commit delivery can no longer turn a committed mutation into a failure.
 async function commitEvents(db: any, events: any, {
-  now, actionId, principal, payload, pipeline, scope, type, authorize, historyCommit, handler,
+  now, actionId, principal, payload, pipeline, livePipeline, tierOfEvent, scope, type, authorize, historyCommit, handler,
   erasureActionContext, authorization,
 }: {
   now: string;
@@ -441,6 +709,8 @@ async function commitEvents(db: any, events: any, {
   principal: unknown;
   payload: unknown;
   pipeline: any;
+  livePipeline?: any;
+  tierOfEvent?: (handle: any) => DataTier | undefined;
   scope: string;
   type: unknown;
   authorize?: (context: any) => unknown | Promise<unknown>;
@@ -535,7 +805,26 @@ async function commitEvents(db: any, events: any, {
         throw new TypeError(`action '${type}' declares protected artefacts and must return a canonicalPayload without protected payloads`);
       }
 
-      const requirePrivateFact = pipeline.requiresPrivateFact?.(commit.events, type) ?? false;
+      // S3/A2 tier routing — split the commit's events by resolved entity tier.
+      // A `live`-tier event goes to the live (no-history) variant; everything
+      // else goes through the durable variant byte-for-byte. Without a live
+      // pipeline configured, every event takes the durable lane exactly as
+      // before — this routing is a no-op for existing servers. The result is
+      // reassembled in the handler's original emission order.
+      const partition = (commit.events as any[]).map((e, index) => {
+        const live = livePipeline !== undefined
+          && tierOfEvent !== undefined
+          && tierOfEvent(handleOfEvent(e)) === 'live';
+        return { e, index, live };
+      });
+      const durableBatch = partition.filter((p) => !p.live).map((p) => p.e);
+      const liveBatch = partition.filter((p) => p.live).map((p) => p.e);
+      if (directive !== undefined && liveBatch.length > 0) {
+        throw new TypeError(`action '${type}' returned an erasure directive for a live-tier entity — live entities have no undo history to erase`);
+      }
+
+      const requirePrivateFact = (pipeline.requiresPrivateFact?.(commit.events, type) ?? false)
+        || (livePipeline?.requiresPrivateFact?.(commit.events, type) ?? false);
       // Canonicalize and persist before any opted-in projection can observe the
       // fact. All writes remain inside this origin transaction.
       const privateFact = declarePostCommitEffectsInTxn(db, {
@@ -543,9 +832,28 @@ async function commitEvents(db: any, events: any, {
         effects: commit.effects, requirePrivateFact,
       });
       const canonicalPayload = commit.canonicalPayload ?? payload;
-      const result = await pipeline.applyInTxn(db, commit.events, {
-        now, actionId, nextSeq, principal, payload: canonicalPayload, type, scope, privateFact,
-        claimedBlobs: commit.claimedBlobs,
+      const durableResult = durableBatch.length > 0
+        ? await pipeline.applyInTxn(db, durableBatch, {
+          now, actionId, nextSeq, principal, payload: canonicalPayload, type, scope, privateFact,
+          claimedBlobs: commit.claimedBlobs,
+        })
+        : [];
+      const liveResult = liveBatch.length > 0
+        ? await livePipeline.applyInTxn(db, liveBatch, {
+          now, actionId, principal, payload: canonicalPayload, type, scope, privateFact,
+          claimedBlobs: commit.claimedBlobs,
+        })
+        : [];
+      // Reassemble the finalized events in the handler's original emission
+      // order (both variants preserve their sub-batch order).
+      const durableIndexes = partition.filter((p) => !p.live).map((p) => p.index);
+      const liveIndexes = partition.filter((p) => p.live).map((p) => p.index);
+      const result = (commit.events as any[]).map((_: any, index: number) => {
+        const livePosition = liveIndexes.indexOf(index);
+        if (livePosition !== -1) return liveResult[livePosition];
+        const durablePosition = durableIndexes.indexOf(index);
+        if (durablePosition !== -1) return durableResult[durablePosition];
+        return undefined;
       });
       const confirmedThrough = sequences.get(scope) ?? readSeq(db, scope);
       const resultData = commit.authoringReceipt
@@ -553,7 +861,11 @@ async function commitEvents(db: any, events: any, {
         : Object.freeze({ actionId, confirmedThrough });
       // The owning-stream action receipt (Wave 4.9): written atomically with
       // the events it references, so a retry's dedupe check and a crash
-      // recovery always see either both or neither.
+      // recovery always see either both or neither. A live-only commit SKIPS
+      // `_ActionReceipt` — it would retain the request payload, which the
+      // no-history lane must not (considerations #8/#9); the minimized
+      // `_NoHistoryReceipt` was written inside the live variant, atomically
+      // with the same commit.
       if (directive !== undefined) {
         const prepared = isErasureDirectivePreparation(directive) ? prepareErasureDirective(db, directive, { excludeActionId: actionId } as any) : directive;
         if (!isErasureDirective(prepared)) throw new TypeError(`action '${type}' returned an invalid erasure directive`);
@@ -563,16 +875,23 @@ async function commitEvents(db: any, events: any, {
         });
       }
       await historyCommit?.apply?.(db);
-      insertReceipt(db, scope, actionId, now, result, directive === undefined
-        ? {
-          ...historyCommit?.metadata,
-           actionType: type ?? historyCommit?.metadata?.actionType,
-             actionData: commit.canonicalPayload ?? historyCommit?.metadata?.actionData ?? payload,
-            resultData,
-            ...(commit.historyOutcome ? { historyOutcome: commit.historyOutcome } : {}),
-        }
-        : { actionType: type, actionData: { version: 1 }, operation: 'erasure' });
-      return Object.freeze({ events: result, resultData });
+      // A live-ONLY commit skips `_ActionReceipt` entirely — it would retain the
+      // request payload, which the no-history lane must not (considerations
+      // #8/#9); the minimized `_NoHistoryReceipt` was written inside the live
+      // variant, atomically with the same commit. Any commit that engages the
+      // durable lane (including a zero-event durable action) still writes it.
+      if (liveBatch.length === 0 || durableBatch.length > 0) {
+        insertReceipt(db, scope, actionId, now, durableResult, directive === undefined
+          ? {
+            ...historyCommit?.metadata,
+             actionType: type ?? historyCommit?.metadata?.actionType,
+               actionData: commit.canonicalPayload ?? historyCommit?.metadata?.actionData ?? payload,
+              resultData,
+              ...(commit.historyOutcome ? { historyOutcome: commit.historyOutcome } : {}),
+          }
+          : { actionType: type, actionData: { version: 1 }, operation: 'erasure' });
+      }
+      return Object.freeze({ events: result, resultData, durableEvents: durableResult, liveEvents: liveResult });
     });
   } catch (err) {
     const batchError = err as { [BATCH_HANDLER_FAILURE]?: boolean; error?: unknown; actionIndex?: number } | null | undefined;
@@ -586,8 +905,17 @@ async function commitEvents(db: any, events: any, {
     return executionFailure(err, { actionId });
   }
 
+  // Post-commit fan-out: the durable consumers see the durable events, the
+  // live consumers see the live events (a consumer that must observe BOTH tiers
+  // — e.g. the search-staleness seam — is wired into both pipelines). A
+  // fan-out failure never turns a committed mutation into a reported failure.
   try {
-    await pipeline.afterCommit(committed.events, { db, actionId });
+    await pipeline.afterCommit(committed.durableEvents, { db, actionId });
+  } catch (err) {
+    getLog().error('dispatch', 'post-commit delivery failed', { err, actionId });
+  }
+  try {
+    await livePipeline?.afterCommit?.(committed.liveEvents, { db, actionId });
   } catch (err) {
     getLog().error('dispatch', 'post-commit delivery failed', { err, actionId });
   }
@@ -619,11 +947,19 @@ function receiptMetadata(request: any, historyCommit: any) {
 // (AGENTS.md: never a magic default); omitting it is a load-time error. When
 // Phase 2 wires this kernel to a request path, `authorize` is where the route
 // gate + grant engine compose — it is not a second, looser auth path.
-export function createServer({ handlers = {}, authorize, db, pipeline = durableMutationVariant(), history, historyActions = {}, cursorPolicy, annotatedHistory, authorization }: {
+export function createServer({ handlers = {}, authorize, db, pipeline = durableMutationVariant(), livePipeline, tierOfEvent, history, historyActions = {}, cursorPolicy, annotatedHistory, authorization }: {
   handlers?: Record<string, any>;
   authorize?: (context: any) => any;
   db?: any;
   pipeline?: any;
+  // S3/A2 — the no-history mutation lane. `livePipeline` is a
+  // `liveMutationVariant()`; `tierOfEvent` resolves an event's handle to its
+  // live-data tier ('live' events route to the live pipeline, everything else
+  // through the durable pipeline). Both must be supplied together — a live
+  // pipeline without a resolver routes nothing, which would silently keep
+  // writing live entities into `_Log`.
+  livePipeline?: any;
+  tierOfEvent?: (handle: any) => DataTier | undefined;
   history?: any;
   historyActions?: Record<string, any>;
   cursorPolicy?: any;
@@ -640,6 +976,15 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
   }
   if (db && pipeline?.name !== 'durable.mutation') {
     throw new Error(`durable createServer requires the 'durable.mutation' pipeline variant.`);
+  }
+  if (livePipeline && livePipeline.name !== 'live.mutation') {
+    throw new Error(`live createServer requires the 'live.mutation' pipeline variant.`);
+  }
+  if (livePipeline && !db) {
+    throw new Error('live mutations require a durable database.');
+  }
+  if (livePipeline && !tierOfEvent) {
+    throw new Error(`live createServer requires a tierOfEvent resolver to route live-tier entities away from _Log.`);
   }
   if (history && !db) throw new Error('durable history requires a durable database');
   const authorizeFn = authorize as (context: any) => unknown;
@@ -832,6 +1177,13 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     // no _Log row to key on.
     const dedupe = checkDurableDedupe(db, scope, actionId, request, handler.dedupeReceiptMatches);
     if (dedupe) return dedupe;
+    // S3/A2 — a retried live-tier action settles via its minimized receipt
+    // (no second apply) before the handler re-runs. Mirrors the durable dedupe,
+    // reading the `_NoHistoryReceipt` table instead of `_ActionReceipt`.
+    if (livePipeline) {
+      const liveDedupe = checkLiveDedupe(db, scope, actionId);
+      if (liveDedupe) return liveDedupe;
+    }
 
     // Run the handler — events only, no DB writes (Fork A: entity-as-projection).
     // The handler may be sync or async.
@@ -853,7 +1205,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     // single-writer; BEGIN/COMMIT serialize writes.
     const now = new Date().toISOString();
     const committed = await commitEvents(db, emitted, {
-      now, actionId, principal, payload, pipeline, scope, type, authorize, historyCommit,
+      now, actionId, principal, payload, pipeline, livePipeline, tierOfEvent, scope, type, authorize, historyCommit,
       handler: handler.inTransaction || historyCommit?.handlerInputs ? handler : null, erasureActionContext,
       authorization,
     });
@@ -927,6 +1279,14 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     // same (scope, actionId) identity as `dispatch`, one grammar for both.
     const dedupe = checkDurableBatchDedupe(db, scope, actionId, actions);
     if (dedupe) return dedupe;
+    // S3/A2 — a retried live-tier batch settles via its minimized receipt.
+    // The receipt stores no envelope, so a reused actionId under the same scope
+    // always dedupes (idempotency contract: same actionId, same settled
+    // outcome); the durable batch's envelope fingerprint does not exist here.
+    if (livePipeline) {
+      const liveDedupe = checkLiveDedupe(db, scope, actionId);
+      if (liveDedupe) return liveDedupe;
+    }
 
     // Run every handler, concatenating their emitted events. Handlers are pure
     // (events only, no DB writes — Fork A), so the batch runs them in order and
@@ -993,7 +1353,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     // The receipt binds the entire submitted envelope, not merely its emitted
     // events. A retry must prove it is the same batch before deduping.
     const committed = await commitEvents(db, batchCommit, {
-      now, actionId, principal, payload: actions, pipeline, scope, type: '$batch', authorize, historyCommit,
+      now, actionId, principal, payload: actions, pipeline, livePipeline, tierOfEvent, scope, type: '$batch', authorize, historyCommit,
       handler: runInTxn ? runHandlers : null,
       authorization,
     });
