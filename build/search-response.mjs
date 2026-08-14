@@ -12,7 +12,9 @@
 //      its own health (S4/A1).
 //   2. BOUNDED LIMITS — a request's result bound is clamped to a hard cap (max
 //      results / page); nothing unbounded ever reaches the plugin (consideration
-//      #22).
+//      #22). The registry owns the window: a plugin is always invoked from
+//      offset 0 for the full span the caller's window needs, and the registry
+//      applies that window to the plugin's output exactly once.
 //   3. CANCELLATION + TIMEOUT — searchWithDeadline races a plugin's search
 //      against the caller's AbortSignal and a hard deadline, returning a closed
 //      cancelled/timed-out/completed outcome instead of a thrown state leak.
@@ -400,11 +402,16 @@ export function buildSearchResponse      (input                           )     
   });
   // Uniqueness invariant: two hits sharing a tie-break key make the ordering
   // non-deterministic (and pagination unstable) — reject fail-closed rather
-  // than silently return a non-total order.
-  for (let i = 1; i < ordered.length; i++) {
-    if (ordered[i].key === ordered[i - 1].key) {
-      throw new SearchDuplicateKeyError(`duplicate search tie-break key '${ordered[i].key}' in the response`);
+  // than silently return a non-total order. The check spans the FULL sorted
+  // list (a Set over keys), not just adjacent entries: equal keys at different
+  // ranks are never adjacent after sorting, so an adjacent-only scan would
+  // admit a duplicate whose copies sit at non-adjacent positions.
+  const seenKeys = new Set        ();
+  for (const entry of ordered) {
+    if (seenKeys.has(entry.key)) {
+      throw new SearchDuplicateKeyError(`duplicate search tie-break key '${entry.key}' in the response`);
     }
+    seenKeys.add(entry.key);
   }
   const hits = Object.freeze(ordered.map((entry) => Object.freeze({
     pluginId: input.pluginId,

@@ -626,4 +626,22 @@ describe('search authorization — composed response', () => {
     const closed = buildSearchResponse({ pluginId: 'x', generation: 0, staleness: 'rebuilding', error: 'denied' });
     assert.deepEqual(closed.hits, []);
   });
+
+  test('a duplicate tie-break key is rejected across the FULL sorted list, not just adjacent ranks', () => {
+    // After sorting by (rank, key) these hits order as dup@1, other@2, dup@3 —
+    // the duplicate copies are at ranks 1 and 3 with a different key between
+    // them, so an adjacent-only scan would miss them.
+    assert.throws(
+      () => buildSearchResponse({
+        pluginId: 'notes-fts', generation: 2, staleness: 'fresh',
+        hits: [
+          { key: 'dup', rank: 1, hit: { id: 'a' } },
+          { key: 'other', rank: 2, hit: { id: 'b' } },
+          { key: 'dup', rank: 3, hit: { id: 'c' } },
+        ],
+      }),
+      SearchDuplicateKeyError,
+      'a key duplicated at non-adjacent ranks must still reject fail-closed',
+    );
+  });
 });

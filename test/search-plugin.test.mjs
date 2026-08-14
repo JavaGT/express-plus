@@ -485,7 +485,7 @@ describe('search plugin registry — failure isolation', () => {
 // ---- S4/A6 search composition: bounds, cancellation, start-stamp -----------
 
 describe('search plugin registry — search composition', () => {
-  test('the registry bounds the plugin request and windows the plugin output (cap + page)', async () => {
+  test('the registry owns the window: the plugin is asked from offset 0 for the full span, and the output is sliced exactly once (cap + page)', async () => {
     let received = null;
     const registry = createSearchPluginRegistry();
     registry.register(makePlugin({
@@ -499,10 +499,53 @@ describe('search plugin registry — search composition', () => {
     // a page size past the cap is CLAMPED at the boundary, never honored
     const outcome = await registry.search('windowed', { page: 3, pageSize: 5000 });
     assert.equal(outcome.ok, true);
-    assert.equal(received.limit, SEARCH_MAX_PAGE_SIZE, 'the plugin was asked for the clamped window');
-    assert.equal(received.offset, 200);
+    assert.equal(received.offset, 0, 'the caller’s offset is never forwarded — the registry owns offsetting');
+    assert.equal(received.limit, 200 + SEARCH_MAX_PAGE_SIZE, 'the plugin is asked for the full span the window needs');
     assert.equal(outcome.result.hits.length, SEARCH_MAX_PAGE_SIZE, 'nothing beyond the page window escapes the registry');
     assert.equal(outcome.result.hits[0].id, 'n200');
+  });
+
+  test('a plugin that HONORS its request window is never double-windowed', async () => {
+    let received = null;
+    const registry = createSearchPluginRegistry();
+    registry.register(makePlugin({
+      id: 'honoring',
+      search: (_ctx, request) => {
+        received = request;
+        const all = Array.from({ length: 300 }, (_, i) => ({ id: `n${i}`, rank: i }));
+        // the plugin faithfully applies its received window (offset + limit)
+        return { hits: all.slice(request.offset ?? 0, (request.offset ?? 0) + request.limit) };
+      },
+    }));
+    await registry.rebuild('honoring');
+    const outcome = await registry.search('honoring', { page: 3, pageSize: 100 });
+    assert.equal(received.offset, 0, 'an offset-honoring plugin is only ever given offset 0, so no second window is possible');
+    assert.equal(received.limit, 300);
+    assert.equal(outcome.ok, true);
+    assert.equal(outcome.result.hits.length, 100);
+    assert.equal(outcome.result.hits[0].id, 'n200');
+    assert.equal(outcome.result.hits[99].id, 'n299');
+  });
+
+  test('a flat offset/limit window lands on the requested span without re-offsetting', async () => {
+    let received = null;
+    const registry = createSearchPluginRegistry();
+    registry.register(makePlugin({
+      id: 'flat-window',
+      search: (_ctx, request) => {
+        received = request;
+        const all = Array.from({ length: 200 }, (_, i) => ({ id: `n${i}`, rank: i }));
+        return { hits: all.slice(request.offset ?? 0, (request.offset ?? 0) + request.limit) };
+      },
+    }));
+    await registry.rebuild('flat-window');
+    const outcome = await registry.search('flat-window', { offset: 10, limit: 30 });
+    assert.equal(received.offset, 0);
+    assert.equal(received.limit, 40);
+    assert.equal(outcome.ok, true);
+    assert.equal(outcome.result.hits.length, 30);
+    assert.equal(outcome.result.hits[0].id, 'n10');
+    assert.equal(outcome.result.hits[29].id, 'n39');
   });
 
   test('a bound-less search is windowed to the default limit', async () => {

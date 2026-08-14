@@ -107,6 +107,12 @@ export const SUPPORTED_SEARCH_PLUGIN_CONTRACT_VERSION = 1;
                                
                           
                            
+                                                                              
+                                                                            
+                                                                             
+                                                                             
+                                                                          
+                                
                                                                                 
                                                                              
                                                                              
@@ -752,14 +758,17 @@ export function createSearchPluginRegistry(options                              
   async function search(id        , request               )                               {
     const entry = ledgerOf(id);
     // The S4/A6 search composition seam. The registry — never the plugin —
-    // owns bounded limits, cancellation/timeout, and the authoritative index
+    // owns the result window, cancellation/timeout, and the authoritative index
     // metadata:
     //   - START-STAMP: generation/fence/state are captured BEFORE the run. A
     //     search may take arbitrarily long; labeling old-index hits with
     //     post-await metadata would stamp them newer than they are.
-    //   - BOUNDED WINDOW: the request's result bound is clamped here and the
-    //     plugin's OUTPUT is windowed against it (cap + page window respected),
-    //     so nothing unbounded ever reaches or escapes the plugin.
+    //   - WINDOW (registry-owned, single application): the caller's clamped
+    //     window is applied to the plugin's OUTPUT exactly once, so nothing
+    //     unbounded ever escapes the plugin. The plugin is ALWAYS asked from
+    //     offset 0 for the full span the window needs (offset + limit) — the
+    //     caller's offset is never forwarded, so a plugin that honors its
+    //     request.offset can never have its output windowed a second time.
     //   - DEADLINE + ABORT: the run races the caller's signal and the hard
     //     deadline, so an uncooperative plugin can never hang the search; the
     //     plugin additionally receives the combined signal on its request so a
@@ -769,7 +778,7 @@ export function createSearchPluginRegistry(options                              
     const state = entry.state;
     const ctx = contextOf(id);
     const { offset, limit } = searchPageWindow(request);
-    const boundedRequest                = { ...request, offset, limit };
+    const boundedRequest                = { ...request, offset: 0, limit: offset + limit };
     try {
       const run = await searchWithDeadline(
         (signal) => entry.plugin.search(ctx, { ...boundedRequest, signal }),
