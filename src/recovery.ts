@@ -76,6 +76,8 @@ import path from 'node:path';
 import { frameworkTableNames } from './schema-table-census.ts';
 import { getLog } from './log.ts';
 import { createWriteQueue } from './write-queue.ts';
+import { MIGRATION_LEDGER_TABLE } from './migration-ledger.ts';
+import type { LedgerEntry } from './migration-ledger.ts';
 import type {
   BackupWriteCoordinator,
   BackupManifest,
@@ -104,12 +106,18 @@ const RECOVERY_MANAGED_SUBDIRECTORIES = Object.freeze(['blobs', 'staging', 'back
 // this prefix in the owned directory means a restore crashed mid-swap.
 const STAGE_PREFIX = 'data.sqlite.recovering-';
 
-// The two DECLARED migration ledger table names (kept in sync with backup.ts's
-// APP_LEDGER/WORKBENCH_LEDGER). These are the ONLY names a restore accepts:
-// they are interpolated into SQL, and the manifest is untrusted input, so a
-// manifest-chosen table name is refused (review #83).
-const WORKBENCH_LEDGER = '_WorkbenchMigration';
-const APP_LEDGER = '_Migration';
+// The ONE DECLARED migration ledger table name (kept in sync with backup.ts's
+// manifest type and migration-ledger.ts's MIGRATION_LEDGER_TABLE). This is the
+// ONLY name a restore accepts: it is interpolated into SQL, and the manifest is
+// untrusted input, so a manifest-chosen table name is refused (review #83).
+const MIGRATION_LEDGER = MIGRATION_LEDGER_TABLE;
+
+// Ordering for the namespaced ledger's applied versions: namespace (string) then
+// version (numeric) — the same (namespace, version) order backup.ts records.
+function compareLedgerEntry(a: LedgerEntry, b: LedgerEntry): number {
+  if (a.namespace !== b.namespace) return a.namespace < b.namespace ? -1 : 1;
+  return a.version - b.version;
+}
 
 // Upper bound on error messages persisted in diagnostics / logged (review #82
 // finding 4 policy): stage + identifier + a short sanitized reason, never row
@@ -772,28 +780,35 @@ export function createRecoveryManager(options: RecoveryManagerOptions): Recovery
 
   function validateLedgerShape(ledger: Partial<BackupMigrationLedgerState>): string[] {
     const failures: string[] = [];
-    for (const key of ['app', 'workbench'] as const) {
-      const lane = ledger[key];
-      if (!lane || typeof lane !== 'object') {
-        failures.push(`migration ledger '${key}' is missing`);
-        continue;
-      }
-      // The ledger table names are interpolated into SQL when the snapshot is
-      // validated — the two DECLARED names only, never a manifest-chosen table
-      // (review #83). The SQL seam itself re-enforces this before building any
-      // statement; this shape check rejects other names up front.
-      if (typeof lane.table !== 'string' || lane.table.length === 0) {
-        failures.push(`migration ledger '${key}' table is not a string`);
-      } else if (lane.table !== (key === 'app' ? APP_LEDGER : WORKBENCH_LEDGER)) {
-        failures.push(
-          `migration ledger '${key}' declares an unsupported ledger table '${lane.table}' — only '${APP_LEDGER}' and '${WORKBENCH_LEDGER}' are restored`,
-        );
-      }
-      if (typeof lane.maxVersion !== 'number' || !Number.isSafeInteger(lane.maxVersion)) {
-        failures.push(`migration ledger '${key}' maxVersion is not an integer`);
-      }
-      if (!Array.isArray(lane.appliedVersions)) {
-        failures.push(`migration ledger '${key}' appliedVersions is not an array`);
+    // The ledger table name is interpolated into SQL when the snapshot is
+    // validated — the ONE DECLARED name only, never a manifest-chosen table
+    // (review #83). The SQL seam itself re-enforces this before building any
+    // statement; this shape check rejects other names up front.
+    if (typeof ledger.table !== 'string' || ledger.table.length === 0) {
+      failures.push('migration ledger table is not a string');
+    } else if (ledger.table !== MIGRATION_LEDGER) {
+      failures.push(
+        `migration ledger declares an unsupported ledger table '${ledger.table}' — only '${MIGRATION_LEDGER}' is restored`,
+      );
+    }
+    if (typeof ledger.maxVersion !== 'number' || !Number.isSafeInteger(ledger.maxVersion)) {
+      failures.push('migration ledger maxVersion is not an integer');
+    }
+    if (!Array.isArray(ledger.appliedVersions)) {
+      failures.push('migration ledger appliedVersions is not an array');
+    } else {
+      for (const entry of ledger.appliedVersions) {
+        if (!entry || typeof entry !== 'object') {
+          failures.push('migration ledger appliedVersions contains a non-object entry');
+        } else {
+          if (typeof (entry as { namespace?: unknown }).namespace !== 'string') {
+            failures.push('migration ledger appliedVersions entry is missing a string namespace');
+          }
+          const version = (entry as { version?: unknown }).version;
+          if (typeof version !== 'number' || !Number.isSafeInteger(version) || version <= 0) {
+            failures.push('migration ledger appliedVersions entry is missing a positive integer version');
+          }
+        }
       }
     }
     return failures;
@@ -801,24 +816,25 @@ export function createRecoveryManager(options: RecoveryManagerOptions): Recovery
 
   function validateLedgerConsistency(ledger: BackupMigrationLedgerState): string[] {
     const failures: string[] = [];
-    for (const key of ['app', 'workbench'] as const) {
-      const lane = ledger[key];
-      if (!lane) continue;
-      const versions = lane.appliedVersions;
-      if (!Array.isArray(versions)) continue;
-      let previous = Number.NEGATIVE_INFINITY;
-      for (const version of versions) {
-        if (!Number.isInteger(version)) {
-          failures.push(`migration ledger '${key}' records a non-integer applied version ${JSON.stringify(version)}`);
-        } else if (version <= previous) {
-          failures.push(`migration ledger '${key}' appliedVersions is not strictly ascending (duplicate or out of order)`);
-        }
-        previous = version;
+    const versions = ledger.appliedVersions;
+    if (!Array.isArray(versions)) return failures;
+    let previous: LedgerEntry | null = null;
+    for (const entry of versions) {
+      if (!entry || typeof entry !== 'object' || typeof entry.namespace !== 'string' || !Number.isInteger(entry.version)) {
+        failures.push('migration ledger records a malformed applied version');
+        continue;
       }
-      const max = versions.length > 0 ? versions[versions.length - 1] : 0;
-      if (lane.maxVersion !== max) {
-        failures.push(`migration ledger '${key}' maxVersion ${lane.maxVersion} does not match the highest applied version ${max}`);
+      if (previous !== null && compareLedgerEntry(previous, entry) >= 0) {
+        failures.push('migration ledger appliedVersions is not strictly ascending by (namespace, version) (duplicate or out of order)');
       }
+      previous = { namespace: entry.namespace, version: entry.version };
+    }
+    const max = versions.reduce((highest, entry) => {
+      const version = typeof entry === 'object' && entry !== null ? (entry as { version?: unknown }).version : undefined;
+      return typeof version === 'number' && version > highest ? version : highest;
+    }, 0);
+    if (typeof ledger.maxVersion === 'number' && ledger.maxVersion !== max) {
+      failures.push(`migration ledger maxVersion ${ledger.maxVersion} does not match the highest applied version ${max}`);
     }
     return failures;
   }
@@ -1368,39 +1384,32 @@ function schemaIdentityOf(db: DatabaseSync): { platformSchemaIdentity: string; a
   const platformTables = frameworkTableNames.filter((name) => sqlByName.has(name)).slice().sort();
   const platformSchemaIdentity = sha256hex(platformTables.map((name) => `${name}:${sqlByName.get(name)!}`).join('\n'));
   const appSchemaIdentity = rows
-    .filter((row) => !framework.has(row.name) && row.name !== WORKBENCH_LEDGER)
+    .filter((row) => !framework.has(row.name) && row.name !== MIGRATION_LEDGER)
     .map((row) => `${row.name}:${sha256hex(row.sql)}`)
     .sort();
   return { platformSchemaIdentity, appSchemaIdentity };
 }
 
 // Recompute the migration ledger that EXISTS in a snapshot using the table
-// names the manifest recorded (never assuming a fresh reset). SECURITY (review
-// #83): the manifest is untrusted input and these names are interpolated into
-// SQL, so the two DECLARED ledger table names are enforced before any statement
+// name the manifest recorded (never assuming a fresh reset). SECURITY (review
+// #83): the manifest is untrusted input and this name is interpolated into
+// SQL, so the ONE DECLARED ledger table name is enforced before any statement
 // is built — a manifest-chosen table is a validation failure, never SQL.
 function migrationLedgerOf(db: DatabaseSync, manifest: BackupManifest): BackupMigrationLedgerState {
-  const appTable = manifest.migrationLedgerState.app?.table ?? APP_LEDGER;
-  const workbenchTable = manifest.migrationLedgerState.workbench?.table ?? WORKBENCH_LEDGER;
-  if (appTable !== APP_LEDGER) {
-    throw new Error(`manifest declares an unsupported app migration ledger table '${appTable}' — only '${APP_LEDGER}' is restored`);
-  }
-  if (workbenchTable !== WORKBENCH_LEDGER) {
+  const declaredTable = manifest.migrationLedgerState?.table ?? MIGRATION_LEDGER;
+  if (declaredTable !== MIGRATION_LEDGER) {
     throw new Error(
-      `manifest declares an unsupported workbench migration ledger table '${workbenchTable}' — only '${WORKBENCH_LEDGER}' is restored`,
+      `manifest declares an unsupported migration ledger table '${declaredTable}' — only '${MIGRATION_LEDGER}' is restored`,
     );
   }
-  const hasTable = (name: string) => Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
-  const versionsOf = (table: string): { appliedVersions: number[]; maxVersion: number } => {
-    if (!hasTable(table)) return { appliedVersions: [], maxVersion: 0 };
-    const rows = db.prepare(`SELECT version FROM ${table} ORDER BY version`).all() as Array<{ version: number }>;
-    const appliedVersions = rows.map((row) => Number(row.version));
-    return { appliedVersions, maxVersion: appliedVersions.length ? appliedVersions[appliedVersions.length - 1] : 0 };
-  };
-  return {
-    app: { table: APP_LEDGER, ...versionsOf(APP_LEDGER) },
-    workbench: { table: WORKBENCH_LEDGER, ...versionsOf(WORKBENCH_LEDGER) },
-  };
+  const hasTable = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(MIGRATION_LEDGER));
+  if (!hasTable) return { table: MIGRATION_LEDGER, appliedVersions: [], maxVersion: 0 };
+  const rows = db
+    .prepare(`SELECT namespace, version FROM ${MIGRATION_LEDGER} ORDER BY namespace, version`)
+    .all() as Array<{ namespace: string; version: number }>;
+  const appliedVersions = rows.map((row) => ({ namespace: row.namespace, version: Number(row.version) }));
+  const maxVersion = appliedVersions.reduce((max, entry) => Math.max(max, entry.version), 0);
+  return { table: MIGRATION_LEDGER, appliedVersions, maxVersion };
 }
 
 // ---- CLI ------------------------------------------------------------------

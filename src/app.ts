@@ -41,7 +41,7 @@ import {
 } from './sqlite-adapter.ts';
 import type { DbAdapterConfig, OpenedDatabase, ReadMirrorDescription } from './db-adapter.ts';
 import { executeDDL, executeFrameworkDDL, generateSideTableDDL, generatedIndexNames } from './ddl.ts';
-import { runMigrations } from './migrations.ts';
+import { runMigrations, validateMigrations } from './migrations.ts';
 import { runWorkbenchMigrations } from './workbench-migrations.ts';
 import { validateSchemaOwnedEntityTable } from './schema-entity-validation.ts';
 import { frameworkTableNames, declaredTableNames } from './schema-table-census.ts';
@@ -363,12 +363,13 @@ export default function workbench({
     if (schema !== undefined && (!schema || typeof schema.prepare !== 'function' || !Array.isArray(schema.tables))) {
       throw new TypeError('schema must be a SqliteSchemaResult');
     }
-    const allMigrations = [...(schema?.migrations ?? []), ...migrations].sort((a, b) => a.version - b.version);
-    for (let index = 1; index < allMigrations.length; index += 1) {
-      if (allMigrations[index - 1].version === allMigrations[index].version) {
-        throw new Error(`duplicate migration version ${allMigrations[index].version} across schema and application migrations`);
-      }
-    }
+    // Namespaced migrations (S2/A4, workbench#90): schema-declared and
+    // app-declared migrations share the (namespace, version) ledger; two
+    // namespaces may use the same version. validateMigrations fails closed on
+    // reserved-namespace impersonation, duplicates, gaps, and dependency
+    // syntax before any DDL or migration executes.
+    const declaredMigrations = [...migrations, ...(schema?.migrations ?? [])];
+    validateMigrations(declaredMigrations);
 
     const declarationsByName = new Map();
     const bindingsByDeclaration = new Map();
@@ -666,7 +667,7 @@ export default function workbench({
     // Versioned schema migrations (eng-review spec #9, #17). Declared at
     // construction; run at startup pre-traffic during schema preparation AFTER the
     // entity tables exist, so each `up` may ALTER/backfill them. One migration txn
-    // = (DDL + meta-version bump) atomic; see src/migrations.mjs.
+    // = (DDL + namespaced ledger-record bump) atomic; see src/migration-ledger.mjs.
     app.migrations = migrations;
 
     // Static accessor for the router constructor, so exemplars may write
@@ -745,10 +746,10 @@ export default function workbench({
             }
           }
           // Migrations run last, pre-traffic, after every entity table exists. Each
-          // is its own transaction (DDL + meta-version bump atomic). Runs only when
-          // declared — an app with no migrations is untouched (no _Migration table).
+          // is its own transaction (DDL + ledger-record bump atomic). Runs only when
+          // declared — an app with no migrations is untouched (no ledger table).
           await runWorkbenchMigrations(app.db);
-          if (allMigrations.length) runMigrations(app.db, allMigrations);
+          if (declaredMigrations.length) runMigrations(app.db, declaredMigrations);
           if (schema) schema.prepare(app.db, { skipMigrations: true });
           for (const entity of app.entities.values()) {
             const declaration = schemaTables.get(entity.name.toLowerCase());

@@ -107,7 +107,18 @@ export type CancelJobResult = JobRow | { terminal: true } | { forbidden: true } 
 // ---------------------------------------------------------------------------
 
 export interface Migration {
+  /** Per-namespace migration ledger identity (S2/A4 namespaced ledger, #90). */
+  namespace: string;
+  /** Human-readable migration name, unique per namespace. */
+  name: string;
+  /** Positive version; identity is the (namespace, version) pair. */
   version: number;
+  /** Cross-namespace dependencies, e.g. `"workbench@5"`. */
+  dependencies?: readonly string[];
+  /** Pinned immutable fingerprint; when absent the runner derives one from `up`. */
+  checksum?: string;
+  /** The package/app version that supplied this migration. */
+  suppliedBy?: string;
   up(db: WorkbenchDatabase): void;
 }
 
@@ -463,13 +474,7 @@ export interface TableDeclaration {
   triggers?: readonly TriggerDeclaration[];
 }
 
-export interface NamespacedMigration extends Migration {
-  /** Per-namespace migration ledger identity (A4 owns the runtime). */
-  namespace: string;
-  name: string;
-  /** Cross-namespace dependencies, e.g. `"workbench@5"`. */
-  dependencies?: readonly string[];
-}
+export interface NamespacedMigration extends Migration {}
 
 export interface SqliteSchemaResult {
   readonly name: string;
@@ -705,7 +710,7 @@ export function createBlobStore(options: {
 export function runMigrations(
   db: WorkbenchDatabase,
   migrations?: Migration[],
-  options?: { now?: () => string },
+  options?: { now?: () => string; suppliedBy?: string },
 ): void;
 
 // ---------------------------------------------------------------------------

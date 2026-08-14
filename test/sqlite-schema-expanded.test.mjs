@@ -503,7 +503,7 @@ test('shadow tables are not cross-checked against external declarations (A2 cens
   assert.deepEqual(schema.virtualTables[0].shadowTables, ['proj']);
 });
 
-test('prepare fails closed on cross-namespace version collisions under the legacy global ledger', () => {
+test('prepare fails closed when a schema migration impersonates the reserved workbench namespace', () => {
   let ran = 0;
   const schema = defineSqliteSchema({
     name: 'collide',
@@ -517,8 +517,8 @@ test('prepare fails closed on cross-namespace version collisions under the legac
   try {
     assert.throws(
       () => schema.prepare(db),
-      /version 5 in namespaces "workbench" and "app".*legacy global migration ledger.*#90/,
-      'prepare refuses the legacy-ledger version collision',
+      /reserved namespace "workbench".*only the Workbench package may own it/,
+      'prepare refuses reserved-namespace impersonation (the same version in two namespaces is otherwise legitimate under the namespaced ledger)',
     );
     assert.equal(ran, 0, 'no migration executed');
     assert.equal(
@@ -527,7 +527,7 @@ test('prepare fails closed on cross-namespace version collisions under the legac
       'no table DDL executed before the refusal',
     );
     assert.equal(
-      db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_Migration'").get(),
+      db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_SchemaMigration'").get(),
       undefined,
       'migration ledger not touched',
     );
@@ -536,7 +536,7 @@ test('prepare fails closed on cross-namespace version collisions under the legac
   }
 });
 
-test('prepare({ skipMigrations: true }) still refuses cross-namespace version collisions under the legacy global ledger', () => {
+test('prepare({ skipMigrations: true }) still refuses reserved-namespace impersonation', () => {
   let ran = 0;
   const schema = defineSqliteSchema({
     name: 'collide-skip',
@@ -550,8 +550,8 @@ test('prepare({ skipMigrations: true }) still refuses cross-namespace version co
   try {
     assert.throws(
       () => schema.prepare(db, { skipMigrations: true }),
-      /version 5 in namespaces "workbench" and "app".*legacy global migration ledger.*#90/,
-      'prepare with skipMigrations still refuses the legacy-ledger version collision',
+      /reserved namespace "workbench".*only the Workbench package may own it/,
+      'prepare with skipMigrations still refuses reserved-namespace impersonation',
     );
     assert.equal(ran, 0, 'no migration executed');
     assert.equal(
@@ -560,7 +560,7 @@ test('prepare({ skipMigrations: true }) still refuses cross-namespace version co
       'no table DDL executed before the refusal',
     );
     assert.equal(
-      db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_Migration'").get(),
+      db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_SchemaMigration'").get(),
       undefined,
       'migration ledger not touched',
     );
@@ -569,23 +569,26 @@ test('prepare({ skipMigrations: true }) still refuses cross-namespace version co
   }
 });
 
-test('namespaced migrations with distinct versions still run under the legacy global ledger', () => {
+test('namespaced migrations with distinct versions still run under the namespaced ledger', () => {
   const applied = [];
   const schema = defineSqliteSchema({
     name: 'non-colliding',
     tables: [],
     migrations: [
-      { namespace: 'workbench', name: 'a', version: 4, up(db) { applied.push('a'); db.exec('CREATE TABLE IF NOT EXISTS A (id TEXT PRIMARY KEY)'); } },
+      { namespace: 'schema', name: 'a', version: 4, up(db) { applied.push('a'); db.exec('CREATE TABLE IF NOT EXISTS A (id TEXT PRIMARY KEY)'); } },
       { namespace: 'app', name: 'b', version: 6, up(db) { applied.push('b'); db.exec('CREATE TABLE IF NOT EXISTS B (id TEXT PRIMARY KEY)'); } },
     ],
   });
   const db = new DatabaseSync(':memory:');
   try {
     schema.prepare(db);
-    assert.deepEqual(applied, ['a', 'b']);
+    // Independent migrations in different namespaces run in deterministic
+    // (namespace, version) order — the dependency graph defines order, never a
+    // global integer list (workbench#90).
+    assert.deepEqual(applied, ['b', 'a']);
     assert.deepEqual(
-      db.prepare('SELECT version FROM _Migration ORDER BY version').all().map((row) => row.version),
-      [4, 6],
+      db.prepare('SELECT namespace, version FROM _SchemaMigration ORDER BY namespace, version').all().map((row) => `${row.namespace}@${row.version}`),
+      ['app@6', 'schema@4'],
     );
   } finally {
     db.close();

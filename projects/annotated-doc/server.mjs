@@ -302,10 +302,10 @@ export function createAnnotatedDocApp({ db = DB_PATH } = {}) {
     db,
      entities: [Project, Comment, Code, Doc],
     migrations: [
-      { version: 1, up: migrateCommentColors },
-      { version: 2, up: migrateAnnotationFamilies },
-      { version: 3, up: migrateSensitiveFamily },
-      { version: 4, up: migrateCodeFamily },
+      { namespace: 'annotated-doc', name: 'comment-colors', version: 1, up: migrateCommentColors },
+      { namespace: 'annotated-doc', name: 'annotation-families', version: 2, up: migrateAnnotationFamilies },
+      { namespace: 'annotated-doc', name: 'sensitive-family', version: 3, up: migrateSensitiveFamily },
+      { namespace: 'annotated-doc', name: 'code-family', version: 4, up: migrateCodeFamily },
     ],
   });
   const principalOf = principalOfFromRequest;

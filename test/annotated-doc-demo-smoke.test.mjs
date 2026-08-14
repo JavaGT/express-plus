@@ -21,7 +21,7 @@ test('annotated-doc migration adds a color for legacy comments', async (t) => {
   const initial = createAnnotatedDocApp({ db });
   await initial.app.prepareSchema();
   db.exec(`
-    DROP TABLE _Migration;
+    DROP TABLE _SchemaMigration;
     DROP TABLE Doc_body_annotation_comment;
     CREATE TABLE Doc_body_annotation_comment (
       annotation_id TEXT PRIMARY KEY,
@@ -42,7 +42,7 @@ test('annotated-doc migration rebuilds the annotation family CHECK to include se
   const initial = createAnnotatedDocApp({ db });
   await initial.app.prepareSchema();
   db.exec(`
-    DROP TABLE _Migration;
+    DROP TABLE _SchemaMigration;
     DROP TABLE Doc_body_annotation;
     CREATE TABLE Doc_body_annotation (
       id TEXT PRIMARY KEY,

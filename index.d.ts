@@ -1488,7 +1488,21 @@ export interface WorkbenchOptions {
     anchor: { entity: string; id: string; row: Record<string, unknown> },
   ) => unknown | Promise<unknown>;
   history?: DurableHistoryDescriptor;
-  migrations?: readonly Readonly<{ version: number; up(db: WorkbenchDatabase): void }>[];
+  migrations?: readonly Readonly<{
+    /** Per-namespace migration ledger identity (S2/A4 namespaced ledger, #90). */
+    namespace: string;
+    /** Human-readable migration name, unique per namespace. */
+    name: string;
+    /** Positive version; identity is the (namespace, version) pair. */
+    version: number;
+    /** Cross-namespace dependencies, e.g. `"workbench@5"`. */
+    dependencies?: readonly string[];
+    /** Pinned immutable fingerprint; when absent the runner derives one from `up`. */
+    checksum?: string;
+    /** The package/app version that supplied this migration. */
+    suppliedBy?: string;
+    up(db: WorkbenchDatabase): void;
+  }>[];
   jobs?: Readonly<Record<string, unknown>>;
   blobs?: Readonly<Record<string, unknown>>;
   log?: Readonly<Record<string, unknown>>;

@@ -92,6 +92,8 @@ export const SEARCH_INDEX_KIND = 'search-index';
 // schema beyond mounted entities (src/migrations.mjs).
 export const searchIndexMigrations = [
   {
+    namespace: 'search',
+    name: 'post-search-index',
     version: 1,
     up: (db) => db.exec(
       `CREATE TABLE IF NOT EXISTS PostSearchIndex (

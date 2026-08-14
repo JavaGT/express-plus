@@ -61,6 +61,7 @@ import { frameworkTableNames } from './schema-table-census.ts';
 import { getLog } from './log.ts';
 import type { DbHandle } from './driver.ts';
 import type { IntegrityFinding, IntegrityReport } from './db-adapter.ts';
+import { MIGRATION_LEDGER_TABLE, type LedgerEntry } from './migration-ledger.ts';
 
 export const BACKUP_FORMAT_VERSION = 1 as const;
 
@@ -102,17 +103,14 @@ export type BackupBlobSource = {
   ): Promise<readonly MaterializedBlobFile[]> | readonly MaterializedBlobFile[];
 };
 
+// The namespaced migration ledger state captured in a backup manifest (S2/A4,
+// workbench#90): ONE namespaced lane — identity is (namespace, version) — not
+// the two legacy global tables. `appliedVersions` is ordered by (namespace,
+// version); `maxVersion` is the highest integer version across namespaces.
 export type BackupMigrationLedgerState = {
-  readonly app: {
-    readonly table: '_Migration';
-    readonly appliedVersions: readonly number[];
-    readonly maxVersion: number;
-  };
-  readonly workbench: {
-    readonly table: '_WorkbenchMigration';
-    readonly appliedVersions: readonly number[];
-    readonly maxVersion: number;
-  };
+  readonly table: typeof MIGRATION_LEDGER_TABLE;
+  readonly appliedVersions: readonly LedgerEntry[];
+  readonly maxVersion: number;
 };
 
 // The concretely enumerated manifest fields (issue #82 spec §2). `encryption`
@@ -242,8 +240,7 @@ export type BackupManager = {
 // so the name is filesystem-friendly on every platform.
 const BACKUP_NAME = /^(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}Z)-([0-9a-f]+)$/;
 
-const WORKBENCH_LEDGER = '_WorkbenchMigration';
-const APP_LEDGER = '_Migration';
+const MIGRATION_LEDGER = MIGRATION_LEDGER_TABLE;
 
 // The framework blob-metadata ledger. Its presence in a schema means the source
 // is blob-capable: adopted blob generations MAY exist, so a backup without a
@@ -885,22 +882,19 @@ function schemaIdentityOf(db: DatabaseSync): { platformSchemaIdentity: string; a
   const platformTables = frameworkTableNames.filter((name) => sqlByName.has(name)).slice().sort();
   const platformSchemaIdentity = sha256hex(platformTables.map((name) => `${name}:${sqlByName.get(name)!}`).join('\n'));
   const appSchemaIdentity = rows
-    .filter((row) => !framework.has(row.name) && row.name !== WORKBENCH_LEDGER)
+    .filter((row) => !framework.has(row.name) && row.name !== MIGRATION_LEDGER)
     .map((row) => `${row.name}:${sha256hex(row.sql)}`)
     .sort();
   return { platformSchemaIdentity, appSchemaIdentity };
 }
 
 function migrationLedgerOf(db: DatabaseSync): BackupMigrationLedgerState {
-  const hasTable = (name: string) => Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
-  const versionsOf = (table: string): { appliedVersions: number[]; maxVersion: number } => {
-    if (!hasTable(table)) return { appliedVersions: [], maxVersion: 0 };
-    const rows = db.prepare(`SELECT version FROM ${table} ORDER BY version`).all() as Array<{ version: number }>;
-    const appliedVersions = rows.map((row) => Number(row.version));
-    return { appliedVersions, maxVersion: appliedVersions.length ? appliedVersions[appliedVersions.length - 1] : 0 };
-  };
-  return {
-    app: { table: APP_LEDGER, ...versionsOf(APP_LEDGER) },
-    workbench: { table: WORKBENCH_LEDGER, ...versionsOf(WORKBENCH_LEDGER) },
-  };
+  const hasTable = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(MIGRATION_LEDGER));
+  if (!hasTable) return { table: MIGRATION_LEDGER, appliedVersions: [], maxVersion: 0 };
+  const rows = db
+    .prepare(`SELECT namespace, version FROM ${MIGRATION_LEDGER} ORDER BY namespace, version`)
+    .all() as Array<{ namespace: string; version: number }>;
+  const appliedVersions = rows.map((row) => ({ namespace: row.namespace, version: Number(row.version) }));
+  const maxVersion = appliedVersions.reduce((max, entry) => Math.max(max, entry.version), 0);
+  return { table: MIGRATION_LEDGER, appliedVersions, maxVersion };
 }

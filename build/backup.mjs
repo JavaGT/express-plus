@@ -59,12 +59,13 @@ import {
 import path from 'node:path';
 import { frameworkTableNames } from './schema-table-census.mjs';
 import { getLog } from './log.mjs';
-                                            
-                                                                         
+
+
+import { MIGRATION_LEDGER_TABLE,                  } from './migration-ledger.mjs';
 
 export const BACKUP_FORMAT_VERSION = 1         ;
 
-                                                                                        
+
 
 export const DEFAULT_RETENTION                                  = Object.freeze({
   daily: 7,
@@ -92,28 +93,25 @@ export const DEFAULT_RETENTION                                  = Object.freeze(
 // same-user attacker with filesystem write access to the owned directory could
 // equally rewrite the manifest/snapshot themselves — the window is documented,
 // not defended against (an adversary there owns the backup directory outright).
-                                                                                              
 
-                                
-                                                           
-              
-                       
-                        
-                                                                                
-  
 
-                                          
-                 
-                                 
-                                                
-                                
-    
-                       
-                                          
-                                                
-                                
-    
-  
+
+
+
+
+
+
+
+
+// The namespaced migration ledger state captured in a backup manifest (S2/A4,
+// workbench#90): ONE namespaced lane — identity is (namespace, version) — not
+// the two legacy global tables. `appliedVersions` is ordered by (namespace,
+// version); `maxVersion` is the highest integer version across namespaces.
+
+
+
+
+
 
 // The concretely enumerated manifest fields (issue #82 spec §2). `encryption`
 // is recorded explicitly per owner decision #3 — the platform encrypts at the
@@ -129,121 +127,120 @@ export const DEFAULT_RETENTION                                  = Object.freeze(
 // stays truthful. `purgedAt` is set when the binned bytes were force-deleted
 // earlier than the recovery period (or swept at expiry), so an operator can
 // tell destroyed content from restorable content.
-                                               
-                              
-                        
-                        
-                            
-                             
-   
 
-                              
-                                                       
-                                          
-                                                
-                                                            
-                                            
-                                              
-                             
-                               
-                                          
-                              
-                                                                 
-  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // Diagnostics are retained for failure forensics WITHOUT data content: stage,
 // error message, and identifiers (generation ids, backup ids) only — never row
 // data and never blob bytes.
-                                
-                      
-                                                                                                
-                         
-                                            
-  
 
-                          
-              
-                        
-                                  
-                                
-                                 
-                                        
-      
-              
-                         
-                                            
-                                
-                                 
-                                    
-                                         
-                                            
-       
 
-                                      
-                            
-                             
-                                    
-                             
-   
 
-                                                                                                      
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // The snapshot source. The SQLite adapter's opened database satisfies this
 // shape: `root` is the owned directory (backups/ + quarantine/ live under it),
 // `handle` carries the live connection for the WAL probe, and `backupTo` is the
 // adapter's online-backup hook (node:sqlite, never a raw file copy).
-                            
-                               
-                                             
-                                              
-                                                                     
-                                                                         
-                                                                      
-                                                                           
-                                                                            
-                                                                               
-                                                                               
-            
-                                                     
-  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // The platform write coordinator surface the capture barrier runs through.
 // `createBackupManager` requires the coordinator to be the source's declared
 // owner (identity, not shape): any object with a `run` method is a foreign
 // coordinator and is refused.
-                                      
-                                               
-  
 
-                                    
-                                
-                                                                            
-                                                                              
-                                                                         
-                                                                         
-                                                    
-                                                    
-                                           
-                                                      
-                            
-  
 
-                             
-                                  
-                                   
-                              
-                                                            
-                                                      
-                        
-  
+
+
+
+
+                                                          
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // `backups/<timestamp>-<id>/` — the stable directory naming (spec §6). The
 // fixed-width ISO timestamp sorts lexicographically; `:` is replaced with `-`
 // so the name is filesystem-friendly on every platform.
 const BACKUP_NAME = /^(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}Z)-([0-9a-f]+)$/;
 
-const WORKBENCH_LEDGER = '_WorkbenchMigration';
-const APP_LEDGER = '_Migration';
+const MIGRATION_LEDGER = MIGRATION_LEDGER_TABLE;
 
 // The framework blob-metadata ledger. Its presence in a schema means the source
 // is blob-capable: adopted blob generations MAY exist, so a backup without a
@@ -374,9 +371,9 @@ export function createBackupManager(options                      )              
   function isCompleteBackupDir(dir        )          {
     try {
       if (!existsSync(path.join(dir, 'snapshot.sqlite'))) return false;
-      const manifest = JSON.parse(readFileSync(path.join(dir, 'manifest.json'), 'utf8'))     
-                         
-                                
+      const manifest = JSON.parse(readFileSync(path.join(dir, 'manifest.json'), 'utf8'))
+
+
        ;
       return manifest.formatVersion === BACKUP_FORMAT_VERSION && manifest.status === 'complete';
     } catch {
@@ -728,17 +725,17 @@ export function createBackupManager(options                      )              
 
 // ---- internals -----------------------------------------------------------
 
-                      
-                
-                            
-                             
-                                   
-                                 
-                              
-                                                   
-  
 
-                                                                                          
+
+
+
+
+
+
+
+
+
+
 
 // Verify a materializer's report against what actually landed on disk (review
 // #82 finding 2): every reported file must exist under destBlobDir, be a
@@ -805,7 +802,7 @@ function verifyMaterialization(
   return { ok: true };
 }
 
-                                                                                   
+
 
 function validateRetention(retention                                            )                                  {
   const daily = retention?.daily ?? DEFAULT_RETENTION.daily;
@@ -885,22 +882,19 @@ function schemaIdentityOf(db              )                                     
   const platformTables = frameworkTableNames.filter((name) => sqlByName.has(name)).slice().sort();
   const platformSchemaIdentity = sha256hex(platformTables.map((name) => `${name}:${sqlByName.get(name) }`).join('\n'));
   const appSchemaIdentity = rows
-    .filter((row) => !framework.has(row.name) && row.name !== WORKBENCH_LEDGER)
+    .filter((row) => !framework.has(row.name) && row.name !== MIGRATION_LEDGER)
     .map((row) => `${row.name}:${sha256hex(row.sql)}`)
     .sort();
   return { platformSchemaIdentity, appSchemaIdentity };
 }
 
 function migrationLedgerOf(db              )                             {
-  const hasTable = (name        ) => Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
-  const versionsOf = (table        )                                                    => {
-    if (!hasTable(table)) return { appliedVersions: [], maxVersion: 0 };
-    const rows = db.prepare(`SELECT version FROM ${table} ORDER BY version`).all()                              ;
-    const appliedVersions = rows.map((row) => Number(row.version));
-    return { appliedVersions, maxVersion: appliedVersions.length ? appliedVersions[appliedVersions.length - 1] : 0 };
-  };
-  return {
-    app: { table: APP_LEDGER, ...versionsOf(APP_LEDGER) },
-    workbench: { table: WORKBENCH_LEDGER, ...versionsOf(WORKBENCH_LEDGER) },
-  };
+  const hasTable = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(MIGRATION_LEDGER));
+  if (!hasTable) return { table: MIGRATION_LEDGER, appliedVersions: [], maxVersion: 0 };
+  const rows = db
+    .prepare(`SELECT namespace, version FROM ${MIGRATION_LEDGER} ORDER BY namespace, version`)
+    .all()                                                 ;
+  const appliedVersions = rows.map((row) => ({ namespace: row.namespace, version: Number(row.version) }));
+  const maxVersion = appliedVersions.reduce((max, entry) => Math.max(max, entry.version), 0);
+  return { table: MIGRATION_LEDGER, appliedVersions, maxVersion };
 }

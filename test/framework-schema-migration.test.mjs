@@ -59,3 +59,41 @@ test('generateFrameworkDDL still includes cursor tables (backwards compatible)',
   const pcCount = joined.split('_ProjectedCursor').length - 1;
   assert.equal(pcCount, 1, '_ProjectedCursor must appear exactly once in generateFrameworkDDL');
 });
+
+test('the 5 package migrations run under the reserved workbench namespace on a fresh DB (S2/A4 re-home)', async () => {
+  const { runWorkbenchMigrations, appliedWorkbenchVersion, WORKBENCH_SUPPLIED_BY } = await import('../build/workbench-migrations.mjs');
+  const { ledgerRows, MIGRATION_LEDGER_TABLE } = await import('../build/migrations.mjs');
+  const db = new DatabaseSync(':memory:');
+  try {
+    runWorkbenchMigrations(db);
+    assert.equal(appliedWorkbenchVersion(db), 5);
+
+    const rows = ledgerRows(db);
+    assert.equal(rows.length, 5, 'all five package migrations recorded');
+    assert.ok(rows.every((row) => row.namespace === 'workbench'), 'every package migration lives in the workbench namespace');
+    assert.deepEqual(
+      rows.map((row) => row.version).sort((a, b) => a - b),
+      [1, 2, 3, 4, 5],
+    );
+    assert.ok(rows.every((row) => row.name.length > 0), 'every package migration records a name');
+    assert.ok(rows.every((row) => /^[0-9a-f]{64}$/.test(row.checksum)), 'every package migration records a checksum');
+    assert.ok(rows.every((row) => row.suppliedBy === WORKBENCH_SUPPLIED_BY), 'the package lane records its suppliedBy');
+
+    // Re-running is a no-op (idempotent) and the reserved namespace is the only
+    // lane the package owns — no other namespace was touched.
+    runWorkbenchMigrations(db);
+    assert.equal(appliedWorkbenchVersion(db), 5);
+    assert.equal(db.prepare(`SELECT COUNT(*) AS c FROM ${MIGRATION_LEDGER_TABLE}`).get().c, 5);
+
+    // The framework census derives the single namespaced ledger table.
+    const { frameworkTableNames } = await import('../build/schema-table-census.mjs');
+    assert.ok(
+      frameworkTableNames.includes('_SchemaMigration'),
+      'the namespaced ledger table is a framework-owned table',
+    );
+    assert.ok(!frameworkTableNames.includes('_Migration'), 'the legacy app ledger table is gone from the census');
+    assert.ok(!frameworkTableNames.includes('_WorkbenchMigration'), 'the legacy workbench ledger table is gone from the census');
+  } finally {
+    db.close();
+  }
+});

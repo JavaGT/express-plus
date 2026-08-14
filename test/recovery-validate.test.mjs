@@ -185,8 +185,16 @@ test('a migration ledger that does not match the snapshot is rejected — the le
   try {
     // A source db with a REAL applied migration ledger.
     const opened = openSqliteAdapter({ directory: dir, name: 'app' });
-    opened.handle.exec('CREATE TABLE _Migration (version INTEGER PRIMARY KEY, appliedAt TEXT NOT NULL)');
-    opened.handle.prepare('INSERT INTO _Migration (version, appliedAt) VALUES (?, ?)').run(1, '2026-01-01T00:00:00.000Z');
+    opened.handle.exec(`CREATE TABLE _SchemaMigration (
+      namespace TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      checksum TEXT NOT NULL,
+      appliedAt TEXT NOT NULL,
+      suppliedBy TEXT,
+      PRIMARY KEY (namespace, version)
+    )`);
+    opened.handle.prepare('INSERT INTO _SchemaMigration (namespace, version, name, checksum, appliedAt, suppliedBy) VALUES (?, ?, ?, ?, ?, ?)').run('alpha', 1, 'a1', 'c1', '2026-01-01T00:00:00.000Z', null);
     opened.handle.exec('CREATE TABLE note (id TEXT PRIMARY KEY, body TEXT)');
     opened.handle.prepare('INSERT INTO note (id, body) VALUES (?, ?)').run('n1', 'hello');
     const writeCoordinator = createWriteQueue();
@@ -195,14 +203,15 @@ test('a migration ledger that does not match the snapshot is rejected — the le
     opened.close();
     assert.equal(backup.ok, true);
     const manifest = readManifest(dir, backup.backupId);
-    assert.deepEqual(manifest.migrationLedgerState.app.appliedVersions, [1], 'the backup captured the applied ledger');
+    assert.deepEqual(manifest.migrationLedgerState.appliedVersions, [{ namespace: 'alpha', version: 1 }], 'the backup captured the applied ledger');
 
     // Lie about the ledger: the manifest claims no migrations were ever applied.
     const lied = {
       ...manifest,
       migrationLedgerState: {
-        app: { table: '_Migration', appliedVersions: [], maxVersion: 0 },
-        workbench: { table: '_WorkbenchMigration', appliedVersions: [], maxVersion: 0 },
+        table: '_SchemaMigration',
+        appliedVersions: [],
+        maxVersion: 0,
       },
     };
     writeFileSync(manifestPath(dir, backup.backupId), JSON.stringify(lied, null, 2));
@@ -226,8 +235,13 @@ test('an internally inconsistent migration ledger is rejected', { timeout: 12000
     // No ledgers exist in this snapshot, but the manifest claims versions are
     // applied out of order and its maxVersion is a lie — internally impossible.
     const badLedger = {
-      app: { table: '_Migration', appliedVersions: [3, 1, 2], maxVersion: 2 },
-      workbench: { table: '_WorkbenchMigration', appliedVersions: [], maxVersion: 0 },
+      table: '_SchemaMigration',
+      appliedVersions: [
+        { namespace: 'alpha', version: 3 },
+        { namespace: 'alpha', version: 1 },
+        { namespace: 'alpha', version: 2 },
+      ],
+      maxVersion: 2,
     };
     writeFileSync(manifestPath(dir, backup.backupId), JSON.stringify({ ...manifest, migrationLedgerState: badLedger }, null, 2));
 
@@ -533,7 +547,7 @@ test('a manifest declaring a third (unsupported) migration ledger table is refus
           ...manifest,
           migrationLedgerState: {
             ...manifest.migrationLedgerState,
-            app: { ...manifest.migrationLedgerState.app, table: '_OtherMigration' },
+            table: '_OtherMigration',
           },
         },
         null,

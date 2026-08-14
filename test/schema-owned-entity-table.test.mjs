@@ -40,7 +40,7 @@ test('schema owns an entity main table while Workbench generates only framework 
   }
 });
 
-test('app boot refuses a schema whose namespaced migrations collide under the legacy ledger — before executing any migration', async () => {
+test('app boot refuses a schema that impersonates the reserved workbench namespace — before executing any migration', async () => {
   const db = new DatabaseSync(':memory:');
   let ran = 0;
   try {
@@ -54,8 +54,8 @@ test('app boot refuses a schema whose namespaced migrations collide under the le
     });
     assert.throws(
       () => workbench({ db, schema }),
-      /duplicate migration version 5|legacy global migration ledger/i,
-      'the app boot path refuses the colliding-namespace schema',
+      /reserved namespace "workbench".*only the Workbench package may own it/i,
+      'the app boot path refuses the reserved-namespace schema',
     );
     assert.equal(ran, 0, 'no migration executed');
     assert.equal(
@@ -64,7 +64,7 @@ test('app boot refuses a schema whose namespaced migrations collide under the le
       'no schema table DDL executed before the refusal',
     );
     assert.equal(
-      db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_Migration'").get(),
+      db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_SchemaMigration'").get(),
       undefined,
       'migration ledger not touched',
     );
@@ -95,7 +95,7 @@ test('schema-owned entity table validation rejects write-altering triggers', asy
     schema.prepare(db);
     db.exec('CREATE TRIGGER SchemaNote_hostile AFTER INSERT ON SchemaNote BEGIN DELETE FROM SchemaNote WHERE id = NEW.id; END');
     const app = workbench({ db, schema, entities: [Note] });
-    await assert.rejects(app.prepareSchema(), /must not have trigger/i);
+    await assert.rejects(app.prepareSchema(), /undeclared trigger/i);
   } finally {
     db.close();
   }
@@ -219,17 +219,54 @@ test('schema-owned entity table validation runs after migrations', async () => {
       } }],
     });
     const app = workbench({ db, schema, entities: [Note] });
-    await assert.rejects(app.prepareSchema(), /must not have trigger/i);
+    await assert.rejects(app.prepareSchema(), /undeclared trigger/i);
   } finally {
     db.close();
   }
 });
 
-test('schema and application migrations use one version stream', () => {
+test('schema-owned entity table validation permits a trigger declared by the owning schema', async () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    const schema = defineSqliteSchema({
+      name: 'schema-note',
+      tables: [{
+        name: 'SchemaNote',
+        columns: [
+          { name: 'id', type: 'text', primaryKey: true },
+          { name: 'title', type: 'text', notNull: true },
+          { name: 'score', type: 'real' },
+        ],
+        triggers: [{ name: 'SchemaNote_audit', timing: 'after', event: 'insert', body: 'SELECT 1;' }],
+      }],
+    });
+    schema.prepare(db);
+    db.exec('CREATE TRIGGER SchemaNote_audit AFTER INSERT ON SchemaNote BEGIN SELECT 1; END');
+    const app = workbench({ db, schema, entities: [Note] });
+    await app.prepareSchema();
+    assert.ok(db.prepare("SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name = 'SchemaNote_audit'").get());
+  } finally {
+    db.close();
+  }
+});
+
+test('schema and application migrations are namespaced — same version in different namespaces is legitimate (workbench#90)', () => {
   const schema = defineSqliteSchema({
     name: 'schema-note', tables: [], migrations: [{ namespace: 'schema-note', name: 'seed', version: 17, up() {} }],
   });
-  assert.throws(() => workbench({ schema, migrations: [{ version: 17, up() {} }] }), /duplicate migration version/i);
+  // The same version in a DIFFERENT namespace is fine (no global integer merge).
+  const app = workbench({ schema, migrations: [{ namespace: 'app', name: 'seed', version: 17, up() {} }] });
+  assert.ok(app, 'a namespaced app migration sharing a version with a schema migration is accepted');
+  // The same (namespace, version) declared in BOTH places is a duplicate.
+  assert.throws(
+    () => workbench({ schema, migrations: [{ namespace: 'schema-note', name: 'dup', version: 17, up() {} }] }),
+    /duplicate migration version 17 in namespace "schema-note"/,
+  );
+  // A legacy un-namespaced app migration is refused (migrations are namespaced now).
+  assert.throws(
+    () => workbench({ migrations: [{ version: 17, up() {} }] }),
+    /migration namespace/,
+  );
 });
 
 test('schema migration may add a declared entity column before indexes and validation', async () => {

@@ -31,9 +31,17 @@ async function makeBackup(dir, { blobs, withLedger = false } = {}) {
   const opened = openSqliteAdapter({ directory: dir, name: 'app' });
   try {
     if (withLedger) {
-      opened.handle.exec('CREATE TABLE _Migration (version INTEGER PRIMARY KEY, appliedAt TEXT NOT NULL)');
-      opened.handle.prepare('INSERT INTO _Migration (version, appliedAt) VALUES (?, ?)').run(1, '2026-01-01T00:00:00.000Z');
-      opened.handle.prepare('INSERT INTO _Migration (version, appliedAt) VALUES (?, ?)').run(2, '2026-01-02T00:00:00.000Z');
+      opened.handle.exec(`CREATE TABLE _SchemaMigration (
+        namespace TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        checksum TEXT NOT NULL,
+        appliedAt TEXT NOT NULL,
+        suppliedBy TEXT,
+        PRIMARY KEY (namespace, version)
+      )`);
+      opened.handle.prepare('INSERT INTO _SchemaMigration (namespace, version, name, checksum, appliedAt, suppliedBy) VALUES (?, ?, ?, ?, ?, ?)').run('alpha', 1, 'a1', 'c1', '2026-01-01T00:00:00.000Z', null);
+      opened.handle.prepare('INSERT INTO _SchemaMigration (namespace, version, name, checksum, appliedAt, suppliedBy) VALUES (?, ?, ?, ?, ?, ?)').run('alpha', 2, 'a2', 'c2', '2026-01-02T00:00:00.000Z', null);
     }
     opened.handle.exec('CREATE TABLE note (id TEXT PRIMARY KEY, body TEXT)');
     opened.handle.prepare('INSERT INTO note (id, body) VALUES (?, ?)').run('n1', 'hello swap');
@@ -174,7 +182,10 @@ test('fresh-directory restore passes the full schema + blob census before servin
         },
       },
     });
-    assert.deepEqual(backup.manifest.migrationLedgerState.app.appliedVersions, [1, 2]);
+    assert.deepEqual(backup.manifest.migrationLedgerState.appliedVersions, [
+      { namespace: 'alpha', version: 1 },
+      { namespace: 'alpha', version: 2 },
+    ]);
 
     const seam = {
       verifyBackupGeneration: (generation, backupBlobsDir) => {
@@ -215,8 +226,11 @@ test('fresh-directory restore passes the full schema + blob census before servin
     try {
       assert.equal(db.prepare('SELECT body FROM note WHERE id = ?').get('n1').body, 'hello swap');
       assert.deepEqual(
-        db.prepare('SELECT version FROM _Migration ORDER BY version').all().map((row) => row.version),
-        [1, 2],
+        db.prepare('SELECT namespace, version FROM _SchemaMigration ORDER BY namespace, version').all().map((row) => ({ namespace: row.namespace, version: row.version })),
+        [
+          { namespace: 'alpha', version: 1 },
+          { namespace: 'alpha', version: 2 },
+        ],
         'the migration ledger that EXISTS was restored and validated',
       );
       assert.equal(db.prepare('PRAGMA quick_check').get().quick_check, 'ok');

@@ -1,28 +1,35 @@
-// workbench-migrations.mjs — package-owned versioned migration lane.
+// workbench-migrations.mjs — package-owned migration lane, re-homed into the
+// reserved `workbench` namespace of the shared namespaced ledger (S2/A4,
+// workbench#90).
 //
 // Sol ruling (issue JavaGT/scope#184, comment 5175490719): the authoring
 // checkpoint deduplication must be performed by a versioned, idempotent
 // migration owned by the Workbench package and run automatically from
-// app.prepareSchema, backed by a PRIVATE ledger. The application-supplied
-// `options.migrations` / `_Migration` lane is deliberately NOT reused: Scope
-// passes an empty list, and sharing one integer namespace would risk duplicate
-// version or skip collisions between package migrations and app migrations.
-// Scope's own string-id schema lane (ScopeSchemaVersion / SCOPE_SCHEMA_MIGRATIONS)
-// is untouched; this lane only reshapes Workbench-authored ephemeral tables.
-//
-// The single migration transaction is BEGIN EXCLUSIVE (this package's normal
-// begin() uses BEGIN IMMEDIATE; exclusive is the binding requirement). Every
-// per-prefix step and the version-record insert commit or roll back together.
+// app.prepareSchema. The application-supplied migration lane is NOT reused:
+// Scope passes an empty list, and the `workbench` namespace is package-owned
+// (reserved), so no app migration can impersonate this lane. The whole lane
+// runs inside ONE BEGIN EXCLUSIVE transaction — a failure rolls every
+// migration of the lane back together (no partial lane state), matching the
+// Sol ruling. Each `up` remains safe to re-apply against a rolled-back state
+// and to run against an already-canonical schema (fresh DBs emit the canonical
+// shape, so v1/v4 skip; v2/v3/v5 detect and skip or no-op).
 
-const LEDGER_DDL = `CREATE TABLE IF NOT EXISTS _WorkbenchMigration (
-  version INTEGER PRIMARY KEY,
-  appliedAt TEXT NOT NULL
-)`;
+import {
+  runLedgerMigrations,
+  ensureMigrationTable,
+  ledgerRows,
+  type Migration,
+  type MigrationRunOptions,
+} from './migration-ledger.ts';
+import type { DbHandle } from './driver.ts';
+import { restoreTextFamily, serializeCompactTextFamilyCheckpoint } from './annotated-text-continuous.ts';
+
+// The package version that supplies the lane, recorded per ledger row. Keep in
+// sync with package.json when releasing.
+const WORKBENCH_PACKAGE_VERSION = '0.1.2';
+export const WORKBENCH_SUPPLIED_BY = `workbench@${WORKBENCH_PACKAGE_VERSION}`;
 
 const PREFIX_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
-
-import { exclusiveTxn, type DbHandle } from './driver.ts';
-import { restoreTextFamily, serializeCompactTextFamilyCheckpoint } from './annotated-text-continuous.ts';
 
 function tableExists(db: DbHandle, name: string) {
   return Boolean(db.prepare('SELECT 1 FROM sqlite_master WHERE type = \'table\' AND name = ?').get(name));
@@ -144,18 +151,12 @@ function rebuildMembershipFamily(db: DbHandle, prefix: string) {
   db.exec(`ALTER TABLE ${tmp} RENAME TO ${prefix}_membership`);
 }
 
-type WorkbenchMigration = {
-  version: number;
-  transaction: 'exclusive';
-  up(db: DbHandle, context?: { now?: () => string }): void;
-};
-
-export const WORKBENCH_MIGRATIONS: readonly WorkbenchMigration[] = Object.freeze([
+export const WORKBENCH_MIGRATIONS: readonly Migration[] = Object.freeze([
   {
+    namespace: 'workbench',
+    name: 'authoring-stream-family-rebuild',
     version: 1,
-    transaction: 'exclusive',
-    up(db, { now = () => new Date().toISOString() } = {}) {
-      void now;
+    up(db) {
       for (const row of db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB '*_authoring_position'").all()) {
         const name = row.name as string;
         if (!name.endsWith('_authoring_position')) continue;
@@ -173,8 +174,9 @@ export const WORKBENCH_MIGRATIONS: readonly WorkbenchMigration[] = Object.freeze
     // state and the committed log are untouched: clients re-bootstrap recovery
     // authoritative tokens for the same document, exactly as v1 does after its
     // legacy rebuild.
+    namespace: 'workbench',
+    name: 'authoring-defective-checkpoint-purge',
     version: 2,
-    transaction: 'exclusive',
     up(db) {
       for (const row of db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB '*_authoring_lease'").all()) {
         const name = row.name as string;
@@ -199,8 +201,9 @@ export const WORKBENCH_MIGRATIONS: readonly WorkbenchMigration[] = Object.freeze
   },
   {
     // v3: bind redaction-aware public offsets to their canonical intervals.
+    namespace: 'workbench',
+    name: 'authoring-redaction-column',
     version: 3,
-    transaction: 'exclusive',
     up(db) {
       for (const row of db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB '*_authoring_position'").all()) {
         const name = row.name as string;
@@ -217,8 +220,9 @@ export const WORKBENCH_MIGRATIONS: readonly WorkbenchMigration[] = Object.freeze
     // multiple rows. The DDL emits the canonical shape for fresh databases; this
     // migration only reshapes legacy tables and copies their existing rows
     // (one per annotation today) over unchanged.
+    namespace: 'workbench',
+    name: 'membership-composite-primary-key',
     version: 4,
-    transaction: 'exclusive',
     up(db) {
       for (const row of db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB '*_membership'").all()) {
         const name = row.name as string;
@@ -233,8 +237,9 @@ export const WORKBENCH_MIGRATIONS: readonly WorkbenchMigration[] = Object.freeze
     // Purge those frames so connected clients re-bootstrap, then compact each
     // durable continuous-text checkpoint to the operation-registry v2 form.
     // Historical committed events are intentionally untouched.
+    namespace: 'workbench',
+    name: 'authoring-compact-checkpoints',
     version: 5,
-    transaction: 'exclusive',
     up(db) {
       for (const row of db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB '*_authoring_lease'").all()) {
         const name = row.name as string;
@@ -262,37 +267,33 @@ export const WORKBENCH_MIGRATIONS: readonly WorkbenchMigration[] = Object.freeze
   },
 ]);
 
-export function ensureWorkbenchMigrationTable(db: DbHandle) {
-  db.exec(LEDGER_DDL);
+// The reserved `workbench` lane keeps its legacy entry-point names (internal.ts
+// and server.ts re-export them). `ensureWorkbenchMigrationTable` now ensures the
+// shared namespaced ledger table; `appliedWorkbenchVersion` reads the
+// `workbench` namespace of it.
+
+export function ensureWorkbenchMigrationTable(db: DbHandle): void {
+  // Alias of the shared namespaced-ledger ensure: the workbench lane lives in
+  // the same `_SchemaMigration` table as every other namespace.
+  ensureMigrationTable(db);
 }
 
 export function appliedWorkbenchVersion(db: DbHandle): number {
-  ensureWorkbenchMigrationTable(db);
-  const row = db.prepare('SELECT MAX(version) AS v FROM _WorkbenchMigration').get() as { v?: number } | undefined;
-  return row?.v ?? 0;
+  return ledgerRows(db)
+    .filter((row) => row.namespace.toLowerCase() === 'workbench')
+    .reduce((max, row) => Math.max(max, row.version), 0);
 }
 
-export function runWorkbenchMigrations(db: DbHandle, { now = () => new Date().toISOString() }: { now?: () => string } = {}) {
-  // Read-only pre-flight: avoid opening the exclusive transaction when the
-  // ledger already records every migration. This never creates the table, so
-  // a fresh DB (no ledger, no migration work) takes the same early return.
-  const hasLedger = tableExists(db, '_WorkbenchMigration');
-  if (hasLedger) {
-    const current = (db.prepare('SELECT COALESCE(MAX(version), 0) AS v FROM _WorkbenchMigration').get() as { v: number }).v;
-    if (WORKBENCH_MIGRATIONS.every((migration) => migration.version <= current)) return;
-  }
-  // One exclusive transaction for the entire lane: ledger creation, version
-  // read, every migration's rebuild, and the version-record insert commit or
-  // roll back together (Sol ruling 5175490719). exclusiveTxn owns the
-  // BEGIN EXCLUSIVE / COMMIT / ROLLBACK bracket; the lane's work is the body.
-  // Synchronous: the migration lane's body has no awaits.
-  exclusiveTxn(db, () => {
-    ensureWorkbenchMigrationTable(db);
-    const current = (db.prepare('SELECT COALESCE(MAX(version), 0) AS v FROM _WorkbenchMigration').get() as { v: number }).v;
-    for (const migration of WORKBENCH_MIGRATIONS) {
-      if (migration.version <= current) continue;
-      migration.up(db, { now });
-      db.prepare('INSERT INTO _WorkbenchMigration (version, appliedAt) VALUES (?, ?)').run(migration.version, now());
-    }
+export function runWorkbenchMigrations(db: DbHandle, options: MigrationRunOptions = {}) {
+  // The runner handles the read-only "nothing pending" fast path itself: it
+  // validates checksums and resolves order before opening the exclusive
+  // transaction, so an already-applied lane that has not been mutated skips
+  // BEGIN EXCLUSIVE entirely. The whole lane is one transaction when it does
+  // run (Sol ruling 5175490719).
+  runLedgerMigrations(db, WORKBENCH_MIGRATIONS, {
+    ...options,
+    suppliedBy: options.suppliedBy ?? WORKBENCH_SUPPLIED_BY,
+    singleTransaction: true,
+    allowReserved: true,
   });
 }

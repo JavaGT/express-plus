@@ -140,7 +140,10 @@ test('schema preparation runs explicit migrations once and rolls failures back',
     schema.prepare(db, { now: () => '2026-07-14T00:00:00.000Z' });
     schema.prepare(db, { now: () => '2026-07-14T00:00:00.000Z' });
     assert.equal(calls, 1);
-    assert.equal(db.prepare('SELECT MAX(version) AS version FROM _Migration').get().version, 420001);
+    assert.deepEqual(
+      db.prepare('SELECT namespace, version FROM _SchemaMigration').all().map((row) => `${row.namespace}@${row.version}`),
+      ['tasks@420001'],
+    );
 
     const failing = defineSqliteSchema({
       name: 'failing',
@@ -155,12 +158,15 @@ test('schema preparation runs explicit migrations once and rolls failures back',
         },
       }],
     });
-    assert.throws(() => failing.prepare(db), /migration 420002 failed: stop/);
+    assert.throws(() => failing.prepare(db), /migration failing@420002 failed: stop/);
     assert.equal(
       db.prepare("SELECT COUNT(*) AS count FROM pragma_table_info('Task') WHERE name = 'partial'").get().count,
       0,
     );
-    assert.equal(db.prepare('SELECT MAX(version) AS version FROM _Migration').get().version, 420001);
+    assert.deepEqual(
+      db.prepare('SELECT namespace, version FROM _SchemaMigration').all().map((row) => `${row.namespace}@${row.version}`),
+      ['tasks@420001'],
+    );
   } finally {
     db.close();
   }
@@ -267,7 +273,7 @@ test('prepare does not create declared indexes on an existing legacy table when 
       }],
     });
 
-    assert.throws(() => schema.prepare(db), /migration 1 failed/);
+    assert.throws(() => schema.prepare(db), /migration legacy@1 failed/);
 
     const indexes = db.prepare("SELECT name FROM pragma_index_list('Legacy') WHERE origin = 'c' ORDER BY name").all();
     assert.deepEqual(indexes, [], 'indexes must not be created when migration fails');

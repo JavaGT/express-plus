@@ -1,5 +1,5 @@
 import { begin, commit, rollback, type DbHandle } from './driver.ts';
-import { runMigrations } from './migrations.ts';
+import { runMigrations, validateMigrations } from './migrations.ts';
 
 const ALLOWED_TYPES = new Set(['text', 'integer', 'real', 'blob']);
 const ALLOWED_FK_ACTIONS = new Set(['cascade', 'set null', 'set default', 'restrict', 'no action']);
@@ -744,26 +744,11 @@ function validateColumnList(columns: unknown, knownColumns: ReadonlyMap<string, 
   }
 }
 
-// The runtime migration ledger (migrations.ts) is still the legacy global,
-// version-keyed table until A4 lands per-namespace ledgers (workbench#90). A
-// declaration set listing the same version in two namespaces cannot run against
-// that ledger: the second application trips the UNIQUE constraint on
-// _Migration.version, and a lower-version migration in a fresh namespace is
-// silently skipped once the global max is higher. Fail closed before any DDL or
-// migration executes.
-function assertLegacyLedgerSafe(migrations: readonly SqliteMigrationSpec[], schemaName: string): void {
-  const ownerByVersion = new Map<number, string>();
-  for (const migration of migrations) {
-    const namespace = folded(migration.namespace);
-    const owner = ownerByVersion.get(migration.version);
-    if (owner !== undefined && owner !== namespace) {
-      throw new Error(
-        `schema "${schemaName}" declares migration version ${migration.version} in namespaces "${owner}" and "${migration.namespace}", which collide under the legacy global migration ledger (per-namespace ledgers land in A4, #90); split them into separate schemas or renumber`,
-      );
-    }
-    ownerByVersion.set(migration.version, namespace);
-  }
-}
+// The runtime migration ledger is the namespaced (namespace, version) ledger
+// (workbench#90). Namespaces are independent, so the same version in two
+// namespaces is legitimate; reserved-namespace impersonation and declaration
+// errors (duplicates, gaps, dependency syntax) are refused by validateMigrations
+// before any DDL or migration executes.
 
 export interface SqliteColumnSpec {
   name: string;
@@ -917,12 +902,13 @@ export function defineSqliteSchema(spec: SqliteSchemaInput): SqliteSchemaDescrip
     virtualTableDdl: Object.freeze(virtualTableDdl),
     triggerDdl: Object.freeze(triggerDdl),
     prepare(db, options) {
-      // The legacy-ledger guard is a declaration-safety check, not a migration
-      // runner: it must refuse colliding namespaces even when the caller defers
+      // Declaration-level safety before any DDL or migration executes: the
+      // namespaced runner (workbench#90) refuses reserved-namespace
+      // impersonation and declaration errors even when the caller defers
       // migration execution (skipMigrations) — the app boot path prepares with
       // skipMigrations and then runs the lane directly via runMigrations, so a
       // skip here would let migrations execute unguarded. Always fail closed.
-      assertLegacyLedgerSafe(migrations, validated.name);
+      validateMigrations(migrations);
       if (tableDdl.length > 0) {
         begin(db);
         try {

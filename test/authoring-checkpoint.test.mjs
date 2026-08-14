@@ -12,7 +12,8 @@ import {
   resolvePosition,
 } from '../build/annotated-text-authoring-stream.mjs';
 import { annotatedTextAuthoringStreamDDL } from '../build/annotated-text-field.mjs';
-import { runWorkbenchMigrations, appliedWorkbenchVersion, ensureWorkbenchMigrationTable } from '../build/workbench-migrations.mjs';
+import { runWorkbenchMigrations, appliedWorkbenchVersion, ensureWorkbenchMigrationTable, WORKBENCH_MIGRATIONS } from '../build/workbench-migrations.mjs';
+import { checksumOf } from '../build/migrations.mjs';
 import { applyTextOp, createTextState, textCheckpoint } from '../build/annotated-text.mjs';
 import { createTextFamily, materializeText, restoreTextFamily, textFamilyCheckpoint } from '../build/annotated-text-continuous.mjs';
 
@@ -430,7 +431,8 @@ test('A8-v2: migration invalidates defective ephemeral state and preserves durab
   db.exec('CREATE TABLE durable_marker (id TEXT PRIMARY KEY, value TEXT NOT NULL)');
   db.prepare('INSERT INTO durable_marker (id, value) VALUES (?, ?)').run('keep', 'durable');
   ensureWorkbenchMigrationTable(db);
-  db.prepare('INSERT INTO _WorkbenchMigration (version, appliedAt) VALUES (1, ?)').run(new Date().toISOString());
+  const v1 = WORKBENCH_MIGRATIONS.find((migration) => migration.version === 1);
+  db.prepare('INSERT INTO _SchemaMigration (namespace, version, name, checksum, appliedAt, suppliedBy) VALUES (?, ?, ?, ?, ?, ?)').run('workbench', 1, v1.name, checksumOf(v1), new Date().toISOString(), null);
   const stream = ensureStream({ db, prefix, documentId: 'doc-10', principalType: 'user', principalId: 'u1' });
   const lease = ensureLease({ db, prefix, streamId: stream.id, clientNonceHash: 'client' });
 
@@ -570,7 +572,7 @@ test('A10: app.prepareSchema upgrades a legacy authoring schema via the built-in
   const positionColumns = new Set(db.prepare(`PRAGMA table_info(${prefix}_authoring_position)`).all().map((r) => r.name));
   assert.ok(positionColumns.has('checkpoint_id'), 'position has checkpoint_id after app boot');
   assert.ok(positionColumns.has('family_checkpoint') === false, 'legacy family_checkpoint column removed after app boot');
-  const applied = db.prepare('SELECT MAX(version) AS v FROM _WorkbenchMigration').get();
+  const applied = db.prepare("SELECT MAX(version) AS v FROM _SchemaMigration WHERE namespace = 'workbench'").get();
   assert.equal(applied.v, 5, 'Workbench migrations v1–v5 recorded');
   assert.equal(count(db, `${prefix}_authoring_position`), 0, 'pre-migration legacy positions cleared');
   app.db.close();

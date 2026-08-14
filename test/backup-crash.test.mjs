@@ -31,7 +31,7 @@ function completeManifest(overrides = {}) {
     formatVersion: 1,
     platformSchemaIdentity: 'x',
     appSchemaIdentity: [],
-    migrationLedgerState: { app: { table: '_Migration', appliedVersions: [], maxVersion: 0 }, workbench: { table: '_WorkbenchMigration', appliedVersions: [], maxVersion: 0 } },
+    migrationLedgerState: { table: '_SchemaMigration', appliedVersions: [], maxVersion: 0 },
     integrityResult: { ok: true, checkedAt: '2026-01-01T00:00:00.000Z', findings: [] },
     blobGenerations: [],
     createdAt: '2026-01-01T00:00:00.000Z',

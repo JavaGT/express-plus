@@ -297,6 +297,8 @@ test('app migrations run as the stop-the-world boot lane — outside the coordin
   const app = workbench({
     db,
     migrations: [{
+      namespace: 'app',
+      name: 'boot-lane',
       version: 1,
       up(d) {
         d.exec('CREATE TABLE boot_lane_migration (id INTEGER PRIMARY KEY)');
@@ -324,8 +326,9 @@ test('the workbench package migration lane runs stop-the-world — outside the c
   await app.prepareSchema();
 
   // runWorkbenchMigrations runs at boot even for a fresh db: the exclusive
-  // lane applies every version and records it in the private ledger.
-  const row = db.prepare('SELECT MAX(version) AS v FROM _WorkbenchMigration').get();
+  // lane applies every version and records it in the reserved workbench
+  // namespace of the shared namespaced ledger.
+  const row = db.prepare("SELECT MAX(version) AS v FROM _SchemaMigration WHERE namespace = 'workbench'").get();
   assert.ok(row && Number(row.v) >= 1, `the package migration ledger recorded applied versions (v=${row.v})`);
   assert.equal(
     turns.length,
@@ -340,6 +343,8 @@ test('a failing migration rolls back atomically — no partial boot state', asyn
   const app = workbench({
     db,
     migrations: [{
+      namespace: 'app',
+      name: 'doomed',
       version: 1,
       up(d) {
         d.exec('CREATE TABLE doomed_migration (id INTEGER PRIMARY KEY)');
@@ -347,7 +352,7 @@ test('a failing migration rolls back atomically — no partial boot state', asyn
       },
     }],
   });
-  await assert.rejects(() => app.prepareSchema(), /migration 1 failed/);
+  await assert.rejects(() => app.prepareSchema(), /migration app@1 failed/);
   assert.equal(
     db.prepare("SELECT name FROM sqlite_master WHERE name = 'doomed_migration'").get(),
     undefined,

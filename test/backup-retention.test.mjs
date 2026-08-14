@@ -43,7 +43,7 @@ function craftBackup(dir, iso, id) {
     encryption: 'none',
     platformSchemaIdentity: 'x',
     appSchemaIdentity: [],
-    migrationLedgerState: { app: { table: '_Migration', appliedVersions: [], maxVersion: 0 }, workbench: { table: '_WorkbenchMigration', appliedVersions: [], maxVersion: 0 } },
+    migrationLedgerState: { table: '_SchemaMigration', appliedVersions: [], maxVersion: 0 },
     integrityResult: { ok: true, checkedAt: iso, findings: [] },
     blobGenerations: [],
   }));

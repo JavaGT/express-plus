@@ -40,8 +40,7 @@ function assertEnumeratedManifest(manifest) {
   assert.ok(Array.isArray(manifest.appSchemaIdentity), 'appSchemaIdentity is an array');
   assert.ok(manifest.appSchemaIdentity.every((entry) => typeof entry === 'string'), 'each app identity is a string');
   assert.ok(manifest.migrationLedgerState, 'migrationLedgerState present');
-  assert.equal(typeof manifest.migrationLedgerState.app.appliedVersions, 'object');
-  assert.equal(typeof manifest.migrationLedgerState.workbench.appliedVersions, 'object');
+  assert.deepEqual(manifest.migrationLedgerState, { table: '_SchemaMigration', appliedVersions: [], maxVersion: 0 }, 'fresh DB carries an empty namespaced ledger');
   assert.ok(manifest.integrityResult && typeof manifest.integrityResult.ok === 'boolean', 'integrityResult present');
   assert.ok(!Number.isNaN(Date.parse(manifest.integrityResult.checkedAt)), 'integrityResult has a checkedAt');
   assert.ok(Array.isArray(manifest.blobGenerations), 'blobGenerations is an array');
@@ -238,27 +237,42 @@ test('migrationLedgerState and schema identity reflect the committed schema', { 
   try {
     const opened = openSqliteAdapter({ directory: dir, name: 'app' });
     try {
-      opened.handle.exec('CREATE TABLE _Migration (version INTEGER PRIMARY KEY, appliedAt TEXT NOT NULL)');
-      opened.handle.prepare('INSERT INTO _Migration (version, appliedAt) VALUES (?, ?)').run(1, '2026-01-01T00:00:00.000Z');
-      opened.handle.prepare('INSERT INTO _Migration (version, appliedAt) VALUES (?, ?)').run(3, '2026-01-03T00:00:00.000Z');
-      opened.handle.exec('CREATE TABLE _WorkbenchMigration (version INTEGER PRIMARY KEY, appliedAt TEXT NOT NULL)');
-      opened.handle.prepare('INSERT INTO _WorkbenchMigration (version, appliedAt) VALUES (?, ?)').run(2, '2026-01-02T00:00:00.000Z');
+      opened.handle.exec(`CREATE TABLE _SchemaMigration (
+        namespace TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        checksum TEXT NOT NULL,
+        appliedAt TEXT NOT NULL,
+        suppliedBy TEXT,
+        PRIMARY KEY (namespace, version)
+      )`);
+      opened.handle.prepare('INSERT INTO _SchemaMigration (namespace, version, name, checksum, appliedAt, suppliedBy) VALUES (?, ?, ?, ?, ?, ?)').run('alpha', 1, 'a1', 'c1', '2026-01-01T00:00:00.000Z', null);
+      opened.handle.prepare('INSERT INTO _SchemaMigration (namespace, version, name, checksum, appliedAt, suppliedBy) VALUES (?, ?, ?, ?, ?, ?)').run('alpha', 3, 'a3', 'c3', '2026-01-03T00:00:00.000Z', null);
+      opened.handle.prepare('INSERT INTO _SchemaMigration (namespace, version, name, checksum, appliedAt, suppliedBy) VALUES (?, ?, ?, ?, ?, ?)').run('workbench', 5, 'wb5', 'c5', '2026-01-05T00:00:00.000Z', 'workbench@0.1.2');
       opened.handle.exec('CREATE TABLE app_note (id TEXT PRIMARY KEY, body TEXT)');
 
       const result = await managerFor(opened).backup();      assert.equal(result.ok, true);
       const manifest = result.manifest;
 
-      // The applied ledgers, captured from the snapshot (committed state).
-      assert.deepEqual(manifest.migrationLedgerState.app, { table: '_Migration', appliedVersions: [1, 3], maxVersion: 3 });
-      assert.deepEqual(manifest.migrationLedgerState.workbench, { table: '_WorkbenchMigration', appliedVersions: [2], maxVersion: 2 });
+      // The applied namespaced ledger, captured from the snapshot (committed
+      // state): identity is (namespace, version), ordered by (namespace, version).
+      assert.deepEqual(manifest.migrationLedgerState, {
+        table: '_SchemaMigration',
+        appliedVersions: [
+          { namespace: 'alpha', version: 1 },
+          { namespace: 'alpha', version: 3 },
+          { namespace: 'workbench', version: 5 },
+        ],
+        maxVersion: 5,
+      });
 
       // Platform identity covers the framework tables; app identity is one
       // fingerprint per app-owned table and never names a ledger.
       assert.equal(manifest.appSchemaIdentity.length, 1, 'exactly the app table is an app-schema identity');
       assert.match(manifest.appSchemaIdentity[0], /^app_note:[0-9a-f]{64}$/);
       assert.ok(
-        manifest.appSchemaIdentity.every((entry) => !entry.startsWith('_Migration') && !entry.startsWith('_WorkbenchMigration')),
-        'ledgers are not app-schema identities',
+        manifest.appSchemaIdentity.every((entry) => !entry.startsWith('_SchemaMigration')),
+        'the ledger is not an app-schema identity',
       );
       // The two identities are stable across a second backup of the same state.
       const again = await managerFor(opened).backup();
