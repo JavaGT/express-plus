@@ -155,6 +155,39 @@ test('a mixed action routes per entity tier: live events skip _Log, history even
   db.close();
 });
 
+test('a mixed-tier retry returns the complete original outcome without applying twice', async () => {
+  const { db, boundNote, boundArticle } = setup();
+  let calls = 0;
+  const server = liveRoutedServer({
+    db,
+    liveConsumers: [boundNote.projection],
+    durableConsumers: [boundArticle.projection],
+    handlers: {
+      'Mixed.commit': ({ payload }) => {
+        calls += 1;
+        return [...noteEvents(payload.note, 'Note.create'), ...articleEvents(payload.article)];
+      },
+    },
+  });
+  const request = {
+    actionId: 'mixed-retry-1', type: 'Mixed.commit',
+    payload: { note: { id: 'n1', title: 'live' }, article: { id: 'a1', title: 'history' } },
+  };
+
+  const first = await server.dispatch(request);
+  const retry = await server.dispatch(request);
+
+  assert.equal(retry.ok, true);
+  assert.equal(retry.deduped, true);
+  assert.deepEqual(retry.events.map((event) => event.type), ['Note.created', 'Article.created']);
+  assert.deepEqual(retry.events.map((event) => event.data.title), ['live', 'history']);
+  assert.deepEqual(retry.resultData, first.resultData);
+  assert.equal(calls, 1, 'the retry must not rerun the handler');
+  assert.equal(revisionOf(db, 'Note:n1'), 1, 'the live projection applies once');
+  assert.equal(logRows(db).length, 1, 'the durable event is not appended twice');
+  db.close();
+});
+
 test('a server without the live pipeline writes _Log for every entity (zero behavior change)', async () => {
   const { db } = setup();
   const server = createServer({
@@ -236,6 +269,19 @@ test('a retried actionId settles to the same outcome without a second apply', as
   assert.equal(revisionOf(db, 'Note:n1'), 1);
   assert.equal(receiptRows(db).length, 1);
   assert.equal(logRows(db).length, 0);
+  db.close();
+});
+
+test('an empty actionId is accepted by the live receipt lane like the durable lane', async () => {
+  const { db, boundNote } = setup();
+  const server = liveRoutedServer({ db, liveConsumers: [boundNote.projection], handlers: commonHandlers });
+
+  const outcome = await server.dispatch({
+    actionId: '', type: 'Note.create', payload: { id: 'n1', title: 'empty id' },
+  });
+
+  assert.equal(outcome.ok, true);
+  assert.equal(receiptRows(db)[0].actionId, '');
   db.close();
 });
 
@@ -416,4 +462,11 @@ test('createServer fails closed when a live pipeline is misconfigured', () => {
   assert.ok(valid);
   assert.throws(() => liveMutationVariant({ maxEffectDepth: -1 }), /maxEffectDepth/);
   db.close();
+});
+
+test('live and durable mutation variants retain the same pipeline interface', () => {
+  const durable = durableMutationVariant();
+  const live = liveMutationVariant();
+  assert.deepEqual(Object.keys(live).sort(), Object.keys(durable).sort());
+  for (const key of Object.keys(durable)) assert.equal(typeof live[key], typeof durable[key]);
 });

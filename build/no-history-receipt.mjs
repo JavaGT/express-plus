@@ -23,6 +23,8 @@
 // Idempotency: a retried (scope, actionId) settles to the same outcome without
 // a second apply — the receipt IS the proof, and the durable `_ActionReceipt`
 // is NOT written for a live-only commit (it would retain the request payload).
+// Only committed outcomes receive a receipt. Rejected actions roll back with no
+// receipt, so a retry runs validation again against the then-current state.
 
 import { prepareCached,               } from './driver.mjs';
 
@@ -95,8 +97,8 @@ export function insertNoHistoryReceipt(db          , input                      
   if (typeof scope !== 'string') {
     throw new TypeError('no-history receipt requires a string scope');
   }
-  if (typeof actionId !== 'string' || actionId.length === 0) {
-    throw new TypeError('no-history receipt requires a non-empty actionId');
+  if (typeof actionId !== 'string') {
+    throw new TypeError('no-history receipt requires a string actionId');
   }
   if (typeof resourceKey !== 'string' || resourceKey.length === 0) {
     throw new TypeError('no-history receipt requires a non-empty resourceKey');

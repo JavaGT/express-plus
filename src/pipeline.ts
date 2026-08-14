@@ -665,6 +665,38 @@ function checkDurableBatchDedupe(db: unknown, scope: string, actionId: string, a
   return Object.freeze({ ...successOutcome(eventsFromReceipt(db as DbHandle, receipt, parseEventType), true), resultData: receipt.resultData });
 }
 
+// Mixed-tier commits have both receipts: the durable receipt replays its _Log
+// events while its internal replay metadata carries the live events (which must
+// not enter _Log). Reassemble them at their original emission indexes only when
+// both receipts prove the whole action committed.
+function checkMixedDedupe(db: unknown, scope: string, actionId: string, request: unknown, receiptMatches?: (receipt: any, request: any) => boolean) {
+  const durableReceipt = receiptFor(db as DbHandle, scope, actionId);
+  const liveReceipt = noHistoryReceiptFor(db as DbHandle, scope, actionId);
+  if (!durableReceipt || !liveReceipt) return null;
+  if (receiptMatches && !receiptMatches(durableReceipt, request)) {
+    return failureOutcome(failure('conflict', 'Action ID is already committed for a different request.'));
+  }
+  const replay = isPlainObject(durableReceipt.resultData)
+    ? (durableReceipt.resultData as Record<string, unknown>).__workbenchMixedReplay
+    : undefined;
+  if (!isPlainObject(replay)
+    || !Array.isArray(replay.durableIndexes)
+    || !Array.isArray(replay.liveIndexes)
+    || !Array.isArray(replay.liveEvents)) return null;
+  const durableEvents = eventsFromReceipt(db as DbHandle, durableReceipt, parseEventType);
+  const events: any[] = [];
+  for (let index = 0; index < replay.durableIndexes.length; index += 1) {
+    events[replay.durableIndexes[index] as number] = durableEvents[index];
+  }
+  for (let index = 0; index < replay.liveIndexes.length; index += 1) {
+    events[replay.liveIndexes[index] as number] = eventWithParsedHandle(replay.liveEvents[index]);
+  }
+  return Object.freeze({
+    ...successOutcome(events, true),
+    resultData: replay.resultData,
+  });
+}
+
 // No-history lane dedupe (S3/A2): a retried (scope, actionId) reads its
 // minimized `_NoHistoryReceipt` and settles to the same outcome WITHOUT a
 // second apply. There are no stored events to replay — the no-history receipt
@@ -881,12 +913,22 @@ async function commitEvents(db: any, events: any, {
       // variant, atomically with the same commit. Any commit that engages the
       // durable lane (including a zero-event durable action) still writes it.
       if (liveBatch.length === 0 || durableBatch.length > 0) {
+        const receiptResultData = liveBatch.length > 0
+          ? {
+            __workbenchMixedReplay: {
+              durableIndexes,
+              liveIndexes,
+              liveEvents: liveResult,
+              resultData,
+            },
+          }
+          : resultData;
         insertReceipt(db, scope, actionId, now, durableResult, directive === undefined
           ? {
             ...historyCommit?.metadata,
              actionType: type ?? historyCommit?.metadata?.actionType,
                actionData: commit.canonicalPayload ?? historyCommit?.metadata?.actionData ?? payload,
-              resultData,
+              resultData: receiptResultData,
               ...(commit.historyOutcome ? { historyOutcome: commit.historyOutcome } : {}),
           }
           : { actionType: type, actionData: { version: 1 }, operation: 'erasure' });
@@ -1175,6 +1217,10 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     // under a different owning scope is independent action identity, and a
     // zero-event action is durably deduped via its receipt even though it left
     // no _Log row to key on.
+    const mixedDedupe = livePipeline
+      ? checkMixedDedupe(db, scope, actionId, request, handler.dedupeReceiptMatches)
+      : null;
+    if (mixedDedupe) return mixedDedupe;
     const dedupe = checkDurableDedupe(db, scope, actionId, request, handler.dedupeReceiptMatches);
     if (dedupe) return dedupe;
     // S3/A2 — a retried live-tier action settles via its minimized receipt
@@ -1277,6 +1323,11 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
 
     // Dedupe the whole batch by its owning-stream action receipt (Wave 4.9) —
     // same (scope, actionId) identity as `dispatch`, one grammar for both.
+    const mixedDedupe = livePipeline
+      ? checkMixedDedupe(db, scope, actionId, actions, (receipt, retryActions) =>
+        receipt.actionType === '$batch' && receipt.actionData === JSON.stringify(retryActions))
+      : null;
+    if (mixedDedupe) return mixedDedupe;
     const dedupe = checkDurableBatchDedupe(db, scope, actionId, actions);
     if (dedupe) return dedupe;
     // S3/A2 — a retried live-tier batch settles via its minimized receipt.
