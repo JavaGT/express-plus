@@ -1,4 +1,4 @@
-import { admitRow } from './row-grant.ts';
+import { admitRowTransition } from './field-admission.ts';
 import { CASCADE_PREAUTHORIZED } from './entity/removal-cascade.ts';
 import {
   admitSystemMutation,
@@ -263,7 +263,18 @@ function buildDurableAdmission(app: any, annotatedKernel: any) {
     } catch {
       row = null;
     }
-    return admitRow({ kind: 'verb', entity, row, principal, verb });
+    // The injected authorization adapter (listen({ authorization })) is THE
+    // admission engine for the whole app; with none injected the framework
+    // row-grant default runs, unchanged. This is the same proposed-transition
+    // seam the generated CRUD handlers use, so a durable-gate current-row check
+    // can never contradict the handler's adapter-governed transition admission.
+    return admitRowTransition({
+      entity,
+      verb,
+      before: row,
+      principal,
+      authorization: app._authorization,
+    });
   }
   return {
     async beforeProjection({ entityName, verb, principal, event, payload, db: hookDb, now }: any) {
@@ -488,7 +499,23 @@ export function buildKernel(app: any) {
         // always has either the live row or its deletion anchor to check.
         if (!stored) return verb === 'create';
         const row = entity.deserializeRow({ ...stored });
-        return admitRow({ kind: 'verb', entity, row, principal: context.principal, verb: verb === 'create' ? 'remove' : 'update' });
+        // The generated update handler's own proposed-transition admission
+        // (admitRowTransition) is the ONE governing gate for an update move: it
+        // evaluates BOTH the current row and the proposed after-row through the
+        // injected adapter (app._authorization) exactly once. This pre-gate must
+        // not re-run a second framework-default admission of the current row —
+        // that would bypass the adapter and reject a transition the adapter
+        // admits. A redo-create (undo of a remove) has no handler-side
+        // transition admission, so its deletion-anchor admission is rerouted
+        // through the same adapter-aware seam instead.
+        if (verb === 'update') return true;
+        return admitRowTransition({
+          entity,
+          verb: 'remove',
+          before: row,
+          principal: context.principal,
+          authorization: app._authorization,
+        });
       }
       // A composite (authorizedRows) action evaluates every affected row through
       // ONE adapter admit() call. The app's injected adapter (listen({ authorization }))

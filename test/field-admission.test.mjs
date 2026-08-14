@@ -533,3 +533,115 @@ test('an injected authorization adapter governs update transition admission (den
   assert.ok(transitionCalls.length >= 2, 'the adapter was consulted on both the current and the proposed row');
   assert.ok(transitionCalls.every((c) => c.row?.id === 'd1'));
 });
+
+// A conditional-history entity runs the generated-history pre-gate (kernel.ts)
+// on EVERY update of that type. That gate must not impose a framework-default
+// current-row admission on top of the handler's adapter-governed transition
+// admission: the injected adapter is THE gate, so an update the adapter admits
+// on a row the framework grant would deny commits, and an adapter denial
+// rejects — exactly like the non-conditional path above.
+test('an injected adapter governs conditional-history update admission (admit and deny on an out-of-framework row)', async (t) => {
+  const declaration = declareScopedHistoryDoc();
+  const db = new DatabaseSync(':memory:');
+  for (const sql of generateDDL(declaration)) db.exec(sql);
+  // d1 is owned by bob: the framework row grant denies alice write on the
+  // CURRENT row, so the generated-history pre-gate's default admitRow would
+  // reject the whole update before the handler ever ran.
+  db.prepare("INSERT INTO ScopedDoc (id, title, owner) VALUES (?, ?, ?)").run('d1', 'Report', 'bob');
+  const defaultAdapter = createAuthorizationAdapter();
+  const transitionCalls = [];
+  let adapterDecision = null;
+  const adapter = {
+    admit: async (input) => {
+      if (input.category === 'entity' && input.verb === 'update') {
+        transitionCalls.push({ row: input.row, principal: input.principal?.id });
+        return adapterDecision
+          ? { admitted: true, reasonCode: null }
+          : { admitted: false, reasonCode: 'no-capability' };
+      }
+      return defaultAdapter.admit(input);
+    },
+    registerResource: (input) => defaultAdapter.registerResource(input),
+  };
+  const app = workbench({ db, entities: [declaration] });
+  app._authorization = adapter; // what serve.ts listen() stashes from { authorization }
+  t.after(async () => { await app.shutdown(); db.close(); });
+  await app.start();
+
+  // Admit case: the current row is out of the framework write scope, but the
+  // adapter admits the transition. The update commits — no framework-default
+  // rejection from the pre-gate or the durable gate.
+  adapterDecision = true;
+  const admitted = await app.dispatch({
+    actionId: 'adapter-admit-scoped', type: 'ScopedDoc.update',
+    payload: { id: 'd1', title: 'Renamed' }, principal: alice,
+  });
+  assert.equal(admitted.ok, true, JSON.stringify(admitted));
+  assert.equal(db.prepare('SELECT title FROM ScopedDoc WHERE id = ?').get('d1').title, 'Renamed');
+  assert.ok(transitionCalls.some((c) => c.row?.id === 'd1' && c.principal === 'alice'), 'the transition admission consulted the injected adapter');
+
+  // Deny case: the injected adapter denies — 403 and the row is unchanged.
+  transitionCalls.length = 0;
+  adapterDecision = false;
+  const denied = await app.dispatch({
+    actionId: 'adapter-deny-scoped', type: 'ScopedDoc.update',
+    payload: { id: 'd1', title: 'Renamed-again' }, principal: alice,
+  });
+  assert.equal(denied.ok, false, JSON.stringify(denied));
+  assert.equal(denied.failure.category, 'denied');
+  assert.equal(denied.failure.message, 'forbidden');
+  assert.equal(db.prepare('SELECT title FROM ScopedDoc WHERE id = ?').get('d1').title, 'Renamed', 'the denied update leaves the row unchanged');
+});
+
+// The same adapter-governing rule holds on a history move: an undo that would
+// land the row in a state the adapter admits commits even when the CURRENT row
+// is out of the framework write scope (the generated-history pre-gate used to
+// reject it with the framework default before the history handler ran).
+test('an injected adapter governs a history undo whose current row is out of the framework write scope', async (t) => {
+  const declaration = declareScopedHistoryDoc();
+  const db = new DatabaseSync(':memory:');
+  for (const sql of generateDDL(declaration)) db.exec(sql);
+  const defaultAdapter = createAuthorizationAdapter();
+  const transitionCalls = [];
+  const adapter = {
+    admit: async (input) => {
+      if (input.category === 'entity' && input.verb === 'update') {
+        transitionCalls.push({ row: input.row, principal: input.principal?.id });
+        return { admitted: true, reasonCode: null };
+      }
+      return defaultAdapter.admit(input);
+    },
+    registerResource: (input) => defaultAdapter.registerResource(input),
+  };
+  const app = workbench({ db, entities: [declaration], history: durableHistory({ authorize: () => true }) });
+  app._authorization = adapter;
+  t.after(async () => { await app.shutdown(); db.close(); });
+  await app.start();
+  const session = 'history-tab';
+  const rowScope = 'ScopedDoc:d1';
+
+  const created = await app.dispatch({
+    actionId: 'history-create', type: 'ScopedDoc.create',
+    payload: { id: 'd1', title: 'first', owner: 'alice' }, principal: alice,
+  });
+  assert.equal(created.ok, true, JSON.stringify(created));
+  const updated = await app.dispatch({
+    actionId: 'history-edit', type: 'ScopedDoc.update',
+    payload: { id: 'd1', title: 'second' }, principal: alice,
+    scope: rowScope, history: { session },
+  });
+  assert.equal(updated.ok, true, JSON.stringify(updated));
+
+  // Narrow the framework write scope so the CURRENT row (title 'second') is no
+  // longer writable even by its owner. The adapter still admits the undo.
+  const ScopedDoc = app.entities.get('ScopedDoc');
+  ScopedDoc.grant = () => [scope(() => everyone()).can(async ({ is, entity }) => {
+    if (!(await is.owner())) return grant(read, subscribe);
+    return entity?.title === 'first' ? grant(read, subscribe) : grant(read, subscribe);
+  })];
+  const cursor = await app.history.cursor({ scope: rowScope, principal: alice, session });
+  const undone = await app.history.undo({ scope: rowScope, principal: alice, session, actionId: 'undo-adapter', revision: cursor.revision });
+  assert.equal(undone.ok, true, JSON.stringify(undone));
+  assert.deepEqual({ ...db.prepare('SELECT title, owner FROM ScopedDoc WHERE id = ?').get('d1') }, { title: 'first', owner: 'alice' });
+  assert.ok(transitionCalls.some((c) => c.row?.id === 'd1' && c.principal === 'alice'), 'the history move consulted the injected adapter');
+});
