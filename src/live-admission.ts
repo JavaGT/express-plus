@@ -19,8 +19,11 @@ import { failure } from './outcome.ts';
 import type { WorkbenchFailure } from './outcome.ts';
 import { getAnnotatedTextCompiledMetadata } from './annotated-text-field.ts';
 import type { LiveConn, LiveDatabase, LiveEntityRecord, LiveFanoutHandle, MayVerb } from './live-fanout.ts';
+import { compileSubscriptionRule } from './subscription-rule.ts';
+import type { CompiledSubscriptionRule } from './subscription-rule.ts';
 
 const MAX_SUBS_PER_CONN = 256;
+const MAX_COLLECTION_SUBS_PER_CONN = 32;
 const MAX_ID_LEN = 256;
 
 function hasAnnotatedText(entity: LiveEntityRecord): boolean {
@@ -46,6 +49,11 @@ export function parseSubscribeMsg(msg: unknown): NormalizedSubscribe | null {
       if (handle) {
         interest.entity = handle.entity;
         interest.id = handle.id;
+      } else if (message.rule !== undefined || message.collectionRule !== undefined) {
+        // A bare entity scope is collection identity (#102). It is only accepted
+        // with a declarative rule; generic scope subscriptions remain disabled.
+        interest.entity = scope;
+        interest.rule = message.rule ?? message.collectionRule;
       }
     }
 
@@ -142,8 +150,8 @@ export type SubscriptionAdmission =
       fields: Record<string, true> | null;
       pace: PaceProfile | null;
       carets: string[] | null;
-      interest: Record<string, unknown>;
-    };
+       interest: Record<string, unknown>;
+     };
 
 export async function authorizeSubscription(
   msg: unknown,
@@ -170,17 +178,27 @@ export async function authorizeSubscription(
   const { scope, interest } = normalized;
   const entityName = interest.entity;
   const id = interest.id;
+  const collectionRule = interest.rule ?? interest.collectionRule;
 
-  if (typeof entityName !== 'string' || id === undefined) {
+  if (typeof entityName !== 'string' || (id === undefined && collectionRule === undefined)) {
     return { admitted: false, failure: failure('invalid-input', 'Scope-level subscriptions are not configured; use entity and id.') };
   }
 
-  const idStr = String(id);
+  const isCollection = id === undefined;
+  if (isCollection && scope !== entityName) {
+    return { admitted: false, failure: failure('invalid-input', 'Collection scope must be its resource kind.') };
+  }
+
+  const idStr = isCollection ? '' : String(id);
   if (idStr.length > MAX_ID_LEN) {
     return { admitted: false, failure: failure('invalid-input', 'Subscribe id is too long.') };
   }
-  if (fanout.subscriptionCount(conn) >= MAX_SUBS_PER_CONN && !fanout.hasSubscription(conn, entityName, idStr)) {
+  if (!isCollection && fanout.subscriptionCount(conn) >= MAX_SUBS_PER_CONN && !fanout.hasSubscription(conn, entityName, idStr)) {
     return { admitted: false, failure: failure('conflict', 'Too many subscriptions are active.') };
+  }
+  const collectionCount = (fanout as LiveFanoutHandle & { collectionSubscriptionCount?: (connection: LiveConn) => number }).collectionSubscriptionCount?.(conn) ?? 0;
+  if (isCollection && collectionCount >= MAX_COLLECTION_SUBS_PER_CONN) {
+    return { admitted: false, failure: failure('conflict', 'Too many collection subscriptions are active.') };
   }
   if (!resolveEntity || !mayVerb || !db) {
     throw new Error('Live subscription admission dependencies are unavailable.');
@@ -192,20 +210,20 @@ export async function authorizeSubscription(
 
   const principal: Principal = conn.principal ?? anonymous;
   const { sql: where, params: scopeParams } = entity.scopeFilter(principal);
-  const row = db
-    .prepare(`SELECT * FROM ${entity.name} AS t0 WHERE ${where} AND t0.id = :id`)
-    .get({ ...scopeParams, id: idStr });
-  if (!row) {
-    return { admitted: false, failure: failure('denied', 'Forbidden.') };
-  }
+  const row = isCollection
+    ? db.prepare(`SELECT * FROM ${entity.name} AS t0 WHERE ${where} LIMIT 1`).get(scopeParams)
+    : db.prepare(`SELECT * FROM ${entity.name} AS t0 WHERE ${where} AND t0.id = :id`).get({ ...scopeParams, id: idStr });
+  // An empty collection is still a valid, scope-authorized subscription. A row
+  // that exists but falls outside the scope filter is indistinguishable from it.
+  if (!row && !isCollection) return { admitted: false, failure: failure('denied', 'Forbidden.') };
   {
-    const hydrated = entity.hydrate ? entity.hydrate(row, principal) : row;
+    const hydrated = row && (entity.hydrate ? entity.hydrate(row, principal) : row);
     // Subscribe admission runs through the injected authorization adapter
     // (S5/A2) when one is wired — the SAME seam REST dispatch and the route
     // gate consult — so an app policy adapter owns live admission too (the
     // ticket's single-path requirement). Without an adapter the framework
     // row-grant runs, unchanged.
-    const allowed = authorization
+    const allowed = !hydrated || (authorization
       ? (await authorization.admit({
           category: 'entity',
           verb: 'subscribe',
@@ -215,7 +233,7 @@ export async function authorizeSubscription(
           row: hydrated,
           resourceId: idStr,
         })).admitted
-      : await mayRow(entity as never, 'subscribe', hydrated, principal, mayVerb as never);
+      : await mayRow(entity as never, 'subscribe', hydrated, principal, mayVerb as never));
     if (!allowed) {
       return { admitted: false, failure: failure('denied', 'Forbidden.') };
     }
@@ -227,6 +245,12 @@ export async function authorizeSubscription(
   let pace: PaceProfile | null;
   let carets: string[] | null;
   try {
+    if (isCollection) {
+      // Compile during registration, never on a later refresh. This is both the
+      // SQL injection boundary and the no-JS-filter fallback guarantee.
+      const compiled: CompiledSubscriptionRule = compileSubscriptionRule(collectionRule, entity);
+      interest.rule = compiled;
+    }
     ({ fields, pace, carets } = buildInterest(interest, entity));
   } catch (err) {
     return { admitted: false, failure: failure('invalid-input', (err as { message?: string }).message || 'Invalid fields or pace selection.') };
