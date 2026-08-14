@@ -1,11 +1,15 @@
 // blob-root-relocation.test.mjs — S6/A2 default byte-root relocation. With NO
 // blobs config, a FILE-mode app's byte store roots under the owned directory's
-// managed `blobs/` (final slots) + `staging/` (pending slots) — never
-// `cwd/.blobs`. An explicit `blobs: { root }` stays the override (refused on
-// overlap with the owned directory). A memory database gets the in-memory fake
-// byte store (S6/A1) — no disk root at all. `pathFor` is retired from the
-// portable BlobStore surface; it survives only as the `_pathFor` internal/test
-// handle.
+// managed `blobs/` (final slots) + `staging/` (pending slots) — inside the
+// owned directory when one exists, beside the db file otherwise; never the
+// retired `cwd/.blobs` default (a relative database path makes the owned
+// directory cwd-relative, so the managed root can legitimately sit under cwd).
+// An explicit `blobs: { root }` stays the override (refused on overlap with
+// the owned directory). A memory database gets the in-memory fake byte store
+// (S6/A1) — no disk root at all. `pathFor` is retired from the portable
+// BlobStore surface; it survives only as the `_pathFor` internal/test handle.
+// A conforming custom DbAdapter must declare `root` (owned directory for file
+// mode, null for memory) or construction fails closed (review #93).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -13,6 +17,7 @@ import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { createSqliteAdapter } from '../build/sqlite-adapter.mjs';
 import workbench from '../build/internal.mjs';
 
 function tempRoot() {
@@ -132,6 +137,78 @@ test('pathFor is retired from the portable BlobStore surface (test/debug handle 
       assert.equal(typeof app.blobs.pathFor, 'undefined', 'no portable pathFor on the app blob store');
       assert.equal(typeof app.blobs._pathFor, 'function', 'the explicit internal/test handle survives');
       assert.equal(app.blobs._pathFor('x'), app.blobs._pathFor('x'), 'the handle is a pure function');
+    } finally {
+      await app.shutdown();
+    }
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('a file-backed custom DbAdapter without `root` fails closed instead of silently going memory (review #93)', () => {
+  const base = tempRoot();
+  const owned = path.join(base, 'owned');
+  try {
+    // A file-backed DbAdapter (A1 contract) that does not declare its owned
+    // root. The app cannot classify it file-vs-memory, so it must REFUSE with a
+    // named error — never silently hand it the in-memory fake byte store.
+    const fileBackedWithoutRoot = {
+      readMirror() {
+        return {
+          kind: 'read-mirror', mode: 'read-only', readOnly: true,
+          connectionString: `file:${path.join(owned, 'app.db')}?mode=ro`,
+        };
+      },
+      open() {
+        return Promise.reject(new Error('must not open: construction should fail closed first'));
+      },
+    };
+    assert.throws(
+      () => workbench({ db: fileBackedWithoutRoot }),
+      /must declare its `root`/,
+      'construction names the missing owned-directory declaration',
+    );
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('a memory-mode custom DbAdapter (root: null) still gets the in-memory fake byte store', async () => {
+  const base = tempRoot();
+  const previous = process.cwd();
+  process.chdir(base);
+  try {
+    const app = workbench({ db: createSqliteAdapter({ mode: 'memory' }) });
+    await app.ddl();
+    try {
+      assert.equal(app.blobs.capabilities.durability, 'ephemeral', 'the in-memory fake store (S6/A1)');
+      assert.match(app.blobs._pathFor('any-id'), /^mem:\/\/blobs\//, 'the synthetic key handle');
+      assert.equal(existsSync(path.join(base, '.blobs')), false, 'a memory adapter never touches a disk root');
+    } finally {
+      await app.shutdown();
+    }
+  } finally {
+    process.chdir(previous);
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('a file-backed custom DbAdapter (root: owned directory) roots the default byte store under it — never memory', async () => {
+  const base = tempRoot();
+  const owned = path.join(base, 'owned');
+  try {
+    const app = workbench({ db: createSqliteAdapter({ directory: owned, name: 'app', mode: 'file' }) });
+    await app.ddl();
+    try {
+      assert.equal(app.blobs.capabilities.durability, 'durable', 'a file-backed adapter gets a durable store');
+      assert.ok(
+        path.resolve(app.blobs._pathFor('any-id')).startsWith(path.join(owned, 'blobs')),
+        'the default byte root sits under the adapter-owned blobs/',
+      );
+      assert.ok(
+        path.resolve(app.blobs._pathFor('any-id', { pending: true })).startsWith(path.join(owned, 'staging')),
+        'pending slots stage under the adapter-owned staging/',
+      );
     } finally {
       await app.shutdown();
     }

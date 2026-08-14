@@ -58,6 +58,9 @@ test('an adapter-backed app starts headless and shutdown closes the adapter', as
 
 test('workbench refuses a DbAdapter opened database whose open() rejects', async () => {
   const failing = {
+    // Memory-mode adapter (A1 contract): declares root: null so the app does
+    // not fail closed on the missing owned-directory declaration.
+    root: null,
     readMirror() {
       return { kind: 'read-mirror', mode: 'read-only', readOnly: true, connectionString: 'file::memory:?mode=ro' };
     },

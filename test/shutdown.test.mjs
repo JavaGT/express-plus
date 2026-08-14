@@ -22,6 +22,9 @@ function tempRoot() {
 // — used to prove app.shutdown() propagates the failure instead of swallowing it.
 function failingCloseAdapter() {
   return {
+    // Memory-mode adapter: declares root: null so the app does not fail closed
+    // on the missing owned-directory declaration (review #93).
+    root: null,
     readMirror() {
       return { kind: 'read-mirror', mode: 'read-only', readOnly: true, connectionString: 'file::memory:?mode=ro' };
     },

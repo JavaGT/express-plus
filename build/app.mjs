@@ -112,9 +112,13 @@ function isDbAdapterConfig(value         )                           {
                                   
                                       
                                      
-                                                                               
-                                                                                 
-                                
+                                                                          
+                                                                         
+                                                                         
+                                                                         
+                                                                          
+                                       
+                               
  
 
 function isDbAdapter(value         )                          {
@@ -156,12 +160,16 @@ function refuseBlobOverlap(ownedDirectory        , blobRoot               )     
 
 // Resolve the blob root (S6/A2 relocation). The DEFAULT is ALWAYS the owned
 // directory's managed `blobs/` subdirectory for a file-mode database — never
-// cwd (the old `process.cwd()/.blobs` default was flagged by the S7 audit and
-// is removed by this ticket). An EXPLICIT `blobs.root` is the override, still
-// refused on overlap with the owned directory (refuse-vs-place preserved from
-// S1/A2). Memory databases resolve NO disk root at all — they use the in-memory
-// fake byte store (S6/A1). Called before the adapter opens so a refusal never
-// leaks the OS-backed ownership lock.
+// the old `process.cwd()/.blobs` default (flagged by the S7 audit and removed
+// by this ticket). The guarantee is "inside the adapter-owned directory when
+// one exists; beside the db file otherwise" — for a RELATIVE database path the
+// owned directory itself is cwd-relative (e.g. db: 'app.db' roots blobs at
+// cwd/blobs), which is fine: it is the owned directory's managed subdirectory,
+// not an unrelated cwd/.blobs default. An EXPLICIT `blobs.root` is the
+// override, still refused on overlap with the owned directory (refuse-vs-place
+// preserved from S1/A2). Memory databases resolve NO disk root at all — they
+// use the in-memory fake byte store (S6/A1). Called before the adapter opens
+// so a refusal never leaks the OS-backed ownership lock.
 function resolveBlobRoot(ownedDirectory        , explicitRoot               )         {
   if (explicitRoot) {
     refuseBlobOverlap(ownedDirectory, explicitRoot);
@@ -220,9 +228,13 @@ export default function workbench({
   // refuse an EXPLICIT blobs.root overlap BEFORE the adapter opens — an overlap
   // thrown after opening would leak the OS-backed ownership lock (S1/A2). For a
   // FILE-mode database the DEFAULT is ALWAYS the owned directory's managed
-  // `blobs/` (+ `staging/` for pending slots) — never cwd (S6/A2 relocation).
-  // `blobRoot` stays null only for a memory database with no explicit blobs
-  // config: those get the in-memory fake byte store (S6/A1).
+  // `blobs/` (+ `staging/` for pending slots) — the guaranteed placement is
+  // "inside the adapter-owned directory when one exists; beside the db file
+  // otherwise" (S6/A2 relocation). A relative database path makes that owned
+  // directory cwd-relative, so the root is cwd-relative in that case; it is
+  // never the retired unrelated cwd/.blobs default. `blobRoot` stays null only
+  // for a memory database with no explicit blobs config: those get the
+  // in-memory fake byte store (S6/A1).
   const explicitBlobRoot = blobOpts
     && typeof blobOpts.writePending !== 'function'
     && blobOpts?.root
@@ -281,7 +293,18 @@ export default function workbench({
       // owned root (`root`, null for memory) so the blob-root guard still runs
       // before the deferred open.
       pendingDbAdapter = db;
-      const adapterRoot = (db                  ).root ?? null;
+      const adapterRoot = (db                  ).root;
+      if (adapterRoot === undefined) {
+        // FAIL CLOSED (review #93 finding 1): an adapter that does not declare
+        // `root` cannot prove it is memory-mode, and silently treating it as
+        // memory would hand a FILE-backed database an ephemeral in-memory byte
+        // store — a durability regression. The adapter must declare its owned
+        // directory (file mode, blobs root under it) or null (memory mode).
+        throw new Error(
+          'a conforming DbAdapter must declare its `root`: the owned directory for file mode '
+            + '(the default blob store roots under it), or null for memory mode',
+        );
+      }
       if (adapterRoot) {
         blobRoot = resolveBlobRoot(adapterRoot, explicitBlobRoot);
         blobStagingRoot = managedStagingRoot(adapterRoot, explicitBlobRoot);
@@ -297,9 +320,10 @@ export default function workbench({
     } else if (db && typeof (db                          ).location === 'function') {
       // A raw DatabaseSync handle: classify memory vs file by its location()
       // (:memory: → null). A raw FILE handle has no adapter-owned directory, so
-      // the default root sits beside the db file — never cwd. A raw MEMORY
-      // handle keeps only an explicit blobs.root (blobRoot is already null
-      // otherwise) — the in-memory fake byte store (S6/A1).
+      // the default root sits beside the db file (a relative location makes that
+      // dirname cwd-relative). A raw MEMORY handle keeps only an explicit
+      // blobs.root (blobRoot is already null otherwise) — the in-memory fake
+      // byte store (S6/A1).
       const location = (db                                 ).location();
       if (location != null) {
         const owned = path.dirname(location);
@@ -498,11 +522,14 @@ export default function workbench({
     // The blob store is an app-level resource, constructed when a db is engaged
     // (blobs are adopted by dispatch commits — no db, no durable kernel, no
     // blobs). With no blobs config, a FILE-mode app's byte store roots under
-    // the owned directory's managed `blobs/` + `staging/` pair — never cwd
-    // (S6/A2 relocation; the old cwd/.blobs default was retired). A MEMORY
-    // database gets the in-memory fake byte store (S6/A1). One store, reached
-    // by the /blobs upload route AND the kernel's blob adopter — not a second
-    // persistence path.
+    // the owned directory's managed `blobs/` + `staging/` pair (S6/A2
+    // relocation; the old cwd/.blobs default was retired). The guaranteed
+    // placement is "inside the adapter-owned directory when one exists; beside
+    // the db file otherwise" — a relative database path makes that directory
+    // cwd-relative, which is the owned root, not an unrelated cwd/.blobs
+    // default. A MEMORY database gets the in-memory fake byte store (S6/A1).
+    // One store, reached by the /blobs upload route AND the kernel's blob
+    // adopter — not a second persistence path.
     //
     // SEAM (seam-review §2.2): `blobs` may be either an options bag (`{ root }`,
     // back-compat — the framework builds fsBlobs internally; the root is

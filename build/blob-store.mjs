@@ -31,8 +31,10 @@
 // (the deployment reality for a photos app is S3-compatible storage — a future
 // `s3Blobs({...})` implements the same interface). With NO blobs config, a
 // file-mode app's byte store roots under the owned directory's managed
-// `blobs/` + `staging/` pair (S6/A2 relocation — never cwd); a memory database
-// uses the in-memory fake store (S6/A1).
+// `blobs/` + `staging/` pair (S6/A2 relocation — inside the owned directory
+// when one exists, beside the db file otherwise; a relative database path
+// makes the owned directory cwd-relative, so the root can be cwd-relative in
+// that case). A memory database uses the in-memory fake store (S6/A1).
 
 import { createHash, randomUUID } from 'node:crypto';
 import { fsBlobs, hasPathFor,                                            } from './fs-blobs.mjs';

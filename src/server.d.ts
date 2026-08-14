@@ -645,9 +645,10 @@ export function createBlobStore(options: {
    * Explicit byte root (back-compat `blobs: { root }`), refused on overlap with
    * the owned directory. When omitted and the store is built through
    * `workbench()`, a file-mode app's byte store roots under the owned
-   * directory's managed `blobs/` (pending slots in `staging/`) — never cwd
-   * (S6/A2 relocation) — and a memory database uses the in-memory fake byte
-   * store (S6/A1).
+   * directory's managed `blobs/` (pending slots in `staging/`) — inside the
+   * owned directory when one exists, beside the db file otherwise; a relative
+   * database path makes that owned directory cwd-relative (S6/A2 relocation) —
+   * and a memory database uses the in-memory fake byte store (S6/A1).
    */
   root?: string;
   db: WorkbenchDatabase;

@@ -152,14 +152,18 @@ test('workbench refuses a blobs.root that overlaps the owned directory (both dir
   }
 });
 
-test('a file-mode database roots the default blob store under the owned blobs/ + staging/ directories (never cwd)', async () => {
+test('a file-mode database roots the default blob store under the owned blobs/ + staging/ directories', async () => {
   const base = tempRoot();
   const previous = process.cwd();
   process.chdir(base);
   try {
     // S6/A2 relocation: with no blob config, the default byte root is ALWAYS
     // the owned directory's managed `blobs/` subdirectory (final) with
-    // `staging/` for pending slots — never cwd/.blobs.
+    // `staging/` for pending slots — never the retired cwd/.blobs default. The
+    // guarantee is "inside the adapter-owned directory when one exists"; here
+    // the owned directory IS the (relative) cwd, so the managed subdirectories
+    // land at cwd/blobs + cwd/staging — the owned root, not an unrelated
+    // cwd/.blobs default.
     const app = workbench({ db: { directory: '.', name: 'app', mode: 'file' } });
     assert.ok(app.blobs, 'blob store constructed');
     const finalPath = path.resolve(app.blobs._pathFor('any-id'));
