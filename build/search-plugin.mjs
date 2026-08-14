@@ -743,6 +743,21 @@ export function createSearchPluginRegistry(options                              
     const ctx = contextOf(id);
     try {
       const result = await run(ctx);
+      // A plugin-owned identity can change while an async materialization is
+      // running (for example, a vector model-space switch). Its result belongs
+      // to the old identity and cannot make the new one ready.
+      if (entry.plugin.generationIdentity !== entry.generationIdentity) {
+        synchronizeGenerationIdentity(entry);
+        return {
+          ok: true,
+          generation: entry.generation,
+          fence: entry.fence,
+          state: entry.state,
+          counts: entry.counts,
+          lastError: null,
+          result: null,
+        };
+      }
       // prepare success leaves the plugin building (owned objects exist, the
       // index is not materialized yet); validate/reconcile/rebuild success
       // makes the index ready — unless the fence moved mid-flight, in which

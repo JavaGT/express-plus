@@ -150,7 +150,13 @@ export function createVectorPlugin(options                     )               {
   function rebuild(ctx                     )                          {
     const next = target();
     next.clear();
-    for (const row of ctx.reader.rows(options.source.entity)) ingest(next, row);
+    try {
+      for (const row of ctx.reader.rows(options.source.entity)) ingest(next, row);
+    } catch (err) {
+      // Do not leave a partially rebuilt direct index or shadow generation.
+      next.clear();
+      throw err;
+    }
     return { counts: { vectors: next.size } };
   }
 
@@ -166,7 +172,16 @@ export function createVectorPlugin(options                     )               {
       // so its prior indexed value must not remain searchable.
       const row = ctx.reader.row(options.source.entity, change.rowId);
       if (row === undefined) next.delete(change.rowId);
-      else ingest(next, row);
+      else {
+        try {
+          ingest(next, row);
+        } catch (err) {
+          if (err instanceof VectorPluginValidationError && err.code === 'unauthorized-source-ownership') {
+            next.delete(change.rowId);
+          }
+          throw err;
+        }
+      }
     }
     return { counts: { vectors: next.size } };
   }

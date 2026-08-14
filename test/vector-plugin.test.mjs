@@ -88,6 +88,26 @@ test('vector plugin rejects model-space mismatch and unauthorized source ownersh
   assert.match(ownerOutcome.lastError.message, /not owned/);
 });
 
+test('ownership rejection purges stale rows and aborts a partial rebuild', async (t) => {
+  const kit = setup({ owns: (row) => row.owner === 'alice' });
+  t.after(() => kit.db.close());
+  kit.insert('n1', [1, 0]);
+  kit.insert('n2', [0, 1]);
+  await rebuild(kit);
+
+  kit.db.prepare('UPDATE Note SET owner = ? WHERE id = ?').run('mallory', 'n2');
+  const rebuilt = await kit.registry.rebuild('note-vectors');
+  assert.equal(rebuilt.ok, false);
+  assert.equal(kit.plugin.indexCensus({}).Note.count, 0, 'a failed direct rebuild leaves no partial index active');
+
+  kit.db.prepare('UPDATE Note SET owner = ? WHERE id = ?').run('alice', 'n2');
+  await rebuild(kit);
+  kit.db.prepare('UPDATE Note SET owner = ? WHERE id = ?').run('mallory', 'n2');
+  const reconciled = await kit.registry.reconcile('note-vectors', [{ entity: 'Note', rowId: 'n2', kind: 'updated' }]);
+  assert.equal(reconciled.ok, false);
+  assert.equal(kit.plugin.indexCensus({}).Note.count, 1, 'a row that loses ownership is removed from the active index');
+});
+
 test('vector plugin refuses sources without ownership and contains ownership predicate errors', async (t) => {
   assert.throws(() => createVectorPlugin({
     id: 'unowned-vectors',

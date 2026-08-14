@@ -767,6 +767,36 @@ describe('search plugin registry — generation and fence transitions', () => {
     assert.equal(state.generation, 1);
     assert.deepEqual(state.counts, { documents: 5 });
   });
+
+  test('an identity change during rebuild stays building with cleared counts', async () => {
+    const registry = createSearchPluginRegistry();
+    let generationIdentity = 'model-v1';
+    let releaseBuild;
+    const gate = new Promise((resolve) => {
+      releaseBuild = resolve;
+    });
+    const plugin = makePlugin({
+      id: 'identity-gated-build',
+      rebuild: async () => {
+        await gate;
+        return { counts: { documents: 5 } };
+      },
+    });
+    Object.defineProperty(plugin, 'generationIdentity', { get: () => generationIdentity });
+    registry.register(plugin);
+
+    const building = registry.rebuild('identity-gated-build');
+    generationIdentity = 'model-v2';
+    releaseBuild();
+    const outcome = await building;
+    assert.equal(outcome.state, 'building');
+    assert.deepEqual(outcome.counts, {});
+    const state = registry.stateOf('identity-gated-build');
+    assert.equal(state.state, 'building');
+    assert.deepEqual(state.counts, {});
+    assert.equal(state.generation, 2);
+    assert.equal(state.fence, 1);
+  });
 });
 
 // ---- prepare / validate ----------------------------------------------------
