@@ -87,6 +87,12 @@ export interface JobRow {
   stage: string | null;
   attempts: number;
   availableAt: number | null;
+  // S5/A5 machine attribution persisted on the _Job row: the canonical
+  // principal key and the normalized allowlist of the enqueue-time machine
+  // principal (both null when the job is unattributed). Survives restart and
+  // separate worker processes.
+  principalKey: string | null;
+  operations: readonly string[] | null;
 }
 
 export type SubmitResultOk =

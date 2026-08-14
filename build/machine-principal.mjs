@@ -20,6 +20,13 @@
 import { principal,                } from './principal.mjs';
 import { operationCategory,                        } from './operation.mjs';
 
+// The machine-principal brand. A MODULE-PRIVATE symbol minted only inside
+// machinePrincipal() below and stamped onto the returned object BEFORE it is
+// frozen, so a machine principal is UNFORGEABLE: no caller can construct a
+// principal-shaped object (matching id/source/operations) that isMachinePrincipal
+// accepts — the brand is the only admission key, and it never leaves this module.
+const MACHINE_BRAND = Symbol('workbench.machinePrincipal');
+
                                             
                           
                       
@@ -28,7 +35,8 @@ import { operationCategory,                        } from './operation.mjs';
                                                                        
                    
                                                                        
-                                                                 
+                                                                          
+                                                                       
                   
                                                                           
                                   
@@ -69,28 +77,31 @@ export function machinePrincipal({ id, operations }                       )     
       return operationCategory(operation).operation;
     }),
   );
-  return principal({
-    type: 'system',
-    id,
-    attributes: Object.freeze({
-      source: id,
-      machine: true,
-      operations: normalized,
+  return Object.freeze({
+    ...principal({
+      type: 'system',
+      id,
+      attributes: Object.freeze({
+        source: id,
+        machine: true,
+        operations: normalized,
+      }),
+      status: 'active',
     }),
-    status: 'active',
+    // The unforgeable brand: stamped here (before the freeze above) so only this
+    // constructor ever produces a principal isMachinePrincipal accepts.
+    [MACHINE_BRAND]: true,
   })                               ;
 }
 
-// Type guard — true only for a machine principal carrying the `machine`
-// discriminator and an explicit allowlist. Anything else (a raw `system`
-// principal, a user, anonymous) is NOT a machine principal: fail closed.
+// Type guard — true ONLY for a machine principal minted by machinePrincipal()
+// (carrying the module-private brand). A hand-rolled object that mimics every
+// readable field (type:'system', id, source, machine:true, a matching
+// operations allowlist) still lacks the brand and is NOT a machine principal —
+// fail closed. This is the sole admission key every runtime seam reads.
 export function isMachinePrincipal(principalLike         )                                    {
   if (!principalLike || typeof principalLike !== 'object') return false;
-  const p = principalLike                                                                 ;
-  return p.type === 'system'
-    && p.attributes != null
-    && typeof p.attributes === 'object'
-    && p.attributes.machine === true;
+  return (principalLike                                 )[MACHINE_BRAND] === true;
 }
 
 // The explicit allowlist of a machine principal, or null when the principal is

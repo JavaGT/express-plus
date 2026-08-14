@@ -35,9 +35,10 @@ import type { AuthorizationAdapter } from './authorization-adapter.ts';
 import { tryParseScopeKey } from './scope-handle.ts';
 import type { ScopeHandle } from './scope-handle.ts';
 import type { Principal } from './principal.ts';
-import { principalKeyOf } from './principal.ts';
+import { anonymous, principalKeyOf } from './principal.ts';
 import type { FrameworkLog } from './log.ts';
 import type { LiveDatabase, LiveEntityRecord, MayVerb, RevocationListener, RevocationResourceScope } from './live-fanout.ts';
+import { normalizeRevocationScope } from './live-fanout.ts';
 
 let nextSubId = 1;
 
@@ -85,10 +86,13 @@ interface CoreSub {
   document: unknown;
   activation?: Promise<number>;
   resyncEnvelope?: unknown;
-  // Set when a revocation publish woke this subscription: its reauthorization
-  // failure is the MANIFESTATION of an already-published revocation, so it must
-  // not publish again (exactly-once per revocation class).
-  revokeWake?: RevocationResourceScope | null;
+  // Set of PENDING revocation events this subscription has been woken by (canonical
+  // keys). A SET, not a single marker: multiple distinct revocations published
+  // before the next catchUp are all retained and each gets a re-authorization
+  // attempt — the later one never collapses the earlier (workbench#75 review
+  // finding 5). Consumed (cleared) at each catchUp; a non-empty set also marks
+  // the catchUp as revocation-driven so its denial is never re-published.
+  revokeWakes: Set<string>;
   _abortHandler?: () => void;
 }
 
@@ -133,10 +137,16 @@ export interface LiveDeliveryCore {
   // adapters) notified on every revocation; returns an unsubscribe.
   onRevocation(listener: RevocationListener): () => void;
   // Publish a revocation for a principal + resource scope (see the contract in
-  // live-fanout.mjs). Fires the registered listeners exactly once per call and
-  // immediately re-authorizes the AFFECTED subscriptions (matching by scope key
-  // or principal key) — event-driven, so a revoked reader's feed ends without
-  // waiting for the next event batch.
+  // live-fanout.mjs). The descriptor is normalized and validated first — a
+  // malformed scope (unknown category, empty key, non-canonical principal key,
+  // invalid entity scope syntax) throws RevocationScopeError before any listener
+  // fires (finding 4). The publisher is wired into the MUTATION paths that
+  // invalidate grants: a committed deletion (terminal removal) and every
+  // delivery-time reauthorization denial publish through this seam, exactly once
+  // per invalidation, and immediately re-authorize the AFFECTED subscriptions
+  // (matching by scope key or principal key) — event-driven, so a revoked
+  // reader's feed ends without waiting for the next event batch. An app mutation
+  // handler (membership removal, principal status change) calls this directly.
   revoke(principal: Principal, resourceScope: RevocationResourceScope): void;
   close(): void;
   snapshot(input: { principal: Principal; scope: string }): Record<string, unknown>;
@@ -157,6 +167,21 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
   // exactly once per published revocation, and the affected subscriptions are
   // re-authorized immediately (event-driven, not per-batch).
   const revocationListeners: RevocationListener[] = [];
+  // Exactly-once dedup for ENTITY-scope revocations published from the delivery
+  // path (a committed deletion or a reauthorization denial): keyed by scope +
+  // the last observed seq, so concurrent deliveries of the SAME invalidation
+  // publish exactly once. A later invalidation (new events) gets a new key and
+  // publishes again; entries are pruned when the scope is reauthorized.
+  const publishedRevocations = new Map<string, true>();
+
+  // The canonical key a subscription keys a revocation event on — a distinct
+  // wake set entry per distinct revocation (category-prefixed so an entity
+  // scope and a principal key that happen to share a spelling never collapse).
+  function revocationKey(resourceScope: RevocationResourceScope): string {
+    return resourceScope.category === 'entity'
+      ? `entity:${resourceScope.key}`
+      : `principal:${resourceScope.key}`;
+  }
 
   // Does a subscription fall inside a published revocation's resource scope?
   // entity scope ⇒ its scope key equals the key; principal scope ⇒ its
@@ -169,15 +194,20 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
   // Publish a revocation: fire the registered listeners once, then immediately
   // wake every affected subscription so it re-reads + re-authorizes NOW (no wait
   // for the next event batch). A woken subscription that then fails
-  // reauthorization is terminated; it carries the revokeWake marker so its
-  // termination does not re-publish (exactly-once per revocation class).
+  // reauthorization is terminated; it retains the revocation key in its wake set
+  // so its termination does not re-publish (exactly-once per revocation event).
+  // Each DISTINCT revocation event is added to a subscription's wake set — two
+  // revocations published before its next catchUp are both re-authorized, never
+  // collapsed into the last one (finding 5).
   function publishRevocation(principal: Principal, resourceScope: RevocationResourceScope): void {
+    const key = revocationKey(resourceScope);
     for (const listener of revocationListeners) {
       try { listener(principal, resourceScope); } catch { /* per-listener isolation */ }
     }
     for (const [subId, sub] of [...subs.entries()]) {
       if (!sub.active || !revocationMatches(sub, resourceScope)) continue;
-      sub.revokeWake = resourceScope;
+      if (sub.revokeWakes.has(key)) continue;
+      sub.revokeWakes.add(key);
       if (sub.paused) {
         sub.dirty = true;
       } else if (sub.pending) {
@@ -196,9 +226,36 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
     };
   }
 
+  // The public revocation seam (spec item 4): normalize + validate the descriptor
+  // FIRST (finding 4 — a malformed descriptor throws RevocationScopeError before
+  // any listener fires or any subscription is woken), then publish. Every
+  // mutation/admission path that invalidates a grant routes through this one
+  // function — the delivery-time reauthorization denials and committed deletions
+  // in catchUp below, and any app mutation handler that calls revoke() directly.
   function revoke(principal: Principal, resourceScope: RevocationResourceScope): void {
     if (closed) return;
-    publishRevocation(principal, resourceScope);
+    publishRevocation(principal, normalizeRevocationScope(principal, resourceScope));
+  }
+
+  // Exactly-once entity-scope publish keyed on the observed state: scope + the
+  // last seq read in the failing catchUp batch (null when nothing was read).
+  // Concurrent deliveries of the same invalidation share the key and only the
+  // first publishes; a later invalidation has a new seq and publishes again.
+  function publishRevocationForScope(scope: string, lastSeq: number | null): void {
+    const dedupKey = lastSeq === null ? scope : `${scope}\u0000${lastSeq}`;
+    if (publishedRevocations.has(dedupKey)) return;
+    publishedRevocations.set(dedupKey, true);
+    revoke(anonymous, { category: 'entity', key: scope });
+  }
+
+  // A successful reauthorization means the grant exists again: the scope's old
+  // invalidation keys are stale and must not suppress a FUTURE invalidation.
+  function prunePublishedRevocations(scope: string): void {
+    if (publishedRevocations.has(scope)) publishedRevocations.delete(scope);
+    const prefix = `${scope}\u0000`;
+    for (const key of [...publishedRevocations.keys()]) {
+      if (key.startsWith(prefix)) publishedRevocations.delete(key);
+    }
   }
 
   function entityRecord(name: string): LiveEntityRecord {
@@ -356,14 +413,23 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
     }
     sub.pending = true;
     try {
+      // The number of re-authorization iterations owed to consumed revocation
+      // keys in THIS catchUp invocation. A subscription woken by two distinct
+      // revocations re-authorizes once per key (finding 5); while owed
+      // iterations remain the catchUp is "revocation-driven", so a denial is
+      // never re-published (the denial is the manifestation of a published
+      // revocation — exactly once per revocation event).
+      let revocationsOwed = 0;
       while (true) {
         if (!sub.active) return;
         sub.dirty = false;
-        // A revocation publish waked this subscription (revokeWake set): its
-        // reauthorization failure is the manifestation of that already-published
-        // revocation, so it must not publish again — exactly once per class.
-        const revocationScope = sub.revokeWake;
-        sub.revokeWake = null;
+        // Consume the pending revocation wake set. Distinct revocation events
+        // are retained (a set, never a single marker that collapses into the
+        // last one); each owned key below buys one re-authorization iteration.
+        const pendingRevocations = [...sub.revokeWakes];
+        sub.revokeWakes.clear();
+        revocationsOwed += pendingRevocations.length;
+        const revocationDriven = revocationsOwed > 0;
         const handle = tryParseScopeKey(sub.scope);
         if (!handle) { removeSub(subId); log?.error?.('live', 'invalid scope', { scope: sub.scope }); throw new Error(`invalid scope '${sub.scope}'`); }
         let events: Array<{ seq: number } & Readonly<Record<string, unknown>>>;
@@ -375,6 +441,10 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
           throw new Error(`readSince failed for scope '${sub.scope}'`);
         }
         const auth = reauthFor(sub.entityRec, sub.principal, handle);
+        // A successful reauthorization means the grant exists again — stale
+        // invalidation dedup keys for this scope must not suppress a FUTURE
+        // invalidation.
+        if (auth) prunePublishedRevocations(sub.scope);
         // A removal deletes its authorization subject, so it cannot be
         // re-authorized against a current row. Without that row, only terminal
         // removals for this entity may be projected; other committed rows in
@@ -385,21 +455,24 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
           ? events
           : terminalRemoval ? events : [];
         if (!auth && !terminalRemoval) {
-          // Reauthorization denied at delivery time: the single admission path
-          // where access revocation manifests. Publish once (unless this wake
-          // already WAS a published revocation) so listeners hear it and the
-          // OTHER affected subscriptions are re-authorized immediately.
-          if (!revocationScope) publishRevocation(sub.principal, { category: 'entity', key: sub.scope });
+          // Reauthorization denied at delivery time: the admission path where a
+          // grant-invalidating mutation manifests. Publish the revocation
+          // exactly once for this observed state (deduped per scope + seq) —
+          // unless this wake already WAS a published revocation — so listeners
+          // hear it and the OTHER affected subscriptions are re-authorized
+          // immediately.
+          if (!revocationDriven) publishRevocationForScope(sub.scope, events.length > 0 ? events[events.length - 1].seq : null);
           removeSub(subId); log?.error?.('live', 'reauth denied', { scope: sub.scope }); return;
         }
         if (auth && !(await checkMayRow(sub.entityRec, auth.row, sub.principal))) {
-          if (!revocationScope) publishRevocation(sub.principal, { category: 'entity', key: sub.scope });
+          if (!revocationDriven) publishRevocationForScope(sub.scope, events.length > 0 ? events[events.length - 1].seq : null);
           removeSub(subId); log?.error?.('live', 'mayRow denied', { scope: sub.scope }); return;
         }
         if (!sub.active) return;
         const resyncEnvelope = sub.resyncEnvelope;
         if (events.length === 0 && !resyncEnvelope) {
-          if (sub.dirty) continue;
+          revocationsOwed -= 1;
+          if (sub.dirty || revocationsOwed > 0) continue;
           return;
         }
         const batch: unknown[] = resyncEnvelope ? [resyncEnvelope] : [];
@@ -448,6 +521,14 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
           // The authorization subject is gone. A terminal removal is the only
           // allowed output, and this subscription cannot acknowledge unrelated
           // earlier events that were withheld by the fail-closed filter.
+          // THE MUTATION PATH (workbench#75 review BLOCKER): a committed
+          // deletion invalidates every subscription's grant on this scope.
+          // Publish the revocation exactly once per (scope, removal seq) —
+          // the synchronous dedup guards concurrent deliveries of the same
+          // removal, and a revocation-woken catchUp (revocationDriven) skips
+          // because its publish already happened — before delivering the
+          // terminal removal, so S4/S6 listeners hear the deletion immediately.
+          if (!revocationDriven) publishRevocationForScope(sub.scope, events[events.length - 1].seq);
           sub.cursor = events[events.length - 1].seq;
           removeSub(subId);
           return;
@@ -455,7 +536,8 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
         // Advance cursor past the last event we processed (even if projection
         // returned empty — the events were acknowledged).
         if (events.length > 0) sub.cursor = events[events.length - 1].seq;
-        if (sub.dirty) continue;
+        revocationsOwed -= 1;
+        if (sub.dirty || revocationsOwed > 0) continue;
         return;
       }
     } catch (err) {
@@ -523,7 +605,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
     // so a closed core never installs a stranded subscription.
     if (closed) throw new Error('live-delivery-core is closed');
     const subId = generateSubId();
-    const sub: CoreSub = { entityRec, principal, deliver, revoke, signal, cursor: after, pending: false, dirty: false, paused, scope, active: true, document };
+    const sub: CoreSub = { entityRec, principal, deliver, revoke, signal, cursor: after, pending: false, dirty: false, paused, scope, active: true, document, revokeWakes: new Set() };
     subs.set(subId, sub);
     let set = byScope.get(scope);
     if (!set) { set = new Set(); byScope.set(scope, set); }
@@ -611,6 +693,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
     }
     subs.clear();
     byScope.clear();
+    publishedRevocations.clear();
   }
 
   async function catchup({ principal, scope, after = 0, document = null }: { principal: Principal; scope: string; after?: number; document?: unknown }): Promise<CoreCatchupResult> {

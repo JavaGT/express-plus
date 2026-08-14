@@ -75,6 +75,7 @@ import type { Clock } from './clock.ts';
 import { rawRow } from './entity/query.ts';
 import { operationCategory } from './operation.ts';
 import { machineAllows, isMachinePrincipal, type MachinePrincipal } from './machine-principal.ts';
+import { principalKeyOf } from './principal.ts';
 
 const STATES = { QUEUED: 'queued', CLAIMED: 'claimed', RUNNING: 'running', COMPLETED: 'completed', FAILED: 'failed', CANCELLED: 'cancelled' } as const;
 
@@ -96,6 +97,13 @@ export interface JobRow {
   progress: number | null;
   stage: string | null;
   scope: string | null;
+  // S5/A5 machine attribution, DURABLE on the _Job row (workbench#75 review
+  // fix): the canonical key of the enqueue-time machine principal and its
+  // normalized allowlist survive restart/worker — a worker process that only
+  // reads the row still enforces the job's own attribution, and the key is
+  // available for audit. Both are null for an unattributed job.
+  principalKey: string | null;
+  operations: readonly string[] | null;
 }
 
 export interface JobQueueOptions {
@@ -196,9 +204,11 @@ export function createJobQueue({
   let reaperWatcher: { remove(): void } | null = null;
   // Machine attribution (S5/A5): a job enqueued with a machine principal is
   // attributed to it (the attributable operational identity for audit). The
-  // allowlist ENFORCEMENT is the handler/context check in work() — this map is
-  // the attribution record, not a second enforcement seam.
-  const attributedJobs = new Map<string, MachinePrincipal>();
+  // allowlist ENFORCEMENT is the handler/context check in work() — the durable
+  // _Job row is the attribution record (principalKey + operations), not an
+  // in-memory map (workbench#75 review fix): attribution survives restart and
+  // a separate worker process, so enforcement never depends on same-instance
+  // state.
 
   // Run a mutation through the write coordinator when one is configured; a
   // standalone queue runs synchronously. The result is the body's value, or a
@@ -255,6 +265,15 @@ export function createJobQueue({
 
   function parseJob(row: Record<string, unknown> | undefined): JobRow | null {
     if (!row) return null;
+    let operations: readonly string[] | null = null;
+    if (row.operations != null) {
+      try {
+        const parsed = JSON.parse(row.operations as string);
+        operations = Array.isArray(parsed) ? parsed : null;
+      } catch {
+        operations = null;
+      }
+    }
     return {
       id: String(row.id ?? ''),
       kind: String(row.kind ?? ''),
@@ -269,6 +288,8 @@ export function createJobQueue({
       progress: row.progress as number | null,
       stage: row.stage as string | null,
       scope: row.scope as string | null,
+      principalKey: row.principalKey as string | null,
+      operations,
     };
   }
 
@@ -308,7 +329,10 @@ export function createJobQueue({
   // caller-supplied id (caller-owned, like entity ids). Routes through the write
   // coordinator when one is configured. `principal` is the optional machine
   // attribution (S5/A5): the attributable machine principal this job runs under.
-  // Fail closed: a non-machine principal is rejected at construction.
+  // Fail closed: a non-machine principal is rejected at construction. The
+  // attribution is persisted on the DURABLE _Job row (principalKey +
+  // operations), so it survives restart and a separate worker process — the
+  // dispatch enforcement in work() reads the row, never an in-memory map.
   function enqueue({ kind, payload = null, id, scope, principal }: { kind?: string; payload?: unknown; id?: string; scope?: string; principal?: MachinePrincipal } = {}): JobRow | null | Promise<JobRow | null> {
     return coordinated(() => {
       if (!kind) throw new Error('enqueue: kind is required');
@@ -318,9 +342,12 @@ export function createJobQueue({
       const jobId = id ?? randomUUID();
       const t = now();
       db.prepare(
-        'INSERT INTO _Job (id, kind, payload, status, enqueuedAt, scope, workerId, claimedAt, leaseUntil) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL)',
-      ).run(jobId, kind, payload != null ? JSON.stringify(payload) : null, STATES.QUEUED, t, scope ?? null);
-      if (principal) attributedJobs.set(jobId, principal);
+        'INSERT INTO _Job (id, kind, payload, status, enqueuedAt, scope, workerId, claimedAt, leaseUntil, principalKey, operations) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)',
+      ).run(
+        jobId, kind, payload != null ? JSON.stringify(payload) : null, STATES.QUEUED, t, scope ?? null,
+        principal ? principalKeyOf(principal) : null,
+        principal ? JSON.stringify(principal.attributes.operations) : null,
+      );
       const job = parseJob(rawRow(db, '_Job', jobId));
       if (job && job.scope != null) {
         emit(buildEvent(job, 'enqueued', t));
@@ -632,7 +659,9 @@ export function createJobQueue({
   // principal's allowlist (or in the job's enqueue-time attribution allowlist,
   // when one was attached), the job FAILS CLOSED — the fn is never invoked and
   // the job is recorded as failed with a denial reason. "Internal" is never an
-  // implicit grant.
+  // implicit grant. The job's attribution is read from the DURABLE _Job row
+  // (principalKey + operations), so enforcement is identical whether the job was
+  // enqueued in this process, a prior process, or a separate worker.
   //
   // `once()` runs one claim→fn→submit cycle and returns the result (or null when
   // nothing claimable) — awaitable for deterministic tests. The poll loop calls
@@ -659,15 +688,20 @@ export function createJobQueue({
       return declared.find((operation) => !machineAllows(principalLike, operation));
     }
 
+    // The DURABLE job attribution: a stored allowlist (normalized names) that
+    // must also cover every handler-declared operation. Null when the job was
+    // enqueued without an attribution.
+    function deniedAttributedOperation(job: JobRow): string | undefined {
+      if (!job.operations || job.operations.length === 0) return undefined;
+      return declared.find((operation) => !job.operations!.includes(operation));
+    }
+
     async function once() {
       const job = await claim(workerId, { kind });
       if (!job) return null;
       await heartbeat(job.id, workerId);
       let denied = deniedOperation(principal);
-      if (denied === undefined) {
-        const attributed = attributedJobs.get(job.id);
-        if (attributed) denied = deniedOperation(attributed);
-      }
+      if (denied === undefined) denied = deniedAttributedOperation(job);
       if (denied !== undefined) {
         // Fail closed: the fn is never invoked. Record the denial as a failed
         // result so the job cannot linger claimed (the substrate's uniform

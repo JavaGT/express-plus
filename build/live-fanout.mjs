@@ -95,12 +95,16 @@ import { publicEvent } from './event-delivery.mjs';
 //   - { category: 'principal', key: 'user:u1' } — a principal's access revoked;
 //     matches every live subscription whose principal key equals the key.
 //
-// PUBLISHER: the package calls revoke() from the single mutation/admission
-// path where a grant/access is revoked (subscription admission denial,
-// delivery-time reauthorization denial, or an adapter's explicit revocation),
-// firing the registered listeners exactly once per call and immediately
-// re-authorizing the affected subscriptions (event-driven — no wait for the
-// next event batch).
+// PUBLISHER: revoke() is the single publish surface. The package calls it from
+// the mutation/admission paths where a grant is revoked — a committed deletion
+// (terminal removal) and delivery-time reauthorization denial (live-delivery-core),
+// plus an app's explicit revocation from a mutation handler (membership removal,
+// principal status change) — firing the registered listeners exactly once per
+// call and immediately re-authorizing the affected subscriptions (event-driven —
+// no wait for the next event batch). The descriptor is normalized/validated at
+// the seam (normalizeRevocationScope): a malformed descriptor is rejected
+// deterministically (RevocationScopeError) before any listener or registry is
+// touched.
 //
 // BOOTSTRAP: bootstrap/catchup always re-authorize against current state
 // BEFORE first delivery, so a subscription registered AFTER a revocation still
@@ -111,6 +115,49 @@ import { publicEvent } from './event-delivery.mjs';
                                                              
 
                                                                                                         
+
+// Deterministic rejection for a malformed revocation descriptor at the publish
+// seam (revoke()). A listener can never observe an ambiguous descriptor it
+// would half-match.
+export class RevocationScopeError extends Error {
+  constructor(message        ) {
+    super(message);
+    this.name = 'RevocationScopeError';
+  }
+}
+
+// Normalize + validate a revocation descriptor at the publish seam. Fail closed:
+// an unknown category, a non-string/empty key, an entity key that is not valid
+// scope syntax (Entity:id), or a principal key that is not the CANONICAL
+// principal key of the published principal is rejected deterministically. Both
+// the core and the fan-out route every published revocation through this, so the
+// two registries agree on exactly which descriptor a key names.
+export function normalizeRevocationScope(principal                              , input         )                          {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new RevocationScopeError('revoke: resourceScope must be a { category, key } descriptor');
+  }
+  const { category, key } = input                                         ;
+  if (category !== 'entity' && category !== 'principal') {
+    throw new RevocationScopeError(`revoke: resourceScope.category must be 'entity' or 'principal' (got '${String(category)}')`);
+  }
+  if (typeof key !== 'string' || key.length === 0) {
+    throw new RevocationScopeError('revoke: resourceScope.key must be a non-empty string');
+  }
+  if (category === 'entity') {
+    if (!tryParseScopeKey(key)) {
+      throw new RevocationScopeError(`revoke: entity resourceScope.key '${key}' is not valid scope syntax (expected Entity:id)`);
+    }
+    return { category, key };
+  }
+  // principal category: the key must be the canonical key of the published
+  // principal — a revocation never names an identity the caller did not publish
+  // under (an anonymous principal has no key and can never be revoked).
+  const canonical = principalKeyOf(principal);
+  if (canonical === null || canonical !== key) {
+    throw new RevocationScopeError(`revoke: principal resourceScope.key '${key}' is not the canonical key of the published principal (expected '${canonical}')`);
+  }
+  return { category, key };
+}
 
                            
                  
@@ -149,6 +196,8 @@ import { publicEvent } from './event-delivery.mjs';
                                                                              
                                                                              
                                                                                
+                                                                                
+                                                                     
                                                                              
                                                                                                                                                                                      
                 
@@ -310,20 +359,24 @@ export function createLiveFanout({ mayVerb = null }                             
   // (principal scope) — so a revoked reader receives nothing further. This is
   // the event-driven counterpart to the core's committed revocation path: the
   // fan-out no longer waits for the next emit to re-authorize a revoked reader.
+  // The descriptor is normalized/validated first (findings #75-4): a malformed
+  // descriptor throws RevocationScopeError before any listener or registry is
+  // touched.
   function revoke(principal           , resourceScope                         )       {
+    const normalized = normalizeRevocationScope(principal, resourceScope);
     for (const listener of revocationListeners) {
-      try { listener(principal, resourceScope); } catch { /* per-listener isolation */ }
+      try { listener(principal, normalized); } catch { /* per-listener isolation */ }
     }
-    if (resourceScope.category === 'entity') {
-      const subs = byScope.get(resourceScope.key);
+    if (normalized.category === 'entity') {
+      const subs = byScope.get(normalized.key);
       if (subs) {
-        for (const conn of [...subs.keys()]) removeSubscription(resourceScope.key, conn);
+        for (const conn of [...subs.keys()]) removeSubscription(normalized.key, conn);
       }
       return;
     }
     for (const conn of [...connSubs.keys()]) {
       if (conn.closed) continue;
-      if (principalKeyOf(conn.principal) === resourceScope.key) removeAll(conn);
+      if (principalKeyOf(conn.principal) === normalized.key) removeAll(conn);
     }
   }
 

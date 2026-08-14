@@ -11,6 +11,7 @@ import { schedule, date, scope, everyone, grant, read } from '../build/index.mjs
 import { entity, generateDDL, executeFrameworkDDL } from '../build/internal.mjs';
 import { admitSystemMutation, startClockTriggers, schedulerSource, machinePrincipal, isMachinePrincipal, machineAllows, machineOperations } from '../build/schedule.mjs';
 import { createLiveDeliveryCore } from '../build/live-delivery-core.mjs';
+import { createLiveFanout } from '../build/live-fanout.mjs';
 import { createJobQueue } from '../build/job-queue.mjs';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -93,6 +94,46 @@ test('isMachinePrincipal rejects a raw system principal (no machine discriminato
   assert.equal(isMachinePrincipal({ type: 'system', id: null, attributes: { source: 'x' }, status: 'active' }), false);
   assert.equal(isMachinePrincipal({ type: 'user', id: 'u', attributes: {}, status: 'active' }), false);
   assert.equal(isMachinePrincipal(null), false);
+});
+
+// ---- unforgeable brand (finding 2) ----
+
+test('isMachinePrincipal rejects a hand-rolled object that mimics EVERY readable field (unforgeable brand)', () => {
+  // This forges id, source, machine, and a matching operations allowlist — every
+  // readable field a minted machinePrincipal carries. The module-private brand
+  // is the only admission key, so the forgery is still denied.
+  const forged = { type: 'system', id: 'worker:1', attributes: { source: 'worker:1', machine: true, operations: ['update'] }, status: 'active' };
+  assert.equal(isMachinePrincipal(forged), false, 'a forged machine principal is not a machine principal');
+  assert.equal(machineAllows(forged, 'update'), false, 'a forged machine principal grants nothing');
+  assert.equal(machineOperations(forged), null, 'a forged machine principal has no allowlist');
+});
+
+test('admitSystemMutation DENIES a hand-rolled machine-shaped principal with matching id/source/operations (finding 2)', () => {
+  const { db, Blog, now, source } = admitSetup();
+  const forged = { type: 'system', id: source, attributes: { source, machine: true, operations: ['update'] }, status: 'active' };
+  const granted = admitSystemMutation({
+    entity: Blog, verb: 'update', rowId: 'row1',
+    payload: { published: true },
+    principal: forged, db, now,
+  });
+  assert.equal(granted, false, 'the admission seam rejects an unbranded object even when every readable field matches');
+  db.close();
+});
+
+test('job-queue work()/enqueue reject a hand-rolled machine-shaped principal with matching id/source/operations (finding 2)', () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const queue = createJobQueue({ db, sharedSecret: JOB_SECRET });
+  const forged = { type: 'system', id: 'worker:1', attributes: { source: 'worker:1', machine: true, operations: ['execute'] }, status: 'active' };
+  assert.throws(
+    () => queue.work('k', async () => {}, { principal: forged, operations: ['execute'] }),
+    /attributable machine principal is required/,
+  );
+  assert.throws(
+    () => queue.enqueue({ kind: 'k', principal: forged }),
+    /must be an attributable machine principal/,
+  );
+  db.close();
 });
 
 // ---- allowlist enforcement: admitSystemMutation (schedule admission) ----
@@ -380,6 +421,182 @@ test('revocation-during-delivery: revoke ends a live feed through the one remova
   db.close();
 });
 
+// ---- mutation paths publish revocations (finding 1, BLOCKER) ----
+
+test('a committed deletion mutation publishes a revocation exactly once and ends the feed', async () => {
+  const db = liveDb();
+  insertNote(db, 'n1', 'hello');
+  appendEvent(db, 'Note:n1', 1, 'Note.created', { title: 'hello' });
+  const core = createLiveDeliveryCore({
+    db,
+    entities: new Map([['Note', makeEntity('Note')]]),
+    mayVerb: alwaysAllow,
+    projectRecipient: simpleProjector,
+  });
+  const fired = [];
+  let transportRevokes = 0;
+  core.onRevocation((principal, resourceScope) => fired.push([principal.id, resourceScope]));
+  const delivered = [];
+  await core.subscribe({
+    principal: { type: 'user', id: 'u1' }, scope: 'Note:n1', after: 0, signal: null,
+    deliver: async (batch) => { delivered.push(...batch); },
+    revoke: () => { transportRevokes += 1; },
+  });
+  assert.equal(delivered.length, 1, 'created event delivered');
+
+  // The deletion mutation: the row is gone and its removal commits.
+  db.prepare('DELETE FROM Note WHERE id = ?').run('n1');
+  appendEvent(db, 'Note:n1', 2, 'Note.removed', {});
+  await core.wake('Note:n1');
+  await sleep(50);
+
+  assert.equal(fired.length, 1, 'the deletion mutation published the revocation exactly once');
+  assert.deepEqual(fired[0], [null, { category: 'entity', key: 'Note:n1' }], 'entity-scope revocation for the deleted row');
+  assert.equal(transportRevokes, 1, 'the revoked feed ended through the one removal path');
+  assert.equal(delivered.length, 2, 'the terminal removal was delivered');
+
+  // A later wake is a no-op — the subscription is gone and nothing re-publishes.
+  core.wake('Note:n1');
+  await sleep(20);
+  assert.equal(fired.length, 1, 'no re-publish after the deletion was already published');
+  core.close();
+  db.close();
+});
+
+test('a deletion mutation with MULTIPLE subscribers publishes exactly once (dedup)', async () => {
+  const db = liveDb();
+  insertNote(db, 'n1', 'hello');
+  appendEvent(db, 'Note:n1', 1, 'Note.created', { title: 'hello' });
+  const core = createLiveDeliveryCore({
+    db,
+    entities: new Map([['Note', makeEntity('Note')]]),
+    mayVerb: alwaysAllow,
+    projectRecipient: simpleProjector,
+  });
+  let publishes = 0;
+  core.onRevocation(() => { publishes += 1; });
+  await core.subscribe({ principal: { type: 'user', id: 'u1' }, scope: 'Note:n1', after: 0, signal: null, deliver: async () => {} });
+  await core.subscribe({ principal: { type: 'user', id: 'u2' }, scope: 'Note:n1', after: 0, signal: null, deliver: async () => {} });
+
+  db.prepare('DELETE FROM Note WHERE id = ?').run('n1');
+  appendEvent(db, 'Note:n1', 2, 'Note.removed', {});
+  await core.wake('Note:n1');
+  await sleep(50);
+
+  assert.equal(publishes, 1, 'two subscribers observing the same deletion mutation publish the revocation exactly once');
+  core.close();
+  db.close();
+});
+
+test('a membership-removal mutation publishes a revocation and ends the removed membership feed', async () => {
+  const db = liveDb();
+  // A grant-bearing membership row: removing it is the membership-removal
+  // mutation that invalidates the grant on its scope.
+  db.exec('CREATE TABLE IF NOT EXISTS ProjectMembership (id TEXT PRIMARY KEY, project TEXT, member TEXT)');
+  db.prepare('INSERT OR REPLACE INTO ProjectMembership (id, project, member) VALUES (?, ?, ?)').run('pm1', 'p1', 'u1');
+  appendEvent(db, 'ProjectMembership:pm1', 1, 'ProjectMembership.created', { project: 'p1', member: 'u1' });
+  const core = createLiveDeliveryCore({
+    db,
+    entities: new Map([['ProjectMembership', makeEntity('ProjectMembership')]]),
+    mayVerb: alwaysAllow,
+    projectRecipient: simpleProjector,
+  });
+  const fired = [];
+  core.onRevocation((principal, resourceScope) => fired.push(resourceScope));
+  const delivered = [];
+  await core.subscribe({
+    principal: { type: 'user', id: 'u1' }, scope: 'ProjectMembership:pm1', after: 0, signal: null,
+    deliver: async (batch) => { delivered.push(...batch); },
+  });
+  assert.equal(delivered.length, 1, 'membership created event delivered');
+
+  // The membership-removal mutation: the row is deleted and its removal commits.
+  db.prepare('DELETE FROM ProjectMembership WHERE id = ?').run('pm1');
+  appendEvent(db, 'ProjectMembership:pm1', 2, 'ProjectMembership.removed', {});
+  await core.wake('ProjectMembership:pm1');
+  await sleep(50);
+
+  assert.deepEqual(fired, [{ category: 'entity', key: 'ProjectMembership:pm1' }], 'the membership-removal mutation published exactly one revocation');
+  assert.equal(delivered.length, 2, 'the terminal removal was delivered');
+  core.close();
+  db.close();
+});
+
+// ---- revocation descriptor normalization/validation (finding 4) ----
+
+test('revoke rejects malformed revocation descriptors deterministically (finding 4)', async () => {
+  const db = liveDb();
+  insertNote(db, 'n1', 'hello');
+  const core = createLiveDeliveryCore({
+    db,
+    entities: new Map([['Note', makeEntity('Note')]]),
+    mayVerb: alwaysAllow,
+    projectRecipient: simpleProjector,
+  });
+  const u1 = { type: 'user', id: 'u1' };
+  assert.throws(() => core.revoke(u1, null), /resourceScope must be a \{ category, key \} descriptor/);
+  assert.throws(() => core.revoke(u1, { category: 'bogus', key: 'Note:n1' }), /category must be 'entity' or 'principal'/);
+  assert.throws(() => core.revoke(u1, { category: 'entity', key: '' }), /key must be a non-empty string/);
+  assert.throws(() => core.revoke(u1, { category: 'entity', key: 42 }), /key must be a non-empty string/);
+  assert.throws(() => core.revoke(u1, { category: 'entity', key: 'not-a-valid-scope' }), /not valid scope syntax/);
+  assert.throws(
+    () => core.revoke(u1, { category: 'principal', key: 'user:someone-else' }),
+    /not the canonical key of the published principal/,
+  );
+  // A valid descriptor is published unchanged.
+  const fired = [];
+  core.onRevocation((principal, resourceScope) => fired.push(resourceScope));
+  core.revoke(u1, { category: 'entity', key: 'Note:n1' });
+  assert.deepEqual(fired, [{ category: 'entity', key: 'Note:n1' }]);
+  core.close();
+  db.close();
+});
+
+test('live-fanout revoke rejects malformed descriptors deterministically (finding 4)', () => {
+  const fanout = createLiveFanout({});
+  const u1 = { type: 'user', id: 'u1' };
+  assert.throws(() => fanout.revoke(u1, { category: 'nope', key: 'x' }), /category must be 'entity' or 'principal'/);
+  assert.throws(() => fanout.revoke(u1, { category: 'principal', key: 'user:someone-else' }), /not the canonical key of the published principal/);
+  assert.throws(() => fanout.revoke(u1, { category: 'entity', key: 'not-a-scope' }), /not valid scope syntax/);
+  fanout.close();
+});
+
+// ---- distinct revocation events each re-authorize (finding 5) ----
+
+test('two distinct revocations each produce a re-authorization attempt (wake set, not a single marker)', async () => {
+  const db = liveDb();
+  insertNote(db, 'n1', 'hello');
+  appendEvent(db, 'Note:n1', 1, 'Note.created', { title: 'hello' });
+  let auths = 0;
+  const core = createLiveDeliveryCore({
+    db,
+    entities: new Map([['Note', makeEntity('Note')]]),
+    mayVerb: async () => { auths += 1; return true; },
+    projectRecipient: simpleProjector,
+  });
+  const fired = [];
+  core.onRevocation((principal, resourceScope) => fired.push(resourceScope));
+  // Paused: both revocations publish while no catchUp runs, so BOTH are pending
+  // on activation — the later one must not collapse the earlier.
+  const activation = await core.subscribe({
+    principal: { type: 'user', id: 'u1' }, scope: 'Note:n1', after: 0, signal: null, paused: true,
+    deliver: async () => {},
+  });
+  assert.equal(auths, 1, 'paused subscribe admits once');
+  core.revoke({ type: 'user', id: 'u1' }, { category: 'entity', key: 'Note:n1' });
+  core.revoke({ type: 'user', id: 'u1' }, { category: 'principal', key: 'user:u1' });
+  await activation.activate();
+  await sleep(20);
+
+  assert.equal(auths, 3, 'each distinct revocation produced its own re-authorization attempt (1 subscribe + 2 revocations)');
+  assert.deepEqual(fired, [
+    { category: 'entity', key: 'Note:n1' },
+    { category: 'principal', key: 'user:u1' },
+  ], 'both distinct revocation events were published — neither collapsed');
+  core.close();
+  db.close();
+});
+
 // ---- allowlist-via-context: job-queue dispatch ----
 
 const JOB_SECRET = 'machine-job-secret';
@@ -475,5 +692,49 @@ test('job-queue: the job attribution (enqueue principal) must also cover the han
   assert.equal(res.denied, 'update', 'a job whose attribution does not grant the handler operations is denied');
   assert.equal(ran, false, 'fn never invoked');
   worker.stop();
+  db.close();
+});
+
+// ---- durable job attribution (finding 3) ----
+
+test('job attribution is persisted on the durable _Job row and enforced by a fresh queue (survives restart/worker)', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const owner = machinePrincipal({ id: 'job-owner', operations: ['read'] });
+  const queue1 = createJobQueue({ db, sharedSecret: JOB_SECRET, maxAttempts: 1 });
+  queue1.enqueue({ kind: 'attributed-durable', payload: {}, principal: owner });
+
+  const row = db.prepare('SELECT principalKey, operations FROM _Job WHERE kind = ?').get('attributed-durable');
+  assert.equal(row.principalKey, 'system:job-owner', 'the canonical principal key is persisted on the durable row');
+  assert.deepEqual(JSON.parse(row.operations), ['read'], 'the normalized allowlist is persisted on the durable row');
+
+  // A FRESH queue over the same db is a restarted worker: the attribution is
+  // read from the row, so the handler-declared ungranted operation is denied —
+  // enforcement never depends on same-instance in-memory state.
+  const queue2 = createJobQueue({ db, sharedSecret: JOB_SECRET, maxAttempts: 1 });
+  let ran = false;
+  const worker = queue2.work('attributed-durable', async () => { ran = true; return {}; }, {
+    principal: machinePrincipal({ id: 'worker:restart', operations: ['execute', 'update'] }),
+    operations: ['update'],
+    pollIntervalMs: Infinity,
+  });
+  const res = await worker.once();
+  assert.equal(res.denied, 'update', 'the durable row attribution denies the handler operation in a fresh queue');
+  assert.equal(ran, false, 'fn never invoked');
+  const failed = db.prepare('SELECT status, payload FROM _Job WHERE kind = ?').get('attributed-durable');
+  assert.equal(failed.status, 'failed', 'the denied job is recorded as failed');
+  assert.equal(JSON.parse(failed.payload).denied, true);
+  worker.stop();
+  db.close();
+});
+
+test('an unattributed job has a null durable attribution (no invented identity)', () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const queue = createJobQueue({ db, sharedSecret: JOB_SECRET });
+  queue.enqueue({ kind: 'plain', payload: {} });
+  const row = db.prepare('SELECT principalKey, operations FROM _Job WHERE kind = ?').get('plain');
+  assert.equal(row.principalKey, null, 'no attribution persisted');
+  assert.equal(row.operations, null, 'no allowlist persisted');
   db.close();
 });

@@ -423,7 +423,9 @@ export function generateFrameworkDDL(): string[] {
   availableAt INTEGER,
   progress INTEGER NOT NULL DEFAULT 0,
   stage TEXT,
-  scope TEXT
+  scope TEXT,
+  principalKey TEXT,
+  operations TEXT
 );`,
     `CREATE TABLE IF NOT EXISTS _PrivateActionFact (
   originOrder INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -552,6 +554,12 @@ function ensureJobColumns(db: DbHandle): void {
   }
   if (!cols.has('scope')) {
     db.exec('ALTER TABLE _Job ADD COLUMN scope TEXT');
+  }
+  if (!cols.has('principalKey')) {
+    db.exec('ALTER TABLE _Job ADD COLUMN principalKey TEXT');
+  }
+  if (!cols.has('operations')) {
+    db.exec('ALTER TABLE _Job ADD COLUMN operations TEXT');
   }
 }
 
