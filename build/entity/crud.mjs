@@ -424,6 +424,35 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
             data[fieldName] = deserializeField(descriptor, replacement[fieldName]);
           }
         }
+        // Proposed-transition admission on the history move (S5/A3): an undo/
+        // redo is an update like any other, so the row grant / field access runs
+        // against BOTH the current row and the proposed after-row — a history
+        // move that lands the row outside the principal's write scope is denied
+        // even though the current row is in scope. The history rows are the
+        // durable raw-cell shapes, so they deserialize through the record's row
+        // seam (the same deserialized shape the non-history path gets from
+        // record.findById) before the transition gate evaluates them. The
+        // invitation-acceptance bypass mirrors the non-history path: acceptance
+        // updates run under the acceptance authority, not a write grant.
+        const acceptanceManagedUpdate = record.name === 'Invitation'
+          && admitInvitationAcceptance({
+            event: { handle: verbs.updated.handle         , data: data                                       },
+            principal,
+          });
+        if (!acceptanceManagedUpdate) {
+          const before = record.deserializeRow({ ...currentStored });
+          const after = record.deserializeRow({ ...replacement });
+          if (!(await admitRowTransition({
+            entity: record,
+            verb: 'update',
+            before,
+            after,
+            principal,
+            authorization,
+          }))) {
+            throw Object.assign(new Error('forbidden'), { status: 403 });
+          }
+        }
         return { events: [{ handle: verbs.updated.handle, type: verbs.updated.type, scope: resolveGeneratedEventScope(record, { id, row: currentStored, payload: replacement, scope }), data: { ...data, id } }], privateFact: { before: expected, after: replacement } };
       }
       for (const fieldName of Object.keys(rest)) {

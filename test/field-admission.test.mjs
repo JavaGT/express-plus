@@ -12,7 +12,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import { annotatedText, entity, everyone, grant, read, ref, scope, subscribe, text, write } from '../build/index.mjs';
+import { annotatedText, createAuthorizationAdapter, durableHistory, entity, everyone, grant, read, ref, scope, subscribe, text, write } from '../build/index.mjs';
 import workbench, { generateDDL } from '../build/internal.mjs';
 import { projectRowForRecipient } from '../build/entity/projection.mjs';
 import { admitInferenceFields, admitRowTransition, annotatedTextDeniedPlaceholder, mayReadField, readableFieldNames } from '../build/field-admission.mjs';
@@ -411,4 +411,125 @@ test('admitInferenceFields rejects a sort/filter/count on an unreadable field wi
   assert.deepEqual(await admitInferenceFields(Doc, row, alice, { sort: ['secret'] }), { admitted: true });
   // The two-valued decision never echoes a field name.
   assert.equal(JSON.stringify(await admitInferenceFields(Doc, row, bob, { sort: ['secret'] })).includes('secret'), false);
+});
+
+// ---- History moves (undo/redo) run the proposed-transition update admission ----
+
+// A Doc with conditional update history and an owner-scoped write grant, so a
+// history move can be driven end-to-end through the durable undo/redo path.
+function declareScopedHistoryDoc() {
+  return entity('ScopedDoc', {
+    title: text(),
+    owner: text(),
+    checks: { owner: ({ entity: row, principal }) => row.owner === principal.id },
+    grant: () => [scope(() => everyone()).can(async ({ is }) => (
+      await is.owner() ? grant(read, write, subscribe) : grant(read, subscribe)
+    ))],
+    history: { update: 'conditional' },
+  });
+}
+
+test('end-to-end: an undo that would move the row out of the write scope is denied through the history update path', async (t) => {
+  const declaration = declareScopedHistoryDoc();
+  const db = new DatabaseSync(':memory:');
+  for (const sql of generateDDL(declaration)) db.exec(sql);
+  const app = workbench({ db, entities: [declaration], history: durableHistory({ authorize: () => true }) });
+  t.after(async () => { await app.shutdown(); db.close(); });
+  await app.start();
+  const session = 'history-tab';
+  const rowScope = 'ScopedDoc:d1';
+
+  const created = await app.dispatch({
+    actionId: 'history-create', type: 'ScopedDoc.create',
+    payload: { id: 'd1', title: 'first', owner: 'alice' }, principal: alice,
+  });
+  assert.equal(created.ok, true, JSON.stringify(created));
+  const updated = await app.dispatch({
+    actionId: 'history-edit', type: 'ScopedDoc.update',
+    payload: { id: 'd1', title: 'second' }, principal: alice,
+    scope: rowScope, history: { session },
+  });
+  assert.equal(updated.ok, true, JSON.stringify(updated));
+
+  // The server narrows the write scope between the commit and the undo: a row
+  // titled 'first' is no longer writable even by its owner. The CURRENT row
+  // (title 'second') stays in scope — ordinary row admission still admits — but
+  // the undo's target after-row (title 'first') lands out of scope.
+  const ScopedDoc = app.entities.get('ScopedDoc');
+  ScopedDoc.grant = () => [scope(() => everyone()).can(async ({ is, entity }) => {
+    if (!(await is.owner())) return grant(read, subscribe);
+    return entity?.title === 'first' ? grant(read, subscribe) : grant(read, write, subscribe);
+  })];
+  const cursor = await app.history.cursor({ scope: rowScope, principal: alice, session });
+  const denied = await app.history.undo({ scope: rowScope, principal: alice, session, actionId: 'undo-out', revision: cursor.revision });
+  assert.equal(denied.ok, false, JSON.stringify(denied));
+  assert.equal(denied.failure.category, 'denied');
+  assert.equal(denied.failure.message, 'forbidden');
+  assert.deepEqual({ ...db.prepare('SELECT title, owner FROM ScopedDoc WHERE id = ?').get('d1') }, { title: 'second', owner: 'alice' });
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _Log WHERE actionId = 'undo-out'").get().count, 0);
+  assert.deepEqual(await app.history.cursor({ scope: rowScope, principal: alice, session }), cursor, 'a denied undo moves no history cursor');
+
+  // Restore the original write scope: the same undo is now admitted.
+  ScopedDoc.grant = () => [scope(() => everyone()).can(async ({ is }) => (
+    await is.owner() ? grant(read, write, subscribe) : grant(read, subscribe)
+  ))];
+  const admitted = await app.history.undo({ scope: rowScope, principal: alice, session, actionId: 'undo-in', revision: cursor.revision });
+  assert.equal(admitted.ok, true, JSON.stringify(admitted));
+  assert.deepEqual({ ...db.prepare('SELECT title, owner FROM ScopedDoc WHERE id = ?').get('d1') }, { title: 'first', owner: 'alice' });
+});
+
+// ---- The injected authorization adapter governs the update transition admission ----
+
+test('an injected authorization adapter governs update transition admission (deny and admit cases)', async (t) => {
+  const declaration = declareDoc();
+  const db = new DatabaseSync(':memory:');
+  for (const sql of generateDDL(declaration)) db.exec(sql);
+  db.prepare("INSERT INTO Doc (id, title, owner, secret) VALUES (?, ?, ?, ?)").run('d1', 'Report', 'alice', 'top-secret-value');
+  const defaultAdapter = createAuthorizationAdapter();
+  const transitionCalls = [];
+  let adapterDecision = null;
+  const adapter = {
+    admit: async (input) => {
+      if (input.category === 'entity' && input.verb === 'update') {
+        transitionCalls.push({ row: input.row, principal: input.principal?.id });
+        return adapterDecision
+          ? { admitted: true, reasonCode: null }
+          : { admitted: false, reasonCode: 'no-capability' };
+      }
+      return defaultAdapter.admit(input);
+    },
+    registerResource: (input) => defaultAdapter.registerResource(input),
+  };
+  const app = workbench({ db, entities: [declaration] });
+  app._authorization = adapter; // what serve.ts listen() stashes from { authorization }
+  t.after(async () => { await app.shutdown(); db.close(); });
+  await app.start();
+
+  // Deny case: the injected adapter denies a transition the framework grant
+  // would admit (Alice renames her own row). The update is denied 403, the row
+  // is unchanged, and the transition admission consulted the adapter.
+  adapterDecision = false;
+  const denied = await app.dispatch({
+    actionId: 'adapter-deny', type: 'Doc.update',
+    payload: { id: 'd1', title: 'Renamed' }, principal: alice,
+  });
+  assert.equal(denied.ok, false, JSON.stringify(denied));
+  assert.equal(denied.failure.category, 'denied');
+  assert.equal(denied.failure.message, 'forbidden');
+  assert.ok(transitionCalls.some((c) => c.row?.id === 'd1'), 'the transition admission consulted the injected adapter');
+  assert.equal(db.prepare('SELECT title FROM Doc WHERE id = ?').get('d1').title, 'Report', 'the denied update leaves the row unchanged');
+
+  // Admit case: the injected adapter admits a transition the framework grant
+  // would deny (Alice re-assigns ownership away — the framework row grant denies
+  // write on the after-row). The adapter's decision governs: the update commits.
+  transitionCalls.length = 0;
+  adapterDecision = true;
+  const admitted = await app.dispatch({
+    actionId: 'adapter-admit', type: 'Doc.update',
+    payload: { id: 'd1', owner: 'bob' }, principal: alice,
+  });
+  assert.equal(admitted.ok, true, JSON.stringify(admitted));
+  assert.equal(db.prepare('SELECT owner FROM Doc WHERE id = ?').get('d1').owner, 'bob');
+  assert.ok(transitionCalls.length >= 2, 'the adapter was consulted on both the current and the proposed row');
+  assert.ok(transitionCalls.every((c) => c.row?.id === 'd1'));
 });

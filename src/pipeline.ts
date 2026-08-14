@@ -25,6 +25,7 @@ import { principalKeyOf } from './principal.ts';
 import { applyErasureDirective, isErasureDirective, isErasureDirectivePreparation, prepareErasureDirective } from './erasure-directive.ts';
 import { declarePostCommitEffectsInTxn } from './post-commit-effects.ts';
 import { protectedArtefactCapability } from './protected-artefact-store.ts';
+import type { AuthorizationAdapter } from './authorization-adapter.ts';
 
 // `action(type)` — declare an imperative request type. The handler that turns it
 // into events is attached later by the entity/dispatch wiring.
@@ -433,7 +434,7 @@ function checkDurableBatchDedupe(db: unknown, scope: string, actionId: string, a
 // Post-commit delivery can no longer turn a committed mutation into a failure.
 async function commitEvents(db: any, events: any, {
   now, actionId, principal, payload, pipeline, scope, type, authorize, historyCommit, handler,
-  erasureActionContext,
+  erasureActionContext, authorization,
 }: {
   now: string;
   actionId: string;
@@ -446,6 +447,7 @@ async function commitEvents(db: any, events: any, {
   historyCommit?: any;
   handler?: any;
   erasureActionContext?: unknown;
+  authorization?: AuthorizationAdapter | null;
 }) {
   // A batch and any in-transaction effects share one sequence allocator. The
   // first event for a scope reads its committed cursor once; later events use
@@ -509,6 +511,7 @@ async function commitEvents(db: any, events: any, {
         try {
           events = await handler({
             payload, principal, db, now, scope, actionId,
+            ...(authorization !== undefined && authorization !== null ? { authorization } : {}),
             ...(protectedArtefact ? { protectedArtefact } : {}),
             ...(historyCommit?.handlerInputs ? { history: historyCommit.handlerInputs[0] } : {}),
           });
@@ -616,7 +619,7 @@ function receiptMetadata(request: any, historyCommit: any) {
 // (AGENTS.md: never a magic default); omitting it is a load-time error. When
 // Phase 2 wires this kernel to a request path, `authorize` is where the route
 // gate + grant engine compose — it is not a second, looser auth path.
-export function createServer({ handlers = {}, authorize, db, pipeline = durableMutationVariant(), history, historyActions = {}, cursorPolicy, annotatedHistory }: {
+export function createServer({ handlers = {}, authorize, db, pipeline = durableMutationVariant(), history, historyActions = {}, cursorPolicy, annotatedHistory, authorization }: {
   handlers?: Record<string, any>;
   authorize?: (context: any) => any;
   db?: any;
@@ -625,6 +628,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
   historyActions?: Record<string, any>;
   cursorPolicy?: any;
   annotatedHistory?: any;
+  authorization?: AuthorizationAdapter | null;
 } = {}) {
   if (typeof authorize !== 'function') {
     throw new Error(
@@ -692,7 +696,10 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
       // sequence number and append to the log.
       let events;
       try {
-        const emitted = handler({ payload, principal, scope });
+        const emitted = handler({
+          payload, principal, scope,
+          ...(authorization !== undefined && authorization !== null ? { authorization } : {}),
+        });
         events = emitted.map((e: any) =>
           Object.freeze({ ...e, seq: nextSeq(e.scope), actionId }));
       } catch (err) {
@@ -743,7 +750,10 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
       for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
         const action = actions[actionIndex];
         try {
-          allEmitted.push(...handlers[action.type]({ payload: action.payload, principal, scope }));
+          allEmitted.push(...handlers[action.type]({
+            payload: action.payload, principal, scope,
+            ...(authorization !== undefined && authorization !== null ? { authorization } : {}),
+          }));
         } catch (err) {
           return executionFailure(err, { actionId, type: action.type }, { actionIndex });
         }
@@ -828,7 +838,10 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     let emitted = null;
     if (!handler.inTransaction && !historyCommit?.handlerInputs) {
       try {
-        emitted = await handler({ payload, principal, scope });
+        emitted = await handler({
+          payload, principal, scope,
+          ...(authorization !== undefined && authorization !== null ? { authorization } : {}),
+        });
       } catch (err) {
         return executionFailure(err, { actionId, type });
       }
@@ -842,6 +855,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     const committed = await commitEvents(db, emitted, {
       now, actionId, principal, payload, pipeline, scope, type, authorize, historyCommit,
       handler: handler.inTransaction || historyCommit?.handlerInputs ? handler : null, erasureActionContext,
+      authorization,
     });
     return committed;
   }
@@ -929,10 +943,14 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
           now: transactionContext.now,
           scope: transactionContext.scope,
           actionId: transactionContext.actionId,
+          ...(authorization !== undefined && authorization !== null ? { authorization } : {}),
         }
         // Preserve the ordinary-batch handler contract: scope is available in
         // both batch modes, while db/clock/action identity are transaction-only.
-        : { scope };
+        : {
+          scope,
+          ...(authorization !== undefined && authorization !== null ? { authorization } : {}),
+        };
       const allEmitted = [];
       for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
         const action = actions[actionIndex];
@@ -977,6 +995,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     const committed = await commitEvents(db, batchCommit, {
       now, actionId, principal, payload: actions, pipeline, scope, type: '$batch', authorize, historyCommit,
       handler: runInTxn ? runHandlers : null,
+      authorization,
     });
     return committed;
   }

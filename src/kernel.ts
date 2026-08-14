@@ -504,6 +504,12 @@ export function buildKernel(app: any) {
     historyActions: generatedHistoryActions,
     cursorPolicy,
      annotatedHistory: annotatedKernel.annotatedHistory,
+    // The app's injected authorization adapter (S5/A2) is THE admission engine
+    // for the whole app — HTTP, live, registered actions, and the generated
+    // CRUD handlers alike; with none injected each seam keeps its framework
+    // default, unchanged. Threading it through createServer lets the CRUD
+    // handlers pass it to the proposed-transition update admission.
+    authorization: app._authorization,
     pipeline: durableMutationVariant({
       projectionConsumers: projections,
       admission: buildDurableAdmission(app, annotatedKernel),
