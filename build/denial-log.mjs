@@ -8,7 +8,7 @@
 // the two-valued admission surface the decisions themselves saw.
 
                                                                                         
-                                                                  
+import { sanitizeOpaqueId,                                                } from './audit.mjs';
                                                         
 import {                 statusOf } from './principal.mjs';
 import { createKeyedRateLimiter,                       } from './rate-limit.mjs';
@@ -50,11 +50,15 @@ export function createDenialAuditor({
   limiter = createKeyedRateLimiter({ windowMs, max: 1, now }),
 }                      )                {
   function actorOf(principal           )             {
-    return Object.freeze({ type: principal.type, id: principal.id, status: statusOf(principal) });
+    return Object.freeze({
+      type: principal.type,
+      id: sanitizeOpaqueId(principal.id),
+      status: statusOf(principal),
+    });
   }
 
   function keyOf(actor            , reasonCode                     )         {
-    const id = actor.id ?? 'anon';
+    const id = sanitizeOpaqueId(actor.id) ?? 'anon';
     return `${actor.type}:${id}:${actor.status}${KEY_SEPARATOR}${reasonCode}`;
   }
 

@@ -4,12 +4,16 @@ import workbench, {
   admin, authorizedRows, principal, read, write, grant, membership, parseCookies, SESSION_COOKIE,
   apiKeyPrincipalOf, createInvitationApi as createRootInvitationApi, emailSeam,
   FAILURE_CATEGORIES, failure, failureOutcome, isWorkbenchFailure, sanitizeUnexpectedFailure,
+  createAuditor, createDenialAuditor, isOpaqueId, sanitizeOpaqueId, noopAuditSink,
   matchRoute, noopTransport, serveStatic, sessionCookie, sessionPrincipalOf,
   sessionTokenOf, registerAnnotatedTextStructuralExtension as registerRootAnnotatedTextStructuralExtension,
   durableHistory,
   type ActionHandle, type BatchAction, type CommittedEvent, type DispatchRequest,
   type DispatchResult, type EventHandle, type FailureCategory, type FailureOutcome,
   type InheritDirective, type Principal, type WorkbenchFailure,
+  type AuditActor, type AuditClassification, type AuditEvent, type AuditInput, type AuditOutcome,
+  type AuditSink, type Auditor, type AuditorOptions, type DenialAuditor, type DenialInput,
+  type RetentionConfig,
   type ErasurePreparationContext, type ErasurePreparationReads,
   type OrdinaryRegisteredProjection, type PrivateFactRegisteredProjection,
   type DeclaredClaimedBlob, type RegisteredAction, type WorkbenchApp, type WorkbenchEntity, type WriteQueue,
@@ -563,6 +567,36 @@ void [
   stillBound, parsedCookie, rootInvitationApi, routeMatch, staticHandler,
   sessionToken, principalFromSession, principalFromApiKey, mail,
 ];
+
+// ── generic audit + denial contract (S5/A4) ─────────────────────────────
+const auditRetention: RetentionConfig = { security: '12m', diagnostic: '30d' };
+const auditSink: AuditSink = { write: (event: AuditEvent, retention: string) => void [event, retention] };
+const auditOptions: AuditorOptions = { sink: auditSink, retentionConfig: auditRetention, now: () => 1, id: () => 'evt-1' };
+const auditor: Auditor = createAuditor(auditOptions);
+const securityInput: AuditInput = {
+  principal: invitationUser, operation: 'read', resourceCategory: 'entity', resourceId: 'n1',
+  outcome: 'deny', reasonCode: 'no-capability',
+};
+const securityEvent: AuditEvent = auditor.auditSecurity(securityInput);
+const diagnosticEvent: AuditEvent = auditor.auditDiagnostic({
+  principal: invitationUser, operation: 'read', resourceCategory: 'entity',
+  outcome: 'allow', reasonCode: null,
+});
+const eventActor: AuditActor = securityEvent.actor;
+const eventOutcome: AuditOutcome = securityEvent.outcome;
+const eventClassification: AuditClassification = diagnosticEvent.classification;
+const denialAuditor: DenialAuditor = createDenialAuditor({ auditor });
+const denialInput: DenialInput = {
+  principal: invitationUser, operation: 'read', resourceCategory: 'entity', reasonCode: 'no-capability',
+};
+const denialEvent: AuditEvent | null = denialAuditor.auditDenial(denialInput);
+const denialKey: string = denialAuditor.keyOf({ type: 'user', id: 'user-1', status: 'active' }, 'anonymous');
+const opaqueCheck: boolean = isOpaqueId('n1');
+const sanitizedId: string | null = sanitizeOpaqueId('alice@example.com');
+noopAuditSink.write(securityEvent, '12m');
+void [securityEvent, diagnosticEvent, eventActor, eventOutcome, eventClassification, denialAuditor, denialInput, denialEvent, denialKey, opaqueCheck, sanitizedId, securityInput];
+// @ts-expect-error retentionConfig is required
+createAuditor({ sink: auditSink });
 
 // ── field-constructor contract parity ──────────────────────────────────
 

@@ -8,7 +8,7 @@
 // the two-valued admission surface the decisions themselves saw.
 
 import type { AdmissionReasonCode, ResourceCategory } from './authorization-adapter.ts';
-import type { AuditActor, AuditEvent, Auditor } from './audit.ts';
+import { sanitizeOpaqueId, type AuditActor, type AuditEvent, type Auditor } from './audit.ts';
 import type { OperationCategory } from './operation.ts';
 import { type Principal, statusOf } from './principal.ts';
 import { createKeyedRateLimiter, type KeyedRateLimiter } from './rate-limit.ts';
@@ -50,11 +50,15 @@ export function createDenialAuditor({
   limiter = createKeyedRateLimiter({ windowMs, max: 1, now }),
 }: DenialAuditorOptions): DenialAuditor {
   function actorOf(principal: Principal): AuditActor {
-    return Object.freeze({ type: principal.type, id: principal.id, status: statusOf(principal) });
+    return Object.freeze({
+      type: principal.type,
+      id: sanitizeOpaqueId(principal.id),
+      status: statusOf(principal),
+    });
   }
 
   function keyOf(actor: AuditActor, reasonCode: AdmissionReasonCode): string {
-    const id = actor.id ?? 'anon';
+    const id = sanitizeOpaqueId(actor.id) ?? 'anon';
     return `${actor.type}:${id}:${actor.status}${KEY_SEPARATOR}${reasonCode}`;
   }
 

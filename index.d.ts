@@ -256,6 +256,97 @@ export interface AuthorizationAdapterOptions {
 
 export function createAuthorizationAdapter(options?: AuthorizationAdapterOptions): AuthorizationAdapter;
 
+// ── generic audit contract (S5/A4) ───────────────────────────────────────────
+// ONE event schema, TWO retention classes, injectable sink, and the rate-limited
+// denial path. IDs are OPAQUE, never content: every string recorded on an event
+// (actor.id, resourceId, operation) is canonicalized at the emitter boundary via
+// sanitizeOpaqueId, so a token, alias, filename, excerpt, or URL can never ride
+// the record. `retentionConfig` values pass through untouched as a frozen
+// snapshot taken at construction (shallow copy).
+
+/** An opaque identifier: a bounded, whitespace-free lowercase token of letters/digits/`-`/`_` (never a URL, path, email alias, excerpt, or token-like string). */
+export type OpaqueId = string;
+/** Validation for the opaque-id shape — bounded, whitespace-free, lowercase-only token. */
+export function isOpaqueId(value: string): boolean;
+/** Emitter-boundary canonicalizer: passes conforming ids through, maps everything else to a deterministic sha256 digest; empty/null → null. Idempotent. */
+export function sanitizeOpaqueId(value: string | null | undefined): string | null;
+
+export type AuditClassification = 'security' | 'diagnostic';
+export type AuditOutcome = 'allow' | 'deny';
+
+export interface AuditActor {
+  readonly type: PrincipalType;
+  readonly id: string | null;
+  readonly status: PrincipalStatus;
+}
+export interface AuditEvent {
+  readonly id: string;
+  readonly time: number;
+  readonly actor: AuditActor;
+  readonly operation: string | null;
+  readonly resourceCategory: ResourceCategory;
+  readonly resourceId: string | null;
+  readonly outcome: AuditOutcome;
+  readonly reasonCode: AdmissionReasonCode | null;
+  readonly classification: AuditClassification;
+}
+export type AuditRetention = string;
+export interface RetentionConfig {
+  readonly security: AuditRetention;
+  readonly diagnostic: AuditRetention;
+}
+export interface AuditInput {
+  readonly principal: Principal;
+  readonly operation: OperationCategory | string | null;
+  readonly resourceCategory: ResourceCategory;
+  readonly resourceId?: string | null;
+  readonly outcome: AuditOutcome;
+  readonly reasonCode?: AdmissionReasonCode | null;
+}
+export interface AuditSink {
+  write(event: AuditEvent, retention: AuditRetention): void;
+}
+export interface AuditorOptions {
+  readonly sink?: AuditSink;
+  readonly sinks?: Partial<Record<AuditClassification, AuditSink>>;
+  /** Value passthrough with snapshot semantics: shallow-copied and frozen at construction. */
+  readonly retentionConfig: RetentionConfig;
+  readonly now?: () => number;
+  readonly id?: () => string;
+}
+export interface Auditor {
+  readonly retentionConfig: RetentionConfig;
+  auditSecurity(input: AuditInput): AuditEvent;
+  auditDiagnostic(input: AuditInput): AuditEvent;
+}
+export function createAuditor(options: AuditorOptions): Auditor;
+export const noopAuditSink: AuditSink;
+
+export interface DenialInput {
+  readonly principal: Principal;
+  readonly operation: OperationCategory | string | null;
+  readonly resourceCategory: ResourceCategory;
+  readonly resourceId?: string | null;
+  readonly reasonCode: AdmissionReasonCode;
+}
+export interface DenialAuditorOptions {
+  readonly auditor: Auditor;
+  readonly windowMs?: number;
+  readonly now?: () => number;
+  readonly limiter?: KeyedRateLimiter;
+}
+export interface DenialAuditor {
+  readonly windowMs: number;
+  auditDenial(input: DenialInput): AuditEvent | null;
+  keyOf(actor: AuditActor, reasonCode: AdmissionReasonCode): string;
+}
+export function createDenialAuditor(options: DenialAuditorOptions): DenialAuditor;
+
+export interface KeyedRateLimitResult { allowed: boolean; retryAfterMs: number; limit: number; }
+export interface KeyedRateLimiter { check(key: string): KeyedRateLimitResult; }
+export interface KeyedRateLimitOptions { windowMs: number; max: number; now?: () => number; }
+export function createKeyedRateLimiter(options?: KeyedRateLimitOptions): KeyedRateLimiter;
+
 export interface HandlerReq {
   body: Record<string, unknown>;
   params: Record<string, string>;

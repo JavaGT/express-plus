@@ -18,6 +18,9 @@ export { requireUser, allowAnonymous } from './route-gate.mjs';
 export * as operations from './operation.mjs';
 export { openReadMirror, ReadMirrorError,                                                     } from './read-mirror.mjs';
 export { createAuthorizationAdapter,                                                                                                    } from './authorization-adapter.mjs';
+export { createAuditor, noopAuditSink, isOpaqueId, sanitizeOpaqueId,                                                                                                                                                                                                             } from './audit.mjs';
+export { createDenialAuditor,                                                                 } from './denial-log.mjs';
+export { createKeyedRateLimiter,                                                                              } from './rate-limit.mjs';
 export { router } from './app.mjs';
 export {
   FAILURE_CATEGORIES,

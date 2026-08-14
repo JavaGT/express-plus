@@ -18,6 +18,9 @@ export { requireUser, allowAnonymous } from './route-gate.ts';
 export * as operations from './operation.ts';
 export { openReadMirror, ReadMirrorError, type ReadMirrorHandle, type ReadMirrorStatementKind } from './read-mirror.ts';
 export { createAuthorizationAdapter, type AuthorizationAdapter, type AdmissionDecision, type AdmissionReasonCode, type ResourceCategory } from './authorization-adapter.ts';
+export { createAuditor, noopAuditSink, isOpaqueId, sanitizeOpaqueId, type OpaqueId, type Auditor, type AuditorOptions, type AuditActor, type AuditClassification, type AuditEvent, type AuditInput, type AuditOutcome, type AuditRetention, type AuditSink, type RetentionConfig } from './audit.ts';
+export { createDenialAuditor, type DenialAuditor, type DenialAuditorOptions, type DenialInput } from './denial-log.ts';
+export { createKeyedRateLimiter, type KeyedRateLimiter, type KeyedRateLimitOptions, type KeyedRateLimitResult } from './rate-limit.ts';
 export { router } from './app.ts';
 export {
   FAILURE_CATEGORIES,

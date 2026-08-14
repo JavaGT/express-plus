@@ -22,6 +22,7 @@ export const PUBLIC_API = Object.freeze({
       'principal', 'anonymous', 'requireUser', 'allowAnonymous', 'router',
       'inc', 'dec', 'self', 'many', 'effect', 'schedule', 'tick',
       'simulate', 'now',
+      'createAuditor', 'createDenialAuditor', 'isOpaqueId', 'sanitizeOpaqueId',
       'annotatedTextClientHandle',
        'annotationEntityAction', 'annotatedTextAnnotationAction',
       'User', 'Session', 'Inbox', 'Credential', 'Invitation', 'ApiKey',

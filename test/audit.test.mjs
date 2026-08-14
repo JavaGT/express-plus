@@ -6,8 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { principal, anonymous, requireUser } from '../build/index.mjs';
-import { createAuditor, noopAuditSink } from '../build/audit.mjs';
+import { principal, anonymous, requireUser, createAuditor, noopAuditSink, sanitizeOpaqueId, isOpaqueId } from '../build/index.mjs';
 import { createDenialAuditor } from '../build/denial-log.mjs';
 import { createAuthorizationAdapter } from '../build/authorization-adapter.mjs';
 
@@ -254,4 +253,110 @@ test('the audit records the REAL principal status while the admission decision s
     assert.equal(event.actor.id, 'alice', 'audit keeps the real identity');
   }
   assert.equal(events.length, 3, 'each real status emits its own representative');
+});
+
+// --- opaque-ID contract at the emitter boundary
+
+test('token/email-alias/filename/excerpt-looking ids are canonicalized to an opaque digest (actor.id + resourceId)', () => {
+  const events = [];
+  const auditor = createAuditor({
+    sink: { write: (event) => events.push(event) },
+    retentionConfig: { security: '12m', diagnostic: '30d' },
+  });
+
+  const sensitive = [
+    'SECRET-TOKEN-abc123',       // token-looking
+    'alice@example.com',          // email alias
+    '/private/report.pdf',        // filename
+    'the quick brown fox jumps',  // excerpt
+    'https://example.com/x',      // URL
+  ];
+  for (const id of sensitive) {
+    auditor.auditSecurity({
+      principal: principal({ type: 'user', id }), operation: 'read', resourceCategory: 'entity',
+      resourceId: id, outcome: 'deny', reasonCode: 'no-capability',
+    });
+  }
+
+  assert.equal(events.length, sensitive.length);
+  for (const event of events) {
+    assert.ok(event.actor.id, 'actor id is recorded');
+    assert.ok(event.resourceId, 'resourceId is recorded');
+    // the canonical form is opaque and never carries the original content
+    assert.ok(isOpaqueId(event.actor.id), `actor.id is opaque: ${event.actor.id}`);
+    assert.ok(isOpaqueId(event.resourceId), `resourceId is opaque: ${event.resourceId}`);
+    assert.equal(event.actor.id, event.resourceId, 'identical raw ids canonicalize identically');
+    const serialized = JSON.stringify(event);
+    for (const raw of sensitive) {
+      assert.ok(!serialized.includes(raw), `raw id content never rides the event: ${raw}`);
+    }
+  }
+
+  // deterministic: the same raw id always maps to the same opaque form
+  const again = createAuditor({ retentionConfig: { security: '12m', diagnostic: '30d' } });
+  const replay = again.auditSecurity({
+    principal: principal({ type: 'user', id: 'alice@example.com' }), operation: 'read',
+    resourceCategory: 'entity', resourceId: 'alice@example.com', outcome: 'deny', reasonCode: 'no-capability',
+  });
+  assert.equal(replay.actor.id, events[1].actor.id);
+});
+
+test('conforming opaque ids pass through untouched; empty id records as null', () => {
+  const events = [];
+  const auditor = createAuditor({
+    sink: { write: (event) => events.push(event) },
+    retentionConfig: { security: '12m', diagnostic: '30d' },
+  });
+  auditor.auditSecurity({
+    principal: principal({ type: 'user', id: 'user-123_abc' }), operation: 'read',
+    resourceCategory: 'entity', resourceId: 'n1', outcome: 'deny', reasonCode: 'no-capability',
+  });
+  auditor.auditSecurity({
+    principal: anonymous, operation: 'read',
+    resourceCategory: 'entity', resourceId: '', outcome: 'deny', reasonCode: 'anonymous',
+  });
+
+  assert.equal(events[0].actor.id, 'user-123_abc');
+  assert.equal(events[0].resourceId, 'n1');
+  assert.equal(events[1].actor.id, null, 'anonymous has no id');
+  assert.equal(events[1].resourceId, null, 'empty resourceId records as null');
+});
+
+test('the denial path sanitizes actor.id and resourceId through the emitter', () => {
+  const events = [];
+  const auditor = createAuditor({
+    sink: { write: (event) => events.push(event) },
+    retentionConfig: { security: '12m', diagnostic: '30d' },
+  });
+  const denial = createDenialAuditor({ auditor });
+
+  const event = denial.auditDenial({
+    principal: principal({ type: 'user', id: 'alice@example.com' }),
+    operation: 'read', resourceCategory: 'entity', resourceId: '/private/report.pdf',
+    reasonCode: 'no-capability',
+  });
+  assert.ok(event, 'a representative is emitted');
+  assert.ok(isOpaqueId(event.actor.id), 'denial actor.id is opaque');
+  assert.ok(isOpaqueId(event.resourceId), 'denial resourceId is opaque');
+  assert.ok(!JSON.stringify(event).includes('alice@example.com'));
+  assert.ok(!JSON.stringify(event).includes('report.pdf'));
+
+  // the rate-limit key uses the same opaque id, so a raw and a sanitized actor
+  // land in the same bucket
+  const rawKey = denial.keyOf({ type: 'user', id: 'alice@example.com', status: 'active' }, 'no-capability');
+  assert.ok(!rawKey.includes('alice@example.com'), 'keys never embed raw content');
+  assert.equal(rawKey, denial.keyOf({ type: 'user', id: event.actor.id, status: 'active' }, 'no-capability'));
+});
+
+test('sanitizeOpaqueId is exposed and matches the emitter contract', () => {
+  assert.equal(isOpaqueId('n1'), true);
+  assert.equal(isOpaqueId(''), false);
+  assert.equal(isOpaqueId('has space'), false);
+  assert.equal(isOpaqueId('a@b'), false);
+  assert.equal(isOpaqueId('/x'), false);
+  assert.equal(sanitizeOpaqueId('n1'), 'n1');
+  assert.equal(sanitizeOpaqueId(null), null);
+  assert.equal(sanitizeOpaqueId(''), null);
+  assert.equal(sanitizeOpaqueId('https://example.com/token'), sanitizeOpaqueId('https://example.com/token'));
+  assert.ok(!sanitizeOpaqueId('https://example.com/token').includes('example.com'));
 });
