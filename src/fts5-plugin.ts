@@ -246,17 +246,20 @@ export function createFts5Plugin(options: Fts5PluginOptions): Fts5Plugin {
         const candidates = rows.map((row) => {
           const id = String(row.id);
           // A snippet from an unmatched field may contain the highlight marker in
-          // its source text. Ask FTS5 which field matched instead of inspecting
-          // the snippet, which also fails closed for cross-field expressions.
-          const fieldIndex = options.source.fields.findIndex((field) => ctx.index.query({
-            sql: `SELECT rowid FROM ${table} WHERE ${idColumn} = ? AND ${table} MATCH ? LIMIT 1`,
-            params: [id, `${field} : (${request.query})`],
-          }).length > 0);
-          const excerpt = fieldIndex === -1 ? undefined : row[`excerpt_${fieldIndex}`];
+          // its source text. Ask FTS5 which fields matched instead. Cross-field
+          // expressions are ambiguous, so never attribute an excerpt to one.
+          const matchingFieldIndexes = options.source.fields.flatMap((field, index) =>
+            ctx.index.query({
+              sql: `SELECT rowid FROM ${table} WHERE ${idColumn} = ? AND ${table} MATCH ? LIMIT 1`,
+              params: [id, `${field} : (${request.query})`],
+            }).length > 0 ? [index] : [],
+          );
+          const fieldIndex = matchingFieldIndexes.length === 1 ? matchingFieldIndexes[0] : undefined;
+          const excerpt = fieldIndex === undefined ? undefined : row[`excerpt_${fieldIndex}`];
           const hit = Object.freeze({
             id,
             rank: greatest === 0 ? 1 : Math.max(0, -asNumber(row.score) / greatest),
-            ...(fieldIndex === -1 ? {} : { excerptField: options.source.fields[fieldIndex] }),
+            ...(fieldIndex === undefined ? {} : { excerptField: options.source.fields[fieldIndex] }),
           });
           return {
             hit,

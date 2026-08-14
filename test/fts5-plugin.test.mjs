@@ -151,6 +151,23 @@ test('FTS5 uses a column match rather than literal highlight markers to select e
   assert.match(outcome.result.hits[0].excerpt, /needle/);
 });
 
+test('FTS5 omits ambiguous cross-field excerpts and attributes single-field excerpts', async (t) => {
+  const kit = await setup();
+  t.after(() => close(kit));
+  kit.insert('ambiguous', 'foo', 'bar');
+  kit.insert('single', 'title', 'foo');
+  await rebuild(kit);
+
+  const outcome = await kit.registry.search('note-fts', { query: 'foo OR bar', principal: alice });
+  assert.equal(outcome.ok, true);
+  const ambiguous = outcome.result.hits.find((hit) => hit.id === 'ambiguous');
+  assert.equal('excerpt' in ambiguous, false);
+  assert.equal('excerptField' in ambiguous, false);
+  const single = outcome.result.hits.find((hit) => hit.id === 'single');
+  assert.equal(single.excerptField, 'body');
+  assert.match(single.excerpt, /foo/);
+});
+
 test('FTS5 plugin participates in fenced A3 shadow rebuild, reconcile, parity, and actual-index health', async (t) => {
   const kit = await setup();
   const bridge = createSearchStalenessBridge({ registry: kit.registry });
