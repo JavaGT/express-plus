@@ -203,6 +203,21 @@ test('reaper refcount sweep', async () => {
   rmSync(store._pathFor(refId), { force: true });
 });
 
+test('reaper treats an empty census as no adopted blob references', async () => {
+  const { root, db, store } = await setupBlobStore();
+  const { id } = store.upload({ bytes: Buffer.from('unreferenced') });
+  db.exec('BEGIN IMMEDIATE');
+  store.adopt(db, id);
+  db.exec('COMMIT');
+  store.finalize(id);
+
+  const result = store.reap({ ttl: 3600_000, census: EMPTY_BLOB_CENSUS });
+
+  assert.equal(result.danglers, 1, 'an empty census declares no adopted references');
+  assert.equal(store.stat(id), undefined, 'the unreferenced adopted blob is reaped');
+  rmSync(root, { recursive: true, force: true });
+});
+
 test('readRange closes the file descriptor (no leak)', async () => {
   // Regression: readRange opened with openSync but never closeSync'd (a comment
   // claimed "GC handles it" — sync fds are raw OS fds Node does NOT GC). A

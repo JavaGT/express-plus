@@ -127,6 +127,18 @@ test('a declared blob field without owningResource or erasureCategory fails decl
   );
 });
 
+test('action-level reference identifiers fail during census compilation', () => {
+  for (const declaration of [
+    { actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File; DROP TABLE BlobStore', erasureCategory: 'deletable' },
+    { actionName: 'File.upload', field: 'blob id', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable' },
+  ]) {
+    assert.throws(
+      () => compileBlobCensus({ entities: new Map(), declaredBlobFields: [declaration] }),
+      /owningResource and field must be SQL identifiers/,
+    );
+  }
+});
+
 test('declared references on distinct owning resources stay distinct, even for the same column name', () => {
   const census = compileBlobCensus({
     entities: new Map(),

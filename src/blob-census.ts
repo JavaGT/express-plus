@@ -65,6 +65,7 @@ export interface BlobCensusInput {
 }
 
 const refKey = (table: string, column: string): string => `${table}\u0000${column}`;
+const SQL_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 const isErasureCategory = (value: unknown): value is BlobErasureCategory =>
   value === 'deletable' || value === 'retained' || value === 'derived';
@@ -103,6 +104,9 @@ export function compileBlobCensus({ entities, declaredBlobFields = [] }: BlobCen
     if (!declaration || typeof declaration.owningResource !== 'string' || !declaration.owningResource
       || !isErasureCategory(declaration.erasureCategory)) {
       throw new TypeError('blob census: every declared blob field requires owningResource and erasureCategory');
+    }
+    if (!SQL_IDENTIFIER.test(declaration.owningResource) || typeof declaration.field !== 'string' || !SQL_IDENTIFIER.test(declaration.field)) {
+      throw new TypeError('blob census: declared blob field owningResource and field must be SQL identifiers');
     }
     if (declaration.ownership !== undefined && !isOwnership(declaration.ownership)) {
       throw new TypeError('blob census: declared blob field ownership must be exclusive or shared');

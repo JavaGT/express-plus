@@ -218,7 +218,7 @@ export function createBlobStore({ root, stagingRoot, db, bytes }: BlobStoreOptio
     // nothing (skipped after one catalog check). Matching content hashes never
     // merge ownership (#7): every id is checked against its own references.
     const adoptedForRefcount = db.prepare('SELECT id FROM BlobStore WHERE status = ?').all('adopted') as Array<{ id: string }>;
-    if (adoptedForRefcount.length > 0 && census.references.length > 0) {
+    if (adoptedForRefcount.length > 0) {
       const existingTables = new Set<string>();
       const tableStmt = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?");
       for (const ref of census.references) {
