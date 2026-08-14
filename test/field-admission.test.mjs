@@ -530,7 +530,11 @@ test('an injected authorization adapter governs update transition admission (den
   });
   assert.equal(admitted.ok, true, JSON.stringify(admitted));
   assert.equal(db.prepare('SELECT owner FROM Doc WHERE id = ?').get('d1').owner, 'bob');
-  assert.ok(transitionCalls.length >= 2, 'the adapter was consulted on both the current and the proposed row');
+  // Exactly-once: the generated handler consults the adapter for the current
+  // row AND the proposed after-row — exactly two calls — and the durable
+  // pipeline gate must not re-admit the current row through the adapter on top
+  // of that (no third consultation that could contradict the handler's decision).
+  assert.equal(transitionCalls.length, 2, 'the adapter is consulted exactly once per transition row, with no durable-gate duplicate');
   assert.ok(transitionCalls.every((c) => c.row?.id === 'd1'));
 });
 
@@ -579,6 +583,7 @@ test('an injected adapter governs conditional-history update admission (admit an
   assert.equal(admitted.ok, true, JSON.stringify(admitted));
   assert.equal(db.prepare('SELECT title FROM ScopedDoc WHERE id = ?').get('d1').title, 'Renamed');
   assert.ok(transitionCalls.some((c) => c.row?.id === 'd1' && c.principal === 'alice'), 'the transition admission consulted the injected adapter');
+  assert.equal(transitionCalls.length, 2, 'the durable gate adds no duplicate adapter consultation on a conditional-history update');
 
   // Deny case: the injected adapter denies — 403 and the row is unchanged.
   transitionCalls.length = 0;

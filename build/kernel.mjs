@@ -318,7 +318,18 @@ function buildDurableAdmission(app     , annotatedKernel     ) {
         return granted;
       }
       if (verb === 'update' || verb === 'remove') {
-        const granted = await admitsExistingRow({ entityName, verb, principal, event })
+        // The generated CRUD handler's own proposed-transition admission
+        // (admitRowTransition) is the ONE governing gate for these events: it
+        // evaluates BOTH the current row and the proposed after-row through the
+        // injected adapter (app._authorization) exactly once. This durable gate
+        // must not re-admit the current row through the adapter on top of that —
+        // a duplicate consultation that could contradict the handler's decision.
+        // With no adapter injected the framework row-grant default still runs
+        // here, unchanged (defense in depth over the same framework engine).
+        const durableAdmission = app._authorization
+          ? true
+          : await admitsExistingRow({ entityName, verb, principal, event });
+        const granted = durableAdmission
           && await annotatedKernel.admitProject({ entityName, verb, principal, event }, app);
         if (granted) {
           rearmChangedScheduleReceipts({
