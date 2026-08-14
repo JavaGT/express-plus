@@ -33,6 +33,7 @@ import {
 } from './db-adapter.ts';
 import { acquireDirectoryLock, type DirectoryLock } from './directory-lock.ts';
 import type { BackupWriteCoordinator } from './backup.ts';
+import { probeDatabaseFile, type RecoveryProbeResult } from './recovery.ts';
 
 export { DB_OWNED_ERROR_CODE, DirectoryOwnedError } from './directory-lock.ts';
 
@@ -92,6 +93,12 @@ export interface OpenedSqliteDatabase extends OpenedDatabase {
   // opened before the coordinator exists) — an unbound source refuses
   // backup-manager construction.
   writeCoordinator?: BackupWriteCoordinator;
+  // S1/A4 recovery wiring (read-only): the recovery health probe bound to this
+  // adapter's owned database file. A corrupt database cannot be OPENED (the
+  // fail-closed quick_check at open throws), so recovery probes the FILE
+  // directly — this hook reports damage without opening the app, powering the
+  // stop-and-ask default. Never mutates. Memory mode is always healthy.
+  probeRecovery(): RecoveryProbeResult;
   // Remove the db file, -wal/-shm, and lock sidecar. backups/, quarantine/,
   // recycle/ (S1/A3/A4/A6) and blobs//staging/ are left untouched. Closes the
   // adapter first if it is still open.
@@ -338,6 +345,16 @@ function makeOpenedSqliteDatabase(
     }
   };
 
+  // S1/A4 recovery wiring (read-only): delegates to the canonical file probe,
+  // bound to this adapter's owned database file. A memory adapter has no file
+  // and is always healthy. Recovery also works over a plain `{ root }` source
+  // (the corrupt-db path where this adapter refuses to open), which probes the
+  // file the same way via probeDatabaseFile.
+  const probeRecovery = (): RecoveryProbeResult => {
+    if (!root) return { ok: true, checkedAt: new Date().toISOString() };
+    return probeDatabaseFile(path.join(root, SQLITE_DATA_FILENAME));
+  };
+
   return {
     handle,
     capabilities,
@@ -348,6 +365,7 @@ function makeOpenedSqliteDatabase(
     close,
     checkpoint,
     integrityCheck,
+    probeRecovery,
     teardown,
     // No default: the app binds the platform write coordinator before creating
     // a backup manager (the adapter opens before the coordinator exists). An

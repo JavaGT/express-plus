@@ -33,6 +33,7 @@ import {
 } from './db-adapter.mjs';
 import { acquireDirectoryLock,                    } from './directory-lock.mjs';
                                                           
+import { probeDatabaseFile,                          } from './recovery.mjs';
 
 export { DB_OWNED_ERROR_CODE, DirectoryOwnedError } from './directory-lock.mjs';
 
@@ -92,6 +93,12 @@ const TEARDOWN_FILENAMES = Object.freeze([
                                                                       
                                  
                                             
+                                                                               
+                                                                            
+                                                                         
+                                                                              
+                                                                        
+                                       
                                                                             
                                                                               
                                        
@@ -338,6 +345,16 @@ function makeOpenedSqliteDatabase(
     }
   };
 
+  // S1/A4 recovery wiring (read-only): delegates to the canonical file probe,
+  // bound to this adapter's owned database file. A memory adapter has no file
+  // and is always healthy. Recovery also works over a plain `{ root }` source
+  // (the corrupt-db path where this adapter refuses to open), which probes the
+  // file the same way via probeDatabaseFile.
+  const probeRecovery = ()                      => {
+    if (!root) return { ok: true, checkedAt: new Date().toISOString() };
+    return probeDatabaseFile(path.join(root, SQLITE_DATA_FILENAME));
+  };
+
   return {
     handle,
     capabilities,
@@ -348,6 +365,7 @@ function makeOpenedSqliteDatabase(
     close,
     checkpoint,
     integrityCheck,
+    probeRecovery,
     teardown,
     // No default: the app binds the platform write coordinator before creating
     // a backup manager (the adapter opens before the coordinator exists). An

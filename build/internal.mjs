@@ -71,3 +71,24 @@ export {
                      
                   
 } from './backup.mjs';
+export {
+  createRecoveryManager,
+  probeDatabaseFile,
+  parseRecoveryCliArgs,
+  runRecoveryCli,
+  RECOVERY_CLI_USAGE,
+                       
+                              
+                      
+                        
+                                  
+                              
+                           
+                     
+                       
+                      
+                      
+                           
+                         
+                       
+} from './recovery.mjs';
