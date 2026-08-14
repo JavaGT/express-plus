@@ -181,7 +181,7 @@ test('schema-owned entity table validation runs after migrations', async () => {
     const schema = defineSqliteSchema({
       name: 'schema-note',
       tables: noteSchema().tables,
-      migrations: [{ version: 17, up(innerDb) {
+      migrations: [{ namespace: 'schema-note', name: 'late-trigger', version: 17, up(innerDb) {
         innerDb.exec('CREATE TRIGGER SchemaNote_late AFTER INSERT ON SchemaNote BEGIN DELETE FROM SchemaNote WHERE id = NEW.id; END');
       } }],
     });
@@ -194,7 +194,7 @@ test('schema-owned entity table validation runs after migrations', async () => {
 
 test('schema and application migrations use one version stream', () => {
   const schema = defineSqliteSchema({
-    name: 'schema-note', tables: [], migrations: [{ version: 17, up() {} }],
+    name: 'schema-note', tables: [], migrations: [{ namespace: 'schema-note', name: 'seed', version: 17, up() {} }],
   });
   assert.throws(() => workbench({ schema, migrations: [{ version: 17, up() {} }] }), /duplicate migration version/i);
 });
@@ -214,7 +214,7 @@ test('schema migration may add a declared entity column before indexes and valid
         ],
         indexes: [{ name: 'SchemaNote_score', columns: ['score'] }],
       }],
-      migrations: [{ version: 18, up(innerDb) { innerDb.exec('ALTER TABLE SchemaNote ADD COLUMN score REAL'); } }],
+      migrations: [{ namespace: 'schema-note', name: 'add-score', version: 18, up(innerDb) { innerDb.exec('ALTER TABLE SchemaNote ADD COLUMN score REAL'); } }],
     });
     const app = workbench({ db, schema, entities: [Note] });
     await app.prepareSchema();

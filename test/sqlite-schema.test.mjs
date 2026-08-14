@@ -125,6 +125,8 @@ test('schema preparation runs explicit migrations once and rolls failures back',
   const schema = taskSchema({
     migrations: [
       {
+        namespace: 'tasks',
+        name: 'archive-column',
         version: 420001,
         up(db) {
           calls += 1;
@@ -144,6 +146,8 @@ test('schema preparation runs explicit migrations once and rolls failures back',
       name: 'failing',
       tables: [],
       migrations: [{
+        namespace: 'failing',
+        name: 'partial-column',
         version: 420002,
         up(innerDb) {
           innerDb.exec('ALTER TABLE Task ADD COLUMN partial TEXT');
@@ -213,9 +217,25 @@ test('defineSqliteSchema rejects ambiguous or unsafe declarations before touchin
     () => defineSqliteSchema({
       name: 'bad',
       tables: [],
-      migrations: [{ version: 1, up() {} }, { version: 1, up() {} }],
+      migrations: [{ namespace: 'dupe', name: 'one', version: 1, up() {} }, { namespace: 'dupe', name: 'two', version: 1, up() {} }],
     }),
     /duplicate migration/i,
+  );
+  assert.throws(
+    () => defineSqliteSchema({
+      name: 'bad',
+      tables: [],
+      migrations: [{ namespace: 'dupe', name: 'same-name', version: 1, up() {} }, { namespace: 'dupe', name: 'same-name', version: 2, up() {} }],
+    }),
+    /duplicate migration name/i,
+  );
+  assert.throws(
+    () => defineSqliteSchema({
+      name: 'bad',
+      tables: [],
+      migrations: [{ namespace: 'missing', name: 'no-up', version: 1 }],
+    }),
+    /up function/i,
   );
 });
 
@@ -240,6 +260,8 @@ test('prepare does not create declared indexes on an existing legacy table when 
         },
       ],
       migrations: [{
+        namespace: 'legacy',
+        name: 'explodes',
         version: 1,
         up() { throw new Error('explosion'); },
       }],
@@ -271,4 +293,68 @@ test('foreign keys may target explicitly-declared external tables without claimi
   assert.deepEqual(schema.tableNames, ['Comment']);
   assert.doesNotMatch(schema.ddl.join('\n'), /CREATE TABLE IF NOT EXISTS "Project"/);
   assert.match(schema.ddl.join('\n'), /REFERENCES "Project" \("id"\)/);
+});
+
+// Backward compatibility: Scope's existing TableDeclaration-shaped declarations
+// (src/lib/wb-scope/schema/declaration.ts) must pass validation unchanged and
+// produce byte-identical DDL to the pre-S2/A1 compiler for the old feature set.
+test('legacy Scope-shaped declarations validate and emit identical DDL', () => {
+  const schema = defineSqliteSchema({
+    name: 'scope-shaped',
+    externalTables: [{ name: 'Project', columns: ['id'] }],
+    tables: [
+      {
+        name: 'Artefact',
+        columns: [
+          { name: 'id', type: 'text', primaryKey: true },
+          { name: 'projectId', type: 'text', notNull: true },
+          { name: 'name', type: 'text', notNull: true },
+          { name: 'createdAt', type: 'integer', notNull: true, default: 0 },
+          { name: 'updatedAt', type: 'integer' },
+        ],
+        foreignKeys: [
+          { columns: ['projectId'], references: { table: 'Project', columns: ['id'] }, onDelete: 'cascade', onUpdate: 'cascade' },
+        ],
+        indexes: [
+          { name: 'Artefact_projectId_idx', columns: ['projectId'] },
+        ],
+      },
+      {
+        name: 'ArtefactTag',
+        columns: [
+          { name: 'artefactId', type: 'text', notNull: true },
+          { name: 'tagId', type: 'text', notNull: true },
+          { name: 'addedAt', type: 'text', defaultExpression: 'CURRENT_TIMESTAMP' },
+        ],
+        primaryKey: ['artefactId', 'tagId'],
+      },
+    ],
+  });
+
+  assert.deepEqual(schema.ddl, [
+    `CREATE TABLE IF NOT EXISTS "Artefact" (
+  "id" TEXT PRIMARY KEY,
+  "projectId" TEXT NOT NULL,
+  "name" TEXT NOT NULL,
+  "createdAt" INTEGER NOT NULL DEFAULT 0,
+  "updatedAt" INTEGER,
+  FOREIGN KEY ("projectId") REFERENCES "Project" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);`,
+    `CREATE TABLE IF NOT EXISTS "ArtefactTag" (
+  "artefactId" TEXT NOT NULL,
+  "tagId" TEXT NOT NULL,
+  "addedAt" TEXT DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY ("artefactId", "tagId")
+);`,
+    'CREATE INDEX IF NOT EXISTS "Artefact_projectId_idx" ON "Artefact" ("projectId")',
+  ]);
+
+  const db = new DatabaseSync(':memory:');
+  try {
+    schema.prepare(db);
+    const row = db.prepare("SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name = 'Artefact'").get();
+    assert.match(row.sql, /ON DELETE CASCADE ON UPDATE CASCADE/);
+  } finally {
+    db.close();
+  }
 });

@@ -9,12 +9,26 @@ const ALLOWED_DEFAULT_EXPRESSIONS = new Set([
   'CURRENT_TIMESTAMP',
   "(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
 ]);
+// S2/A1: plugin virtual tables are FTS5-only until S4 ratifies further modules.
+const ALLOWED_VIRTUAL_MODULES = new Set(['fts5']);
+const ALLOWED_TRIGGER_TIMING = new Set(['before', 'after', 'instead of']);
+const ALLOWED_TRIGGER_EVENTS = new Set(['insert', 'update', 'delete']);
+
+const IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function requireName(value         , label        )         {
   if (typeof value !== 'string' || value.length === 0 || value.includes('\0')) {
     throw new Error(`${label} must be a non-empty string without NUL bytes`);
   }
   return value;
+}
+
+function requireIdentifier(value         , label        )         {
+  const name = requireName(value, label);
+  if (!IDENTIFIER_PATTERN.test(name)) {
+    throw new Error(`${label} must be an identifier`);
+  }
+  return name;
 }
 
 function folded(name        )         {
@@ -39,18 +53,247 @@ function normaliseAction(value         , label        )                     {
   return value.toUpperCase();
 }
 
+// ---------------------------------------------------------------------------
+// SQL expression sanity checks.
+//
+// Declarations ship raw SQL fragments (CHECK, index WHERE, trigger WHEN/body,
+// virtual-table options). These are validated before any database is touched:
+// well-formed tokens, balanced quotes and parentheses, no comments or parameter
+// placeholders, and — where the fragment lives inside one table — bare column
+// references resolve to declared columns. This is deliberately a strict-ish
+// tokenizer, not a full SQL parser; it keeps ordinary app declarations honest
+// without duplicating the SQLite grammar.
+// ---------------------------------------------------------------------------
+
+const SQL_EXPRESSION_TOKEN = new RegExp(
+  [
+    /"(?:[^"]|"")*"/.source,
+    /'(?:[^']|'')*'/.source,
+    /0[xX][0-9a-fA-F]+/.source,
+    /(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?/.source,
+    /[A-Za-z_][A-Za-z0-9_]*/.source,
+    /<=|>=|!=|<>|==|\|\||->>|->|<<|>>|::|[(),.+\-*/%<>=!~&|^;]/.source,
+  ].join('|'),
+  'y',
+);
+
+const SQL_KEYWORDS = new Set([
+  'ABORT', 'ALL', 'AND', 'AS', 'ASC', 'BETWEEN', 'BY', 'CASE', 'CAST',
+  'COLLATE', 'CONFLICT', 'CROSS', 'CURRENT', 'CURRENT_DATE', 'CURRENT_TIME',
+  'CURRENT_TIMESTAMP', 'CURRENT_USER', 'DEFERRED', 'DESC', 'DISTINCT',
+  'ELSE', 'END', 'ESCAPE', 'EXCEPT', 'EXCLUSIVE', 'EXISTS', 'FAIL', 'FALSE',
+  'FILTER', 'FIRST', 'FULL', 'GLOB', 'GROUP', 'HAVING', 'IGNORE', 'IMMEDIATE',
+  'IN', 'INNER', 'INTERSECT', 'IS', 'ISNULL', 'JOIN', 'KEY', 'LAST', 'LEFT',
+  'LIKE', 'LIMIT', 'MATCH', 'NATURAL', 'NO', 'NOT', 'NOTNULL', 'NULL',
+  'NULLS', 'OFFSET', 'ON', 'OR', 'ORDER', 'OUTER', 'OVER', 'PARTITION',
+  'PRECEDING', 'RANGE', 'RECURSIVE', 'REGEXP', 'REPLACE', 'RIGHT', 'ROLLBACK',
+  'ROWS', 'SELECT', 'THEN', 'TRUE', 'UNBOUNDED', 'UNION', 'WHEN', 'WHERE',
+  'WITH',
+]);
+
+const TRAILING_INVALID_PUNCT = new Set([
+  '+', '-', '*', '/', '%', '=', '<', '>', '!', '~', '&', '|', '^', '(', ',',
+  '.', ';', '<=', '>=', '!=', '<>', '==', '->', '->>', '<<', '>>', '||', '::',
+]);
+
+// Keywords that cannot end a boolean expression (they demand a following
+// operand/clause) — a WHERE/CHECK ending in one is malformed.
+const TRAILING_INVALID_KEYWORDS = new Set([
+  'AND', 'AS', 'BETWEEN', 'BY', 'CASE', 'CAST', 'COLLATE', 'ELSE', 'ESCAPE',
+  'EXCEPT', 'EXISTS', 'FROM', 'GLOB', 'GROUP', 'HAVING', 'IN', 'INTERSECT',
+  'IS', 'LIKE', 'LIMIT', 'MATCH', 'NOT', 'OFFSET', 'OR', 'ORDER', 'REGEXP',
+  'SELECT', 'THEN', 'UNION', 'WHEN', 'WHERE', 'WITH',
+]);
+
+                    
+               
+                                                                
+ 
+
+function checkQuotesBalanced(input        , label        )       {
+  let inString = false;
+  for (let i = 0; i < input.length; i += 1) {
+    const ch = input[i];
+    if (inString) {
+      if (ch === "'") {
+        if (input[i + 1] === "'") {
+          i += 1;
+        } else {
+          inString = false;
+        }
+      }
+    } else if (ch === "'") {
+      inString = true;
+    }
+  }
+  if (inString) throw new Error(`${label} has an unterminated string literal`);
+}
+
+function tokenizeSql(input        , label        )             {
+  checkQuotesBalanced(input, label);
+  if (input.includes('--') || input.includes('/*')) {
+    throw new Error(`${label} must not contain SQL comments`);
+  }
+  const tokens             = [];
+  let depth = 0;
+  for (let index = 0; index < input.length;) {
+    const ch = input[index];
+    if (/\s/.test(ch)) {
+      index += 1;
+      continue;
+    }
+    SQL_EXPRESSION_TOKEN.lastIndex = index;
+    const match = SQL_EXPRESSION_TOKEN.exec(input);
+    if (match === null || match.index !== index) {
+      throw new Error(`${label} contains an invalid token "${ch}"`);
+    }
+    const text = match[0];
+    let kind                  ;
+    if (text[0] === '"') kind = 'quoted';
+    else if (text[0] === "'") kind = 'string';
+    else if (/^[0-9]/.test(text) || /^\.\d/.test(text)) kind = 'number';
+    else if (/^[A-Za-z_]/.test(text)) kind = 'identifier';
+    else kind = 'punct';
+    if (kind === 'punct') {
+      if (text === '(') depth += 1;
+      if (text === ')') {
+        depth -= 1;
+        if (depth < 0) throw new Error(`${label} has unbalanced parentheses`);
+      }
+    }
+    tokens.push({ text, kind });
+    index += text.length;
+  }
+  if (depth !== 0) throw new Error(`${label} has unbalanced parentheses`);
+  return tokens;
+}
+
+// Validate a single SQL expression (CHECK, index WHERE/expression term,
+// trigger WHEN). Bare identifiers and quoted identifiers must resolve to a
+// declared column unless they are SQL keywords, function names, qualified
+// names, or (for triggers) NEW./OLD. pseudo-table references.
+function validateSqlExpression(
+  input         ,
+  knownColumns                              ,
+  label        ,
+)       {
+  if (typeof input !== 'string' || input.trim().length === 0) {
+    throw new Error(`${label} must be a non-empty SQL expression`);
+  }
+  const tokens = tokenizeSql(input, label);
+  let skipNext = false;
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (token.kind === 'quoted') {
+      const next = tokens[i + 1];
+      if (next?.kind === 'punct' && next.text === '.') continue;
+      const name = token.text.slice(1, -1).replaceAll('""', '"');
+      if (!knownColumns.has(folded(name))) {
+        throw new Error(`${label} references missing column "${name}"`);
+      }
+      continue;
+    }
+    if (token.kind !== 'identifier') continue;
+    if (skipNext) {
+      skipNext = false;
+      continue;
+    }
+    const upper = token.text.toUpperCase();
+    if (SQL_KEYWORDS.has(upper)) {
+      if (upper === 'COLLATE' || upper === 'AS') skipNext = true;
+      continue;
+    }
+    const next = tokens[i + 1];
+    if (next?.kind === 'punct' && (next.text === '(' || next.text === '.')) continue;
+    if (!knownColumns.has(folded(token.text))) {
+      throw new Error(`${label} references missing column "${token.text}"`);
+    }
+  }
+  const last = tokens[tokens.length - 1];
+  if (last.kind === 'punct' && TRAILING_INVALID_PUNCT.has(last.text)) {
+    throw new Error(`${label} ends with an invalid token "${last.text}"`);
+  }
+  if (last.kind === 'identifier' && TRAILING_INVALID_KEYWORDS.has(last.text.toUpperCase())) {
+    throw new Error(`${label} ends with an incomplete expression ("${last.text}")`);
+  }
+}
+
+// Validate a trigger body. Bodies are multi-statement SQL and may reference
+// other tables, so only NEW./OLD. column references are checked against the
+// declaring table. Statements must be semicolon-terminated.
+function validateTriggerBody(
+  input         ,
+  knownColumns                              ,
+  label        ,
+)       {
+  if (typeof input !== 'string' || input.trim().length === 0) {
+    throw new Error(`${label} must declare a non-empty trigger body`);
+  }
+  if (!input.includes(';')) {
+    throw new Error(`${label} body must contain at least one statement (terminated by ';')`);
+  }
+  const tokens = tokenizeSql(input, label);
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (token.kind !== 'identifier' || (token.text.toUpperCase() !== 'NEW' && token.text.toUpperCase() !== 'OLD')) {
+      continue;
+    }
+    const dot = tokens[i + 1];
+    const column = tokens[i + 2];
+    if (!(dot?.kind === 'punct' && dot.text === '.') || column === undefined || (column.kind !== 'identifier' && column.kind !== 'quoted')) {
+      throw new Error(`${label} uses ${token.text} without a column reference`);
+    }
+    const name = column.kind === 'quoted' ? column.text.slice(1, -1).replaceAll('""', '"') : column.text;
+    if (!knownColumns.has(folded(name))) {
+      throw new Error(`${label} references missing column "${name}"`);
+    }
+    i += 2;
+  }
+}
+
+// Validate a raw virtual-table option fragment (e.g. `content='articles'`,
+// `tokenize='porter unicode61'`). Options are module vocabulary, not table
+// columns, so only well-formedness is checked.
+function validateVirtualTableOption(input         , label        )       {
+  if (typeof input !== 'string' || input.trim().length === 0) {
+    throw new Error(`${label} must be a non-empty option`);
+  }
+  if (input.includes('\0')) throw new Error(`${label} must not contain NUL bytes`);
+  const tokens = tokenizeSql(input, label);
+  const last = tokens[tokens.length - 1];
+  if (last.kind === 'punct' && TRAILING_INVALID_PUNCT.has(last.text)) {
+    throw new Error(`${label} ends with an invalid token "${last.text}"`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// DDL compilation
+// ---------------------------------------------------------------------------
+
 function compileTable(table                 )         {
   const lines = table.columns.map((column) => {
     let sql = `  ${quoteIdent(column.name)} ${column.type.toUpperCase()}`;
+    if (column.collation !== undefined) sql += ` COLLATE ${column.collation}`;
     if (column.primaryKey) sql += ' PRIMARY KEY';
     if (column.notNull) sql += ' NOT NULL';
     if (column.default !== undefined) sql += ` DEFAULT ${quoteDefault(column.default)}`;
     if (column.defaultExpression !== undefined) sql += ` DEFAULT ${column.defaultExpression}`;
+    if (column.check !== undefined) sql += ` CHECK (${column.check})`;
     return sql;
   });
 
   if (table.primaryKey !== undefined) {
     lines.push(`  PRIMARY KEY (${table.primaryKey.map(quoteIdent).join(', ')})`);
+  }
+
+  for (const constraint of table.unique ?? []) {
+    const named = constraint.name !== undefined ? `CONSTRAINT ${quoteIdent(constraint.name)} ` : '';
+    lines.push(`  ${named}UNIQUE (${constraint.columns.map(quoteIdent).join(', ')})`);
+  }
+
+  for (const constraint of table.check ?? []) {
+    const named = constraint.name !== undefined ? `CONSTRAINT ${quoteIdent(constraint.name)} ` : '';
+    lines.push(`  ${named}CHECK (${constraint.expression})`);
   }
 
   for (const foreignKey of table.foreignKeys ?? []) {
@@ -64,12 +307,36 @@ function compileTable(table                 )         {
     lines.push(sql);
   }
 
-  return `CREATE TABLE IF NOT EXISTS ${quoteIdent(table.name)} (\n${lines.join(',\n')}\n);`;
+  let sql = `CREATE TABLE IF NOT EXISTS ${quoteIdent(table.name)} (\n${lines.join(',\n')}\n)`;
+  if (table.strict) sql += ' STRICT';
+  if (table.withoutRowid) sql += ', WITHOUT ROWID';
+  return `${sql};`;
 }
 
 function compileIndex(tableName        , index                 )         {
+  const terms = [
+    ...(index.columns ?? []).map(quoteIdent),
+    ...(index.expression ?? []),
+  ];
   const unique = index.unique ? ' UNIQUE' : '';
-  return `CREATE${unique} INDEX IF NOT EXISTS ${quoteIdent(index.name)} ON ${quoteIdent(tableName)} (${index.columns.map(quoteIdent).join(', ')})`;
+  let sql = `CREATE${unique} INDEX IF NOT EXISTS ${quoteIdent(index.name)} ON ${quoteIdent(tableName)} (${terms.join(', ')})`;
+  if (index.where !== undefined) sql += ` WHERE ${index.where}`;
+  return sql;
+}
+
+function compileVirtualTable(virtualTable                        )         {
+  return `CREATE VIRTUAL TABLE IF NOT EXISTS ${quoteIdent(virtualTable.name)} USING ${virtualTable.module}(${virtualTable.options.join(', ')});`;
+}
+
+function compileTrigger(tableName        , trigger                   )         {
+  let sql = `CREATE TRIGGER IF NOT EXISTS ${quoteIdent(trigger.name)} ${trigger.timing.toUpperCase()} ${trigger.event.toUpperCase()}`;
+  if (trigger.columnNames !== undefined && trigger.columnNames.length > 0) {
+    sql += ` OF ${trigger.columnNames.map(quoteIdent).join(', ')}`;
+  }
+  sql += ` ON ${quoteIdent(tableName)}`;
+  if (trigger.when !== undefined) sql += ` WHEN ${trigger.when}`;
+  sql += ` BEGIN ${trigger.body} END;`;
+  return sql;
 }
 
                              
@@ -77,14 +344,26 @@ function compileIndex(tableName        , index                 )         {
                    
                            
                        
+                          
  
 
                                                                    
-                                                                                                                           
-                                                                                                                                                  
+                      
                                                                              
+                                                                             
+                                             
+ 
+                       
+                                                                          
+                                                                                       
+ 
+                                                                                                                    
                                                                                                               
-                                                             
+                                                                      
+                                                                        
+                                                                                                                                    
+                                                                                                                                     
+                                                                                                                          
 
 function validateSpec(input         )       {
   if (input === null || typeof input !== 'object') throw new Error('schema declaration must be an object');
@@ -100,10 +379,60 @@ function validateSpec(input         )       {
     throw new Error('schema migrations must be an array');
   }
   const migrations = (spec.migrations ?? [])             ;
+  if (spec.virtualTables !== undefined && !Array.isArray(spec.virtualTables)) {
+    throw new Error('schema virtualTables must be an array');
+  }
+  const virtualTables = (spec.virtualTables ?? [])             ;
 
   const tablesByName = new Map                                                                         ();
   const referencedTablesByName = new Map                                                                         ();
-  const globalIndexes = new Set        ();
+  const indexNameSpace = new Set        ();
+  const checkNames = new Set        ();
+  const triggerNames = new Set        ();
+  const virtualTableNames = new Set        ();
+  const shadowTableNames = new Set        ();
+
+  for (const virtualTable of virtualTables) {
+    if (virtualTable === null || typeof virtualTable !== 'object') {
+      throw new Error('virtual table declaration must be an object');
+    }
+    const declaration = virtualTable                     ;
+    requireName(declaration.name, 'virtual table name');
+    const virtualKey = folded(declaration.name          );
+    if (virtualTableNames.has(virtualKey)) throw new Error(`duplicate virtual table "${declaration.name}"`);
+    if (shadowTableNames.has(virtualKey)) throw new Error(`virtual table "${declaration.name}" collides with a shadow table`);
+    const module = requireName(declaration.module, `virtual table "${declaration.name}" module`);
+    if (!ALLOWED_VIRTUAL_MODULES.has(module.toLowerCase())) {
+      throw new Error(`unknown virtual table module "${module}" for "${declaration.name}"`);
+    }
+    if (!Array.isArray(declaration.options) || (declaration.options             ).length === 0) {
+      throw new Error(`virtual table "${declaration.name}" must declare at least one option`);
+    }
+    const options = declaration.options             ;
+    const seenOptions = new Set        ();
+    for (const option of options) {
+      validateVirtualTableOption(option, `option in virtual table "${declaration.name}"`);
+      const optionKey = folded(option          );
+      if (seenOptions.has(optionKey)) throw new Error(`duplicate option "${option}" in virtual table "${declaration.name}"`);
+      seenOptions.add(optionKey);
+    }
+    requireName(declaration.ownerPluginId, `owner plugin for virtual table "${declaration.name}"`);
+    if (!Array.isArray(declaration.shadowTables) || (declaration.shadowTables             ).length === 0) {
+      throw new Error(`virtual table "${declaration.name}" must declare the shadow tables it owns`);
+    }
+    const shadows = declaration.shadowTables             ;
+    const seenShadows = new Set        ();
+    for (const shadow of shadows) {
+      requireName(shadow, `shadow table for virtual table "${declaration.name}"`);
+      const shadowKey = folded(shadow          );
+      if (seenShadows.has(shadowKey)) throw new Error(`duplicate shadow table "${shadow}" for virtual table "${declaration.name}"`);
+      if (shadowTableNames.has(shadowKey)) throw new Error(`duplicate shadow table "${shadow}"`);
+      if (virtualTableNames.has(shadowKey)) throw new Error(`shadow table "${shadow}" collides with a virtual table`);
+      seenShadows.add(shadowKey);
+      shadowTableNames.add(shadowKey);
+    }
+    virtualTableNames.add(virtualKey);
+  }
 
   for (const externalTable of externalTables) {
     if (externalTable === null || typeof externalTable !== 'object') {
@@ -132,11 +461,15 @@ function validateSpec(input         )       {
     requireName(declaration.name, 'table name');
     const tableKey = folded(declaration.name          );
     if (tablesByName.has(tableKey) || referencedTablesByName.has(tableKey)) throw new Error(`duplicate table "${declaration.name}"`);
+    if (virtualTableNames.has(tableKey) || shadowTableNames.has(tableKey)) {
+      throw new Error(`table "${declaration.name}" collides with a declared virtual table`);
+    }
     if (!Array.isArray(declaration.columns) || (declaration.columns             ).length === 0) {
       throw new Error(`table "${declaration.name}" must declare at least one column`);
     }
 
     const columnsByName = new Map                 ();
+    const pendingColumnChecks                                                = [];
     let columnPrimaryKeys = 0;
     for (const column of declaration.columns             ) {
       if (column === null || typeof column !== 'object') throw new Error(`invalid column in table "${declaration.name}"`);
@@ -154,8 +487,21 @@ function validateSpec(input         )       {
       if (col.defaultExpression !== undefined && !ALLOWED_DEFAULT_EXPRESSIONS.has(col.defaultExpression          )) {
         throw new Error(`invalid default expression "${col.defaultExpression}" for column "${col.name}"`);
       }
+      if (col.collation !== undefined) {
+        requireIdentifier(col.collation, `collation for column "${col.name}"`);
+      }
+      if (col.check !== undefined) {
+        pendingColumnChecks.push({
+          expression: col.check,
+          label: `check on column "${col.name}"`,
+        });
+      }
       if (col.primaryKey === true) columnPrimaryKeys += 1;
       columnsByName.set(columnKey, col);
+    }
+
+    for (const { expression, label } of pendingColumnChecks) {
+      validateSqlExpression(expression, columnsByName, label);
     }
 
     if (columnPrimaryKeys > 1 || (columnPrimaryKeys > 0 && declaration.primaryKey !== undefined)) {
@@ -165,13 +511,94 @@ function validateSpec(input         )       {
       validateColumnList(declaration.primaryKey, columnsByName, `primary key on table "${declaration.name}"`);
     }
 
+    if (declaration.strict !== undefined && typeof declaration.strict !== 'boolean') {
+      throw new Error(`strict on table "${declaration.name}" must be a boolean`);
+    }
+    if (declaration.withoutRowid !== undefined && typeof declaration.withoutRowid !== 'boolean') {
+      throw new Error(`withoutRowid on table "${declaration.name}" must be a boolean`);
+    }
+    if (declaration.withoutRowid === true && columnPrimaryKeys === 0 && declaration.primaryKey === undefined) {
+      throw new Error(`withoutRowid table "${declaration.name}" must declare a primary key`);
+    }
+
     for (const index of (declaration.indexes ?? [])             ) {
       const idx = index              ;
       requireName(idx.name, `index name on table "${declaration.name}"`);
       const indexKey = folded(idx.name          );
-      if (globalIndexes.has(indexKey)) throw new Error(`duplicate index "${idx.name}"`);
-      globalIndexes.add(indexKey);
-      validateColumnList(idx.columns, columnsByName, `index "${idx.name}"`);
+      if (indexNameSpace.has(indexKey)) throw new Error(`duplicate index "${idx.name}"`);
+      indexNameSpace.add(indexKey);
+      if (idx.columns !== undefined) {
+        validateColumnList(idx.columns, columnsByName, `index "${idx.name}"`);
+      }
+      if (idx.expression !== undefined) {
+        if (!Array.isArray(idx.expression) || (idx.expression             ).length === 0) {
+          throw new Error(`index "${idx.name}" expression terms must be a non-empty array`);
+        }
+        for (const term of idx.expression             ) {
+          validateSqlExpression(term, columnsByName, `expression in index "${idx.name}"`);
+        }
+      }
+      if (idx.columns === undefined && idx.expression === undefined) {
+        throw new Error(`index "${idx.name}" must declare columns or expression terms`);
+      }
+      if (idx.where !== undefined) {
+        validateSqlExpression(idx.where, columnsByName, `partial index "${idx.name}"`);
+      }
+    }
+
+    for (const constraint of (declaration.unique ?? [])             ) {
+      if (constraint === null || typeof constraint !== 'object') {
+        throw new Error(`invalid unique constraint on table "${declaration.name}"`);
+      }
+      const unique = constraint                         ;
+      if (unique.name !== undefined) {
+        requireName(unique.name, `unique constraint name on table "${declaration.name}"`);
+        const uniqueKey = folded(unique.name          );
+        if (indexNameSpace.has(uniqueKey)) throw new Error(`duplicate index name "${unique.name}"`);
+        indexNameSpace.add(uniqueKey);
+      }
+      validateColumnList(unique.columns, columnsByName, `unique constraint on table "${declaration.name}"`);
+    }
+
+    for (const constraint of (declaration.check ?? [])             ) {
+      if (constraint === null || typeof constraint !== 'object') {
+        throw new Error(`invalid check constraint on table "${declaration.name}"`);
+      }
+      const check = constraint                        ;
+      if (check.name !== undefined) {
+        requireName(check.name, `check constraint name on table "${declaration.name}"`);
+        const checkKey = folded(check.name          );
+        if (checkNames.has(checkKey)) throw new Error(`duplicate check constraint "${check.name}"`);
+        checkNames.add(checkKey);
+      }
+      validateSqlExpression(check.expression, columnsByName, `check constraint on table "${declaration.name}"`);
+    }
+
+    for (const trigger of (declaration.triggers ?? [])             ) {
+      if (trigger === null || typeof trigger !== 'object') {
+        throw new Error(`invalid trigger on table "${declaration.name}"`);
+      }
+      const trig = trigger                ;
+      requireName(trig.name, `trigger name on table "${declaration.name}"`);
+      const triggerKey = folded(trig.name          );
+      if (triggerNames.has(triggerKey)) throw new Error(`duplicate trigger "${trig.name}"`);
+      triggerNames.add(triggerKey);
+      if (typeof trig.timing !== 'string' || !ALLOWED_TRIGGER_TIMING.has(trig.timing.toLowerCase())) {
+        throw new Error(`invalid trigger timing "${String(trig.timing)}" for trigger "${trig.name}"`);
+      }
+      if (typeof trig.event !== 'string' || !ALLOWED_TRIGGER_EVENTS.has(trig.event.toLowerCase())) {
+        throw new Error(`invalid trigger event "${String(trig.event)}" for trigger "${trig.name}"`);
+      }
+      if (trig.columnNames !== undefined) {
+        if (trig.event.toLowerCase() !== 'update') {
+          throw new Error(`trigger "${trig.name}" declares column names for a non-UPDATE event`);
+        }
+        validateColumnList(trig.columnNames, columnsByName, `trigger "${trig.name}"`);
+      }
+      if (trig.when !== undefined) {
+        validateSqlExpression(trig.when, columnsByName, `trigger "${trig.name}"`);
+      }
+      validateTriggerBody(trig.body, columnsByName, `trigger "${trig.name}" on "${declaration.name}"`);
     }
 
     tablesByName.set(tableKey, { table: table                   , columnsByName });
@@ -199,15 +626,34 @@ function validateSpec(input         )       {
     }
   }
 
-  const migrationVersions = new Set        ();
+  const migrationVersionsByNamespace = new Map                     ();
+  const migrationNames = new Set        ();
   for (const migration of migrations) {
     const m = migration                  ;
     if (migration === null || typeof migration !== 'object' || !Number.isSafeInteger(m.version) || (m.version          ) <= 0) {
       throw new Error('migration version must be a positive safe integer');
     }
-    if (migrationVersions.has(m.version          )) throw new Error(`duplicate migration version ${m.version}`);
+    const namespace = requireName(m.namespace, 'migration namespace');
+    const name = requireName(m.name, 'migration name');
+    const namespaceKey = folded(namespace);
+    if (!migrationVersionsByNamespace.has(namespaceKey)) migrationVersionsByNamespace.set(namespaceKey, new Set());
+    const versions = migrationVersionsByNamespace.get(namespaceKey) ;
+    if (versions.has(m.version          )) throw new Error(`duplicate migration version ${m.version} in namespace "${namespace}"`);
+    versions.add(m.version          );
+    const nameKey = `${namespaceKey}\u0000${folded(name)}`;
+    if (migrationNames.has(nameKey)) throw new Error(`duplicate migration name "${name}" in namespace "${namespace}"`);
+    migrationNames.add(nameKey);
+    if (m.dependencies !== undefined) {
+      if (!Array.isArray(m.dependencies)) throw new Error(`dependencies for migration "${name}" must be an array`);
+      const seenDependencies = new Set        ();
+      for (const dependency of m.dependencies             ) {
+        const dep = requireName(dependency, `dependency of migration "${name}"`);
+        const depKey = folded(dep);
+        if (seenDependencies.has(depKey)) throw new Error(`duplicate dependency "${dep}" on migration "${name}"`);
+        seenDependencies.add(depKey);
+      }
+    }
     if (typeof m.up !== 'function') throw new Error(`migration ${m.version} must declare an up function`);
-    migrationVersions.add(m.version          );
   }
 }
 
@@ -230,6 +676,8 @@ function validateColumnList(columns         , knownColumns                      
                     
                             
                              
+                     
+                 
  
 
                                        
@@ -242,7 +690,36 @@ function validateColumnList(columns         , knownColumns                      
                                   
                
                    
+                              
+                                 
+                 
+ 
+
+                                             
+                
                              
+ 
+
+                                            
+                
+                     
+ 
+
+                                    
+               
+                                            
+                                        
+                                  
+                
+               
+ 
+
+                                         
+               
+                 
+                             
+                        
+                                  
  
 
                                   
@@ -251,10 +728,18 @@ function validateColumnList(columns         , knownColumns                      
                                  
                                                 
                                        
+                                                 
+                                               
+                   
+                         
+                                          
  
 
                                       
+                    
+               
                   
+                                   
                              
  
 
@@ -262,6 +747,7 @@ function validateColumnList(columns         , knownColumns                      
                
                                      
                                                                            
+                                                    
                                               
  
 
@@ -269,8 +755,12 @@ function validateColumnList(columns         , knownColumns                      
                
                                 
                                      
+                                                   
+                                         
                                              
                          
+                                     
+                                
                                                                                                                  
  
 
@@ -285,11 +775,37 @@ export function defineSqliteSchema(spec                   )                     
       columns: Object.freeze([...foreignKey.columns]),
       references: Object.freeze({ ...foreignKey.references, columns: Object.freeze([...foreignKey.references.columns]) }),
     }))),
-    indexes: Object.freeze((table.indexes ?? []).map((index) => Object.freeze({ ...index, columns: Object.freeze([...index.columns]) }))),
+    indexes: Object.freeze((table.indexes ?? []).map((index) => Object.freeze({
+      ...index,
+      columns: Object.freeze([...(index.columns ?? [])]),
+      expression: Object.freeze([...(index.expression ?? [])]),
+    }))),
+    unique: Object.freeze((table.unique ?? []).map((constraint) => Object.freeze({
+      ...constraint,
+      columns: Object.freeze([...constraint.columns]),
+    }))),
+    check: Object.freeze((table.check ?? []).map((constraint) => Object.freeze({ ...constraint }))),
+    triggers: Object.freeze((table.triggers ?? []).map((trigger) => Object.freeze({
+      ...trigger,
+      columnNames: Object.freeze([...(trigger.columnNames ?? [])]),
+    }))),
     ...(table.primaryKey === undefined ? {} : { primaryKey: Object.freeze([...table.primaryKey]) }),
   })));
+  const virtualTables = Object.freeze((validated.virtualTables ?? []).map((virtualTable) => Object.freeze({
+    ...virtualTable,
+    options: Object.freeze([...virtualTable.options]),
+    shadowTables: Object.freeze([...virtualTable.shadowTables]),
+  })));
+  const triggers = Object.freeze(
+    validated.tables.flatMap((table) => (table.triggers ?? []).map((trigger) => Object.freeze({
+      ...trigger,
+      columnNames: Object.freeze([...(trigger.columnNames ?? [])]),
+    }))),
+  );
   const tableDdl = validated.tables.map(compileTable);
   const indexDdl = validated.tables.flatMap((table) => (table.indexes ?? []).map((index) => compileIndex(table.name, index)));
+  const virtualTableDdl = virtualTables.map(compileVirtualTable);
+  const triggerDdl = validated.tables.flatMap((table) => (table.triggers ?? []).map((trigger) => compileTrigger(table.name, trigger)));
   const ddl = [...tableDdl, ...indexDdl];
   const tableNames = validated.tables.map((table) => table.name);
   const migrations = [...(validated.migrations ?? [])];
@@ -298,8 +814,12 @@ export function defineSqliteSchema(spec                   )                     
     name: validated.name,
     tableNames: Object.freeze(tableNames),
     tables,
+    virtualTables,
+    triggers,
     migrations: Object.freeze(migrations),
     ddl: Object.freeze(ddl),
+    virtualTableDdl: Object.freeze(virtualTableDdl),
+    triggerDdl: Object.freeze(triggerDdl),
     prepare(db, options) {
       if (tableDdl.length > 0) {
         begin(db);
