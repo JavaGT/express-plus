@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync, existsSync, copyFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -201,6 +201,11 @@ test('a missing referenced blob fails closed and leaves quarantine intact', { ti
         if (!existsSync(file) || readFileSync(file, 'utf8').length === 0) {
           throw new Error('blob bytes missing');
         }
+      },
+      materializeRestoreGeneration: (generation, backupBlobsDir, destBlobDir) => {
+        const name = `${generation}.blob`;
+        copyFileSync(join(backupBlobsDir, name), join(destBlobDir, name));
+        return [{ name, size: 0 }];
       },
       censusAfterRestore: () => {},
     };

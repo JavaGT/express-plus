@@ -7,7 +7,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -180,8 +180,21 @@ test('fresh-directory restore passes the full schema + blob census before servin
       verifyBackupGeneration: (generation, backupBlobsDir) => {
         assert.equal(existsSync(join(backupBlobsDir, `${generation}.blob`)), true);
       },
+      materializeRestoreGeneration: (generation, backupBlobsDir, destBlobDir) => {
+        const name = `${generation}.blob`;
+        copyFileSync(join(backupBlobsDir, name), join(destBlobDir, name));
+        return [{ name, size: blobBytes.length }];
+      },
       censusAfterRestore: (generations, targetRoot) => {
         censusCalls.push([generations, targetRoot]);
+        // The verified bytes were materialized into the target BEFORE the
+        // census — the census sees the restored generation, not an empty or
+        // stale blob store (review #83).
+        assert.equal(
+          readFileSync(join(targetRoot, 'blobs', 'gen-a.blob'), 'utf8'),
+          blobBytes,
+          'the generation bytes are present in the target blob layout before the census',
+        );
       },
     };
     const result = await managerFor(dir, { blobs: seam }).recoverIntoFreshDirectory({ backupId: backup.backupId, directory: fresh });
@@ -240,6 +253,11 @@ test('fresh-directory restore fails closed when the census fails and removes the
     });
     const seam = {
       verifyBackupGeneration: () => {},
+      materializeRestoreGeneration: (generation, backupBlobsDir, destBlobDir) => {
+        const name = `${generation}.blob`;
+        copyFileSync(join(backupBlobsDir, name), join(destBlobDir, name));
+        return [{ name, size: blobBytes.length }];
+      },
       censusAfterRestore: () => {
         throw new Error('blob census failed after restore');
       },

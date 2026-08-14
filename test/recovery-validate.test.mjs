@@ -308,11 +308,155 @@ test('a blob seam that cannot verify a referenced generation is rejected with th
       verifyBackupGeneration: () => {
         throw new Error('gen-a bytes missing from backup');
       },
+      materializeRestoreGeneration: () => [],
+      censusAfterRestore: () => {},
     };
     const result = await managerFor(dir, { blobs: failingSeam }).recover({ backupId: backup.backupId });
     assert.equal(result.ok, false);
     assert.match(result.reason, /gen-a/);
     assert.match(result.reason, /unavailable/);
+    assert.equal(existsSync(join(dir, 'backups', backup.backupId)), true, 'the backup stays in backups/');
+    assert.deepEqual(quarantineNames(dir), [], 'quarantine is untouched');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a blob seam that lacks materialization is refused fail-closed (like the no-seam rule)', { timeout: 120000 }, async () => {
+  const root = tempRoot();
+  const dir = join(root, 'owned');
+  try {
+    const blobBytes = 'blob-bytes-gen-a';
+    const backup = await makeBackup(dir, {
+      blobs: {
+        census: () => ['gen-a'],
+        materialize: (generation, destDir) => {
+          writeFileSync(join(destDir, `${generation}.blob`), blobBytes);
+          return [{ name: `${generation}.blob`, size: blobBytes.length }];
+        },
+      },
+    });
+    assert.deepEqual(backup.manifest.blobGenerations, ['gen-a']);
+
+    // Verification alone is never enough: the referenced bytes must also be
+    // materialized into the target, or the census would see nothing.
+    const incompleteSeam = {
+      verifyBackupGeneration: () => {},
+      censusAfterRestore: () => {},
+    };
+    const result = await managerFor(dir, { blobs: incompleteSeam }).recover({ backupId: backup.backupId });
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 'rejected');
+    assert.match(result.reason, /materializeRestoreGeneration|incomplete/);
+    assert.equal(existsSync(join(dir, 'backups', backup.backupId)), true, 'the backup stays in backups/');
+    assert.deepEqual(quarantineNames(dir), [], 'quarantine is untouched');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a manifest with integrityResult removed is refused', { timeout: 120000 }, async () => {
+  const root = tempRoot();
+  const dir = join(root, 'owned');
+  try {
+    const backup = await makeBackup(dir);
+    const manifest = readManifest(dir, backup.backupId);
+    const { integrityResult, ...without } = manifest;
+    assert.ok(integrityResult, 'the real manifest records an integrityResult');
+    writeFileSync(manifestPath(dir, backup.backupId), JSON.stringify(without, null, 2));
+
+    const result = await managerFor(dir).recover({ backupId: backup.backupId });
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 'rejected');
+    assert.match(result.reason, /integrityResult/);
+    assert.equal(existsSync(join(dir, 'backups', backup.backupId)), true, 'the backup stays in backups/');
+    assert.deepEqual(quarantineNames(dir), [], 'quarantine is untouched');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a manifest with a falsified integrityResult is refused', { timeout: 120000 }, async () => {
+  const root = tempRoot();
+  const dir = join(root, 'owned');
+  try {
+    const backup = await makeBackup(dir);
+    const manifest = readManifest(dir, backup.backupId);
+    // The snapshot is healthy, but the manifest claims integrity failed — a
+    // fabricated record a complete backup can never hold.
+    writeFileSync(
+      manifestPath(dir, backup.backupId),
+      JSON.stringify(
+        {
+          ...manifest,
+          integrityResult: {
+            ok: false,
+            checkedAt: '2026-01-01T00:00:00.000Z',
+            findings: [{ severity: 'error', message: 'fabricated failure' }],
+          },
+        },
+        null,
+        2,
+      ),
+    );
+
+    const result = await managerFor(dir).recover({ backupId: backup.backupId });
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 'rejected');
+    assert.match(result.reason, /failed integrity check/);
+    assert.equal(existsSync(join(dir, 'backups', backup.backupId)), true, 'the backup stays in backups/');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a manifest with a malformed (falsified) platformSchemaIdentity is refused', { timeout: 120000 }, async () => {
+  const root = tempRoot();
+  const dir = join(root, 'owned');
+  try {
+    const backup = await makeBackup(dir);
+    const manifest = readManifest(dir, backup.backupId);
+    writeFileSync(
+      manifestPath(dir, backup.backupId),
+      JSON.stringify({ ...manifest, platformSchemaIdentity: 'not-a-schema-fingerprint' }, null, 2),
+    );
+
+    const result = await managerFor(dir).recover({ backupId: backup.backupId });
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 'rejected');
+    assert.match(result.reason, /platformSchemaIdentity/);
+    assert.equal(existsSync(join(dir, 'backups', backup.backupId)), true, 'the backup stays in backups/');
+    assert.deepEqual(quarantineNames(dir), [], 'quarantine is untouched');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a manifest declaring a third (unsupported) migration ledger table is refused', { timeout: 120000 }, async () => {
+  const root = tempRoot();
+  const dir = join(root, 'owned');
+  try {
+    const backup = await makeBackup(dir);
+    const manifest = readManifest(dir, backup.backupId);
+    writeFileSync(
+      manifestPath(dir, backup.backupId),
+      JSON.stringify(
+        {
+          ...manifest,
+          migrationLedgerState: {
+            ...manifest.migrationLedgerState,
+            app: { ...manifest.migrationLedgerState.app, table: '_OtherMigration' },
+          },
+        },
+        null,
+        2,
+      ),
+    );
+
+    const result = await managerFor(dir).recover({ backupId: backup.backupId });
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 'rejected');
+    assert.match(result.reason, /unsupported ledger table|_OtherMigration/);
     assert.equal(existsSync(join(dir, 'backups', backup.backupId)), true, 'the backup stays in backups/');
     assert.deepEqual(quarantineNames(dir), [], 'quarantine is untouched');
   } finally {

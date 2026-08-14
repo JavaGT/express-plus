@@ -47,11 +47,14 @@
 // The adapter teardown removes only the db file, -wal/-shm, and lock sidecar —
 // a dev/reset path must clear database state, never recovery/backup material.
 //
-// The blob availability/census seam is DELIBERATELY pluggable (S6 owns blob
-// enumeration): this module DECLARES the S6 blob-generation interface
+// The blob seam is DELIBERATELY pluggable (S6 owns blob enumeration and
+// materialization): this module DECLARES the S6 blob-generation interface
 // (`RecoveryBlobSeam`) and only calls into it. Without a seam, a backup that
 // references blob generations refuses fail-closed (its bytes cannot be
-// verified), mirroring the backup manager's no-seam rule.
+// verified), mirroring the backup manager's no-seam rule. Verification ALONE is
+// never enough: the seam must ALSO materialize the verified generations into
+// the target's blob layout before the census runs, or the census would see
+// missing bytes (fresh target) or stale bytes (live restore).
 
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomBytes } from 'node:crypto';
@@ -59,9 +62,11 @@ import {
   chmodSync,
   copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -71,7 +76,12 @@ import path from 'node:path';
 import { frameworkTableNames } from './schema-table-census.ts';
 import { getLog } from './log.ts';
 import { createWriteQueue } from './write-queue.ts';
-import type { BackupWriteCoordinator, BackupManifest, BackupMigrationLedgerState } from './backup.ts';
+import type {
+  BackupWriteCoordinator,
+  BackupManifest,
+  BackupMigrationLedgerState,
+  MaterializedBlobFile,
+} from './backup.ts';
 import type { IntegrityFinding, IntegrityReport } from './db-adapter.ts';
 import { BACKUP_FORMAT_VERSION } from './backup.ts';
 
@@ -94,7 +104,12 @@ const RECOVERY_MANAGED_SUBDIRECTORIES = Object.freeze(['blobs', 'staging', 'back
 // this prefix in the owned directory means a restore crashed mid-swap.
 const STAGE_PREFIX = 'data.sqlite.recovering-';
 
+// The two DECLARED migration ledger table names (kept in sync with backup.ts's
+// APP_LEDGER/WORKBENCH_LEDGER). These are the ONLY names a restore accepts:
+// they are interpolated into SQL, and the manifest is untrusted input, so a
+// manifest-chosen table name is refused (review #83).
 const WORKBENCH_LEDGER = '_WorkbenchMigration';
+const APP_LEDGER = '_Migration';
 
 // Upper bound on error messages persisted in diagnostics / logged (review #82
 // finding 4 policy): stage + identifier + a short sanitized reason, never row
@@ -142,13 +157,25 @@ function deepEqual(a: unknown, b: unknown): boolean {
 
 // The pluggable blob-generation seam (S6 declares + implements the concrete
 // census). The backup side (`BackupBlobSource`) materializes generations INTO
-// the backup; the recovery side verifies those bytes pre-activation and censuses
-// the live/fresh blob store before a restore may be complete.
+// the backup; the recovery side verifies those bytes pre-activation, materializes
+// them into the target's blob layout, and censuses the live/fresh blob store
+// before a restore may be complete.
 export type RecoveryBlobSeam = {
   // Verify the backup actually holds verified bytes for one referenced
   // generation. Throws when the generation's bytes are missing or unverifiable
   // → the restore aborts with the backup left untouched.
   verifyBackupGeneration?(generation: string, backupBlobsDir: string): Promise<void> | void;
+  // Materialize one verified generation's bytes from the backup's blobs/ into
+  // the target's blob-store layout (`destBlobDir` — the target's `blobs/`
+  // subdirectory, the same layout the backup side materialized into). Returns
+  // the files written (name + size) so recovery can verify the bytes actually
+  // landed. Required whenever a backup references generations: verification
+  // alone leaves the target with no bytes for the census to see.
+  materializeRestoreGeneration?(
+    generation: string,
+    backupBlobsDir: string,
+    destBlobDir: string,
+  ): Promise<readonly MaterializedBlobFile[]> | readonly MaterializedBlobFile[];
   // Post-restore blob census: confirm every referenced generation is available
   // in the live blob store of `targetRoot` (the owned directory, or the fresh
   // directory in a fresh restore) before the app is allowed to serve. Throws →
@@ -373,8 +400,15 @@ export function createRecoveryManager(options: RecoveryManagerOptions): Recovery
     );
   }
   const blobs = options.blobs ?? null;
-  if (blobs !== null && (typeof blobs.verifyBackupGeneration !== 'function' && typeof blobs.censusAfterRestore !== 'function')) {
-    throw new TypeError('recovery blobs source must expose verifyBackupGeneration(generation, backupBlobsDir) and/or censusAfterRestore(generations, targetRoot)');
+  if (
+    blobs !== null &&
+    (typeof blobs.verifyBackupGeneration !== 'function' &&
+      typeof blobs.materializeRestoreGeneration !== 'function' &&
+      typeof blobs.censusAfterRestore !== 'function')
+  ) {
+    throw new TypeError(
+      'recovery blobs source must expose verifyBackupGeneration(generation, backupBlobsDir), materializeRestoreGeneration(generation, backupBlobsDir, destBlobDir), and/or censusAfterRestore(generations, targetRoot)',
+    );
   }
   const validateMigrationLedger = options.validateMigrationLedger ?? null;
   if (validateMigrationLedger !== null && typeof validateMigrationLedger !== 'function') {
@@ -590,6 +624,14 @@ export function createRecoveryManager(options: RecoveryManagerOptions): Recovery
     try {
       const integrity = integrityCheckOf(db);
       for (const finding of integrity.findings) failures.push(`backup snapshot failed integrity_check: ${finding}`);
+      // RECOMPUTE the integrity the manifest recorded (the backup side records
+      // a quick_check report) and require it to match the manifest — an
+      // integrityResult that the snapshot does not reproduce (removed,
+      // falsified, or stale) fails closed (issue #82 contract, review #83).
+      const recordedIntegrity = quickCheckOf(db);
+      if (recordedIntegrity.ok !== manifest.integrityResult.ok) {
+        failures.push('snapshot integrity does not match the manifest integrityResult');
+      }
       // The snapshot must recompute to EXACTLY the identities the manifest
       // recorded when the backup was taken — a drifted or tampered snapshot is
       // not the backup the manifest describes. A corrupt snapshot can throw at
@@ -651,7 +693,61 @@ export function createRecoveryManager(options: RecoveryManagerOptions): Recovery
         `backup declares encryption ${JSON.stringify(manifest.encryption)} — the platform restores only volume-encrypted (encryption 'none') backups`,
       );
     }
-    if (!Array.isArray(manifest.blobGenerations)) failures.push('manifest blobGenerations is not an array');
+    // Issue #82 manifest contract: validate EVERY enumerated field (types +
+    // content), never a subset. A manifest that omits or falsifies a recorded
+    // identity/integrity field must not restore (review #83).
+    if (typeof manifest.platformSchemaIdentity !== 'string' || !/^[0-9a-f]{64}$/.test(manifest.platformSchemaIdentity)) {
+      failures.push('manifest platformSchemaIdentity is not a valid schema fingerprint (64 lowercase hex)');
+    }
+    if (
+      !Array.isArray(manifest.appSchemaIdentity) ||
+      manifest.appSchemaIdentity.some((id) => typeof id !== 'string' || id.length === 0)
+    ) {
+      failures.push('manifest appSchemaIdentity is not an array of non-empty strings');
+    }
+    if (typeof manifest.createdAt !== 'string' || Number.isNaN(Date.parse(manifest.createdAt))) {
+      failures.push('manifest createdAt is not a valid timestamp');
+    }
+    if (typeof manifest.completedAt !== 'string' || Number.isNaN(Date.parse(manifest.completedAt))) {
+      failures.push('manifest completedAt is not a valid timestamp');
+    }
+    if (
+      !Array.isArray(manifest.blobGenerations) ||
+      manifest.blobGenerations.some((generation) => typeof generation !== 'string' || generation.length === 0)
+    ) {
+      failures.push('manifest blobGenerations is not an array of generation ids');
+    }
+    const integrity = manifest.integrityResult as unknown;
+    if (!integrity || typeof integrity !== 'object') {
+      failures.push('manifest integrityResult is missing');
+    } else {
+      const ir = integrity as Partial<IntegrityReport>;
+      if (typeof ir.ok !== 'boolean') failures.push('manifest integrityResult.ok is not a boolean');
+      if (typeof ir.checkedAt !== 'string' || Number.isNaN(Date.parse(ir.checkedAt))) {
+        failures.push('manifest integrityResult.checkedAt is not a valid timestamp');
+      }
+      if (!Array.isArray(ir.findings)) {
+        failures.push('manifest integrityResult.findings is not an array');
+      } else {
+        for (const finding of ir.findings) {
+          if (
+            !finding ||
+            typeof finding !== 'object' ||
+            typeof (finding as Partial<IntegrityFinding>).severity !== 'string' ||
+            typeof (finding as Partial<IntegrityFinding>).message !== 'string'
+          ) {
+            failures.push('manifest integrityResult contains a malformed finding');
+            break;
+          }
+        }
+        if (ir.ok === true && ir.findings.length > 0) {
+          failures.push('manifest integrityResult is contradictory: records ok:true together with findings');
+        }
+      }
+      if (manifest.status === 'complete' && ir.ok !== true) {
+        failures.push('manifest records a failed integrity check for a complete backup');
+      }
+    }
     const ledger = manifest.migrationLedgerState as unknown;
     if (!ledger || typeof ledger !== 'object') {
       failures.push('manifest migrationLedgerState is missing');
@@ -668,6 +764,17 @@ export function createRecoveryManager(options: RecoveryManagerOptions): Recovery
       if (!lane || typeof lane !== 'object') {
         failures.push(`migration ledger '${key}' is missing`);
         continue;
+      }
+      // The ledger table names are interpolated into SQL when the snapshot is
+      // validated — the two DECLARED names only, never a manifest-chosen table
+      // (review #83). The SQL seam itself re-enforces this before building any
+      // statement; this shape check rejects other names up front.
+      if (typeof lane.table !== 'string' || lane.table.length === 0) {
+        failures.push(`migration ledger '${key}' table is not a string`);
+      } else if (lane.table !== (key === 'app' ? APP_LEDGER : WORKBENCH_LEDGER)) {
+        failures.push(
+          `migration ledger '${key}' declares an unsupported ledger table '${lane.table}' — only '${APP_LEDGER}' and '${WORKBENCH_LEDGER}' are restored`,
+        );
       }
       if (typeof lane.maxVersion !== 'number' || !Number.isSafeInteger(lane.maxVersion)) {
         failures.push(`migration ledger '${key}' maxVersion is not an integer`);
@@ -710,6 +817,22 @@ export function createRecoveryManager(options: RecoveryManagerOptions): Recovery
     if (!blobs || typeof blobs.verifyBackupGeneration !== 'function') {
       return [
         'backup references blob generations but no recovery blob seam was supplied — the referenced bytes cannot be verified before activation (S6 provides the concrete census); refusing to restore',
+      ];
+    }
+    // Verification alone is never enough: the seam must ALSO materialize the
+    // verified bytes into the target's blob layout before the census runs, and
+    // census the result. A seam missing any of the three refuses fail-closed,
+    // like the no-seam rule (review #83).
+    const missing: string[] = [];
+    if (typeof blobs.materializeRestoreGeneration !== 'function') {
+      missing.push('materializeRestoreGeneration(generation, backupBlobsDir, destBlobDir)');
+    }
+    if (typeof blobs.censusAfterRestore !== 'function') {
+      missing.push('censusAfterRestore(generations, targetRoot)');
+    }
+    if (missing.length > 0) {
+      return [
+        `backup references blob generations but the recovery blob seam is incomplete — missing ${missing.join(', ')} — the referenced bytes cannot be restored into and censused in the target (S6 provides the concrete seam); refusing to restore`,
       ];
     }
     const failures: string[] = [];
@@ -798,6 +921,32 @@ export function createRecoveryManager(options: RecoveryManagerOptions): Recovery
       reason: `restore of backup '${backupId}' failed at ${phase}: ${sanitizeError(err)}`,
       quarantined,
     };
+  }
+
+  // Materialize every referenced generation's verified bytes from the backup's
+  // blobs/ into the target's blob-store layout BEFORE the census runs — without
+  // this a real S6 census would see missing bytes in a fresh target, or stale
+  // bytes in a live restore, and could never honestly confirm the restored
+  // store (review #83). Each write is verified against disk (lstat + realpath
+  // containment, mirroring the backup side), so a seam that lies about writing
+  // fails the restore. A live-restore failure after this step leaves only
+  // additive, content-addressed generation bytes in the blob store (reaped when
+  // unreferenced) — never a touched database.
+  async function materializeRestoredBlobs(manifest: BackupManifest, backupDir: string, targetRoot: string): Promise<void> {
+    const generations = manifest.blobGenerations;
+    if (generations.length === 0) return;
+    if (!blobs || typeof blobs.materializeRestoreGeneration !== 'function') {
+      throw new Error(
+        'backup references blob generations but the recovery blob seam cannot materialize them into the target blob store — refusing (S6 provides the concrete materializer)',
+      );
+    }
+    const backupBlobsDir = path.join(backupDir, 'blobs');
+    const destBlobDir = path.join(targetRoot, 'blobs');
+    for (const generation of generations) {
+      const report = await blobs.materializeRestoreGeneration(generation, backupBlobsDir, destBlobDir);
+      const verified = verifyRestoreMaterialization(generation, destBlobDir, report);
+      if (!verified.ok) throw new Error(verified.reason);
+    }
   }
 
   // The full schema + blob census run on the staged bytes BEFORE the swap
@@ -950,6 +1099,8 @@ export function createRecoveryManager(options: RecoveryManagerOptions): Recovery
     // STAGE + CENSUS before the swap. The staged file is a faithful copy of the
     // fully-validated snapshot; the census runs on those bytes so a failing
     // census can never leave a half-activated database in the owned directory.
+    // Verified blob generations are materialized into the owned directory's
+    // blob layout BEFORE the census so the census sees the restored bytes.
     const stagePath = path.join(root, `${STAGE_PREFIX}${recoveryToken()}`);
     // Assigned in the try below; every path that reaches the return has a real
     // census (the catch always returns).
@@ -959,6 +1110,7 @@ export function createRecoveryManager(options: RecoveryManagerOptions): Recovery
       copyFileSync(path.join(backupDir, 'snapshot.sqlite'), stagePath);
       const staged = quickCheckFile(stagePath);
       if (!staged.ok) throw new Error(`staged restore failed integrity verification: ${staged.reason}`);
+      await materializeRestoredBlobs(validation.manifest, backupDir, root);
       census = await runCensus(stagePath, validation.manifest, root);
       if (!census.schema.ok) throw new Error(`schema census failed: ${census.schema.findings.join('; ')}`);
       if (!census.blobs.ok) throw new Error(`blob census failed: ${census.blobs.reason ?? 'referenced blob generations unavailable'}`);
@@ -1066,6 +1218,7 @@ export function createRecoveryManager(options: RecoveryManagerOptions): Recovery
       copyFileSync(path.join(backupDir, 'snapshot.sqlite'), stagePath);
       const staged = quickCheckFile(stagePath);
       if (!staged.ok) throw new Error(`fresh restore failed integrity verification: ${staged.reason}`);
+      await materializeRestoredBlobs(validation.manifest, backupDir, target);
       census = await runCensus(stagePath, validation.manifest, target);
       if (!census.schema.ok) throw new Error(`schema census failed: ${census.schema.findings.join('; ')}`);
       if (!census.blobs.ok) throw new Error(`blob census failed: ${census.blobs.reason ?? 'referenced blob generations unavailable'}`);
@@ -1094,6 +1247,82 @@ export function createRecoveryManager(options: RecoveryManagerOptions): Recovery
 }
 
 // ---- sqlite-snapshot-side helpers (mirror backup.ts) ----------------------
+
+// The SAME quick_check report the backup side records in the manifest
+// (backup.ts quickCheckOf) — the faithful recompute comparison for
+// integrityResult (review #83).
+function quickCheckOf(db: DatabaseSync): IntegrityReport {
+  try {
+    const rows = db.prepare('PRAGMA quick_check').all() as Array<{ quick_check: string }>;
+    const findings: IntegrityFinding[] = [];
+    for (const row of rows) {
+      if (row.quick_check !== 'ok') findings.push({ severity: 'error', message: row.quick_check });
+    }
+    return { ok: findings.length === 0, checkedAt: new Date().toISOString(), findings };
+  } catch (err) {
+    return {
+      ok: false,
+      checkedAt: new Date().toISOString(),
+      findings: [{ severity: 'error', message: sanitizeError(err) }],
+    };
+  }
+}
+
+// Verify a restore-materialization report against what actually landed in the
+// target's blob directory (mirrors backup.ts verifyMaterialization): every
+// reported file must exist under destBlobDir, be a regular file, and match the
+// reported byte size. A symlink is refused outright and every reported path
+// must resolve inside the blob directory's OWN realpath — no launderable byte.
+type RestoreMaterializationVerification = Readonly<{ ok: true } | { ok: false; reason: string }>;
+function verifyRestoreMaterialization(
+  generation: string,
+  destBlobDir: string,
+  report: readonly MaterializedBlobFile[] | undefined,
+): RestoreMaterializationVerification {
+  if (!Array.isArray(report)) {
+    return { ok: false, reason: `materialize for ${generation} did not report the files it wrote` };
+  }
+  if (report.length === 0) {
+    return { ok: false, reason: `materialize for ${generation} reported no files — its bytes were not written` };
+  }
+  let realBlobDir: string;
+  try {
+    realBlobDir = realpathSync(destBlobDir);
+  } catch {
+    return { ok: false, reason: `materialize for ${generation} ran before the target blob directory existed` };
+  }
+  for (const entry of report) {
+    if (!entry || typeof entry.name !== 'string' || typeof entry.size !== 'number' || !Number.isInteger(entry.size) || entry.size < 0) {
+      return { ok: false, reason: `materialize for ${generation} reported a malformed file entry` };
+    }
+    const name = entry.name;
+    if (name === '' || name === '.' || name === '..' || name.includes('/') || name.includes('\\') || path.isAbsolute(name)) {
+      return { ok: false, reason: `materialize for ${generation} reported a path outside the target blob directory` };
+    }
+    const entryPath = path.join(destBlobDir, name);
+    let stat: ReturnType<typeof statSync>;
+    try {
+      const link = lstatSync(entryPath);
+      if (link.isSymbolicLink()) {
+        return { ok: false, reason: `materialize for ${generation} reported a symlink, which cannot be a verified blob byte: ${name}` };
+      }
+      const resolved = realpathSync(entryPath);
+      if (resolved !== realBlobDir && !resolved.startsWith(realBlobDir + path.sep)) {
+        return { ok: false, reason: `materialize for ${generation} resolved outside the target blob directory: ${name}` };
+      }
+      stat = statSync(resolved);
+    } catch {
+      return { ok: false, reason: `materialize for ${generation} reported a file that was not written: ${name}` };
+    }
+    if (!stat.isFile()) {
+      return { ok: false, reason: `materialize for ${generation} reported a non-file entry: ${name}` };
+    }
+    if (stat.size !== entry.size) {
+      return { ok: false, reason: `materialize for ${generation} reported ${entry.size} bytes but ${name} is ${stat.size} bytes` };
+    }
+  }
+  return { ok: true };
+}
 
 function integrityCheckOf(db: DatabaseSync): IntegrityReport {
   try {
@@ -1133,21 +1362,31 @@ function schemaIdentityOf(db: DatabaseSync): { platformSchemaIdentity: string; a
 }
 
 // Recompute the migration ledger that EXISTS in a snapshot using the table
-// names the manifest recorded (never assuming a fresh reset).
+// names the manifest recorded (never assuming a fresh reset). SECURITY (review
+// #83): the manifest is untrusted input and these names are interpolated into
+// SQL, so the two DECLARED ledger table names are enforced before any statement
+// is built — a manifest-chosen table is a validation failure, never SQL.
 function migrationLedgerOf(db: DatabaseSync, manifest: BackupManifest): BackupMigrationLedgerState {
+  const appTable = manifest.migrationLedgerState.app?.table ?? APP_LEDGER;
+  const workbenchTable = manifest.migrationLedgerState.workbench?.table ?? WORKBENCH_LEDGER;
+  if (appTable !== APP_LEDGER) {
+    throw new Error(`manifest declares an unsupported app migration ledger table '${appTable}' — only '${APP_LEDGER}' is restored`);
+  }
+  if (workbenchTable !== WORKBENCH_LEDGER) {
+    throw new Error(
+      `manifest declares an unsupported workbench migration ledger table '${workbenchTable}' — only '${WORKBENCH_LEDGER}' is restored`,
+    );
+  }
   const hasTable = (name: string) => Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
   const versionsOf = (table: string): { appliedVersions: number[]; maxVersion: number } => {
-    if (!table || !hasTable(table)) return { appliedVersions: [], maxVersion: 0 };
+    if (!hasTable(table)) return { appliedVersions: [], maxVersion: 0 };
     const rows = db.prepare(`SELECT version FROM ${table} ORDER BY version`).all() as Array<{ version: number }>;
     const appliedVersions = rows.map((row) => Number(row.version));
     return { appliedVersions, maxVersion: appliedVersions.length ? appliedVersions[appliedVersions.length - 1] : 0 };
   };
   return {
-    app: { table: manifest.migrationLedgerState.app?.table ?? '_Migration', ...versionsOf(manifest.migrationLedgerState.app?.table ?? '_Migration') },
-    workbench: {
-      table: manifest.migrationLedgerState.workbench?.table ?? WORKBENCH_LEDGER,
-      ...versionsOf(manifest.migrationLedgerState.workbench?.table ?? WORKBENCH_LEDGER),
-    },
+    app: { table: APP_LEDGER, ...versionsOf(APP_LEDGER) },
+    workbench: { table: WORKBENCH_LEDGER, ...versionsOf(WORKBENCH_LEDGER) },
   };
 }
 
