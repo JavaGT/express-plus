@@ -981,7 +981,7 @@ export default function workbench({
           }
           latestSchemaReport = createSchemaReport(app.db, settledCensus);
           if (settledOwnership.errors.length > 0) throw new Error(settledOwnership.errors[0].message);
-          const exactErrors = validateExactSchema(app.db, settledCensus, schema ? [schema] : [], { validateCensus: true })
+          const exactErrors = validateExactSchema(app.db, settledCensus, schema ? [schema] : [])
             // A schema-owned entity root may legitimately carry a trigger that
             // belongs to a registered derived-resource plugin (A2 ownership).
             .filter((error) => settledCensus.get(`trigger:${error.name.toLowerCase()}`)?.kind !== 'plugin');
