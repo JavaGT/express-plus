@@ -297,7 +297,6 @@ export interface ReadBlobArgs {
 export class BlobReadDeniedError extends Error {
   readonly status: 403;
   readonly failure: { readonly category: 'denied'; readonly message: string };
-  readonly reasonCode: string;
 }
 
 /**
@@ -394,6 +393,17 @@ export interface ByteStoreCapabilities {
 }
 
 /**
+ * The byte-store contract's typed MISSING-SLOT signal. A conforming backend
+ * MUST throw an instance of this (never a bare Error) when a read targets a
+ * slot that has no bytes — the pending-blob claim machinery distinguishes "the
+ * pending slot is gone, read the final slot" from "the bytes failed to read"
+ * by this TYPE, never by a message string: a conforming backend phrases its
+ * message however it likes (ENOENT-style, S3 NoSuchKey, …). Callers must never
+ * treat any other error as a missing slot.
+ */
+export class BlobSlotNotFoundError extends Error {}
+
+/**
  * The byte-store contract — what `createBlobStore`'s `bytes` option must
  * provide, and what any conforming backend (fs, memory, or a future S3
  * adapter) guarantees. Each method's guarantee is PART OF THE TYPE: the blob
@@ -433,7 +443,8 @@ export interface ByteStore {
    * absent/null `end`) is the accepted EOF sentinel — an open-ended range
    * reads to EOF. `start` stays strictly validated: negative / non-finite /
    * inverted bounds throw, never handed to the underlying store to misbehave
-   * with.
+   * with. A slot with no bytes throws `BlobSlotNotFoundError` (message is
+   * backend-specific — consumers branch on the type, never the text).
    */
   readRange(id: string, range?: [start?: number, end?: number]): Buffer;
 
@@ -442,7 +453,7 @@ export interface ByteStore {
    * to pending bytes — its only caller is the pending-blob claim machinery
    * after its durable state transition selected a claimed generation. A claim
    * is the admission; there is no generic pending read. Same strict bounds as
-   * readRange.
+   * readRange, and the same missing-slot signal (`BlobSlotNotFoundError`).
    */
   readPending(id: string, range?: [start?: number, end?: number]): Buffer;
 
@@ -473,6 +484,17 @@ export interface ByteStore {
    * finalizing) and by tests.
    */
   exists(id: string, options: { pending: boolean }): boolean;
+
+  /**
+   * The free bytes available to this process on the backend's storage, or
+   * `null` when the backend cannot declare it (S6/A5 low-disk guard). A
+   * `durable` backend is expected to implement it — the upload guard refuses
+   * new uploads when free space falls below the configured headroom, and
+   * FAILS CLOSED when a durable backend cannot declare free space at all.
+   * An `ephemeral` backend (memoryBlobs) has no disk to guard and returns
+   * `null` (or omits the member).
+   */
+  freeBytes?(): number | null;
 }
 
 // Compiled blob-reference census (S6/A3): one deterministic registry of every
@@ -534,11 +556,43 @@ export interface BlobStore {
   readRangeStream(id: string, range?: [start?: number, end?: number], options?: { signal?: AbortSignal }): Readable;
   discardPending(id: string): void;
   discard(id: string): void;
+  /**
+   * Generation replacement (S6/A5): stage NEW bytes for an existing adopted
+   * generation, validate the previous generation (exists, adopted, readable),
+   * then switch atomically via switchReplacement in the caller's coordinated
+   * turn. A failure at any point (stage, validation, adopt, or switch) leaves
+   * the old generation readable and authoritative.
+   */
+  replace(
+    previousId: string,
+    options: { bytes: string | Uint8Array; mime?: string; id?: string },
+  ): { id: string; previousId: string; md5: string; sha256: string; size: number; mime: string | null };
+  /**
+   * Atomically switch the generation inside the CALLER'S transaction: the
+   * replacement generation is adopted (pending → adopted) AND the previous
+   * generation is marked 'replaced' (replacement + switch instant recorded).
+   * A failed switch throws and rolls back, leaving the old generation
+   * authoritative.
+   */
+  switchReplacement(
+    dbOrTxn: { prepare(sql: string): WorkbenchStatement },
+    previousId: string,
+    newId: string,
+  ): { adopted: number; replaced: number };
   reap(options: {
     ttl: number;
     /** Compiled blob-reference census (S6/A3) — the refcount sweep's ONLY column source. */
     census: BlobCensus;
-  }): { orphans: number; danglers: number };
+    /**
+     * Replaced-generation retention in ms (named policy 'replaced-generation',
+     * S6/A5). A replaced generation is reclaimed only when unreferenced AND
+     * this retention window has elapsed. Absent/0 → replaced rows are never
+     * reaped by this sweep (fail closed).
+     */
+    replacedRetentionMs?: number;
+    /** S1/A6 recycle seam: routes replaced/dangling generations to the recycling bin before live bytes are removed. */
+    recycle?: { bin(deletion: { generations: readonly string[] }): Promise<unknown> };
+  }): Promise<{ orphans: number; danglers: number }>;
   stat(
     id: string,
   ):
@@ -552,6 +606,21 @@ export interface BlobStore {
         createdAt: string;
       }
     | undefined;
+  /** Durable cleanup state for one generation (S6/A5), or undefined when the row is gone / never failed. */
+  cleanupState(
+    id: string,
+  ):
+    | {
+        id: string;
+        status: string;
+        replacedBy: string | null;
+        replacedAt: string | null;
+        cleanupError: string | null;
+        cleanupAttempts: number;
+      }
+    | undefined;
+  /** Ids currently carrying durable cleanup state (a failed byte deletion awaiting retry). */
+  pendingCleanups(): readonly string[];
   /**
    * TEST/DEBUG-ONLY introspection was RETIRED from the portable surface (S6/A2):
    * no code path may use a physical filesystem path to authorize, read, or
@@ -980,6 +1049,14 @@ export function createBlobStore(options: {
   root?: string;
   db: WorkbenchDatabase;
   bytes?: ByteStore;
+  /**
+   * Low-disk guard (S6/A5): the minimum free bytes a durable byte store must
+   * declare before a new upload is accepted. 0 (the store-level default)
+   * disables the guard here — the application's `maintenanceDefaults` policy
+   * supplies the real headroom. Fail-closed: a durable byte store that cannot
+   * declare free space refuses uploads.
+   */
+  lowDiskHeadroomBytes?: number;
 }): BlobStore;
 
 // ---------------------------------------------------------------------------

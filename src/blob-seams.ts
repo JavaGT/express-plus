@@ -40,6 +40,14 @@
 //     an authorization token — content hashes are integrity metadata only
 //     (S6 consideration #24).
 //
+//   - Materialization is CONTAINED and ATOMIC. The destination blob directory
+//     itself must be a real directory (never a pre-existing symlink — a
+//     symlinked destination would redirect both materializers outside the
+//     intended blob dir), and a generation's byte file + sidecar are written to
+//     temp names and renamed into place only after BOTH writes succeed, so a
+//     failing sidecar write never leaves a byte file observable without its
+//     sidecar (no partial generation is ever present as complete).
+//
 // The seam's own digest verification at `materialize` time is against the
 // BlobStore's recorded sha256 (the digests the manifest's census links to);
 // after the bytes land in a backup, the sidecar is the self-contained digest
@@ -52,6 +60,8 @@ import {
   mkdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -178,6 +188,82 @@ function assertDestinationClear(dir: string, name: string): void {
     throw new Error(`blob destination ${name} is a symlink — refusing to write outside the blob directory`);
   }
   throw new Error(`blob destination ${name} already exists — refusing to overwrite (fail closed)`);
+}
+
+// Validate the destination blob DIRECTORY before any write. mkdirSync with
+// {recursive:true} follows a pre-existing symlink, so a symlinked destBlobDir
+// would redirect both materializers OUTSIDE the intended blob directory: the
+// directory itself must be a real directory (lstat), never a link, and is
+// created only when absent. Returns the resolved realpath — every subsequent
+// write targets it, so even a later swap of the original path for a symlink
+// cannot redirect materialization.
+function resolveBlobDestinationDir(destBlobDir: string): string {
+  let link: ReturnType<typeof lstatSync> | undefined;
+  try {
+    link = lstatSync(destBlobDir);
+    if (link.isSymbolicLink()) {
+      throw new Error(
+        `blob destination directory is a symlink — refusing to write outside the blob directory: ${destBlobDir}`,
+      );
+    }
+    if (!link.isDirectory()) {
+      throw new Error(`blob destination is not a directory: ${destBlobDir}`);
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    mkdirSync(destBlobDir, { recursive: true, mode: 0o700 });
+    // A recursive mkdir could have created through a planted symlink; confirm
+    // what now exists at the destination is a real directory, not a link.
+    link = lstatSync(destBlobDir);
+    if (link.isSymbolicLink() || !link.isDirectory()) {
+      throw new Error(`blob destination directory is not a real directory: ${destBlobDir}`);
+    }
+  }
+  try {
+    return realpathSync(destBlobDir);
+  } catch {
+    throw new Error(`blob destination directory could not be resolved: ${destBlobDir}`);
+  }
+}
+
+// Materialize one generation's byte file + digest sidecar ATOMICALLY into an
+// already-validated destination directory (the realpath from
+// resolveBlobDestinationDir): both files are written to temp names, and only
+// after BOTH writes succeed are they renamed into their final names. A failing
+// sidecar write therefore never leaves a byte file in place without its
+// sidecar — no partial generation is observable as complete — and any
+// mid-sequence failure rolls the temps (and an already-renamed byte file)
+// back. The temp names are deterministic (a single materializer runs per
+// destination at a time), so a crashed run leaves an identifiable temp that a
+// retry fails closed on rather than overwrites.
+function writeGenerationAtomically(destRealDir: string, generation: string, bytes: Buffer): void {
+  const name = blobGenerationFileName(generation);
+  const sidecarName = blobGenerationDigestFileName(generation);
+  assertDestinationClear(destRealDir, name);
+  assertDestinationClear(destRealDir, sidecarName);
+  const byteTmp = path.join(destRealDir, `.${name}.tmp`);
+  const sidecarTmp = path.join(destRealDir, `.${sidecarName}.tmp`);
+  const byteFinal = path.join(destRealDir, name);
+  const sidecarFinal = path.join(destRealDir, sidecarName);
+  let byteRenamed = false;
+  try {
+    writeFileSync(byteTmp, bytes, { flag: 'wx', mode: 0o600 });
+    writeFileSync(sidecarTmp, `${sha256hex(bytes)}\n`, { flag: 'wx', mode: 0o600 });
+    renameSync(byteTmp, byteFinal);
+    byteRenamed = true;
+    renameSync(sidecarTmp, sidecarFinal);
+  } catch (err) {
+    for (const leftover of [byteTmp, sidecarTmp, byteRenamed ? byteFinal : '']) {
+      if (leftover) {
+        try {
+          rmSync(leftover, { force: true });
+        } catch {
+          /* best-effort rollback of the partial generation */
+        }
+      }
+    }
+    throw err;
+  }
 }
 
 // Read + shape-check the digest sidecar for a generation. The sidecar is
@@ -312,11 +398,8 @@ export function createBlobSeams(options: BlobSeamsOptions): BlobSeams {
         `blob generation '${generation}' failed digest verification against the blob store metadata — refusing to materialize corrupt bytes`,
       );
     }
-    mkdirSync(destBlobDir, { recursive: true, mode: 0o700 });
-    assertDestinationClear(destBlobDir, name);
-    assertDestinationClear(destBlobDir, blobGenerationDigestFileName(generation));
-    writeFileSync(path.join(destBlobDir, name), bytes, { flag: 'wx', mode: 0o600 });
-    writeFileSync(path.join(destBlobDir, blobGenerationDigestFileName(generation)), `${digest}\n`, { flag: 'wx', mode: 0o600 });
+    const destRealDir = resolveBlobDestinationDir(destBlobDir);
+    writeGenerationAtomically(destRealDir, generation, bytes);
     return [{ name, size: bytes.length }];
   }
 
@@ -353,11 +436,8 @@ export function createBlobSeams(options: BlobSeamsOptions): BlobSeams {
         `backup blob generation '${generation}' bytes could not be read for restore: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
-    mkdirSync(destBlobDir, { recursive: true, mode: 0o700 });
-    assertDestinationClear(destBlobDir, verified.name);
-    assertDestinationClear(destBlobDir, blobGenerationDigestFileName(generation));
-    writeFileSync(path.join(destBlobDir, verified.name), bytes, { flag: 'wx', mode: 0o600 });
-    writeFileSync(path.join(destBlobDir, blobGenerationDigestFileName(generation)), `${sha256hex(bytes)}\n`, { flag: 'wx', mode: 0o600 });
+    const destRealDir = resolveBlobDestinationDir(destBlobDir);
+    writeGenerationAtomically(destRealDir, generation, bytes);
     return [{ name: verified.name, size: bytes.length }];
   }
 

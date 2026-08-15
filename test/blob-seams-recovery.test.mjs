@@ -10,7 +10,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, symlinkSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -201,6 +201,32 @@ test('materializeRestoreGeneration refuses a pre-existing symlink at the target 
     rmSync(backupBlobs, { recursive: true, force: true });
     rmSync(target, { recursive: true, force: true });
     rmSync(outsideDir, { recursive: true, force: true });
+  }
+});
+
+test('materializeRestoreGeneration refuses a symlinked destination DIRECTORY — nothing is written outside', async () => {
+  const { root, seams } = await setupSeams();
+  const backupBlobs = makeBackupBlobs('gen-restore', BYTES);
+  const parent = mkdtempSync(join(tmpdir(), 'wb-dest-'));
+  const external = mkdtempSync(join(tmpdir(), 'wb-outside-dir-'));
+  const dest = join(parent, 'blobs');
+  symlinkSync(external, dest);
+  try {
+    // A symlink AT the destination directory itself must not redirect the
+    // restored bytes into `external`: refuse before anything is written.
+    assert.throws(
+      () => seams.materializeRestoreGeneration('gen-restore', backupBlobs, dest),
+      /symlink/,
+      'a symlinked destination directory is refused',
+    );
+    assert.equal(readdirSync(external).length, 0, 'nothing was written outside through the destination-directory symlink');
+    assert.equal(existsSync(join(dest, 'gen-restore')), false);
+    assert.equal(existsSync(join(dest, blobGenerationDigestFileName('gen-restore'))), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(backupBlobs, { recursive: true, force: true });
+    rmSync(parent, { recursive: true, force: true });
+    rmSync(external, { recursive: true, force: true });
   }
 });
 

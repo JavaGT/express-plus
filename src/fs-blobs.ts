@@ -40,14 +40,17 @@
 //     byte length; `Infinity` (or an absent/null `end`) is the accepted EOF
 //     sentinel — an open-ended range reads to EOF. `start` stays strictly
 //     validated: negative / non-finite / inverted bounds are rejected cleanly
-//     (→ throw), never passed to the underlying store to misbehave with.
+//     (→ throw), never passed to the underlying store to misbehave with. A
+//     slot with no bytes throws BlobSlotNotFoundError (the contract's typed
+//     missing-slot signal — message is backend-specific, never matched on).
 //
 //   readPending(id, [start, end])
 //     Return the PENDING-slot bytes in `[start, end)` as a Buffer. This is the
 //     ONLY path to pending bytes; its only caller is the pending-blob claim
 //     machinery after its durable state transition selected a claimed
 //     generation — a claim is the admission, there is no generic pending read.
-//     Same strict bounds as readRange.
+//     Same strict bounds as readRange and the same missing-slot signal
+//     (BlobSlotNotFoundError).
 //
 //   readRangeStream(id, [start, end], { signal })
 //     Stream the FINAL-slot range `[start, end)` as a Node Readable, for large
@@ -66,6 +69,12 @@
 //     True iff the pending / final slot has bytes. Used by the reaper to
 //     reconcile (an adopted blob whose pending slot still exists needs
 //     finalizing) and by tests.
+//
+//   freeBytes()
+//     OPTIONAL (S6/A5 low-disk guard): free bytes on the backend's storage, or
+//     null when the backend cannot declare it. A `durable` backend implements
+//     it; `ephemeral` (memory) omits it. The blob store's upload guard fails
+//     closed when a durable backend cannot declare free space.
 //
 //   pathFor(id, { pending }) — RETIRED from the portable contract (S6/A2)
 //     The physical path of a slot. No longer part of `ByteStore`: the surface
@@ -105,6 +114,7 @@ import {
   closeSync,
   existsSync,
   statSync,
+  statfsSync,
   createReadStream,
 } from 'node:fs';
 import { Readable } from 'node:stream';
@@ -141,6 +151,20 @@ export interface ByteStoreCapabilities {
 // must keep it, because the lifecycle in blob-store.ts depends on these
 // semantics. See the module header for the narrative version.
 
+// The contract's typed MISSING-SLOT signal. A conforming backend MUST throw an
+// instance of this (never a bare Error) when a read targets a slot that has no
+// bytes — the pending-blob claim machinery distinguishes "the pending slot is
+// gone, read the final slot" from "the bytes failed to read" by this TYPE,
+// never by a message string: a conforming backend phrases its message however
+// it likes (ENOENT-style, S3 "NoSuchKey", …). Callers must never treat any
+// other error as a missing slot.
+export class BlobSlotNotFoundError extends Error {
+  constructor(message = 'blob not found') {
+    super(message);
+    this.name = 'BlobSlotNotFoundError';
+  }
+}
+
 export interface ByteStore {
   /** Queryable, honest capability declaration. A backend must not overstate it. */
   readonly capabilities: ByteStoreCapabilities;
@@ -174,7 +198,8 @@ export interface ByteStore {
    * absent/null `end`) is the accepted EOF sentinel — an open-ended range
    * reads to EOF. `start` stays strictly validated: negative / non-finite /
    * inverted bounds throw, never handed to the underlying store to misbehave
-   * with.
+   * with. A slot with no bytes throws `BlobSlotNotFoundError` (message is
+   * backend-specific — consumers branch on the type, never the text).
    */
   readRange(id: string, range?: [start?: number, end?: number]): Buffer;
 
@@ -183,7 +208,7 @@ export interface ByteStore {
    * to pending bytes — its only caller is the pending-blob claim machinery
    * after its durable state transition selected a claimed generation. A claim
    * is the admission; there is no generic pending read. Same strict bounds as
-   * readRange.
+   * readRange, and the same missing-slot signal (`BlobSlotNotFoundError`).
    */
   readPending(id: string, range?: [start?: number, end?: number]): Buffer;
 
@@ -214,6 +239,17 @@ export interface ByteStore {
    * finalizing) and by tests.
    */
   exists(id: string, options: { pending: boolean }): boolean;
+
+  /**
+   * The free bytes available to this process on the backend's storage, or
+   * `null` when the backend cannot declare it (S6/A5 low-disk guard). A
+   * `durable` backend is expected to implement it — the upload guard refuses
+   * new uploads when free space falls below the configured headroom, and
+   * FAILS CLOSED when a durable backend cannot declare free space at all.
+   * An `ephemeral` backend (memoryBlobs) has no disk to guard and returns
+   * `null` (or omits the member).
+   */
+  freeBytes?(): number | null;
 }
 
 // TEST/DEBUG-ONLY introspection handle — pathFor was RETIRED from the portable
@@ -331,7 +367,7 @@ export function fsBlobs({ root, stagingRoot }: FsBlobsOptions): ByteStore & Byte
 
   function resolveFinalSlot(id: string): string {
     const finalPath = pathFor(id);
-    if (!existsSync(finalPath)) throw new Error('blob not found');
+    if (!existsSync(finalPath)) throw new BlobSlotNotFoundError();
     return finalPath;
   }
 
@@ -358,7 +394,7 @@ export function fsBlobs({ root, stagingRoot }: FsBlobsOptions): ByteStore & Byte
   function readPending(id: string, range?: [start?: number, end?: number]): Buffer {
     safeId(id);
     const pendingPath = pathFor(id, { pending: true });
-    if (!existsSync(pendingPath)) throw new Error('blob not found');
+    if (!existsSync(pendingPath)) throw new BlobSlotNotFoundError();
     return readSlot(pendingPath, range ?? []);
   }
 
@@ -399,6 +435,18 @@ export function fsBlobs({ root, stagingRoot }: FsBlobsOptions): ByteStore & Byte
     return existsSync(pathFor(id, { pending }));
   }
 
+  // Free bytes on the filesystem holding the final slots, via statfs (bavail ×
+  // frsize = bytes available to this process). Throws never — an unreadable
+  // statfs returns null so the caller can fail closed.
+  function freeBytes(): number | null {
+    try {
+      const stat = statfsSync(root);
+      return stat.bavail * stat.frsize;
+    } catch {
+      return null;
+    }
+  }
+
   return {
     capabilities,
     writePending,
@@ -408,6 +456,7 @@ export function fsBlobs({ root, stagingRoot }: FsBlobsOptions): ByteStore & Byte
     readRangeStream,
     remove,
     exists,
+    freeBytes,
     pathFor,
   };
 }

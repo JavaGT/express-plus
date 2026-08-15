@@ -3,6 +3,7 @@ import { txn, type DbHandle } from './driver.ts';
 import { principalKeyOf, type Principal } from './principal.ts';
 import type { BlobErasureCategory, BlobLifecycleKind, BlobOwnership } from './blob-census.ts';
 import type { BlobStore } from './blob-store.ts';
+import { BlobSlotNotFoundError } from './fs-blobs.ts';
 
 function failure(code: string): never { const error = new Error(code) as Error & { code?: string }; error.code = code; throw error; }
 function token(): string { return randomBytes(32).toString('base64url'); }
@@ -84,10 +85,31 @@ export interface PendingBlobLifecycleOptions {
   adoptedRecoveryTtlMs: number;
 }
 
+/**
+ * The S1/A6 recycle seam the delete path routes through (S6/A5): when the app
+ * owns a recycle manager (`createRecycleManager` over the backup root with the
+ * S6/A6 blob seam), a deleted generation is binned BEFORE its live bytes are
+ * removed — every retained backup holding the generation moves its copy into
+ * the recoverable recycle bin (idempotent per generation). See
+ * BlobRecycleSeam in blob-store.ts — the recycle manager satisfies this shape.
+ */
+export interface PendingBlobRecycleSeam {
+  bin(deletion: { generations: readonly string[] }): Promise<unknown>;
+}
+
 interface PendingBlobApp {
   writeQueue: { run<T>(fn: () => Promise<T> | T): Promise<T> };
   db: DbHandle;
   blobs: BlobStore;
+  /** S1/A6 recycle seam (S6/A5). Optional; set by the app owner once the recycle manager exists. */
+  blobRecycleSeam?: PendingBlobRecycleSeam | null;
+  /**
+   * The platform staleness/deletion contract (S4): a deleted generation is
+   * signaled as a removed BlobStore row so derived stores (search/embeddings/
+   * thumbnails) can drop generation-level material. S6 emits the signal; S4
+   * consumes it; S8 wires lineage purge (#26).
+   */
+  searchStaleness?: { notifySourceChange(input: { entity: string; rowId: string; kind: string; committedAt: string; priority?: string; erasure?: boolean }): unknown } | null;
 }
 
 export interface StagePendingBlobRequest {
@@ -231,8 +253,8 @@ export function createPendingBlobLifecycle(app: PendingBlobApp, options: Pending
     if (row.scopeId !== scopeId) failure('BLOB_DELETE_WRONG_SCOPE');
     if (row.resourceId !== resourceId) failure('BLOB_DELETE_WRONG_RESOURCE');
     if (row.status === 'delete-requested') return true;
-    const changed = app.db.prepare(`UPDATE _PendingBlob SET status = 'delete-requested', deleteActionId = ?
-      WHERE blobId = ? AND status IN ('claimed', 'finalized', 'recovery-failed')`).run(actionId, blobId);
+    const changed = app.db.prepare(`UPDATE _PendingBlob SET status = 'delete-requested', deleteActionId = ?, deletedAt = ?
+      WHERE blobId = ? AND status IN ('claimed', 'finalized', 'recovery-failed')`).run(actionId, new Date().toISOString(), blobId);
     if (!changed.changes) failure('BLOB_DELETE_CONFLICT');
     return true;
   }
@@ -248,23 +270,77 @@ export function createPendingBlobLifecycle(app: PendingBlobApp, options: Pending
   // reads, so this resolves the slot explicitly — pending first (the common
   // claimed-but-not-yet-finalized case), final when the pending slot is already
   // gone (finalized, or finalized-but-status-update-lost). The caller has
-  // already admitted the claim; this is never a public escape hatch.
+  // already admitted the claim; this is never a public escape hatch. The
+  // pending→final fallback keys on the byte store's TYPED missing-slot signal
+  // (BlobSlotNotFoundError), never on a message string — a conforming backend
+  // may phrase a missing slot however it likes.
   function readGeneration(blobId: string, range?: [start?: number, end?: number]): Buffer {
     try {
       return app.blobs.readPending(blobId, range);
     } catch (error) {
-      if ((error as { message?: string })?.message !== 'blob not found') throw error;
+      if (!(error instanceof BlobSlotNotFoundError)) throw error;
       return app.blobs.readRange(blobId, range);
     }
   }
+  // Record a delete-path retry WITHOUT the status flip markRecoveryFailure
+  // performs: a 'delete-requested' row must stay 'delete-requested' so the
+  // next reconcile sweep retries it. Flipping it to 'recovery-failed' (after
+  // adoptedRecoveryTtlMs) would strand the deletion forever — that flip is for
+  // claimed/finalize recovery only.
+  function recordDeleteRetry(row: PendingBlobRow, error: unknown): void {
+    app.db.prepare('UPDATE _PendingBlob SET recoveryFailure = ? WHERE pendingKey = ?')
+      .run(String((error as { message?: unknown })?.message ?? error), row.pendingKey);
+  }
+
+  // The delete path (S6/A5 #4): discard the live bytes, route the generation
+  // through the S1/A6 recycling bin (when a seam is owned), and emit the
+  // derived-store deletion signal (when the staleness bridge is engaged) — ALL
+  // three must succeed before the durable row is dropped. A failure at any
+  // step records durable retry state and keeps the row, so the next sweep
+  // re-runs it (discard + bin + signal are all idempotent). The deletion is
+  // never reported complete until the row is gone.
+  async function reconcileDeletion(row: PendingBlobRow): Promise<void> {
+    app.blobs.discard(row.blobId);
+    if (app.blobRecycleSeam) {
+      await app.blobRecycleSeam.bin({ generations: [row.blobId] });
+    }
+    if (app.searchStaleness) {
+      // Post-commit proof: the delete action's committedAt from the receipt,
+      // falling back to the durable deletedAt (the instant the delete was
+      // requested inside the committed action turn) — never a timestamp that
+      // could precede commit.
+      const receipt = app.db.prepare('SELECT committedAt FROM _ActionReceipt WHERE scope = ? AND actionId = ?')
+        .get(row.scopeId, row.deleteActionId) as { committedAt?: string } | undefined;
+      const committedAt = typeof receipt?.committedAt === 'string' && receipt.committedAt
+        ? receipt.committedAt
+        : (row.deletedAt ?? new Date().toISOString());
+      try {
+        app.searchStaleness.notifySourceChange({
+          entity: 'BlobStore',
+          rowId: row.blobId,
+          kind: 'removed',
+          committedAt,
+          priority: 'high',
+          erasure: true,
+        });
+      } catch (error) {
+        // Post-commit isolation: a signal failure never undoes the discard, but
+        // it MUST be retried — the durable row stays (outer catch records the
+        // retry) so the derived store is told about the deletion before this
+        // row is gone.
+        throw error;
+      }
+    }
+    app.db.prepare("DELETE FROM _PendingBlob WHERE pendingKey = ? AND status = 'delete-requested'").run(row.pendingKey);
+  }
+
   async function reconcile(): Promise<void> {
     const deleting = app.db.prepare("SELECT * FROM _PendingBlob WHERE status = 'delete-requested'").all() as unknown as PendingBlobRow[];
     for (const row of deleting) {
       try {
-        app.blobs.discard(row.blobId);
-        app.db.prepare("DELETE FROM _PendingBlob WHERE pendingKey = ? AND status = 'delete-requested'").run(row.pendingKey);
+        await reconcileDeletion(row);
       } catch (error) {
-        markRecoveryFailure(row, error);
+        recordDeleteRetry(row, error);
       }
     }
     const claimed = app.db.prepare("SELECT * FROM _PendingBlob WHERE status = 'claimed'").all() as unknown as PendingBlobRow[];

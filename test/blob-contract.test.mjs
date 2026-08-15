@@ -14,6 +14,7 @@ import path from 'node:path';
 
 import { fsBlobs } from '../build/fs-blobs.mjs';
 import { memoryBlobs } from '../build/memory-blobs.mjs';
+import { BlobSlotNotFoundError } from '../build/fs-blobs.mjs';
 
 // session() → { store, reopen, dispose }: a fresh store plus reopen() which
 // binds a NEW store to the SAME backing. That is what "durability" means within
@@ -233,6 +234,19 @@ export function blobContractSuite(session, { label }) {
 
   run('readRange on a missing blob throws blob not found', (store) => {
     assert.throws(() => store.readRange('missing'), /blob not found/);
+  });
+
+  run('a missing slot throws the contract-typed BlobSlotNotFoundError, whatever its message', (store) => {
+    // The missing-slot signal is the TYPE, not a message string: the pending-blob
+    // claim machinery branches on instanceof, so a conforming backend may phrase
+    // its message any way it likes (ENOENT-style, S3 NoSuchKey, …). Every backend
+    // must throw the typed signal for BOTH slots.
+    assert.throws(() => store.readRange('absent'), (error) => error instanceof BlobSlotNotFoundError);
+    assert.throws(() => store.readPending('absent'), (error) => error instanceof BlobSlotNotFoundError);
+    store.writePending('pending-only', Buffer.from('x'));
+    assert.throws(() => store.readRange('pending-only'), (error) => error instanceof BlobSlotNotFoundError, 'a missing FINAL slot is the typed signal too');
+    store.finalizePending('pending-only');
+    assert.throws(() => store.readPending('pending-only'), (error) => error instanceof BlobSlotNotFoundError, 'a missing PENDING slot is the typed signal too');
   });
 
   run('exists is false for an unknown id in both slots', (store) => {

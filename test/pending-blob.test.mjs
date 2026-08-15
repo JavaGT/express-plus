@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import workbench, { principal } from '../build/index.mjs';
 import { pendingBlobStager, declaredBlobField, readClaimedBlob, claimedBlobLifecycle } from '../build/server.mjs';
+import { BlobSlotNotFoundError } from '../build/fs-blobs.mjs';
+import { memoryBlobs } from '../build/memory-blobs.mjs';
 
 test('pending blob staging retains Scope canonical key and immutable digest identity', async (t) => {
   const db = new DatabaseSync(':memory:');
@@ -180,7 +182,7 @@ test('the ordinary blob reaper retains a finalized pending-blob generation', asy
   const staged = await pendingBlobStager(app, actor).stage({ scopeId: 'project:p1', resourceId: 'f1', bytes: new Uint8Array([1]) });
   assert.equal((await app.dispatch({ actionId: 'upload', type: 'File.upload', scope: 'project:p1', payload: { id: 'f1', blob: staged.claim }, principal: actor })).ok, true);
   const blobId = db.prepare('SELECT blobId FROM _PendingBlob WHERE pendingKey = ?').get(staged.pendingKey).blobId;
-  assert.deepEqual(app.blobs.reap({ ttl: 0, census: app.blobCensus }), { orphans: 0, danglers: 0 });
+  assert.deepEqual(await app.blobs.reap({ ttl: 0, census: app.blobCensus }), { orphans: 0, danglers: 0 });
   assert.deepEqual(readClaimedBlob(app, blobId), Buffer.from([1]));
 });
 
@@ -191,7 +193,7 @@ test('the ordinary blob reaper retains a staged generation until its claim expir
   await app.start();
   t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
   const staged = await pendingBlobStager(app, principal({ type: 'user', id: 'u1' })).stage({ scopeId: 'project:p1', resourceId: 'f1', bytes: new Uint8Array([1]) });
-  assert.deepEqual(app.blobs.reap({ ttl: -1, census: app.blobCensus }), { orphans: 0, danglers: 0 });
+  assert.deepEqual(await app.blobs.reap({ ttl: -1, census: app.blobCensus }), { orphans: 0, danglers: 0 });
   assert.ok(db.prepare('SELECT 1 FROM _PendingBlob WHERE pendingKey = ?').get(staged.pendingKey));
 });
 
@@ -466,6 +468,52 @@ test('pending bytes are served only through the uploader claim — no generic fa
   assert.deepEqual(readClaimedBlob(app, blobId), Buffer.from([7, 8]), 'finalized bytes still serve through the claim reader');
 });
 
+test('crash-window recovery falls back to the final slot even when the backend phrases its missing-slot error differently', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const root = mkdtempSync(path.join(tmpdir(), 'workbench-pending-'));
+  // A conforming backend whose missing-slot signal uses an ENOENT-style
+  // message instead of the default 'blob not found' text. The claim machinery
+  // must branch on the TYPED signal (BlobSlotNotFoundError), never a message
+  // string — a conforming backend phrases the message however it likes.
+  const backing = memoryBlobs();
+  const enoentStore = {
+    ...backing,
+    readPending(id, range) {
+      if (!backing.exists(id, { pending: true })) throw new BlobSlotNotFoundError(`ENOENT: no such file or directory, blob '${id}'`);
+      return backing.readPending(id, range);
+    },
+    readRange(id, range) {
+      if (!backing.exists(id, { pending: false })) throw new BlobSlotNotFoundError(`ENOENT: no such file or directory, blob '${id}'`);
+      return backing.readRange(id, range);
+    },
+  };
+  const app = workbench({
+    db,
+    blobs: enoentStore,
+    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 1 },
+  });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
+  const actor = principal({ type: 'user', id: 'u1' });
+  const staged = await pendingBlobStager(app, actor).stage({ scopeId: 'project:p1', resourceId: 'f1', bytes: new Uint8Array([7, 8]) });
+  const blobId = db.prepare('SELECT blobId FROM _PendingBlob WHERE pendingKey = ?').get(staged.pendingKey).blobId;
+  const claimed = await app.pendingBlobLifecycle.validateClaim({
+    claim: staged.claim, field: 'blob', resourceId: 'f1', actionName: 'File.upload',
+    actionId: 'upload-1', authenticatedPrincipal: actor, scopeId: 'project:p1', committedEventId: 'event-1',
+  });
+  assert.equal(claimed.blobId, blobId);
+  assert.deepEqual(readClaimedBlob(app, blobId), Buffer.from([7, 8]), 'pending bytes serve through the claim');
+
+  // Crash window: the bytes were finalized (pending slot gone, final slot
+  // holds them) but the durable status UPDATE was lost. reconcile must still
+  // serve the bytes by falling back to the final slot — even though this
+  // backend reports the missing pending slot with an ENOENT-style message.
+  app.blobs.finalize(blobId);
+  await app.pendingBlobLifecycle.reconcile();
+  assert.equal(db.prepare('SELECT status FROM _PendingBlob WHERE blobId = ?').get(blobId).status, 'finalized', 'the claimed generation is finalized after the fallback');
+  assert.deepEqual(readClaimedBlob(app, blobId), Buffer.from([7, 8]), 'finalized bytes still serve through the claim reader');
+});
+
 test('a content hash is never an access token (S6/A4 #4)', async (t) => {
   const db = new DatabaseSync(':memory:');
   const root = mkdtempSync(path.join(tmpdir(), 'workbench-pending-'));
@@ -500,4 +548,114 @@ test('a content hash is never an access token (S6/A4 #4)', async (t) => {
     payload: { id: 'f1', blob: staged.claim }, principal: actor,
   });
   assert.equal(genuine.ok, true, JSON.stringify(genuine));
+});
+
+test('the delete path routes a deleted generation through the S1/A6 recycle seam (S6/A5)', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const root = mkdtempSync(path.join(tmpdir(), 'workbench-pending-'));
+  const binned = [];
+  const app = workbench({
+    db, blobs: { root },
+    actions: [
+      { type: 'File.upload', authorize: () => true, projections: [{ eventTypes: ['File.created'], apply: () => {} }], handler: ({ payload, scope }) => [{ type: 'File.created', scope, data: { blob: payload.blob } }] },
+      { type: 'File.purge', authorize: () => true, projections: [{ eventTypes: ['File.deleted'], apply: () => {} }], handler: ({ scope }) => [{ type: 'File.deleted', scope, data: {} }] },
+    ],
+    blobLifecycle: {
+      fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable', purgeActionName: 'File.purge' })],
+      pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000,
+    },
+  });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
+  app.blobRecycleSeam = { bin: async (deletion) => { binned.push(...deletion.generations); return { ok: true }; } };
+
+  const actor = principal({ type: 'user', id: 'u1' });
+  const staged = await pendingBlobStager(app, actor).stage({ scopeId: 'project:p1', resourceId: 'f1', bytes: new Uint8Array([7, 8]) });
+  assert.equal((await app.dispatch({ actionId: 'upload', type: 'File.upload', scope: 'project:p1', payload: { id: 'f1', blob: staged.claim }, principal: actor })).ok, true);
+  const blobId = db.prepare('SELECT blobId FROM _PendingBlob WHERE pendingKey = ?').get(staged.pendingKey).blobId;
+  assert.equal((await app.dispatch({ actionId: 'delete', type: 'File.purge', scope: 'project:p1', payload: { id: 'f1', blob: { blobId } }, principal: actor })).ok, true);
+
+  await app.pendingBlobLifecycle.reconcile();
+  assert.deepStrictEqual(binned, [blobId], 'the deleted generation was routed to the recycling bin');
+  assert.equal(db.prepare('SELECT * FROM _PendingBlob WHERE blobId = ?').get(blobId), undefined, 'the deletion completed');
+});
+
+test('a failed recycle-bin route keeps the delete durable and the next sweep retries it', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const root = mkdtempSync(path.join(tmpdir(), 'workbench-pending-'));
+  let binAttempts = 0;
+  const app = workbench({
+    db, blobs: { root },
+    actions: [
+      { type: 'File.upload', authorize: () => true, projections: [{ eventTypes: ['File.created'], apply: () => {} }], handler: ({ payload, scope }) => [{ type: 'File.created', scope, data: { blob: payload.blob } }] },
+      { type: 'File.purge', authorize: () => true, projections: [{ eventTypes: ['File.deleted'], apply: () => {} }], handler: ({ scope }) => [{ type: 'File.deleted', scope, data: {} }] },
+    ],
+    blobLifecycle: {
+      fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable', purgeActionName: 'File.purge' })],
+      pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000,
+    },
+  });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
+  app.blobRecycleSeam = {
+    bin: async (deletion) => {
+      binAttempts++;
+      if (binAttempts === 1) throw new Error('bin storage unavailable');
+      return { ok: true };
+    },
+  };
+
+  const actor = principal({ type: 'user', id: 'u1' });
+  const staged = await pendingBlobStager(app, actor).stage({ scopeId: 'project:p1', resourceId: 'f1', bytes: new Uint8Array([1, 2]) });
+  assert.equal((await app.dispatch({ actionId: 'upload', type: 'File.upload', scope: 'project:p1', payload: { id: 'f1', blob: staged.claim }, principal: actor })).ok, true);
+  const blobId = db.prepare('SELECT blobId FROM _PendingBlob WHERE pendingKey = ?').get(staged.pendingKey).blobId;
+  assert.equal((await app.dispatch({ actionId: 'delete', type: 'File.purge', scope: 'project:p1', payload: { id: 'f1', blob: { blobId } }, principal: actor })).ok, true);
+
+  // The pending-blob consumer runs reconcile() post-commit inside the delete
+  // dispatch, so the FIRST bin attempt happens there — it failed, so the
+  // deletion stays durably requested for a later sweep to retry.
+  const row = db.prepare('SELECT status, recoveryFailure FROM _PendingBlob WHERE blobId = ?').get(blobId);
+  assert.equal(binAttempts, 1, 'the first bin attempt ran in the dispatch post-commit consumer');
+  assert.equal(row.status, 'delete-requested', 'a failed bin keeps the delete durably requested');
+  assert.ok(row.recoveryFailure, 'the bin failure is recorded for retry');
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM BlobStore WHERE id = ?').get(blobId).count, 0, 'the live bytes were still removed (idempotent discard)');
+
+  await app.pendingBlobLifecycle.reconcile();
+  assert.equal(binAttempts, 2, 'the next sweep retries the bin');
+  assert.equal(db.prepare('SELECT * FROM _PendingBlob WHERE blobId = ?').get(blobId), undefined, 'the deletion completed after the retry');
+});
+
+test('a deleted generation emits the derived-store deletion signal through the staleness contract (S6/A5)', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const root = mkdtempSync(path.join(tmpdir(), 'workbench-pending-'));
+  const signals = [];
+  const app = workbench({
+    db, blobs: { root },
+    actions: [
+      { type: 'File.upload', authorize: () => true, projections: [{ eventTypes: ['File.created'], apply: () => {} }], handler: ({ payload, scope }) => [{ type: 'File.created', scope, data: { blob: payload.blob } }] },
+      { type: 'File.purge', authorize: () => true, projections: [{ eventTypes: ['File.deleted'], apply: () => {} }], handler: ({ scope }) => [{ type: 'File.deleted', scope, data: {} }] },
+    ],
+    blobLifecycle: {
+      fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable', purgeActionName: 'File.purge' })],
+      pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000,
+    },
+  });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
+  app.searchStaleness = { notifySourceChange: (input) => { signals.push(input); return { recorded: true, priority: 'high', affected: 1 }; } };
+
+  const actor = principal({ type: 'user', id: 'u1' });
+  const staged = await pendingBlobStager(app, actor).stage({ scopeId: 'project:p1', resourceId: 'f1', bytes: new Uint8Array([9]) });
+  assert.equal((await app.dispatch({ actionId: 'upload', type: 'File.upload', scope: 'project:p1', payload: { id: 'f1', blob: staged.claim }, principal: actor })).ok, true);
+  const blobId = db.prepare('SELECT blobId FROM _PendingBlob WHERE pendingKey = ?').get(staged.pendingKey).blobId;
+  assert.equal((await app.dispatch({ actionId: 'delete', type: 'File.purge', scope: 'project:p1', payload: { id: 'f1', blob: { blobId } }, principal: actor })).ok, true);
+
+  await app.pendingBlobLifecycle.reconcile();
+  const signal = signals.find((s) => s.entity === 'BlobStore' && s.rowId === blobId);
+  assert.ok(signal, 'the generation-level deletion signal was emitted');
+  assert.equal(signal.kind, 'removed');
+  assert.equal(signal.erasure, true);
+  assert.equal(signal.priority, 'high');
+  assert.ok(typeof signal.committedAt === 'string' && signal.committedAt.length > 0, 'the signal carries post-commit proof');
+  assert.equal(db.prepare('SELECT * FROM _PendingBlob WHERE blobId = ?').get(blobId), undefined, 'the deletion completed only after the signal');
 });

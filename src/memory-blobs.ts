@@ -24,7 +24,7 @@
 import { Readable } from 'node:stream';
 
 import type { ByteStore, ByteStoreCapabilities, ByteStoreTestDebugHandle } from './fs-blobs.ts';
-import { abortError, validateBlobRange } from './fs-blobs.ts';
+import { abortError, BlobSlotNotFoundError, validateBlobRange } from './fs-blobs.ts';
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -86,14 +86,14 @@ export function memoryBlobs({ backing }: MemoryBlobsOptions = {}): ByteStore & B
   function readRange(id: string, range?: [start?: number, end?: number]): Buffer {
     safeId(id);
     const buf = final.get(id);
-    if (!buf) throw new Error('blob not found');
+    if (!buf) throw new BlobSlotNotFoundError();
     return readSlot(buf, range);
   }
 
   function readPending(id: string, range?: [start?: number, end?: number]): Buffer {
     safeId(id);
     const buf = pending.get(id);
-    if (!buf) throw new Error('blob not found');
+    if (!buf) throw new BlobSlotNotFoundError();
     return readSlot(buf, range);
   }
 
@@ -111,7 +111,7 @@ export function memoryBlobs({ backing }: MemoryBlobsOptions = {}): ByteStore & B
   ): Readable {
     safeId(id);
     const buf = final.get(id);
-    if (!buf) throw new Error('blob not found');
+    if (!buf) throw new BlobSlotNotFoundError();
     const { start, end } = validateBlobRange(buf.length, range ?? []);
     if (signal?.aborted) {
       const stream = Readable.from([]);

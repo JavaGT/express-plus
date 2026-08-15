@@ -45,6 +45,7 @@ export { operationalConsumerAdmin } from './operational-consumer.ts';
 export { createPostCommitEffectRunner } from './post-commit-effects.ts';
 export { pendingBlobStager, declaredBlobField, readClaimedBlob, claimedBlobLifecycle } from './pending-blob.ts';
 export { readBlob, BlobReadDeniedError, type ReadBlobArgs } from './authorized-blob-read.ts';
+export { BlobSlotNotFoundError } from './fs-blobs.ts';
 export { createHistoryReader } from './history-read.ts';
 // Search plugins are server-only: they receive constrained source and
 // index capabilities, never a raw application database handle.

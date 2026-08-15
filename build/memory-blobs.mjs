@@ -24,7 +24,7 @@
 import { Readable } from 'node:stream';
 
 
-import { abortError, validateBlobRange } from './fs-blobs.mjs';
+import { abortError, BlobSlotNotFoundError, validateBlobRange } from './fs-blobs.mjs';
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -86,14 +86,14 @@ export function memoryBlobs({ backing }                     = {})               
   function readRange(id        , range                                 )         {
     safeId(id);
     const buf = final.get(id);
-    if (!buf) throw new Error('blob not found');
+    if (!buf) throw new BlobSlotNotFoundError();
     return readSlot(buf, range);
   }
 
   function readPending(id        , range                                 )         {
     safeId(id);
     const buf = pending.get(id);
-    if (!buf) throw new Error('blob not found');
+    if (!buf) throw new BlobSlotNotFoundError();
     return readSlot(buf, range);
   }
 
@@ -111,7 +111,7 @@ export function memoryBlobs({ backing }                     = {})               
   )           {
     safeId(id);
     const buf = final.get(id);
-    if (!buf) throw new Error('blob not found');
+    if (!buf) throw new BlobSlotNotFoundError();
     const { start, end } = validateBlobRange(buf.length, range ?? []);
     if (signal?.aborted) {
       const stream = Readable.from([]);

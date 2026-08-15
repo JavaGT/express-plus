@@ -26,7 +26,7 @@ export { serveStatic } from './views.mjs';
 export { createJobQueue } from './job-queue.mjs';
 export { createBlobStore } from './blob-store.mjs';
 export { compileBlobCensus } from './blob-census.mjs';
-export { runMigrations, NonTransactionalMigrationError,                          } from './migrations.mjs';
+export { runMigrations } from './migrations.mjs';
 export { defineSqliteSchema } from './sqlite-schema.mjs';
 export { createSchemaReport,                                                                       } from './schema-report.mjs';
 export { describeEntityStorage, describeSqliteStorage } from './sqlite-storage-description.mjs';
@@ -45,6 +45,7 @@ export { operationalConsumerAdmin } from './operational-consumer.mjs';
 export { createPostCommitEffectRunner } from './post-commit-effects.mjs';
 export { pendingBlobStager, declaredBlobField, readClaimedBlob, claimedBlobLifecycle } from './pending-blob.mjs';
 export { readBlob, BlobReadDeniedError,                   } from './authorized-blob-read.mjs';
+export { BlobSlotNotFoundError } from './fs-blobs.mjs';
 export { createHistoryReader } from './history-read.mjs';
 // Search plugins are server-only: they receive constrained source and
 // index capabilities, never a raw application database handle.

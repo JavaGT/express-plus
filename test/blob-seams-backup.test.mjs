@@ -13,7 +13,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, symlinkSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -182,6 +182,45 @@ test('materialize refuses a pre-existing symlink at the generation path — noth
     assert.equal(readFileSync(outsideFile, 'utf8'), 'outside bytes', 'nothing landed outside the blob directory');
   } finally {
     cleanupRoots(root, blobsDir, outsideDir);
+  }
+});
+
+test('materialize refuses a symlinked destination DIRECTORY — nothing is written outside', async () => {
+  const { root, seams, adopt } = await setupStore();
+  const parent = mkdtempSync(join(tmpdir(), 'wb-dest-'));
+  const external = mkdtempSync(join(tmpdir(), 'wb-outside-dir-'));
+  const dest = join(parent, 'blobs');
+  symlinkSync(external, dest);
+  try {
+    adopt(Buffer.from('inside bytes'), 'gen-one');
+    // A symlink AT the destination directory itself (not the generation path)
+    // must not redirect mkdir/writes into `external`: refuse before anything
+    // is written through the link.
+    assert.throws(() => seams.materialize('gen-one', dest), /symlink/, 'a symlinked destination directory is refused');
+    assert.equal(readdirSync(external).length, 0, 'nothing was written outside through the destination-directory symlink');
+    assert.equal(existsSync(join(dest, 'gen-one')), false);
+    assert.equal(existsSync(join(dest, blobGenerationDigestFileName('gen-one'))), false);
+  } finally {
+    cleanupRoots(root, parent, external);
+  }
+});
+
+test('materialize is atomic — a failing sidecar write leaves no partial generation', async () => {
+  const { root, seams, adopt } = await setupStore();
+  const blobsDir = mkdtempSync(join(tmpdir(), 'wb-materialize-'));
+  try {
+    adopt(Buffer.from('atomic bytes'), 'gen-atomic');
+    // A directory planted at the sidecar's temp name forces the sidecar write
+    // to fail (EEXIST under the exclusive 'wx' open — the path is occupied)
+    // AFTER the byte temp write has already succeeded. The seam must roll
+    // back: no byte file without its sidecar may be observable.
+    mkdirSync(join(blobsDir, `.${blobGenerationDigestFileName('gen-atomic')}.tmp`));
+    assert.throws(() => seams.materialize('gen-atomic', blobsDir), /EEXIST|EISDIR/, 'the sidecar write fails');
+    assert.equal(existsSync(join(blobsDir, 'gen-atomic')), false, 'no partial byte file is observable');
+    assert.equal(existsSync(join(blobsDir, blobGenerationDigestFileName('gen-atomic'))), false, 'no sidecar is observable either');
+    assert.equal(existsSync(join(blobsDir, `.${blobGenerationFileName('gen-atomic')}.tmp`)), false, 'the byte temp was rolled back');
+  } finally {
+    cleanupRoots(root, blobsDir);
   }
 });
 

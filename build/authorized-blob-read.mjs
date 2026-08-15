@@ -54,44 +54,54 @@ import { principalKeyOf,                } from './principal.mjs';
 
 // The generic denial every blob-read failure collapses to. HTTP dispatch maps
 // it to a generic 403 'forbidden'. `reasonCode` is server-side diagnostics
-// only (the closed adapter vocabulary, or 'blob-unavailable' for a post-
-// admission byte failure) — never surfaced to a client, never row content, and
-// never a signal that distinguishes denial from absence.
+// only (the closed adapter vocabulary, or 'blob-unavailable' for a byte/
+// admission failure) — stored NON-ENUMERABLY so the public error surface
+// (status, failure, message, name) is byte-identical for every denial kind: a
+// caller can never distinguish denial from absence, and serialization (JSON,
+// deepEqual, key enumeration) never carries the reason.
 export class BlobReadDeniedError extends Error {
            status = 403;
            failure = failure('denied', 'forbidden');
-           reasonCode        ;
   constructor(reasonCode        ) {
     super('forbidden');
     this.name = 'BlobReadDeniedError';
-    this.reasonCode = reasonCode;
+    // Internal diagnostic only — non-enumerable so it never reaches a client,
+    // never row content, and never distinguishes denied from missing (#11).
+    Object.defineProperty(this, 'reasonCode', {
+      value: reasonCode,
+      enumerable: false,
+      configurable: false,
+      writable: false,
+    });
   }
 }
 
 // The authorized blob read. Admits through the S5 adapter under the `blob`
 // resource category (the field names the registered resource; the owning row
-// binds the scope), then serves bytes through `read`. Both the admission and
-// the byte read are attributed to the requesting principal in the auth log.
+// binds the scope), then serves bytes through `read`. BOTH the admission and
+// the byte read are attributed to the requesting principal in the auth log,
+// and BOTH collapse into the same generic denial — a throwing or malformed
+// adapter is never distinguishable from a denial or missing bytes (#11).
 export async function readBlob({ principal, resource, field, operation, range, authorize, read }              )                  {
   const resourceId = resourceIdOf(resource);
-  const decision = await authorize.admit({
-    category: 'blob',
-    principal,
-    operation: operation ?? blobReadCategory,
-    resourceName: field,
-    row: resource,
-    resourceId,
-  });
-  if (!decision.admitted) {
-    getLog().debug('auth', 'blob read denied', {
-      principal: principalLabel(principal),
-      field,
-      resourceId,
-      reason: decision.reasonCode,
-    });
-    throw new BlobReadDeniedError(decision.reasonCode ?? 'no-blob-access');
-  }
   try {
+    const decision = await authorize.admit({
+      category: 'blob',
+      principal,
+      operation: operation ?? blobReadCategory,
+      resourceName: field,
+      row: resource,
+      resourceId,
+    });
+    if (!decision.admitted) {
+      getLog().debug('auth', 'blob read denied', {
+        principal: principalLabel(principal),
+        field,
+        resourceId,
+        reason: decision.reasonCode,
+      });
+      throw new BlobReadDeniedError(decision.reasonCode ?? 'no-blob-access');
+    }
     const bytes = read(range);
     getLog().debug('auth', 'blob read attributed', {
       principal: principalLabel(principal),
@@ -101,10 +111,14 @@ export async function readBlob({ principal, resource, field, operation, range, a
       byteLength: bytes.length,
     });
     return bytes;
-  } catch {
-    // Missing/erased bytes look exactly like a denied read — never a
-    // distinguishable existence signal (#11).
-    getLog().debug('auth', 'blob read unavailable after admission', {
+  } catch (error) {
+    // Every failure — a denied read, a throwing/malformed admission, missing
+    // or erased bytes — collapses into ONE generic denial (#11): a caller can
+    // never distinguish "the blob does not exist" from "you may not read it".
+    // An admission denial rethrows as-is (its internal reason survives for the
+    // server log); anything else becomes the byte-unavailability denial.
+    if (error instanceof BlobReadDeniedError) throw error;
+    getLog().debug('auth', 'blob read unavailable', {
       principal: principalLabel(principal),
       field,
       resourceId,
