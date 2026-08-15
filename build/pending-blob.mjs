@@ -107,27 +107,6 @@ export function declaredBlobField(field         )                    {
 
 
 
-/**
- * The S1/A6 recycle seam the delete path routes through (S6/A5): when the app
- * owns a recycle manager (`createRecycleManager` over the backup root with the
- * S6/A6 blob seam), a deleted generation is binned BEFORE its live bytes are
- * removed — every retained backup holding the generation moves its copy into
- * the recoverable recycle bin (idempotent per generation). See
- * BlobRecycleSeam in blob-store.ts — the recycle manager satisfies this shape.
- */
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
