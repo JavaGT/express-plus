@@ -300,6 +300,26 @@ export function entity(name     , declaration      = {}) {
     ...Object.entries(fields).flatMap(([fieldName, descriptor]) =>
       descriptor.kind === 'state' ? stateEffectEntries(name, fieldName, descriptor) : []),
   ];
+  // S3/A8 review #2 (JavaGT/workbench#114): a live-tier entity may not declare
+  // durable effects. A durable effect anchors its job to the triggering event's
+  // _Log sequence, and live mutations write no _Log row — the row would commit
+  // but the job would never enqueue (a silent behavioral loss). Compile-time
+  // prohibition (ADR #22 fail-closed), matching the live lane's documented
+  // consumer restriction (LIVE_LANE_CONSUMER_NAMES in kernel.ts).
+  if (resolvedTier.tier === 'live') {
+    const durableOnLive = entries.filter(([, effect]) =>
+      effect !== null && typeof effect === 'object'
+      && typeof (effect                         ).durable === 'string');
+    if (durableOnLive.length > 0) {
+      const kinds = durableOnLive.map(([, effect]) => (effect                         ).durable).join(', ');
+      throw new Error(
+        `entity('${name}') is a live-tier entity and cannot declare durable effects (${kinds}) — ` +
+          'durable effects enqueue their job from the _Log sequence of the triggering event, ' +
+          'and live mutations write no _Log row, so the effect would commit its row but never fire. ' +
+          'Declare an in-transaction (mutate/self) effect instead, or move the durable work to a history-tier entity.',
+      );
+    }
+  }
   const validatedEffects = entries.length > 0 ? Object.freeze([...entries]) : null;
   for (const [triggerHandle, effect] of entries) {
     if (effect && typeof effect === 'object' && typeof (effect       ).durable === 'string') continue;

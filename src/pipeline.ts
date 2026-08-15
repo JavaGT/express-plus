@@ -1119,6 +1119,16 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
       return seq;
     }
 
+    // A live-tier event on the in-memory (no-db) kernel is a fail-closed
+    // refusal (#114 review #1): the live lane's tables exist only on a real
+    // database, so committing a live entity's mutation to the in-memory durable
+    // log would silently degrade it to history semantics (no revision bump, no
+    // minimized receipt, no invalidation marker). `createServer` refuses a
+    // no-db live pipeline at assembly; this refuses at dispatch, before any
+    // in-memory event/log entry is written.
+    const emitsLiveTier = (events: any[]) => tierOfEvent !== undefined
+      && events.some((e) => tierOfEvent(handleOfEvent(e)) === 'live');
+
     function dispatch({ actionId, type, payload, principal, scope = '' }: any) {
       const handler = checkHandler(handlers, type);
       if (!handler) return unknownActionOutcome(type);
@@ -1167,6 +1177,15 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
           Object.freeze({ ...e, seq: nextSeq(e.scope), actionId }));
       } catch (err) {
         return executionFailure(err, { actionId, type });
+      }
+      if (emitsLiveTier(events)) {
+        return executionFailure(
+          new ValidationError(
+            'live-tier mutations require a durable database — live mutations write no _Log row ' +
+            'and need the _LiveRevision, _InvalidationLedger, and _NoHistoryReceipt tables a database provides',
+          ),
+          { actionId, type },
+        );
       }
       for (const e of events) log.push(e);
 
@@ -1227,6 +1246,15 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
           Object.freeze({ ...e, seq: nextSeq(e.scope), actionId }));
       } catch (err) {
         return executionFailure(err, { actionId });
+      }
+      if (emitsLiveTier(events)) {
+        return executionFailure(
+          new ValidationError(
+            'live-tier mutations require a durable database — live mutations write no _Log row ' +
+            'and need the _LiveRevision, _InvalidationLedger, and _NoHistoryReceipt tables a database provides',
+          ),
+          { actionId, type: actions[0]?.type },
+        );
       }
       for (const e of events) log.push(e);
       recordInMemoryDispatch(dispatched, scope, actionId, events);

@@ -208,3 +208,27 @@ test('app.ready runs durable effect recovery sweep before serving', async (t) =>
 
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM _Job WHERE kind = ?').get('send-title').n, 1);
 });
+
+// S3/A8 review #2 (JavaGT/workbench#114): buildDurableEffectsRegistry must
+// refuse a live-tier entity with durable effects. entity/compile.ts rejects
+// the declaration at compile time; this registration-time guard covers raw
+// records that skipped entity compilation.
+test('buildDurableEffectsRegistry refuses a live entity with durable effects', () => {
+  const trigger = (entityName) => ({ brand: 'event-handle', type: `${entityName}.created` });
+  const liveSource = {
+    name: 'LiveDurableRegistry',
+    tier: 'live',
+    effects: [[trigger('LiveDurableRegistry'), { durable: 'send-title' }]],
+  };
+  assert.throws(
+    () => buildDurableEffectsRegistry([liveSource]),
+    /live entity 'LiveDurableRegistry'.*cannot declare durable effects/,
+  );
+  // A history-tier entity with the same declaration still builds (no regression).
+  const historySource = {
+    name: 'HistoryDurableRegistry',
+    effects: [[trigger('HistoryDurableRegistry'), { durable: 'send-title' }]],
+  };
+  const registry = buildDurableEffectsRegistry([historySource]);
+  assert.equal(registry.get('HistoryDurableRegistry.created').length, 1);
+});

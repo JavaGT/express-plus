@@ -431,6 +431,14 @@ export const POST_COMMIT_CONSUMER_KINDS = Object.freeze([
 // consumers stay on the durable lane: email + operational sweep committed
 // `_Log` rows, durable effects anchor jobs to `_Log` seqs (live events have
 // none), and the pending-blob reconcile scans its own claim table.
+//
+// RESTRICTION (#114 review #2): a live-tier entity must not rely on any of the
+// excluded consumers. entity/compile.ts refuses durable effects on a live-tier
+// entity at declaration (and buildDurableEffectsRegistry re-refuses raw
+// records at registration); email + operational consumers are `_Log`-anchored
+// and can never observe a live event, so a live action must not emit the event
+// types they subscribe to. A live entity that needs one of these delivery
+// paths must route that work through a history-tier entity instead.
 const LIVE_LANE_CONSUMER_NAMES = new Set([
   'blob.finalize',
   'live',
@@ -536,11 +544,15 @@ export function buildKernel(app: any) {
   // variant (no `_Log` append, `_LiveRevision` bump + `_InvalidationLedger`
   // marker, `_NoHistoryReceipt` idempotency, no `_ActionReceipt` payload
   // retention); everything else takes the durable lane byte-for-byte. Without
-  // a database there is no durable lane to fork from (and live mutations
-  // require one), so the wiring stays off and the kernel keeps its ephemeral
-  // in-memory path. The live pipeline shares the SAME projection, admission,
-  // blob-adoption, and in-txn effect machinery as the durable lane — only the
-  // post-commit fan-out is the live-relevant subset (LIVE_LANE_CONSUMER_NAMES).
+  // a database there is no durable lane to fork from and no live pipeline to
+  // wire (its revision/receipt/invalidation tables exist only on a real
+  // database), so the kernel keeps its ephemeral in-memory path — but the tier
+  // resolver is STILL supplied, so the in-memory dispatch fails closed on any
+  // live-tier mutation instead of silently degrading it to the durable
+  // in-memory log (#114 review #1). The live pipeline shares the SAME
+  // projection, admission, blob-adoption, and in-txn effect machinery as the
+  // durable lane — only the post-commit fan-out is the live-relevant subset
+  // (LIVE_LANE_CONSUMER_NAMES).
   const tierOfEvent = (handle: any): DataTier | undefined => {
     if (!handle || typeof handle.entity !== 'string') return undefined;
     return entities.get(handle.entity)?.tier === 'live' ? 'live' : 'history';
@@ -619,6 +631,10 @@ export function buildKernel(app: any) {
     // The no-history mutation lane (S3/A2, #100): engaged only when a database
     // exists (createServer fails closed otherwise), always paired with its
     // tier resolver so a `live`-tier entity can never fall through to `_Log`.
+    // The tier resolver is wired EVEN without a database: the in-memory
+    // dispatch path uses it to refuse live-tier mutations (dispatch-time
+    // fail-closed, #114 review #1) — a live entity must never silently degrade
+    // to the in-memory durable log.
     livePipeline: app.db ? liveMutationVariant({
       projectionConsumers: projections,
       admission: buildDurableAdmission(app, annotatedKernel),
@@ -627,6 +643,6 @@ export function buildKernel(app: any) {
       executeEffectsForEvent,
       postCommitConsumers: livePostCommitConsumers,
     }) : undefined,
-    tierOfEvent: app.db ? tierOfEvent : undefined,
+    tierOfEvent,
   });
 }

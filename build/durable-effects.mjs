@@ -36,6 +36,9 @@ const CONSUMER = 'effect.durable';
 
 
 
+
+
+
                                                            
 
 
@@ -59,7 +62,23 @@ export function buildDurableEffectsRegistry(entities                            
   const registry = new Map                              ();
   for (const entityRecord of entities ?? []) {
     if (!entityRecord.effects) continue;
-    for (const [triggerHandle, effect] of effectEntries(entityRecord.effects, { sourceEntityName: entityRecord.name })) {
+    const entries = effectEntries(entityRecord.effects, { sourceEntityName: entityRecord.name });
+    // S3/A8 review #2 (JavaGT/workbench#114): a live-tier entity may not
+    // declare durable effects. entity/compile.ts already refuses this at
+    // declaration compile; this registration-time guard covers raw records
+    // that skipped entity compilation, so a live entity can never slip a
+    // durable effect into the registry that the live lane will silently skip.
+    if (entityRecord.tier === 'live') {
+      const durable = entries.filter(([, effect]) => isDurableEffectDeclaration(effect));
+      if (durable.length > 0) {
+        throw new Error(
+          `live entity '${entityRecord.name}' cannot declare durable effects — live mutations write no ` +
+            '_Log row, so a durable effect job could never be anchored to its triggering event. ' +
+            'Move the durable work to a history-tier entity.',
+        );
+      }
+    }
+    for (const [triggerHandle, effect] of entries) {
       if (!isDurableEffectDeclaration(effect)) continue;
       const eventType = resolveTriggerEventType(triggerHandle);
       if (!registry.has(eventType)) registry.set(eventType, []);

@@ -275,6 +275,53 @@ test('history: \'none\' stays a declaration compile rejection; live: true is the
   );
 });
 
+// ---- 4b. durable effects are refused on live-tier entities (#114 review #2) --
+
+// A live entity must not declare a durable effect: durable effects anchor
+// their job to the triggering event's _Log sequence, and live mutations write
+// no _Log row — the row would commit but the job would never enqueue (a silent
+// behavioral loss). Refused at declaration compile with a named error.
+test('a live-tier entity cannot declare durable effects (compile-time rejection)', () => {
+  assert.throws(
+    () => entity('LiveDurableNote', {
+      title: text(),
+      grant: () => grant(read, write, subscribe),
+      live: true,
+      effects: (Self) => [[Self.created, { durable: 'send-title', with: { title: 'sent' } }]],
+    }),
+    /live-tier entity.*cannot declare durable effects \(send-title\)/,
+  );
+  // A history-tier entity keeps declaring the same durable effect (no regression).
+  const DurableSource = entity('DurableSourceNote', {
+    title: text(),
+    grant: () => grant(read, write, subscribe),
+    effects: (Self) => [[Self.created, { durable: 'send-title', with: { title: 'sent' } }]],
+  });
+  assert.equal(DurableSource.name, 'DurableSourceNote');
+});
+
+// ---- 4c. no-db app + live entity fails closed at dispatch (#114 review #1) ---
+
+// Without a database the kernel keeps its ephemeral in-memory path (history
+// entities stay usable), but a live-tier mutation must NEVER silently degrade
+// into the in-memory durable log — it is refused here before any in-memory
+// event/log entry is written.
+test('a live-tier mutation on a database-less app is refused; no in-memory event/log is written', async (t) => {
+  const app = workbench({ entities: [LiveNote] });
+  t.after(async () => { await app.shutdown(); });
+  await app.start();
+
+  const outcome = await app.dispatch({
+    actionId: randomUUID(), type: 'LiveNote.create',
+    payload: { id: 'n1', title: 'no db' },
+    principal: user,
+  });
+  assert.equal(outcome.ok, false, 'a live-tier mutation must be refused without a database');
+  assert.equal(outcome.failure.category, 'invalid-input');
+  assert.match(outcome.failure.message, /live-tier mutations require a durable database/);
+  assert.equal(app.kernel.log.length, 0, 'no in-memory event/log entry is written');
+});
+
 // ---- 5. regression — the durable lane is unchanged --------------------------
 
 test('the app-level durable lane still writes _Log + _ActionReceipt for history entities', async (t) => {
