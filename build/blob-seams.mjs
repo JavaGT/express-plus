@@ -64,8 +64,23 @@
 //     finals, across every context, even separate processes that share no lock
 //     state. A partial final left by a CRASHED materializer (its rollback never
 //     ran) fails closed on the next materialize — never overwritten, never
-//     reclaimed by a writer — and is retired when the backup/recovery manager
-//     quarantines or discards the destination directory it sits in.
+//     reclaimed by a writer — and is retired when the destination directory it
+//     sits in is quarantined or discarded WHOLE by its manager: a failed backup
+//     directory and a failed fresh-restore target are retired directory and
+//     all, so their crash leftovers go with them. The LIVE-restore target is
+//     the owned root's persistent `blobs/` directory — no manager discards it —
+//     so a crash mid-materialize there is REPAIRED by the recovery seam on the
+//     next restore attempt instead of blocking every later restore of that
+//     generation forever: the byte final a crash leaves behind always holds the
+//     generation's own immutable, verified bytes (a crash can only land between
+//     the byte publish and the sidecar publish), so the seam re-materializes
+//     the missing digest sidecar ONLY, and only after confirming the byte final
+//     is a contained regular file whose digest matches the generation's bytes.
+//     A byte final that already verifies with its sidecar is left untouched — a
+//     retry after a crash that landed post-materialize completes as a no-op. A
+//     foreign or unverifiable byte final is a LOUD fail-closed error naming the
+//     generation and its remediation — never overwritten and never removed by a
+//     writer (see materializeRestoreGeneration / inspectPreexistingGeneration).
 //
 //     A per-destination lock keyed by the destination's resolved realpath
 //     additionally serializes writers WITHIN a shared lock buffer (worker
@@ -450,6 +465,129 @@ function removeOwnedFile(finalPath        , identity                          ) 
   }
 }
 
+// The result of inspecting what a destination blob directory already holds for
+// a generation before a RESTORE materialization lands (see
+// inspectPreexistingGeneration). Only the recovery side consults it: the live
+// restore target is the owned root's persistent `blobs/` directory, which no
+// manager ever quarantines or discards, so a crash mid-materialize (its
+// rollback never ran) leaves a byte final without a sidecar that would
+// otherwise block every later restore of that generation.
+
+                                                                        
+
+
+
+
+
+
+
+
+                                                      
+
+
+
+// Inspect a destination blob directory's pre-existing state for one generation
+// under the per-destination lock, REPAIRING the one crash-leftover shape the
+// live-restore target can legitimately hold (byte-without-sidecar). The crash
+// can only land between the byte final publish and the sidecar publish, so a
+// leftover byte final always holds the generation's own immutable, verified
+// bytes; the repair therefore publishes ONLY the missing digest sidecar — a
+// no-clobber link under the same lock as the full materialize — and never
+// touches the byte file. Before anything is published the existing byte final
+// must pass BOTH the containment check (a contained regular file — never a
+// symlink or a path escape) AND a digest match against the generation's bytes;
+// a byte final that is foreign, corrupt, or unverifiable is a LOUD blocker
+// naming the generation and its remediation (the entry is never overwritten,
+// never removed by a writer). A byte final that already verifies with its
+// sidecar is left untouched ('complete' — the retry-after-crash no-op).
+function inspectPreexistingGeneration(
+  destRealDir        ,
+  generation        ,
+  expectedDigest        ,
+  tempToken              ,
+  lockSlots            ,
+)                        {
+  if (!tryAcquireDestinationLock(lockSlots, destRealDir)) {
+    throw new Error(
+      `blob destination ${destRealDir} is being materialized by another writer — refusing to interleave (fail closed)`,
+    );
+  }
+  try {
+    // Re-verified under the lock: a concurrent materializer may have completed
+    // the generation between the caller's read and this check — that winner's
+    // complete generation is the correct outcome and is left untouched.
+    const complete = verifyGenerationBytes(generation, destRealDir);
+    if (complete.ok) return { kind: 'complete', size: complete.size };
+
+    const name = blobGenerationFileName(generation);
+    const bytePath = path.join(destRealDir, name);
+    const contained = verifyContainedRegularFile(destRealDir, name);
+    if (!contained.ok) {
+      if (contained.reason.startsWith('blob file was not found:')) return { kind: 'absent' };
+      return {
+        kind: 'blocked',
+        reason: `blob generation '${generation}' is blocked in the restore target: '${name}' is not a contained regular file (${contained.reason}) — it will never be overwritten or removed by a writer; remove the entry ${bytePath} to retry the restore`,
+      };
+    }
+    let actualDigest        ;
+    try {
+      actualDigest = sha256hex(readFileSync(bytePath));
+    } catch (err) {
+      return {
+        kind: 'blocked',
+        reason: `blob generation '${generation}' is blocked in the restore target: '${name}' could not be read for verification (${err instanceof Error ? err.message : String(err)}) — it will never be overwritten or removed by a writer; remove ${bytePath} to retry the restore`,
+      };
+    }
+    if (actualDigest !== expectedDigest) {
+      const sidecarName = blobGenerationDigestFileName(generation);
+      return {
+        kind: 'blocked',
+        reason: `blob generation '${generation}' is blocked in the restore target: '${name}' holds bytes whose digest does not match the generation's verified bytes — the byte entry is foreign or corrupt and will never be overwritten or removed by a writer; remove ${bytePath} (and ${path.join(destRealDir, sidecarName)}) to retry the restore`,
+      };
+    }
+
+    // The byte final holds the generation's own immutable bytes; only the
+    // digest sidecar is missing (the crash window between the two publishes).
+    // Publish just the sidecar — the byte file is never touched. The sidecar
+    // name must be clear (no-clobber); an occupied name is a foreign state a
+    // crash cannot produce, so it is a loud blocker, never a replacement.
+    const sidecarName = blobGenerationDigestFileName(generation);
+    try {
+      assertDestinationClear(destRealDir, sidecarName);
+    } catch (err) {
+      return {
+        kind: 'blocked',
+        reason: `blob generation '${generation}' is blocked in the restore target: its byte entry verifies as this generation's bytes but '${sidecarName}' is occupied and cannot be written (${err instanceof Error ? err.message : String(err)}) — remove the stale ${sidecarName} entry in ${destRealDir} to retry the restore`,
+      };
+    }
+    const temps = blobGenerationTempNames(generation, tempToken());
+    const sidecarTmp = path.join(destRealDir, temps.sidecar);
+    const sidecarFinal = path.join(destRealDir, sidecarName);
+    let created = false;
+    try {
+      writeFileSync(sidecarTmp, `${expectedDigest}\n`, { flag: 'wx', mode: 0o600 });
+      created = true;
+      publishNoClobber(sidecarTmp, sidecarFinal, `digest sidecar ${sidecarName}`);
+      unlinkSync(sidecarTmp);
+    } catch (err) {
+      if (created) {
+        try {
+          rmSync(sidecarTmp, { force: true });
+        } catch {
+          /* best-effort rollback of the sidecar temp */
+        }
+      }
+      return {
+        kind: 'blocked',
+        reason: `blob generation '${generation}' could not have its missing digest sidecar published in the restore target: ${err instanceof Error ? err.message : String(err)} — remove ${bytePath} to retry a full materialization`,
+      };
+    }
+    return { kind: 'repaired', size: contained.size };
+  } finally {
+    releaseDestinationLock(lockSlots, destRealDir);
+  }
+}
+
 // Materialize one generation's byte file + digest sidecar ATOMICALLY into an
 // already-validated destination directory (the realpath from
 // resolveBlobDestinationDir). Both files are written to temp names unique to
@@ -709,6 +847,32 @@ export function createBlobSeams(options                  )            {
       );
     }
     const destRealDir = resolveBlobDestinationDir(destBlobDir);
+    // The LIVE-restore target is the owned root's persistent `blobs/`
+    // directory — no manager ever quarantines or discards it — so it may
+    // already hold this generation's bytes: a crash mid-materialize (its
+    // rollback never ran) leaves a byte final whose digest sidecar never
+    // landed, which would otherwise fail-closed on every later restore of the
+    // generation. Inspect what is there and repair/complete/refuse before the
+    // normal atomic write: a crash-leftover byte final (matching digest, no
+    // sidecar) gets its sidecar re-published; an already-complete generation
+    // is a no-op; a foreign or unverifiable byte final fails LOUD, naming the
+    // generation and its remediation.
+    const preexisting = inspectPreexistingGeneration(
+      destRealDir,
+      generation,
+      sha256hex(bytes),
+      materializeToken,
+      lockSlots,
+    );
+    if (preexisting.kind === 'complete') {
+      return [{ name: verified.name, size: preexisting.size }];
+    }
+    if (preexisting.kind === 'repaired') {
+      return [{ name: verified.name, size: preexisting.size }];
+    }
+    if (preexisting.kind === 'blocked') {
+      throw new Error(preexisting.reason);
+    }
     writeGenerationAtomically(destRealDir, generation, bytes, materializeToken, lockSlots, afterByteFinalPublish);
     return [{ name: verified.name, size: bytes.length }];
   }

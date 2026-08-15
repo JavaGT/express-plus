@@ -40,7 +40,14 @@
 // the quarantine moves the damaged database out of the way as a whole (a stale
 // WAL/shm sidecar can never pair with the restored file), and the final rename
 // is atomic. The full census runs on the staged bytes BEFORE the swap, so a
-// failing census leaves the live database and the backup untouched.
+// failing census leaves the live database and the backup untouched. A crash
+// DURING blob materialization into the LIVE target leaves a byte-without-sidecar
+// partial in the owned root's persistent blobs/ directory — the manager only
+// quarantines the staged database file, never that directory — and the blob
+// seam REPAIRS the leftover on the next attempt: it re-materializes the missing
+// digest sidecar once the byte final verifies as the generation's own bytes
+// (see the seam contract), so a crashed restore never permanently blocks a
+// later restore of the same generations.
 //
 // DIRECTORY PRESERVATION (spec 5): recovery's swap and fresh-directory restore
 // never wipe `backups/`, `quarantine/`, or `recycle/` (owned by S1/A3/A4/A6).
@@ -965,9 +972,15 @@ export function createRecoveryManager(options                        )          
   // bytes in a live restore, and could never honestly confirm the restored
   // store (review #83). Each write is verified against disk (lstat + realpath
   // containment, mirroring the backup side), so a seam that lies about writing
-  // fails the restore. A live-restore failure after this step leaves only
-  // additive, content-addressed generation bytes in the blob store (reaped when
-  // unreferenced) — never a touched database.
+  // fails the restore. A crash DURING this step into the LIVE target leaves a
+  // byte-without-sidecar partial in the owned root's persistent blobs/
+  // directory (the manager quarantines only the staged database file, never
+  // that directory); the blob seam REPAIRS it on the next attempt — it
+  // re-materializes the missing digest sidecar once the byte final verifies as
+  // the generation's own bytes, and treats an already-complete generation as a
+  // no-op — so a crash leftover can never permanently block a later restore of
+  // that generation (see the seam contract). A fresh-restore failure removes
+  // the whole disposable target, crash leftovers included.
   async function materializeRestoredBlobs(manifest                , backupDir        , targetRoot        )                {
     const generations = manifest.blobGenerations;
     if (generations.length === 0) return;
