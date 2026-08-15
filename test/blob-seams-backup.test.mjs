@@ -25,6 +25,7 @@ import {
   BLOB_GENERATION_LAYOUT_VERSION,
   blobGenerationFileName,
   blobGenerationDigestFileName,
+  blobGenerationTempNames,
 } from '../build/blob-seams.mjs';
 import { openSqliteAdapter } from '../build/sqlite-adapter.mjs';
 import { createWriteQueue } from '../build/write-queue.mjs';
@@ -206,19 +207,26 @@ test('materialize refuses a symlinked destination DIRECTORY — nothing is writt
 });
 
 test('materialize is atomic — a failing sidecar write leaves no partial generation', async () => {
-  const { root, seams, adopt } = await setupStore();
+  const { root, db, store, adopt } = await setupStore();
   const blobsDir = mkdtempSync(join(tmpdir(), 'wb-materialize-'));
   try {
     adopt(Buffer.from('atomic bytes'), 'gen-atomic');
-    // A directory planted at the sidecar's temp name forces the sidecar write
-    // to fail (EEXIST under the exclusive 'wx' open — the path is occupied)
-    // AFTER the byte temp write has already succeeded. The seam must roll
-    // back: no byte file without its sidecar may be observable.
-    mkdirSync(join(blobsDir, `.${blobGenerationDigestFileName('gen-atomic')}.tmp`));
+    // Force the sidecar write to fail AFTER the byte temp write has already
+    // succeeded: pin the per-materialize temp token so the temp names are
+    // predictable, and plant a directory at the sidecar temp path — the
+    // exclusive 'wx' open fails (EEXIST — the path is occupied). The seam must
+    // roll back exactly the files THIS invocation created: its own byte temp,
+    // never the planted blocker, and never a partial byte file without its
+    // sidecar.
+    const token = 'fixedtesttoken';
+    const temps = blobGenerationTempNames('gen-atomic', token);
+    mkdirSync(join(blobsDir, temps.sidecar));
+    const seams = createBlobSeams({ db, blobs: store, census: photoCensus(), tempToken: () => token });
     assert.throws(() => seams.materialize('gen-atomic', blobsDir), /EEXIST|EISDIR/, 'the sidecar write fails');
     assert.equal(existsSync(join(blobsDir, 'gen-atomic')), false, 'no partial byte file is observable');
     assert.equal(existsSync(join(blobsDir, blobGenerationDigestFileName('gen-atomic'))), false, 'no sidecar is observable either');
-    assert.equal(existsSync(join(blobsDir, `.${blobGenerationFileName('gen-atomic')}.tmp`)), false, 'the byte temp was rolled back');
+    assert.equal(existsSync(join(blobsDir, temps.byte)), false, 'the byte temp was rolled back');
+    assert.equal(existsSync(join(blobsDir, temps.sidecar)), true, 'rollback removes only its own files — the planted blocker is untouched');
   } finally {
     cleanupRoots(root, blobsDir);
   }

@@ -44,9 +44,15 @@
 //     itself must be a real directory (never a pre-existing symlink — a
 //     symlinked destination would redirect both materializers outside the
 //     intended blob dir), and a generation's byte file + sidecar are written to
-//     temp names and renamed into place only after BOTH writes succeed, so a
-//     failing sidecar write never leaves a byte file observable without its
-//     sidecar (no partial generation is ever present as complete).
+//     temp names unique to ONE materialize invocation (a fresh random token per
+//     call) and renamed into place only after BOTH writes succeed, so a failing
+//     sidecar write never leaves a byte file observable without its sidecar (no
+//     partial generation is ever present as complete). One writer may
+//     materialize a destination at a time (a per-destination lock keyed by the
+//     destination's resolved realpath; a genuinely-contended destination fails
+//     closed), and a mid-sequence failure rolls back exactly the files THAT
+//     invocation created — a losing concurrent materializer never deletes the
+//     winner's temps or finals.
 //
 // The seam's own digest verification at `materialize` time is against the
 // BlobStore's recorded sha256 (the digests the manifest's census links to);
@@ -54,7 +60,7 @@
 // the recovery/recycle sides verify against — the backup never depends on the
 // live database's metadata to prove its bytes.
 
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   lstatSync,
   mkdirSync,
@@ -106,6 +112,86 @@ export function blobGenerationDigestFileName(generation: string): string {
   return `${validateGeneration(generation)}${DIGEST_SUFFIX}`;
 }
 
+// The per-materialize temp-name token: a safe single path segment (hex/word
+// chars), never a separator, so the temp names stay flat inside the
+// destination directory.
+const TEMP_TOKEN = /^[A-Za-z0-9_]{1,64}$/;
+
+function validateTempToken(token: unknown): string {
+  if (typeof token !== 'string' || !TEMP_TOKEN.test(token)) {
+    throw new TypeError('invalid blob temp token — expected 1-64 of [A-Za-z0-9_]');
+  }
+  return token;
+}
+
+/**
+ * The temp file names one materialize invocation will use for a generation's
+ * byte file and digest sidecar inside the destination `blobs/` directory. The
+ * token is fresh per invocation (see {@link BlobSeamsOptions.tempToken}), so
+ * two concurrent materializers to the same destination can never share a temp
+ * path — a losing materializer rolls back only the temps it created and can
+ * never delete the winner's files.
+ */
+export function blobGenerationTempNames(
+  generation: string,
+  token: string,
+): Readonly<{ byte: string; sidecar: string }> {
+  const name = blobGenerationFileName(generation);
+  const sidecarName = blobGenerationDigestFileName(generation);
+  const safeToken = validateTempToken(token);
+  return { byte: `.${name}.${safeToken}.tmp`, sidecar: `.${sidecarName}.${safeToken}.tmp` };
+}
+
+// ---- per-destination materialize lock -------------------------------------
+//
+// Two materializers writing the same destination blob directory at the same
+// time would interleave temp writes and final renames; the per-destination
+// lock serializes them (a lock/mutex keyed by the destination's resolved
+// realpath). The materialize path is synchronous on one thread, so within a
+// single context the lock is never observed held; the acquire FAILS CLOSED
+// rather than blocking, so a genuinely-contended destination (a parallel
+// context sharing the lock buffer — e.g. worker threads materializing the same
+// directory) aborts the second writer cleanly instead of corrupting the first.
+// Separate processes never share the buffer; their materializers are kept
+// collision-free by the unique temp names + ownership-aware rollback below.
+
+/** The number of lock slots in the per-destination materialize lock buffer. */
+export const BLOB_MATERIALIZE_LOCK_SLOTS = 64 as const;
+
+/** A new SharedArrayBuffer sized for the per-destination materialize lock. */
+export function blobMaterializeLockBuffer(): SharedArrayBuffer {
+  return new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * BLOB_MATERIALIZE_LOCK_SLOTS);
+}
+
+// The process-wide default lock buffer: every seam instance without an explicit
+// buffer shares it, so seam instances in the same process serialize on the same
+// slots. Separate processes (and worker threads given a distinct buffer) never
+// share it — their materializers stay collision-free via unique temp names.
+const defaultLockBuffer = blobMaterializeLockBuffer();
+
+// FNV-1a (32-bit): a stable, allocation-free hash mapping a resolved realpath
+// to a lock slot. A hash collision merely serializes two distinct destinations
+// — always safe, never a correctness hazard.
+function lockSlot(realPath: string): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < realPath.length; i++) {
+    hash ^= realPath.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0) % BLOB_MATERIALIZE_LOCK_SLOTS;
+}
+
+function tryAcquireDestinationLock(slots: Int32Array, realPath: string): boolean {
+  return Atomics.compareExchange(slots, lockSlot(realPath), 0, 1) === 0;
+}
+
+function releaseDestinationLock(slots: Int32Array, realPath: string): void {
+  const wasHeld = Atomics.compareExchange(slots, lockSlot(realPath), 1, 0);
+  if (wasHeld !== 1) {
+    throw new Error('blob materialize lock released without being held');
+  }
+}
+
 export type BlobSeamsOptions = {
   /** The live committed DB state reader (queries the census reference tables + BlobStore). */
   readonly db: DbHandle;
@@ -113,6 +199,23 @@ export type BlobSeamsOptions = {
   readonly census: BlobCensus;
   /** The blob store (metadata + byte reads) the live generations live in. */
   readonly blobs: BlobStore;
+  /**
+   * TEST SEAM: the per-materialize temp-name token source (defaults to a fresh
+   * random token per invocation so concurrent materializers never share a temp
+   * path). Tests override it with a fixed token to predict the temp names and
+   * force a mid-sequence failure deterministically. Production code must never
+   * pass this.
+   */
+  readonly tempToken?: () => string;
+  /**
+   * The SharedArrayBuffer backing the per-destination materialize lock,
+   * keyed by the destination's resolved realpath. Defaults to a module-level
+   * buffer. Pass the SAME buffer to every context (e.g. worker threads) that
+   * materializes into the same destination directories so they serialize on
+   * it; contexts with separate buffers stay collision-free via the unique
+   * per-invocation temp names.
+   */
+  readonly lockBuffer?: SharedArrayBuffer;
 };
 
 /** The one object satisfying all three seam contracts the managers consume. */
@@ -228,41 +331,72 @@ function resolveBlobDestinationDir(destBlobDir: string): string {
 
 // Materialize one generation's byte file + digest sidecar ATOMICALLY into an
 // already-validated destination directory (the realpath from
-// resolveBlobDestinationDir): both files are written to temp names, and only
-// after BOTH writes succeed are they renamed into their final names. A failing
-// sidecar write therefore never leaves a byte file in place without its
-// sidecar — no partial generation is observable as complete — and any
-// mid-sequence failure rolls the temps (and an already-renamed byte file)
-// back. The temp names are deterministic (a single materializer runs per
-// destination at a time), so a crashed run leaves an identifiable temp that a
-// retry fails closed on rather than overwrites.
-function writeGenerationAtomically(destRealDir: string, generation: string, bytes: Buffer): void {
-  const name = blobGenerationFileName(generation);
-  const sidecarName = blobGenerationDigestFileName(generation);
-  assertDestinationClear(destRealDir, name);
-  assertDestinationClear(destRealDir, sidecarName);
-  const byteTmp = path.join(destRealDir, `.${name}.tmp`);
-  const sidecarTmp = path.join(destRealDir, `.${sidecarName}.tmp`);
-  const byteFinal = path.join(destRealDir, name);
-  const sidecarFinal = path.join(destRealDir, sidecarName);
-  let byteRenamed = false;
+// resolveBlobDestinationDir). One writer may materialize a destination at a
+// time (the per-destination lock, keyed by the resolved realpath — a contended
+// destination fails closed rather than interleaving). Both files are written to
+// temp names unique to THIS invocation (a fresh random token) and renamed into
+// their final names only after BOTH writes succeed, so a failing sidecar write
+// never leaves a byte file in place without its sidecar — no partial generation
+// is observable as complete. A mid-sequence failure rolls back exactly the
+// files THIS invocation created: its own temps (unique names, so a concurrent
+// materializer's files can never be removed here) and a byte file it had
+// already renamed into place. A temp name this invocation failed to create (an
+// exclusive 'wx' open that lost a create race) is never deleted, and the 'wx'
+// opens also refuse any pre-existing path — a leftover temp or a planted file
+// fails closed instead of being overwritten or silently adopted.
+function writeGenerationAtomically(
+  destRealDir: string,
+  generation: string,
+  bytes: Buffer,
+  tempToken: () => string,
+  lockSlots: Int32Array,
+): void {
+  if (!tryAcquireDestinationLock(lockSlots, destRealDir)) {
+    throw new Error(
+      `blob destination ${destRealDir} is being materialized by another writer — refusing to interleave (fail closed)`,
+    );
+  }
   try {
-    writeFileSync(byteTmp, bytes, { flag: 'wx', mode: 0o600 });
-    writeFileSync(sidecarTmp, `${sha256hex(bytes)}\n`, { flag: 'wx', mode: 0o600 });
-    renameSync(byteTmp, byteFinal);
-    byteRenamed = true;
-    renameSync(sidecarTmp, sidecarFinal);
-  } catch (err) {
-    for (const leftover of [byteTmp, sidecarTmp, byteRenamed ? byteFinal : '']) {
-      if (leftover) {
-        try {
-          rmSync(leftover, { force: true });
-        } catch {
-          /* best-effort rollback of the partial generation */
+    const name = blobGenerationFileName(generation);
+    const sidecarName = blobGenerationDigestFileName(generation);
+    assertDestinationClear(destRealDir, name);
+    assertDestinationClear(destRealDir, sidecarName);
+    const temps = blobGenerationTempNames(generation, tempToken());
+    const byteTmp = path.join(destRealDir, temps.byte);
+    const sidecarTmp = path.join(destRealDir, temps.sidecar);
+    const byteFinal = path.join(destRealDir, name);
+    const sidecarFinal = path.join(destRealDir, sidecarName);
+    let byteCreated = false;
+    let sidecarCreated = false;
+    let byteRenamed = false;
+    try {
+      writeFileSync(byteTmp, bytes, { flag: 'wx', mode: 0o600 });
+      byteCreated = true;
+      writeFileSync(sidecarTmp, `${sha256hex(bytes)}\n`, { flag: 'wx', mode: 0o600 });
+      sidecarCreated = true;
+      renameSync(byteTmp, byteFinal);
+      byteRenamed = true;
+      renameSync(sidecarTmp, sidecarFinal);
+    } catch (err) {
+      // Ownership-aware rollback: remove only the files this invocation
+      // created/renamed — never another materializer's temp or final.
+      for (const leftover of [
+        byteCreated ? byteTmp : '',
+        sidecarCreated ? sidecarTmp : '',
+        byteRenamed ? byteFinal : '',
+      ]) {
+        if (leftover) {
+          try {
+            rmSync(leftover, { force: true });
+          } catch {
+            /* best-effort rollback of the partial generation */
+          }
         }
       }
+      throw err;
     }
-    throw err;
+  } finally {
+    releaseDestinationLock(lockSlots, destRealDir);
   }
 }
 
@@ -332,6 +466,13 @@ export function createBlobSeams(options: BlobSeamsOptions): BlobSeams {
     throw new TypeError('blob seams require a blob store exposing stat() and readRange()');
   }
 
+  // The per-invocation temp-name token source (unique per materialize call) and
+  // the per-destination lock buffer. Both default to safe values; tests may
+  // pin the token to predict temp names or share the lock buffer across worker
+  // threads (see BlobSeamsOptions).
+  const materializeToken = options.tempToken ?? (() => randomBytes(6).toString('hex'));
+  const lockSlots = new Int32Array(options.lockBuffer ?? defaultLockBuffer);
+
   // ---- backup side (BackupBlobSource) ------------------------------------
 
   // Enumerate every referenced content-addressed generation from the committed
@@ -399,7 +540,7 @@ export function createBlobSeams(options: BlobSeamsOptions): BlobSeams {
       );
     }
     const destRealDir = resolveBlobDestinationDir(destBlobDir);
-    writeGenerationAtomically(destRealDir, generation, bytes);
+    writeGenerationAtomically(destRealDir, generation, bytes, materializeToken, lockSlots);
     return [{ name, size: bytes.length }];
   }
 
@@ -437,7 +578,7 @@ export function createBlobSeams(options: BlobSeamsOptions): BlobSeams {
       );
     }
     const destRealDir = resolveBlobDestinationDir(destBlobDir);
-    writeGenerationAtomically(destRealDir, generation, bytes);
+    writeGenerationAtomically(destRealDir, generation, bytes, materializeToken, lockSlots);
     return [{ name: verified.name, size: bytes.length }];
   }
 
