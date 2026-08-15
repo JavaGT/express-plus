@@ -351,6 +351,75 @@ test('materializeRestoreGeneration refuses LOUDLY an occupied sidecar name — a
   }
 });
 
+test('materializeRestoreGeneration refuses LOUDLY a foreign byte WITH its own valid-but-wrong sidecar — self-consistency is never a no-op', async () => {
+  const { root, seams } = await setupSeams();
+  const backupBlobs = makeBackupBlobs('gen-restore', BYTES);
+  const target = mkdtempSync(join(tmpdir(), 'wb-target-'));
+  const destBlobs = join(target, 'blobs');
+  mkdirSync(destBlobs);
+  try {
+    // A foreign byte carrying its OWN valid sidecar: byte digest == sidecar
+    // digest, so the pair is fully self-consistent — but neither digest equals
+    // the generation's expected digest from the backup. Self-consistency must
+    // NOT count as 'complete' (the retry-after-crash no-op): the pair is
+    // refused loud, exactly like a foreign byte without a sidecar, and never
+    // overwritten or removed.
+    const foreign = Buffer.from('foreign bytes, self-consistent sidecar');
+    const foreignDigest = sha256hex(foreign);
+    assert.notEqual(foreignDigest, sha256hex(BYTES), 'the planted pair differs from the generation bytes');
+    writeFileSync(join(destBlobs, 'gen-restore'), foreign);
+    writeFileSync(join(destBlobs, blobGenerationDigestFileName('gen-restore')), `${foreignDigest}\n`);
+    const byteBefore = statSync(join(destBlobs, 'gen-restore'));
+    const sidecarBefore = statSync(join(destBlobs, blobGenerationDigestFileName('gen-restore')));
+
+    assert.throws(
+      () => seams.materializeRestoreGeneration('gen-restore', backupBlobs, destBlobs),
+      /gen-restore.*digest does not match.*remove/,
+      'the foreign self-consistent pair is refused loud — never accepted as a no-op',
+    );
+    assert.equal(statSync(join(destBlobs, 'gen-restore')).ino, byteBefore.ino, 'the foreign byte was never overwritten or removed');
+    assert.equal(statSync(join(destBlobs, blobGenerationDigestFileName('gen-restore'))).ino, sidecarBefore.ino, 'the foreign sidecar was never overwritten or removed');
+    assert.equal(readFileSync(join(destBlobs, blobGenerationDigestFileName('gen-restore')), 'utf8').trim(), foreignDigest, 'the foreign sidecar content is untouched');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(backupBlobs, { recursive: true, force: true });
+    rmSync(target, { recursive: true, force: true });
+  }
+});
+
+test("materializeRestoreGeneration refuses a mismatched sidecar beside the correct byte — 'complete' requires the sidecar digest to equal the expected digest too", async () => {
+  const { root, seams } = await setupSeams();
+  const backupBlobs = makeBackupBlobs('gen-restore', BYTES);
+  const target = mkdtempSync(join(tmpdir(), 'wb-target-'));
+  const destBlobs = join(target, 'blobs');
+  mkdirSync(destBlobs);
+  try {
+    // The byte IS the generation's own bytes, but the sidecar claims a
+    // DIFFERENT digest. 'complete' fires only when byte AND sidecar digests
+    // BOTH equal the expected digest, so this is not a no-op; the wrong
+    // sidecar is a foreign state no crash can produce, so the repair refuses
+    // rather than replaces it.
+    writeFileSync(join(destBlobs, 'gen-restore'), BYTES);
+    const wrongDigest = 'f'.repeat(64);
+    assert.notEqual(wrongDigest, sha256hex(BYTES), 'the planted sidecar differs from the expected digest');
+    writeFileSync(join(destBlobs, blobGenerationDigestFileName('gen-restore')), `${wrongDigest}\n`);
+    const byteBefore = statSync(join(destBlobs, 'gen-restore'));
+    const sidecarBefore = statSync(join(destBlobs, blobGenerationDigestFileName('gen-restore')));
+
+    assert.throws(
+      () => seams.materializeRestoreGeneration('gen-restore', backupBlobs, destBlobs),
+      /gen-restore.*occupied.*remove/,
+      'a mismatched sidecar beside the correct byte is refused — the no-op fires only on an exact digest match',
+    );
+    assert.equal(statSync(join(destBlobs, 'gen-restore')).ino, byteBefore.ino, 'the correct byte was never rewritten');
+    assert.equal(statSync(join(destBlobs, blobGenerationDigestFileName('gen-restore'))).ino, sidecarBefore.ino, 'the wrong sidecar was never replaced');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(backupBlobs, { recursive: true, force: true });
+    rmSync(target, { recursive: true, force: true });
+  }
+});
+
 test('censusAfterRestore passes when every referenced generation is present, tolerating extra files', async () => {
   const { root, seams } = await setupSeams();
   const target = mkdtempSync(join(tmpdir(), 'wb-target-'));

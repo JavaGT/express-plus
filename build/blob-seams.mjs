@@ -76,11 +76,16 @@
 //     the byte publish and the sidecar publish), so the seam re-materializes
 //     the missing digest sidecar ONLY, and only after confirming the byte final
 //     is a contained regular file whose digest matches the generation's bytes.
-//     A byte final that already verifies with its sidecar is left untouched — a
-//     retry after a crash that landed post-materialize completes as a no-op. A
-//     foreign or unverifiable byte final is a LOUD fail-closed error naming the
-//     generation and its remediation — never overwritten and never removed by a
-//     writer (see materializeRestoreGeneration / inspectPreexistingGeneration).
+//     A byte final whose sidecar verifies it as the generation's own bytes
+//     (byte digest AND sidecar digest BOTH equal the expected digest) is left
+//     untouched — a retry after a crash that landed post-materialize completes
+//     as a no-op. A foreign or unverifiable byte final is a LOUD fail-closed
+//     error naming the generation and its remediation — never overwritten and
+//     never removed by a writer (see materializeRestoreGeneration /
+//     inspectPreexistingGeneration). A byte final that is merely
+//     SELF-consistent with its own sidecar (digest == sidecar, but neither
+//     equals the expected digest) is foreign, not complete: it is refused loud,
+//     never accepted as a no-op.
 //
 //     A per-destination lock keyed by the destination's resolved realpath
 //     additionally serializes writers WITHIN a shared lock buffer (worker
@@ -473,7 +478,10 @@ function removeOwnedFile(finalPath        , identity                          ) 
 // rollback never ran) leaves a byte final without a sidecar that would
 // otherwise block every later restore of that generation.
 
-                                                                        
+
+                                   
+
+
 
 
 
@@ -498,8 +506,12 @@ function removeOwnedFile(finalPath        , identity                          ) 
 // symlink or a path escape) AND a digest match against the generation's bytes;
 // a byte final that is foreign, corrupt, or unverifiable is a LOUD blocker
 // naming the generation and its remediation (the entry is never overwritten,
-// never removed by a writer). A byte final that already verifies with its
-// sidecar is left untouched ('complete' — the retry-after-crash no-op).
+// never removed by a writer). A pre-existing byte+sidecar pair is 'complete'
+// (left untouched — the retry-after-crash no-op) ONLY when the byte digest AND
+// the sidecar digest BOTH equal the generation's expected digest from the
+// backup: a foreign byte carrying its OWN valid-but-wrong sidecar is
+// self-consistent, but its digest is not the expected digest, so it is refused
+// as foreign here — never accepted as a no-op.
 function inspectPreexistingGeneration(
   destRealDir        ,
   generation        ,
@@ -513,12 +525,6 @@ function inspectPreexistingGeneration(
     );
   }
   try {
-    // Re-verified under the lock: a concurrent materializer may have completed
-    // the generation between the caller's read and this check — that winner's
-    // complete generation is the correct outcome and is left untouched.
-    const complete = verifyGenerationBytes(generation, destRealDir);
-    if (complete.ok) return { kind: 'complete', size: complete.size };
-
     const name = blobGenerationFileName(generation);
     const bytePath = path.join(destRealDir, name);
     const contained = verifyContainedRegularFile(destRealDir, name);
@@ -538,20 +544,35 @@ function inspectPreexistingGeneration(
         reason: `blob generation '${generation}' is blocked in the restore target: '${name}' could not be read for verification (${err instanceof Error ? err.message : String(err)}) — it will never be overwritten or removed by a writer; remove ${bytePath} to retry the restore`,
       };
     }
+    // A byte file whose digest is not the generation's expected digest is
+    // foreign or corrupt — INCLUDING a byte file whose digest matches its own
+    // self-consistent sidecar but NOT the expected digest. The 'complete'
+    // no-op below demands BOTH digests equal the expected digest, so a
+    // self-consistent foreign pair is refused here, never accepted.
+    const sidecarName = blobGenerationDigestFileName(generation);
     if (actualDigest !== expectedDigest) {
-      const sidecarName = blobGenerationDigestFileName(generation);
       return {
         kind: 'blocked',
         reason: `blob generation '${generation}' is blocked in the restore target: '${name}' holds bytes whose digest does not match the generation's verified bytes — the byte entry is foreign or corrupt and will never be overwritten or removed by a writer; remove ${bytePath} (and ${path.join(destRealDir, sidecarName)}) to retry the restore`,
       };
     }
 
-    // The byte final holds the generation's own immutable bytes; only the
-    // digest sidecar is missing (the crash window between the two publishes).
-    // Publish just the sidecar — the byte file is never touched. The sidecar
-    // name must be clear (no-clobber); an occupied name is a foreign state a
-    // crash cannot produce, so it is a loud blocker, never a replacement.
-    const sidecarName = blobGenerationDigestFileName(generation);
+    // The byte final holds the generation's own immutable bytes. The pair is
+    // 'complete' (the retry-after-crash no-op) ONLY when the sidecar digest
+    // equals the expected digest too — a byte+sidecar pair that is merely
+    // SELF-consistent (byte digest == sidecar digest, both different from the
+    // expected digest) was refused as foreign above.
+    const sidecar = readSidecar(destRealDir, generation);
+    if (sidecar.ok && sidecar.digest === expectedDigest) {
+      return { kind: 'complete', size: contained.size };
+    }
+
+    // The byte final holds the generation's own immutable bytes but the
+    // digest sidecar is missing, malformed, or stale (the crash window between
+    // the two publishes). Publish just the sidecar — the byte file is never
+    // touched. The sidecar name must be clear (no-clobber); an occupied name
+    // is a foreign state a crash cannot produce, so it is a loud blocker,
+    // never a replacement.
     try {
       assertDestinationClear(destRealDir, sidecarName);
     } catch (err) {
@@ -855,7 +876,9 @@ export function createBlobSeams(options                  )            {
     // generation. Inspect what is there and repair/complete/refuse before the
     // normal atomic write: a crash-leftover byte final (matching digest, no
     // sidecar) gets its sidecar re-published; an already-complete generation
-    // is a no-op; a foreign or unverifiable byte final fails LOUD, naming the
+    // (byte + sidecar digests BOTH equal the expected digest) is a no-op — a
+    // self-consistent foreign byte+sidecar pair is NOT complete and is refused
+    // as foreign; a foreign or unverifiable byte final fails LOUD, naming the
     // generation and its remediation.
     const preexisting = inspectPreexistingGeneration(
       destRealDir,
