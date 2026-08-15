@@ -409,10 +409,10 @@ function publishNoClobber(tmp        , final        , what        )             
 // sits at the final path is first renamed (rename(2), atomic, same directory →
 // same filesystem) to a fresh claim name only THIS call can know, the claim is
 // then identity-checked, and only a matching claim is removed. A replacement
-// (a winner's final that took over the path) is renamed back untouched, so a
-// losing materializer never deletes a winner's final — and because the claim
-// name is random and known only to this invocation, no other actor can race
-// the check against the removal.
+// (a winner's final that took over the path) is restored untouched via a
+// no-clobber hard link, so a losing materializer never deletes a winner's
+// final — and because the claim name is random and known only to this
+// invocation, no other actor can race the check against the removal.
 function removeOwnedFile(finalPath        , identity                          )       {
   if (!identity) return;
   const claimPath = `${finalPath}.${randomBytes(6).toString('hex')}.claim`;
