@@ -16,6 +16,8 @@ import path from 'node:path';
 
 import { generateFrameworkDDL } from '../build/ddl.mjs';
 import { compileBlobCensus } from '../build/blob-census.mjs';
+import { createBlobLifecycle } from '../build/blob-lifecycle.mjs';
+import { declaredBlobField } from '../build/server.mjs';
 import workbench, { entity, blob } from '../build/internal.mjs';
 
 const photoCensus = compileBlobCensus({
@@ -173,6 +175,36 @@ test('switchReplacement is exactly-once — re-running after the switch committe
   rmSync(root, { recursive: true, force: true });
 });
 
+test('the owning-reference update shares the switch txn — all three statements commit or roll back together (S6/A5)', async () => {
+  const { root, db, store } = await setup();
+  const v1 = store.upload({ bytes: 'old-bytes', id: 'gen-invariant' });
+  adoptAndFinalize(db, store, v1.id);
+  const staged = store.replace(v1.id, { bytes: 'new-bytes' });
+  referencePhoto(db, 'p1', v1.id); // the owning reference starts at the old generation
+
+  // ROLLBACK undoes all three: the adopt pair AND the owning-reference update
+  // share the caller's transaction, so none of them can land alone.
+  db.exec('BEGIN IMMEDIATE');
+  store.switchReplacement(db, v1.id, staged.id);
+  db.prepare('UPDATE Photo SET data = ? WHERE id = ?').run(staged.id, 'p1');
+  db.exec('ROLLBACK');
+  assert.equal(store.stat(v1.id).status, 'adopted', 'the old generation stays adopted after rollback');
+  assert.equal(store.stat(staged.id).status, 'pending', 'the replacement stays pending after rollback');
+  assert.equal(db.prepare('SELECT data FROM Photo WHERE id = ?').get('p1').data, v1.id, 'the owning reference still points at the old generation after rollback');
+
+  // COMMIT lands all three together — the new generation is adopted, the old
+  // marked replaced, and the owning reference switched, atomically.
+  db.exec('BEGIN IMMEDIATE');
+  store.switchReplacement(db, v1.id, staged.id);
+  db.prepare('UPDATE Photo SET data = ? WHERE id = ?').run(staged.id, 'p1');
+  db.exec('COMMIT');
+  store.finalize(staged.id);
+  assert.equal(store.stat(v1.id).status, 'replaced', 'the old generation is marked replaced');
+  assert.equal(store.stat(staged.id).status, 'adopted', 'the replacement generation is adopted');
+  assert.equal(db.prepare('SELECT data FROM Photo WHERE id = ?').get('p1').data, staged.id, 'the owning reference switched with the generation pair');
+  rmSync(root, { recursive: true, force: true });
+});
+
 test('a replacement that never finalizes leaves the old generation readable; the recovery finalize promotes it', async () => {
   const { root, db, store } = await setup();
   const v1 = store.upload({ bytes: 'old-bytes', id: 'gen-old' });
@@ -259,6 +291,44 @@ test('app-level: the blob-lifecycle replacement finalize pass promotes a switche
   const { finalized } = await app.reconcileBlobFinalize(app.db);
   assert.ok(finalized >= 1, 'the replacement finalize pass promoted the switched-in generation');
   assert.deepStrictEqual(app.blobs.readRange(staged.id), Buffer.from('new-bytes'), 'the replacement bytes are finalized');
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('action-level-only blob declarations still finalize replacements (S6/A5)', async () => {
+  const { root, db, store } = await setup();
+  const v1 = store.upload({ bytes: 'old-bytes', id: 'gen-action-only' });
+  adoptAndFinalize(db, store, v1.id);
+  const staged = store.replace(v1.id, { bytes: 'new-bytes' });
+  db.exec('BEGIN IMMEDIATE');
+  store.switchReplacement(db, v1.id, staged.id);
+  db.exec('COMMIT');
+  assert.throws(() => store.readRange(staged.id), /blob not found/, 'the replacement bytes await finalize');
+
+  // NO entity blob fields — only an action-level declaration. The lifecycle
+  // must NOT no-op: the replacement finalize pass replays the switch METADATA
+  // (BlobStore.replacedBy), which lives on the row, not in entity events.
+  const { blobAdapter, blobFinalizeConsumer, reconcileBlobFinalize } = createBlobLifecycle({
+    blobs: store,
+    entities: new Map(),
+    declaredBlobFields: [
+      declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable' }),
+    ],
+  });
+  assert.equal(blobAdapter, undefined, 'an action-level-only app has no entity adopt adapter (the pending-blob pipeline adopts)');
+
+  const { finalized } = await reconcileBlobFinalize(db);
+  assert.ok(finalized >= 1, 'the replacement finalize pass ran without any entity blob fields');
+  assert.deepEqual(store.readRange(staged.id), Buffer.from('new-bytes'), 'the action-owned replacement is finalized');
+
+  // The post-commit consumer path finalizes action-level replacements too.
+  const v2 = store.upload({ bytes: 'old-2', id: 'gen-action-only-2' });
+  adoptAndFinalize(db, store, v2.id);
+  const staged2 = store.replace(v2.id, { bytes: 'new-2' });
+  db.exec('BEGIN IMMEDIATE');
+  store.switchReplacement(db, v2.id, staged2.id);
+  db.exec('COMMIT');
+  await blobFinalizeConsumer([], { db });
+  assert.deepEqual(store.readRange(staged2.id), Buffer.from('new-2'), 'the consumer path finalizes the action-owned replacement');
   rmSync(root, { recursive: true, force: true });
 });
 

@@ -167,6 +167,12 @@ function safeId(id         )       {
 
 
 
+                  
+
+
+
+
+
 
 
 
@@ -392,6 +398,18 @@ export function createBlobStore({ root, stagingRoot, db, bytes, lowDiskHeadroomB
   // finalizes the replacement's bytes and the reaper reclaims the replaced
   // generation only once it is unreferenced and the named 'replaced-generation'
   // retention has elapsed.
+  //
+  // OWNING-REFERENCE INVARIANT (S6/A5): the switch is only ONE of the THREE
+  // statements that make a replacement real — (1) this pair (adopt the new
+  // generation, mark the previous 'replaced') plus (2) the caller's UPDATE of
+  // the owning reference row to the new generation id. All three MUST run in
+  // the SAME caller-coordinated transaction: a committed switch without the
+  // owning-reference update leaves the new generation authoritative in
+  // BlobStore but unreferenced by the app row (a future sweep could reap it
+  // and the old generation once retention elapses); a committed owning-reference
+  // update without the switch leaves the old generation authoritative but
+  // unreferenced. Inside one txn, COMMIT lands all three and ROLLBACK undoes
+  // all three — the pair and the owning-reference write can never drift.
   function switchReplacement(dbOrTxn                           , previousId        , newId        )                   {
     safeId(previousId);
     safeId(newId);
@@ -421,7 +439,10 @@ export function createBlobStore({ root, stagingRoot, db, bytes, lowDiskHeadroomB
   // generation is routed to the S1/A6 bin BEFORE any live byte is removed (a
   // bin failure keeps the generation durable — never a silently-kept backup
   // copy). Removal is explicit + verified: each slot that exists is removed,
-  // and the metadata row is deleted only when BOTH slots are confirmed gone.
+  // and the metadata row is deleted only when BOTH slots are confirmed gone
+  // AND the DELETE itself is confirmed to have removed the row (affected rows
+  // + a follow-up existence check) — cleanup is never reported complete
+  // against a row that is still there (e.g. a re-inserting trigger).
   async function attemptReap(id        , { bin = true, recycle: seam }                                               = {})                                 {
     if (bin && seam) {
       try {
@@ -437,7 +458,10 @@ export function createBlobStore({ root, stagingRoot, db, bytes, lowDiskHeadroomB
       if (exists(id, { pending: true }) || exists(id, { pending: false })) {
         throw new Error('blob bytes could not be removed');
       }
-      db.prepare('DELETE FROM BlobStore WHERE id = ?').run(id);
+      const { changes } = db.prepare('DELETE FROM BlobStore WHERE id = ?').run(id);
+      if (changes !== 1 || db.prepare('SELECT 1 FROM BlobStore WHERE id = ?').get(id)) {
+        throw new Error('blob metadata row could not be removed');
+      }
       return 'reaped';
     } catch (error) {
       recordCleanupFailure(id, error);
@@ -450,12 +474,54 @@ export function createBlobStore({ root, stagingRoot, db, bytes, lowDiskHeadroomB
     let orphans = 0;
     let danglers = 0;
 
+    // The reference existence queries are compiled ONCE per sweep and shared by
+    // the cleanup-retry, refcount, and replaced sweeps (a declared table that
+    // is not (yet) provisioned holds no rows and so references nothing — the
+    // same discipline as the pre-#94 reaper).
+    const referenceQueries = prepareReferenceQueries(census);
+
+    // ONE eligibility gate, shared by the durable-cleanup retry and the three
+    // fresh sweeps (S6/A5): a row is reapable only when its STATUS's own rule
+    // says so — a stale, unowned 'pending' (orphan); an unreferenced,
+    // unowned 'adopted' (dangler); an unreferenced, unowned 'replaced' whose
+    // retention window elapsed. A row that fails its status's rule is skipped.
+    function reapKind(
+      row                                                                              ,
+    )                                             {
+      if (row.status === 'pending') {
+        if (db.prepare('SELECT 1 FROM _PendingBlob WHERE blobId = ?').get(row.id)) return 'skip';
+        const createdAt = Date.parse(row.createdAt);
+        if (!Number.isFinite(createdAt) || now - createdAt < ttl) return 'skip';
+        return 'orphan';
+      }
+      if (isReferenced(referenceQueries, row.id)) return 'skip';
+      if (row.status === 'adopted') {
+        if (db.prepare("SELECT 1 FROM _PendingBlob WHERE blobId = ? AND status IN ('claimed', 'finalized', 'recovery-failed', 'delete-requested')").get(row.id)) return 'skip';
+        return 'dangler';
+      }
+      if (row.status === 'replaced') {
+        if (replacedRetentionMs == null || replacedRetentionMs <= 0) return 'skip';
+        if (db.prepare('SELECT 1 FROM _PendingBlob WHERE blobId = ?').get(row.id)) return 'skip';
+        if (!row.replacedAt || Number.isNaN(Date.parse(row.replacedAt))) return 'skip';
+        if (now - Date.parse(row.replacedAt) < replacedRetentionMs) return 'skip';
+        return 'replaced';
+      }
+      return 'skip';
+    }
+
     // 0. Durable-cleanup retry sweep: rows carrying a previously-failed byte
-    // deletion are retried. Recycle is re-emitted (bin() is idempotent per
-    // generation), removal is verified, and only a fully-verified reap deletes
-    // the row — cleanup is never reported complete until then.
-    const cleanupRows = db.prepare('SELECT id FROM BlobStore WHERE cleanupError IS NOT NULL').all()                         ;
+    // deletion are retried — but ONLY after REVALIDATION against the same
+    // eligibility rules the fresh sweeps below apply. A row re-referenced,
+    // re-owned by the pending-blob pipeline, or moved back inside a retention
+    // window since the failed reap is never deleted by a blind retry. Recycle
+    // is re-emitted (bin() is idempotent per generation), removal is verified,
+    // and only a fully-verified reap deletes the row — cleanup is never
+    // reported complete until then.
+    const cleanupRows = db.prepare(
+      'SELECT id, status, createdAt, replacedAt FROM BlobStore WHERE cleanupError IS NOT NULL',
+    ).all()                                                                                       ;
     for (const row of cleanupRows) {
+      if (reapKind(row) === 'skip') continue;
       await attemptReap(row.id, { recycle });
     }
 
@@ -465,10 +531,10 @@ export function createBlobStore({ root, stagingRoot, db, bytes, lowDiskHeadroomB
     // never censused, and so never reached a backup.
     const staleDate = new Date(now - ttl).toISOString();
     const pendingRows = db.prepare(
-      'SELECT id, createdAt FROM BlobStore WHERE status = ? AND createdAt < ?',
-    ).all('pending', staleDate)                                            ;
+      'SELECT id, status, createdAt, replacedAt FROM BlobStore WHERE status = ? AND createdAt < ?',
+    ).all('pending', staleDate)                                                                                       ;
     for (const row of pendingRows) {
-      if (db.prepare('SELECT 1 FROM _PendingBlob WHERE blobId = ?').get(row.id)) continue;
+      if (reapKind(row) !== 'orphan') continue;
       if (await attemptReap(row.id, { bin: false, recycle }) === 'reaped') orphans++;
     }
 
@@ -478,11 +544,11 @@ export function createBlobStore({ root, stagingRoot, db, bytes, lowDiskHeadroomB
     // table that is not (yet) provisioned holds no rows and so references
     // nothing (skipped after one catalog check). Matching content hashes never
     // merge ownership (#7): every id is checked against its own references.
-    const referenceQueries = prepareReferenceQueries(census);
-    const adoptedForRefcount = db.prepare('SELECT id FROM BlobStore WHERE status = ?').all('adopted')                         ;
+    const adoptedForRefcount = db.prepare(
+      'SELECT id, status, createdAt, replacedAt FROM BlobStore WHERE status = ?',
+    ).all('adopted')                                                                                       ;
     for (const row of adoptedForRefcount) {
-      if (db.prepare("SELECT 1 FROM _PendingBlob WHERE blobId = ? AND status IN ('claimed', 'finalized', 'recovery-failed', 'delete-requested')").get(row.id)) continue;
-      if (isReferenced(referenceQueries, row.id)) continue;
+      if (reapKind(row) !== 'dangler') continue;
       if (await attemptReap(row.id, { recycle }) === 'reaped') danglers++;
     }
 
@@ -493,12 +559,11 @@ export function createBlobStore({ root, stagingRoot, db, bytes, lowDiskHeadroomB
     // explicitly permit). A generation with a live _PendingBlob lifecycle row
     // is owned by the pending-blob pipeline and skipped here.
     if (replacedRetentionMs != null && replacedRetentionMs > 0) {
-      const replacedRows = db.prepare('SELECT id, replacedAt FROM BlobStore WHERE status = ?').all('replaced')                                                    ;
+      const replacedRows = db.prepare(
+        'SELECT id, status, createdAt, replacedAt FROM BlobStore WHERE status = ?',
+      ).all('replaced')                                                                                       ;
       for (const row of replacedRows) {
-        if (!row.replacedAt || Number.isNaN(Date.parse(row.replacedAt))) continue;
-        if (now - Date.parse(row.replacedAt) < replacedRetentionMs) continue;
-        if (db.prepare('SELECT 1 FROM _PendingBlob WHERE blobId = ?').get(row.id)) continue;
-        if (isReferenced(referenceQueries, row.id)) continue;
+        if (reapKind(row) !== 'replaced') continue;
         if (await attemptReap(row.id, { recycle }) === 'reaped') danglers++;
       }
     }
@@ -522,9 +587,15 @@ export function createBlobStore({ root, stagingRoot, db, bytes, lowDiskHeadroomB
       .map((ref) => ({ query: db.prepare(`SELECT 1 FROM "${ref.table}" WHERE "${ref.column}" = ? LIMIT 1`) }));
   }
 
+  // stat surfaces the row's FULL metadata (S6/A5): replacement state
+  // (replacedBy/replacedAt) and durable cleanup state (cleanupError/
+  // cleanupAttempts) are visible here so ops + tests can inspect a generation's
+  // lifecycle without a second call.
   function stat(id        )                           {
     safeId(id);
-    const row = db.prepare('SELECT id, status, md5, sha256, size, mime, createdAt FROM BlobStore WHERE id = ?').get(id)                            ;
+    const row = db.prepare(
+      'SELECT id, status, md5, sha256, size, mime, createdAt, replacedBy, replacedAt, cleanupError, cleanupAttempts FROM BlobStore WHERE id = ?',
+    ).get(id)                            ;
     return row;
   }
 

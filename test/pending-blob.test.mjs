@@ -598,7 +598,7 @@ test('a failed recycle-bin route keeps the delete durable and the next sweep ret
   await app.start();
   t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
   app.blobRecycleSeam = {
-    bin: async (deletion) => {
+    bin: async (_deletion) => {
       binAttempts++;
       if (binAttempts === 1) throw new Error('bin storage unavailable');
       return { ok: true };
@@ -613,16 +613,98 @@ test('a failed recycle-bin route keeps the delete durable and the next sweep ret
 
   // The pending-blob consumer runs reconcile() post-commit inside the delete
   // dispatch, so the FIRST bin attempt happens there — it failed, so the
-  // deletion stays durably requested for a later sweep to retry.
+  // deletion stays durably requested for a later sweep to retry. The recycle
+  // route runs BEFORE any live byte is removed (S6/A5 #4), so a bin failure
+  // preserves the generation + row — never a deletion whose binning failed
+  // with the live bytes already gone.
   const row = db.prepare('SELECT status, recoveryFailure FROM _PendingBlob WHERE blobId = ?').get(blobId);
   assert.equal(binAttempts, 1, 'the first bin attempt ran in the dispatch post-commit consumer');
   assert.equal(row.status, 'delete-requested', 'a failed bin keeps the delete durably requested');
   assert.ok(row.recoveryFailure, 'the bin failure is recorded for retry');
-  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM BlobStore WHERE id = ?').get(blobId).count, 0, 'the live bytes were still removed (idempotent discard)');
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM BlobStore WHERE id = ?').get(blobId).count, 1, 'a bin failure keeps the BlobStore row durable');
+  assert.deepEqual(app.blobs.readRange(blobId), Buffer.from([1, 2]), 'the live bytes are preserved until the bin succeeds');
 
   await app.pendingBlobLifecycle.reconcile();
   assert.equal(binAttempts, 2, 'the next sweep retries the bin');
   assert.equal(db.prepare('SELECT * FROM _PendingBlob WHERE blobId = ?').get(blobId), undefined, 'the deletion completed after the retry');
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM BlobStore WHERE id = ?').get(blobId).count, 0, 'the live bytes were removed only after the bin succeeded');
+});
+
+test('the deleted-file policy delays live-byte removal until the cleanup window elapses (S6/A5 #21)', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const root = mkdtempSync(path.join(tmpdir(), 'workbench-pending-'));
+  const app = workbench({
+    db, blobs: { root },
+    blobRetention: { deletedFileCleanupMs: 60_000 },
+    actions: [
+      { type: 'File.upload', authorize: () => true, projections: [{ eventTypes: ['File.created'], apply: () => {} }], handler: ({ payload, scope }) => [{ type: 'File.created', scope, data: { blob: payload.blob } }] },
+      { type: 'File.purge', authorize: () => true, projections: [{ eventTypes: ['File.deleted'], apply: () => {} }], handler: ({ scope }) => [{ type: 'File.deleted', scope, data: {} }] },
+    ],
+    blobLifecycle: {
+      fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable', purgeActionName: 'File.purge' })],
+      pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000,
+    },
+  });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
+
+  const actor = principal({ type: 'user', id: 'u1' });
+  const staged = await pendingBlobStager(app, actor).stage({ scopeId: 'project:p1', resourceId: 'f1', bytes: new Uint8Array([3, 4]) });
+  assert.equal((await app.dispatch({ actionId: 'upload', type: 'File.upload', scope: 'project:p1', payload: { id: 'f1', blob: staged.claim }, principal: actor })).ok, true);
+  const blobId = db.prepare('SELECT blobId FROM _PendingBlob WHERE pendingKey = ?').get(staged.pendingKey).blobId;
+  assert.equal((await app.dispatch({ actionId: 'delete', type: 'File.purge', scope: 'project:p1', payload: { id: 'f1', blob: { blobId } }, principal: actor })).ok, true);
+
+  // Within the deleted-file cleanup window: the deletion stays durably
+  // requested and the live bytes + BlobStore row survive (0 default = immediate,
+  // a configured window defers).
+  await app.pendingBlobLifecycle.reconcile();
+  const pending = db.prepare('SELECT status FROM _PendingBlob WHERE blobId = ?').get(blobId);
+  assert.equal(pending.status, 'delete-requested', 'the deletion is still durably requested inside the cleanup window');
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM BlobStore WHERE id = ?').get(blobId).count, 1, 'the live bytes are kept inside the window');
+  assert.deepEqual(app.blobs.readRange(blobId), Buffer.from([3, 4]), 'the generation stays readable inside the window');
+
+  // The window elapses (backdated deletedAt) → the next sweep removes the live
+  // bytes and completes the deletion.
+  db.prepare('UPDATE _PendingBlob SET deletedAt = ? WHERE blobId = ?').run(new Date(Date.now() - 120_000).toISOString(), blobId);
+  await app.pendingBlobLifecycle.reconcile();
+  assert.equal(db.prepare('SELECT * FROM _PendingBlob WHERE blobId = ?').get(blobId), undefined, 'the deletion completed once the window elapsed');
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM BlobStore WHERE id = ?').get(blobId).count, 0, 'the live bytes were removed');
+});
+
+test('an erasure-class purge waits under the privacy-erasure policy (S6/A5 #21)', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const root = mkdtempSync(path.join(tmpdir(), 'workbench-pending-'));
+  const app = workbench({
+    db, blobs: { root },
+    blobRetention: { privacyErasureMs: 60_000 },
+    actions: [
+      { type: 'File.upload', authorize: () => true, projections: [{ eventTypes: ['File.created'], apply: () => {} }], handler: ({ payload, scope }) => [{ type: 'File.created', scope, data: { blob: payload.blob } }] },
+      { type: 'File.purge', authorize: () => true, projections: [{ eventTypes: ['File.deleted'], apply: () => {} }], handler: ({ scope }) => [{ type: 'File.deleted', scope, data: {} }] },
+    ],
+    blobLifecycle: {
+      fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'retained', purgeActionName: 'File.purge' })],
+      pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000,
+    },
+  });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
+
+  const actor = principal({ type: 'user', id: 'u1' });
+  const staged = await pendingBlobStager(app, actor).stage({ scopeId: 'project:p1', resourceId: 'f1', bytes: new Uint8Array([5, 6]) });
+  assert.equal((await app.dispatch({ actionId: 'upload', type: 'File.upload', scope: 'project:p1', payload: { id: 'f1', blob: staged.claim }, principal: actor })).ok, true);
+  const blobId = db.prepare('SELECT blobId FROM _PendingBlob WHERE pendingKey = ?').get(staged.pendingKey).blobId;
+  assert.equal((await app.dispatch({ actionId: 'delete', type: 'File.purge', scope: 'project:p1', payload: { id: 'f1', blob: { blobId } }, principal: actor })).ok, true);
+
+  // The purge action's declaration is erasure-class ('retained'), so the
+  // privacy-erasure policy governs the live-byte wait — not deleted-file.
+  db.prepare('UPDATE _PendingBlob SET deletedAt = ? WHERE blobId = ?').run(new Date(Date.now() - 10_000).toISOString(), blobId);
+  await app.pendingBlobLifecycle.reconcile();
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM BlobStore WHERE id = ?').get(blobId).count, 1, 'the erasure waits for privacyErasureMs, not deletedFileCleanupMs (default 0)');
+
+  db.prepare('UPDATE _PendingBlob SET deletedAt = ? WHERE blobId = ?').run(new Date(Date.now() - 120_000).toISOString(), blobId);
+  await app.pendingBlobLifecycle.reconcile();
+  assert.equal(db.prepare('SELECT * FROM _PendingBlob WHERE blobId = ?').get(blobId), undefined, 'the erasure completed once privacyErasureMs elapsed');
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM BlobStore WHERE id = ?').get(blobId).count, 0, 'the erasure-class live bytes were removed');
 });
 
 test('a deleted generation emits the derived-store deletion signal through the staleness contract (S6/A5)', async (t) => {

@@ -68,6 +68,27 @@ test('workbench() carries the named policies + low-disk headroom into _maintenan
   await app.shutdown();
 });
 
+test('blobReapTtlMs is an alias of the abandoned-upload policy — the policy is the single authority (S6/A5 #21)', async () => {
+  // A legacy explicit scalar folds INTO the policy (same knob, no divergence).
+  const byScalar = workbench({ blobReapTtlMs: 5_000 });
+  assert.equal(byScalar._maintenance.blobReapTtlMs, 5_000, 'the scalar is reflected');
+  assert.equal(byScalar._maintenance.blobRetention.abandonedUploadTtlMs, 5_000, 'an explicit scalar writes the abandoned-upload policy');
+  await byScalar.shutdown();
+
+  // A policy override drives the alias mirror — the scalar can never diverge.
+  const byPolicy = workbench({ blobRetention: { abandonedUploadTtlMs: 9_000 } });
+  assert.equal(byPolicy._maintenance.blobRetention.abandonedUploadTtlMs, 9_000);
+  assert.equal(byPolicy._maintenance.blobReapTtlMs, 9_000, 'the scalar mirrors the policy value');
+  await byPolicy.shutdown();
+});
+
+test('a legacy scalar and policy alias that conflict are refused (fail closed)', () => {
+  assert.throws(
+    () => workbench({ blobReapTtlMs: 5_000, blobRetention: { abandonedUploadTtlMs: 9_000 } }),
+    /blobReapTtlMs is an alias of blobRetention\.abandonedUploadTtlMs/,
+  );
+});
+
 test('workbench() rejects malformed named-policy config', () => {
   assert.throws(() => workbench({ blobRetention: { replacedGenerationRetentionMs: -1 } }), /replacedGenerationRetentionMs/);
   assert.throws(() => workbench({ blobLowDiskHeadroomBytes: -1 }), /blobLowDiskHeadroomBytes/);

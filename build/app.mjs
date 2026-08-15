@@ -48,6 +48,8 @@ import { frameworkTableNames, declaredTableNames } from './schema-table-census.m
 import { createBlobStore } from './blob-store.mjs';
 import { memoryBlobs } from './memory-blobs.mjs';
 import { createBlobSeams } from './blob-seams.mjs';
+import { retentionMs } from './blob-retention.mjs';
+import { createRecycleManager, recycleManagerBinSeam } from './backup/recycle.mjs';
 import { createJobQueue } from './job-queue.mjs';
 import { createSearchPluginRegistry,                   } from './search-plugin.mjs';
 import { createSearchOwnedIndexCapability } from './index-capability.mjs';
@@ -257,6 +259,7 @@ export default function workbench({
   blobLowDiskHeadroomBytes = maintenanceDefaults.blobLowDiskHeadroomBytes,
   operationalConsumers = [],
   blobLifecycle,
+  blobRecycle,
 }      = {}) {
   // envGate (cso #15): fail-closed at app construction — required env vars must be set.
   for (const v of requireEnv) {
@@ -684,6 +687,39 @@ export default function workbench({
         throw new Error('createBlobSeams requires the compiled blob census (app.blobCensus) — build the kernel first via prepareSchema()/start()');
       }
       return createBlobSeams({ db: app.db, blobs: app.blobs, census: app.blobCensus });
+    };
+    // The S1/A6 recycle manager (S6/A5 #4): the `blobRecycle: { root }` option
+    // constructs the recycle manager over the SAME concrete blob seams the
+    // app's createBlobSeams exposes, so binning resolves the exact backup file
+    // names the backup materializer wrote. Built lazily (the compiled census +
+    // blob store must exist), then surfaced as app.blobRecycleSeam so the
+    // reaper AND the pending-blob delete path route replaced/deleted
+    // generations through the recycling bin BEFORE live bytes are removed.
+    app._blobRecycle = blobRecycle;
+    app.createRecycleManager = () => {
+      if (!app._blobRecycle) throw new Error('blobRecycle is not configured');
+      if (!app.db) {
+        throw new Error('createRecycleManager requires an opened database — await app.ready or call prepareSchema()/start() first');
+      }
+      if (!app.blobs) {
+        throw new Error('createRecycleManager requires the app blob store (app.blobs)');
+      }
+      if (!app.blobCensus) {
+        throw new Error('createRecycleManager requires the compiled blob census (app.blobCensus) — build the kernel first via prepareSchema()/start()');
+      }
+      const seams = app.createBlobSeams();
+      return createRecycleManager({
+        root: app._blobRecycle.root,
+        blobs: seams,
+        // The named 'backup-retention' policy (S6/A5 #21) is the single source
+        // for how long the bin holds generation copies before the expiry sweep
+        // trims them (ms → whole days, floored at the 1-day minimum).
+        retentionDays: Math.max(1, Math.round(retentionMs(app._maintenance.blobRetention, 'backup-retention') / 86_400_000)),
+      });
+    };
+    app.assembleBlobRecycleSeam = () => {
+      if (!app._blobRecycle || app.blobRecycleSeam) return;
+      app.blobRecycleSeam = recycleManagerBinSeam(app.createRecycleManager());
     };
     if (pendingDbAdapter) {
       const adapter = pendingDbAdapter;

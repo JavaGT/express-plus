@@ -3,6 +3,7 @@ import { txn, type DbHandle } from './driver.ts';
 import { principalKeyOf, type Principal } from './principal.ts';
 import type { BlobErasureCategory, BlobLifecycleKind, BlobOwnership } from './blob-census.ts';
 import type { BlobStore } from './blob-store.ts';
+import { retentionMs, type BlobRetentionPolicies } from './blob-retention.ts';
 import { BlobSlotNotFoundError } from './fs-blobs.ts';
 
 function failure(code: string): never { const error = new Error(code) as Error & { code?: string }; error.code = code; throw error; }
@@ -101,6 +102,12 @@ interface PendingBlobApp {
   writeQueue: { run<T>(fn: () => Promise<T> | T): Promise<T> };
   db: DbHandle;
   blobs: BlobStore;
+  /**
+   * S6/A5 named retention policies (single central evaluator, see
+   * src/blob-retention.ts). Optional — a standalone lifecycle (no app
+   * maintenance surface) reads no policies and deletes immediately.
+   */
+  retentionPolicies?: Readonly<BlobRetentionPolicies>;
   /** S1/A6 recycle seam (S6/A5). Optional; set by the app owner once the recycle manager exists. */
   blobRecycleSeam?: PendingBlobRecycleSeam | null;
   /**
@@ -292,18 +299,51 @@ export function createPendingBlobLifecycle(app: PendingBlobApp, options: Pending
       .run(String((error as { message?: unknown })?.message ?? error), row.pendingKey);
   }
 
-  // The delete path (S6/A5 #4): discard the live bytes, route the generation
-  // through the S1/A6 recycling bin (when a seam is owned), and emit the
-  // derived-store deletion signal (when the staleness bridge is engaged) — ALL
-  // three must succeed before the durable row is dropped. A failure at any
+  // The named deleted-file / privacy-erasure wait for a delete-requested row
+  // (S6/A5 #21): the live bytes of a deleted generation are removed only once
+  // the applicable cleanup window has elapsed (0 = immediate, the default).
+  // An erasure-class purge (erasureCategory 'retained'/'derived') waits under
+  // the 'privacy-erasure' policy; ordinary deletions under 'deleted-file'. The
+  // class is read from the durable delete receipt's actionType, so a restart
+  // never re-classifies a deletion differently.
+  function deletionCleanupWaitMs(row: PendingBlobRow): number {
+    const policies = app.retentionPolicies;
+    if (!policies) return 0;
+    let erasure = false;
+    if (row.deleteActionId && row.scopeId) {
+      const receipt = app.db.prepare('SELECT actionType FROM _ActionReceipt WHERE scope = ? AND actionId = ?')
+        .get(row.scopeId, row.deleteActionId) as { actionType?: string } | undefined;
+      const declaration = receipt?.actionType
+        ? fields.find((field) => field.purgeActionName === receipt.actionType)
+        : undefined;
+      erasure = declaration !== undefined && declaration.erasureCategory !== 'deletable';
+    }
+    return retentionMs(policies, erasure ? 'privacy-erasure' : 'deleted-file');
+  }
+
+  // The delete path (S6/A5 #4): bin the generation through the S1/A6 recycle
+  // seam (when one is owned) BEFORE any live byte is removed, then discard the
+  // live bytes, emit the derived-store deletion signal (when the staleness
+  // bridge is engaged), and only then drop the durable row. A failure at any
   // step records durable retry state and keeps the row, so the next sweep
-  // re-runs it (discard + bin + signal are all idempotent). The deletion is
+  // re-runs it (bin + discard + signal are all idempotent). The deletion is
   // never reported complete until the row is gone.
   async function reconcileDeletion(row: PendingBlobRow): Promise<void> {
-    app.blobs.discard(row.blobId);
+    // S6/A5 #21: within the applicable cleanup window the deletion stays
+    // durably requested and nothing is removed yet — the next sweep re-checks.
+    const waitMs = deletionCleanupWaitMs(row);
+    if (waitMs > 0) {
+      const deletedAt = Date.parse(row.deletedAt ?? row.createdAt);
+      if (!Number.isFinite(deletedAt) || Date.now() - deletedAt < waitMs) return;
+    }
+    // Recycle BEFORE live-byte removal: a bin failure THROWS, so the durable
+    // row AND the live bytes survive (retry state recorded) and the next sweep
+    // retries — a generation whose binning failed is never left with its live
+    // bytes already gone.
     if (app.blobRecycleSeam) {
       await app.blobRecycleSeam.bin({ generations: [row.blobId] });
     }
+    app.blobs.discard(row.blobId);
     if (app.searchStaleness) {
       // Post-commit proof: the delete action's committedAt from the receipt,
       // falling back to the durable deletedAt (the instant the delete was

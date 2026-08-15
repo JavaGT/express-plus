@@ -1548,7 +1548,11 @@ export interface WorkbenchOptions {
   log?: Readonly<Record<string, unknown>>;
   /** Pending-blob sweep cadence in milliseconds; must be finite and > 0. */
   blobReapIntervalMs?: number;
-  /** Pending-blob minimum age in milliseconds; must be finite and >= 0. */
+  /**
+   * Back-compat alias for `blobRetention.abandonedUploadTtlMs` (S6/A5): the
+   * SAME knob as that policy — an explicit scalar folds into the policy, a
+   * conflicting explicit pair is refused, and the two can never diverge.
+   */
   blobReapTtlMs?: number;
   /** Durable-log retention in days; finite and >= 0, with 0 disabling retention. */
   logRetentionDays?: number;
@@ -1560,15 +1564,23 @@ export interface WorkbenchOptions {
     abandonedUploadTtlMs: number;
     /** Replaced-generation retention (ms): the readable window after the owning reference switched before reap. */
     replacedGenerationRetentionMs: number;
-    /** Deleted-file cleanup (ms): the deleted live-bytes sweep delay (0 = immediate). */
+    /** Deleted-file cleanup (ms): how long a deleted generation's live bytes wait before the cleanup sweep removes them (0 = immediate). */
     deletedFileCleanupMs: number;
-    /** Privacy-erasure (ms): the erasure-class deletion sweep delay (0 = immediate). */
+    /** Privacy-erasure (ms): the erasure-class deletion wait before live bytes are removed (0 = immediate). */
     privacyErasureMs: number;
-    /** Backup-retention (ms): how long retained backups hold generation copies before trim. */
+    /** Backup-retention (ms): how long retained backups hold generation copies before the bin expiry sweep trims them. */
     backupRetentionMs: number;
   }>>;
   /** Low-disk upload guard (S6/A5 #5): refuse new uploads below this many free bytes (0 disables). */
   blobLowDiskHeadroomBytes?: number;
+  /**
+   * S1/A6 recycle bin (S6/A5 #4): the adapter-owned root whose `backups/` and
+   * `recycle/` directories the recycle manager owns. When set, the app
+   * assembles a recycle seam over the SAME blob seams as backup/recovery, so
+   * replaced/dangling and deleted generations route through the recycling bin
+   * BEFORE live bytes are removed.
+   */
+  blobRecycle?: Readonly<{ root: string }>;
   operationalConsumers?: readonly OperationalConsumer<unknown, any>[];
   blobLifecycle?: BlobLifecycleOptions;
 }

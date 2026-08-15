@@ -82,6 +82,28 @@ test('blob reaper TTL is configured when the application is constructed', async 
   assert.ok(!app.blobs.stat('orph-override'));
 });
 
+test('the replaced-generation policy is the single authority for the app sweep (S6/A5 #21)', async (t) => {
+  const { app, db } = await harness(t, { blobRetention: { replacedGenerationRetentionMs: 60_000 } });
+  const v1 = app.blobs.upload({ bytes: Buffer.from('old-policy'), id: 'gen-policy' });
+  adoptAndFinalize(app, v1.id);
+  const staged = app.blobs.replace(v1.id, { bytes: Buffer.from('new-policy') });
+  db.exec('BEGIN IMMEDIATE');
+  app.blobs.switchReplacement(db, v1.id, staged.id);
+  db.exec('COMMIT');
+  app.blobs.finalize(staged.id);
+  db.prepare('INSERT INTO Note (id, body, photo) VALUES (?, ?, ?)').run('n1', 'x', staged.id);
+
+  // Inside the 60s window the replaced generation is kept.
+  await app.sweepBlobs();
+  assert.ok(app.blobs.stat(v1.id), 'the replaced generation is kept inside the replaced-generation window');
+
+  // The window elapses (backdated replacedAt) → the app sweep reclaims it.
+  db.prepare('UPDATE BlobStore SET replacedAt = ? WHERE id = ?').run(new Date(Date.now() - 120_000).toISOString(), v1.id);
+  await app.sweepBlobs();
+  assert.equal(app.blobs.stat(v1.id), undefined, 'the replaced generation is reaped once the policy window elapsed');
+  assert.ok(app.blobs.stat(staged.id), 'the referenced replacement generation is kept');
+});
+
 test('application runtime registers the construction-level blob reaper interval', async (t) => {
   const registrations = [];
   const { app } = await harness(

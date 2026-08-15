@@ -573,6 +573,10 @@ export interface BlobStore {
    * generation is marked 'replaced' (replacement + switch instant recorded).
    * A failed switch throws and rolls back, leaving the old generation
    * authoritative.
+   *
+   * OWNING-REFERENCE INVARIANT: the switch pair AND the caller's UPDATE of the
+   * owning reference to the new generation id MUST share this same coordinated
+   * transaction — all three commit together or roll back together.
    */
   switchReplacement(
     dbOrTxn: { prepare(sql: string): WorkbenchStatement },
@@ -604,6 +608,14 @@ export interface BlobStore {
         size: number;
         mime: string | null;
         createdAt: string;
+        /** The generation id that replaced this generation (status 'replaced'). */
+        replacedBy?: string | null;
+        /** ISO instant the owning reference switched to the replacement generation. */
+        replacedAt?: string | null;
+        /** Durable cleanup state: last failure message while removing this generation's bytes. */
+        cleanupError?: string | null;
+        /** Durable cleanup state: how many byte-removal attempts failed so far. */
+        cleanupAttempts?: number;
       }
     | undefined;
   /** Durable cleanup state for one generation (S6/A5), or undefined when the row is gone / never failed. */

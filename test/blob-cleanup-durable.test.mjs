@@ -145,6 +145,84 @@ test('a replaced generation with a failed byte removal keeps durable cleanup sta
   rmSync(root, { recursive: true, force: true });
 });
 
+test('a durable-cleanup retry never deletes a generation re-referenced after the failed reap (S6/A5)', async () => {
+  const { root, db, store } = await setup();
+  const { id } = store.upload({ bytes: 're-referenced-bytes' });
+  adoptAndFinalize(db, store, id);
+  makeFinalSlotUndeletable(store, id);
+
+  await store.reap({ ttl: 0, census: photoCensus });
+  assert.ok(store.stat(id), 'the first reap failed and retained the row');
+  assert.equal(store.cleanupState(id).cleanupAttempts, 1, 'the first removal attempt failed');
+
+  // The generation is referenced again BEFORE the retry sweep runs, and the
+  // operator clears the byte blocker. The retry must REVALIDATE (the census
+  // reference is a column source) and skip the row — never delete a newly
+  // referenced generation out from under its owner.
+  referencePhoto(db, 'p1', id);
+  rmSync(store._pathFor(id), { recursive: true, force: true });
+
+  await store.reap({ ttl: 0, census: photoCensus });
+  assert.ok(store.stat(id), 'a re-referenced generation is NOT deleted by the retry sweep');
+  assert.equal(store.cleanupState(id).cleanupAttempts, 1, 'no removal attempt ran for the re-referenced row — it was revalidated, not blindly retried');
+  assert.equal(db.prepare('SELECT data FROM Photo WHERE id = ?').get('p1').data, id, 'the re-reference is intact');
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('a reap never reports complete against a metadata row that is still present (S6/A5 #3)', async () => {
+  const { root, db, store } = await setup();
+  const { id } = store.upload({ bytes: 'verified-removal' });
+  adoptAndFinalize(db, store, id);
+
+  // A re-inserting trigger forces the DELETE to leave the row behind: removal
+  // must VERIFY the metadata is gone (affected rows + a follow-up existence
+  // check) and record a durable failure instead of reporting a complete reap.
+  db.exec(`CREATE TRIGGER reinsert_blob AFTER DELETE ON BlobStore BEGIN
+    INSERT INTO BlobStore (id, status, md5, sha256, size, mime, createdAt)
+    VALUES (OLD.id, OLD.status, OLD.md5, OLD.sha256, OLD.size, OLD.mime, OLD.createdAt);
+  END`);
+
+  const result = await store.reap({ ttl: 0, census: photoCensus });
+  assert.deepStrictEqual(result, { orphans: 0, danglers: 0 }, 'a removal that cannot delete the metadata row is never reported complete');
+  const state = store.cleanupState(id);
+  assert.ok(state, 'the row survives with durable cleanup state');
+  assert.match(state.cleanupError, /metadata row/, 'the verification failure is recorded');
+  assert.equal(state.cleanupAttempts, 1, 'the failed verified removal is counted');
+  assert.ok(store.stat(id), 'the metadata row is still present');
+
+  db.exec('DROP TRIGGER reinsert_blob');
+  await store.reap({ ttl: 0, census: photoCensus });
+  assert.equal(store.stat(id), undefined, 'the verified removal completes once the blocker is gone');
+  assert.deepStrictEqual(store.pendingCleanups(), []);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('stat() surfaces replacement + durable cleanup state (S6/A5)', async () => {
+  const { root, db, store } = await setup();
+  const v1 = store.upload({ bytes: 'old-bytes', id: 'gen-stat' });
+  adoptAndFinalize(db, store, v1.id);
+  const staged = store.replace(v1.id, { bytes: 'new-bytes' });
+  db.exec('BEGIN IMMEDIATE');
+  store.switchReplacement(db, v1.id, staged.id);
+  db.exec('COMMIT');
+  store.finalize(staged.id);
+
+  const oldStat = store.stat(v1.id);
+  assert.equal(oldStat.status, 'replaced');
+  assert.equal(oldStat.replacedBy, staged.id, 'stat() reports the replacement generation');
+  assert.ok(oldStat.replacedAt, 'stat() reports the switch instant');
+
+  // A failed byte removal records cleanup state visible through stat() too.
+  const { id } = store.upload({ bytes: 'stat-cleanup' });
+  adoptAndFinalize(db, store, id);
+  makeFinalSlotUndeletable(store, id);
+  await store.reap({ ttl: 0, census: photoCensus });
+  const cleanupStat = store.stat(id);
+  assert.ok(cleanupStat.cleanupError, 'stat() reports the cleanup failure');
+  assert.equal(cleanupStat.cleanupAttempts, 1, 'stat() reports the attempt count');
+  rmSync(root, { recursive: true, force: true });
+});
+
 test('byte-store deletion and finalization remain idempotent (S6/A5 #6)', async () => {
   const { root, db, store } = await setup();
   const { id } = store.upload({ bytes: 'twice-removed' });

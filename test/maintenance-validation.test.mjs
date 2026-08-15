@@ -44,7 +44,10 @@ test('maintenance accepts zero blob TTL and fractional retention days', async ()
     logRetentionIntervalMs: 1,
     // S6/A5: the named retention policies + low-disk headroom default in when
     // they are not configured — the single TTL source, no scattered literals.
-    blobRetention: blobRetentionDefaults,
+    // An explicit legacy scalar folds INTO the abandoned-upload policy (the
+    // scalar is its alias and can never diverge), so blobReapTtlMs: 0 also
+    // writes abandonedUploadTtlMs: 0.
+    blobRetention: { ...blobRetentionDefaults, abandonedUploadTtlMs: 0 },
     blobLowDiskHeadroomBytes: maintenanceDefaults.blobLowDiskHeadroomBytes,
   });
   await app.shutdown();

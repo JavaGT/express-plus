@@ -76,6 +76,7 @@ export {
 } from './backup.ts';
 export {
   createRecycleManager,
+  recycleManagerBinSeam,
   RECYCLE_FORMAT_VERSION,
   DEFAULT_RECYCLE_RETENTION_DAYS,
   type RecycleManager,

@@ -467,7 +467,13 @@ export function buildKernel(app     ) {
     declaredBlobFields: app._blobLifecycleOptions?.fields ?? [],
   });
   app.blobCensus = census;
-  if (app._blobLifecycleOptions) app.pendingBlobLifecycle = createPendingBlobLifecycle(app, app._blobLifecycleOptions);
+  if (app._blobLifecycleOptions) {
+    // S6/A5 #21: the pending-blob delete path reads the named deleted-file /
+    // privacy-erasure policies from the maintenance surface through the single
+    // central evaluator (retentionMs) — never its own TTL literals.
+    app.retentionPolicies = app._maintenance?.blobRetention;
+    app.pendingBlobLifecycle = createPendingBlobLifecycle(app, app._blobLifecycleOptions);
+  }
   app.durableEffectsRegistry = durableEffectsRegistry;
   app.reconcileBlobFinalize = reconcileBlobFinalize;
   // emailSeam(...).install(app) (called by the app author before .listen(),

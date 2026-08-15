@@ -17,7 +17,7 @@ import { retentionPrune } from './committed-log.mjs';
 import { getLog, withLog } from './log.mjs';
 
 import { EMPTY_BLOB_CENSUS,                 } from './blob-census.mjs';
-import { blobRetentionDefaults, validateBlobRetentionPolicies,                            } from './blob-retention.mjs';
+import { blobRetentionDefaults, retentionMs, validateBlobRetentionPolicies,                            } from './blob-retention.mjs';
 
 import { installBatchHttpDispatcher, installHistoryHttpDispatcher } from './application-action-http.mjs';
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
@@ -36,7 +36,20 @@ export const DEFAULT_LOW_DISK_HEADROOM_BYTES = 256 * 1024 * 1024;
 
 
 
+                                           
+
+
+
+
+
+
                                              
+
+
+
+
+
+
 
 
 
@@ -175,11 +188,15 @@ function engageMaintenance(app            , log              )       {
   if (app.blobs) {
     app.sweepBlobs = () => app.writeQueue.run(() =>
       app.blobs .reap({
-        ttl: options.blobReapTtlMs,
+        // The named 'abandoned-upload' policy (S6/A5) is the SINGLE authority
+        // for the orphan TTL — the legacy blobReapTtlMs scalar is its alias and
+        // can never diverge (validateMaintenanceOptions folds it into the
+        // policy).
+        ttl: retentionMs(options.blobRetention, 'abandoned-upload'),
         census: app.blobCensus ?? EMPTY_BLOB_CENSUS,
         // The named 'replaced-generation' policy (S6/A5): replaced generations
         // are reclaimed only once this retention window has elapsed.
-        replacedRetentionMs: options.blobRetention.replacedGenerationRetentionMs,
+        replacedRetentionMs: retentionMs(options.blobRetention, 'replaced-generation'),
         // Route replaced/dangling generations through the S1/A6 recycling bin
         // (S6/A5 #4) when the app owns a recycle seam.
         ...(app.blobRecycleSeam ? { recycle: app.blobRecycleSeam } : {}),
@@ -226,6 +243,19 @@ async function bootApplication(app            )                      {
 
   app.kernel = buildKernel(app)                            ;
   const dispatch = wireMutationSurface(app);
+
+  // S6/A5 #4: materialize the app's S1/A6 recycle seam now that the compiled
+  // blob census exists (the recycle manager resolves backup blob names over
+  // it). A failed assembly is a degradation — sweeps still remove live bytes,
+  // just without binning — never a boot failure, but it is logged so ops
+  // notice the bin is not engaged.
+  if (!app.blobRecycleSeam && typeof app.assembleBlobRecycleSeam === 'function') {
+    try {
+      app.assembleBlobRecycleSeam();
+    } catch (err) {
+      log.warn('system', 'blob recycle seam assembly failed — replaced/deleted generations will not route through the recycling bin', { err });
+    }
+  }
 
   if (app.db) {
     if (typeof app.db.exec === 'function') {
@@ -347,14 +377,32 @@ export function validateMaintenanceOptions(options                    )         
   }
   // The named retention policies (S6/A5) validate centrally in
   // blob-retention.ts; absent → the shared defaults.
-  const blobRetention = validateBlobRetentionPolicies(options.blobRetention);
+  let blobRetention = validateBlobRetentionPolicies(options.blobRetention);
+  // S6/A5 #21: the legacy scalar blobReapTtlMs is an ALIAS of the named
+  // 'abandoned-upload' policy — the policy is the single authority, so the two
+  // can never diverge. An explicitly-set scalar (a legacy spelling of the same
+  // knob) folds INTO the policy; a scalar that conflicts with an explicitly-set
+  // policy value is a config error (fail closed).
+  const explicitScalar = options.blobReapTtlMs !== maintenanceDefaults.blobReapTtlMs;
+  const explicitPolicyValue = options.blobRetention !== maintenanceDefaults.blobRetention
+    && options.blobRetention?.abandonedUploadTtlMs !== undefined;
+  if (explicitScalar && explicitPolicyValue && options.blobReapTtlMs !== options.blobRetention .abandonedUploadTtlMs) {
+    throw new TypeError(
+      "blobReapTtlMs is an alias of blobRetention.abandonedUploadTtlMs — the two are the same knob and must agree",
+    );
+  }
+  if (explicitScalar) {
+    blobRetention = validateBlobRetentionPolicies({ ...blobRetention, abandonedUploadTtlMs: options.blobReapTtlMs });
+  }
   const blobLowDiskHeadroomBytes = options.blobLowDiskHeadroomBytes ?? maintenanceDefaults.blobLowDiskHeadroomBytes;
   if (typeof blobLowDiskHeadroomBytes !== 'number' || !Number.isFinite(blobLowDiskHeadroomBytes) || blobLowDiskHeadroomBytes < 0) {
     throw new TypeError('blobLowDiskHeadroomBytes must be a finite non-negative number of bytes (0 disables the guard)');
   }
   return Object.freeze({
     blobReapIntervalMs: options.blobReapIntervalMs,
-    blobReapTtlMs: options.blobReapTtlMs,
+    // The mirror of the policy: always retentionMs(blobRetention,
+    // 'abandoned-upload') — the alias value can never diverge from the policy.
+    blobReapTtlMs: retentionMs(blobRetention, 'abandoned-upload'),
     logRetentionDays: options.logRetentionDays,
     logRetentionIntervalMs: options.logRetentionIntervalMs,
     blobRetention,

@@ -60,6 +60,7 @@ import {
 import path from 'node:path';
 import { getLog } from '../log.ts';
 import { BACKUP_FORMAT_VERSION, type BackupBinnedGeneration, type BackupManifest } from '../backup.ts';
+import type { BlobRecycleSeam } from '../blob-store.ts';
 
 export const RECYCLE_FORMAT_VERSION = 1 as const;
 
@@ -175,6 +176,26 @@ export type RecycleManager = {
   // static serving and blob-root acceptance by the S1/A2 managed-path guard).
   readonly root: string;
 };
+
+/**
+ * Adapt a RecycleManager's bin() to the S6/A5 BlobRecycleSeam consumed by the
+ * blob reaper and the pending-blob delete path (src/blob-store.ts). A bin that
+ * left any backup un-binned (result.ok === false) THROWS, so the caller records
+ * durable cleanup state and the next sweep retries — never a silently-kept
+ * backup copy. bin() is idempotent per generation, so a retry re-emits safely.
+ */
+export function recycleManagerBinSeam(manager: Pick<RecycleManager, 'bin'>): BlobRecycleSeam {
+  return {
+    bin: async (deletion: { generations: readonly string[] }) => {
+      const result = await manager.bin(deletion);
+      if (!result.ok) {
+        const detail = result.failed.map((f) => `${f.backupId}: ${f.error}`).join('; ');
+        throw new Error(`recycle bin failed for ${deletion.generations.join(', ')}: ${detail}`);
+      }
+      return result;
+    },
+  };
+}
 
 // The one entry.json field set that identifies a binned generation. `name` is
 // validated to be a bare file name; `binnedAt` is the canonical UTC instant.
