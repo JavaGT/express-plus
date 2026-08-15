@@ -18,6 +18,7 @@ import { createLiveDeliveryHttpHandler } from '../build/live-delivery-http.mjs';
 import { createLiveDeliveryWebSocket } from '../build/live-delivery-websocket.mjs';
 import { executeFrameworkDDL } from '../build/ddl.mjs';
 import { envelopeDiagnostics, isAuthoritativeEnvelope } from '../build/event-delivery.mjs';
+import { createLiveDeliverySession } from '../public/workbench-client.mjs';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -525,3 +526,77 @@ function createClientModel(initialSnapshot = null) {
     },
   };
 }
+
+// --- real-client ingest: the shipped createLiveDeliverySession runtime ---
+// The model above proves the intended contract; these tests prove the same
+// contract through the real client receive()/applyState() path.
+
+function createRealClient() {
+  let deliverBatch;
+  let bootstraps = 0;
+  const session = createLiveDeliverySession({
+    bootstrap: async () => {
+      bootstraps += 1;
+      return { kind: 'snapshot', snapshot: { id: 'n1', title: `snap-${bootstraps}` }, cursor: 0 };
+    },
+    subscribe: async ({ deliver }) => { deliverBatch = deliver; return { close() {} }; },
+    validateSnapshot: (snapshot) => snapshot,
+    fold: (snapshot) => snapshot,
+    optimistic: (snapshot) => snapshot,
+    sendAction: async () => ({ ok: true }),
+    createActionId: (() => { let n = 0; return () => `op-real-${++n}`; })(),
+  });
+  return {
+    session,
+    bootstraps: () => bootstraps,
+    deliver: async (envelopes) => deliverBatch(envelopes),
+  };
+}
+
+test('the shipped client reconciles a pending placeholder from an authoritative `state` replacement', async () => {
+  const { session, deliver } = createRealClient();
+  await session.ready;
+  assert.deepEqual(session.snapshot, { id: 'n1', title: 'snap-1' });
+
+  const dispatched = await session.dispatch('Note.update', { title: 'pending' });
+  assert.equal(session.pendingCount(), 1);
+
+  await deliver([{ type: 'state', entity: 'Note', id: 'n1', seq: 1, state: { id: 'n1', title: 'authoritative' } }]);
+  assert.deepEqual(session.snapshot, { id: 'n1', title: 'authoritative' }, 'a state envelope replaces the model exactly as a logged event does');
+  assert.equal(session.pendingCount(), 0, 'the authoritative replacement reconciles the pending placeholder');
+  assert.deepEqual(await dispatched.settlement.wait(), { opId: dispatched.opId, status: 'reconciled' });
+  session.close();
+});
+
+test('a `state-invalidate` triggers a resnapshot through the shipped client', async () => {
+  const { session, deliver, bootstraps } = createRealClient();
+  await session.ready;
+  assert.equal(bootstraps(), 1);
+
+  await deliver([{ type: 'state-invalidate', entity: 'Note', id: 'n1', seq: 5, reason: 'bounded-overflow', rows: [{ id: 'n1', title: 'truncated' }] }]);
+  assert.equal(bootstraps(), 2, 'a state-invalidate boundary forces a fresh replacement snapshot');
+  assert.deepEqual(session.snapshot, { id: 'n1', title: 'snap-2' }, 'the resnapshot replaces the cached state');
+  assert.equal(session.cursor, 0, 'the invalidation itself never reconciles the cursor from invalidated content');
+  session.close();
+});
+
+test('a notification is safely ignored as non-authoritative through the shipped client', async () => {
+  const { session, deliver, bootstraps } = createRealClient();
+  await session.ready;
+
+  const dispatched = await session.dispatch('Note.update', { title: 'pending' });
+  assert.equal(session.pendingCount(), 1);
+  void dispatched;
+
+  await deliver([{ type: 'notification', kind: 'job-progress', seq: 9 }]);
+  assert.equal(session.pendingCount(), 1, 'a notification never reconciles optimistic state');
+  assert.deepEqual(session.snapshot, { id: 'n1', title: 'snap-1' }, 'a notification never mutates the model');
+  assert.equal(bootstraps(), 1, 'a notification never triggers a resnapshot');
+
+  // The delivery batch resolves rather than throwing a transport/session failure.
+  const rejected = session.dispatch('Note.update', { title: 'still-pending' });
+  await deliver([{ type: 'notification', kind: 'job-progress', seq: 10 }]);
+  assert.equal(session.pendingCount(), 2);
+  await rejected;
+  session.close();
+});

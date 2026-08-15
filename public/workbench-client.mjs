@@ -2571,8 +2571,25 @@ export function createLiveDeliverySession({
       && (typeof left !== 'object' || left.aggregate === right.aggregate);
   }
 
-  function normalizeEvent(envelope) {
-    if (!envelope || envelope.type !== 'event') throw new Error('delivery batch contains an invalid recipient envelope');
+  // S3/A7 client-ingest contract: only `event` (full-log) and `state` (live
+  // replacement) envelopes are authoritative domain mutations. Recovery
+  // controls (`resync`, `state-invalidate`) and derived/operational
+  // notifications are never authoritative; the client ignores the latter
+  // rather than failing the delivery batch (consideration #23). Any other
+  // kind is a protocol violation and still rejects the batch.
+  const DELIVERY_ENVELOPE_KINDS = new Set(['event', 'state', 'resync', 'state-invalidate', 'notification']);
+  function isKnownEnvelopeKind(envelope) {
+    return envelope != null && typeof envelope === 'object'
+      && typeof envelope.type === 'string' && DELIVERY_ENVELOPE_KINDS.has(envelope.type);
+  }
+
+  function isAuthoritativeEnvelope(envelope) {
+    return envelope != null && typeof envelope === 'object'
+      && (envelope.type === 'event' || envelope.type === 'state');
+  }
+
+  function normalizeAuthoritative(envelope) {
+    if (!isAuthoritativeEnvelope(envelope)) throw new Error('delivery batch contains an invalid recipient envelope');
     const span = envelope.seqSpan ?? envelope.seq;
     const [lo, hi] = normalizeSeqSpan(span);
     assertCursor(lo, 'delivery sequence');
@@ -2582,7 +2599,7 @@ export function createLiveDeliverySession({
   }
 
   function applyEvent(envelope) {
-    const { seqSpan } = normalizeEvent(envelope);
+    const { seqSpan } = normalizeAuthoritative(envelope);
     // A declared aggregate has no event reducer. Treat an unexpected event as
     // an opaque recovery boundary rather than acknowledging stale state.
     if (snapshotOnly) return { status: 'resync' };
@@ -2623,6 +2640,46 @@ export function createLiveDeliverySession({
     return { status: operation ? 'confirmed' : 'applied' };
   }
 
+  // An authoritative live `state` replacement is a wholesale snapshot: it is
+  // never folded, it replaces the client's cached state, and it reconciles
+  // delivered pending operations exactly as a logged event echo does (S3/A7
+  // client.d.ts contract). The live revision advances the cursor; the carried
+  // `state` (a recipient-projected live row) is validated like any snapshot.
+  function applyState(envelope) {
+    const { seqSpan } = normalizeAuthoritative(envelope);
+    const decision = decideReplay(cursor, seqSpan);
+    if (decision.kind === 'duplicate') return { status: 'duplicate' };
+    if (decision.kind === 'gap') return { status: 'gap' };
+    let nextSnapshot;
+    try {
+      nextSnapshot = validateSnapshot(envelope.state ?? null);
+    } catch {
+      // An unvalidatable replacement must not advance the cursor or fence.
+      return { status: 'resync' };
+    }
+    // A fold callback may synchronously trigger terminal revocation through a
+    // host lifecycle reaction. Do not restore state after that fail-closed turn.
+    if (closed || status === 'revoked') return { status: 'revoked' };
+    baseSnapshot = nextSnapshot;
+    cursor = decision.cursor;
+    // A whole-state replacement names no per-action echo, so every delivered
+    // operation whose confirmed receipt fence the replacement cursor covers is
+    // reconciled — the same settlement rule applyEvent uses for an echo.
+    for (const [actionId, operation] of operations) {
+      if (operation.delivered
+        && (operation.confirmedCursor == null || cursorAnchor(cursor) >= operation.confirmedCursor)) {
+        settleOperation(operation, { status: 'reconciled' });
+        operations.delete(actionId);
+      }
+    }
+    publish();
+    return { status: 'applied' };
+  }
+
+  function applyAuthoritative(envelope) {
+    return envelope?.type === 'state' ? applyState(envelope) : applyEvent(envelope);
+  }
+
   function settleSnapshotConfirmations(receiptGenerationAtStart) {
     // Composite streams and non-foldable annotated-text ops intentionally do
     // not disclose a foldable echo. A positive sender receipt plus an
@@ -2659,8 +2716,10 @@ export function createLiveDeliverySession({
     assertCursor(result.cursor, 'catch-up cursor');
     const initialCursor = cursor;
     for (const envelope of result.envelopes) {
-      if (envelope?.type === 'resync') return false;
-      const applied = applyEvent(envelope);
+      if (!isKnownEnvelopeKind(envelope)) throw new Error('catch-up recipient envelopes are not valid');
+      if (envelope.type === 'resync' || envelope.type === 'state-invalidate') return false;
+      if (envelope.type === 'notification') continue;
+      const applied = applyAuthoritative(envelope);
       if (applied.status === 'resync') return false;
       if (closed || status === 'revoked') return true;
       if (applied.status === 'gap') throw new Error('catch-up recipient envelopes are not contiguous');
@@ -2729,13 +2788,19 @@ export function createLiveDeliverySession({
     if (!Array.isArray(envelopes)) throw new Error('delivery callback requires an envelope array');
     for (const envelope of envelopes) {
       if (closed || status === 'revoked' || status === 'unavailable' || generation !== connectionGeneration) return;
-      if (envelope?.type === 'resync') {
-        // Recovery causes are intentionally opaque to applications.
+      if (!isKnownEnvelopeKind(envelope)) throw new Error('delivery batch contains an invalid recipient envelope');
+      // Recovery controls are intentionally opaque to applications: a transport
+      // `resync` and a bounded-overflow `state-invalidate` boundary both demand
+      // a fresh replacement snapshot rather than in-place reconciliation.
+      if (envelope.type === 'resync' || envelope.type === 'state-invalidate') {
         const recovery = requestSnapshotRecovery(undefined, !hasUnknownTransmission(), true);
         if (!hasUnknownTransmission()) await recovery;
         continue;
       }
-      const applied = applyEvent(envelope);
+      // Derived/operational notifications are never authoritative domain
+      // mutations; they are ignored, not thrown.
+      if (envelope.type === 'notification') continue;
+      const applied = applyAuthoritative(envelope);
       if (applied.status === 'resync') {
         const recovery = requestSnapshotRecovery(undefined, !hasUnknownTransmission(), true);
         if (!hasUnknownTransmission()) await recovery;
@@ -2749,7 +2814,7 @@ export function createLiveDeliverySession({
           throw error;
         }
         if (closed || status === 'revoked' || generation !== connectionGeneration) return;
-        const replayed = applyEvent(envelope);
+        const replayed = applyAuthoritative(envelope);
         if (replayed.status === 'gap') {
           if (!closed && status !== 'revoked') becomeUnavailable();
           throw new Error('delivery remains gapped after catch-up');
