@@ -232,6 +232,93 @@ test('materialize is atomic — a failing sidecar write leaves no partial genera
   }
 });
 
+test('rollback after a failure AFTER the byte final was published removes that published final atomically (ownership-verified), and the destination is re-materializable next call', async () => {
+  const { root, db, store, adopt } = await setupStore();
+  const blobsDir = mkdtempSync(join(tmpdir(), 'wb-materialize-'));
+  try {
+    adopt(Buffer.from('atomic bytes'), 'gen-atomic');
+    // Force a failure AFTER the byte final has been published (so rollback must
+    // remove a final it owns, not just temps): pin the token and use the
+    // after-byte-publish test hook to plant a directory at the sidecar FINAL
+    // name — the sidecar publish then fails (EEXIST — the path is occupied).
+    // Rollback must atomically remove THIS invocation's own byte final, leave
+    // the planted blocker untouched, and leave the destination re-materializable.
+    const token = 'fixedtesttoken';
+    const temps = blobGenerationTempNames('gen-atomic', token);
+    const sidecarName = blobGenerationDigestFileName('gen-atomic');
+    const seams = createBlobSeams({
+      db,
+      blobs: store,
+      census: photoCensus(),
+      tempToken: () => token,
+      afterByteFinalPublish: () => mkdirSync(join(blobsDir, sidecarName)),
+    });
+    assert.throws(() => seams.materialize('gen-atomic', blobsDir), /EEXIST|already exists/, 'the sidecar publish fails');
+    assert.equal(existsSync(join(blobsDir, 'gen-atomic')), false, 'the published byte final was removed by the ownership-verified rollback');
+    assert.equal(existsSync(join(blobsDir, temps.byte)), false, 'the byte temp was rolled back');
+    assert.equal(existsSync(join(blobsDir, temps.sidecar)), false, 'the sidecar temp was rolled back');
+    assert.equal(existsSync(join(blobsDir, sidecarName)), true, 'rollback never removes what it did not create — the planted blocker is untouched');
+    assert.deepEqual(
+      readdirSync(blobsDir).sort(),
+      [sidecarName].sort(),
+      'only the planted blocker remains — no temp, no claim, no partial generation',
+    );
+
+    // The destination is clean again, so the next materialize of the same
+    // generation into the SAME directory re-materializes it fully.
+    rmSync(join(blobsDir, sidecarName), { recursive: true, force: true });
+    const retry = createBlobSeams({ db, blobs: store, census: photoCensus() });
+    retry.materialize('gen-atomic', blobsDir);
+    assert.equal(existsSync(join(blobsDir, 'gen-atomic')), true, 're-materialized after the rollback');
+    assert.equal(existsSync(join(blobsDir, sidecarName)), true, 'the digest sidecar is present after re-materialization');
+  } finally {
+    cleanupRoots(root, blobsDir);
+  }
+});
+
+test('ownership-verified rollback never removes a foreign file swapped onto the published final path (no check-then-act TOCTOU)', async () => {
+  const { root, db, store, adopt } = await setupStore();
+  const blobsDir = mkdtempSync(join(tmpdir(), 'wb-materialize-'));
+  try {
+    adopt(Buffer.from('atomic bytes'), 'gen-atomic');
+    // Simulate a winner's final replacing this invocation's byte final between
+    // its publish and its rollback: the after-byte-publish hook unlinks the
+    // byte final and puts a DIFFERENT file (different inode) at the path, and
+    // plants a directory at the sidecar final so the invocation fails after
+    // publish. The ownership-verified rollback must NOT delete the foreign file
+    // — a losing materializer never deletes a winner's final, atomically.
+    const token = 'fixedtesttoken';
+    const temps = blobGenerationTempNames('gen-atomic', token);
+    const sidecarName = blobGenerationDigestFileName('gen-atomic');
+    const byteFinal = join(blobsDir, 'gen-atomic');
+    const seams = createBlobSeams({
+      db,
+      blobs: store,
+      census: photoCensus(),
+      tempToken: () => token,
+      afterByteFinalPublish: () => {
+        // The hook runs AFTER this invocation published its byte final: swap a
+        // foreign file in at the same path (a new inode, simulating a winner's
+        // final), then block the sidecar to force the failure.
+        rmSync(byteFinal, { force: true });
+        writeFileSync(byteFinal, 'foreign winner bytes');
+        mkdirSync(join(blobsDir, sidecarName));
+      },
+    });
+    assert.throws(() => seams.materialize('gen-atomic', blobsDir), /EEXIST|already exists/, 'the sidecar publish fails');
+    assert.equal(
+      readFileSync(join(blobsDir, 'gen-atomic'), 'utf8'),
+      'foreign winner bytes',
+      'the foreign file at the final path was NOT deleted by the losing materializer\'s rollback',
+    );
+    assert.equal(existsSync(join(blobsDir, sidecarName)), true, 'the planted blocker is untouched');
+    assert.equal(existsSync(join(blobsDir, temps.byte)), false, 'the byte temp was rolled back');
+    assert.equal(existsSync(join(blobsDir, temps.sidecar)), false, 'the sidecar temp was rolled back');
+  } finally {
+    cleanupRoots(root, blobsDir);
+  }
+});
+
 // ---- real backup-manager integration over the real source + seam ---------
 
 async function setupRealBackup() {

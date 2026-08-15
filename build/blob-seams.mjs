@@ -51,20 +51,30 @@
 //     Publication is NO-CLOBBER (a hard link created only when the final name
 //     is free — never a replace-on-collision rename), so a later writer can
 //     NEVER overwrite an earlier winner's final, and rollback is
-//     OWNERSHIP-VERIFIED (a final is removed only while it is still the exact
-//     file this invocation created — same device + inode), so a losing
-//     materializer never deletes a winner's final. A mid-sequence failure rolls
-//     back exactly the files THAT invocation created — a losing concurrent
-//     materializer never deletes the winner's temps or finals, across every
-//     context, even separate processes that share no lock state.
+//     OWNERSHIP-VERIFIED AND ATOMIC: a final is removed only while it is still
+//     the exact file this invocation created (same device + inode), and the
+//     check is never check-then-act on a shared path — the final is claimed by
+//     an atomic rename to a fresh per-call name no other actor holds, the claim
+//     is verified, and only a matching claim is removed (a foreign file that
+//     replaced this invocation's final is restored in place), so a losing
+//     materializer NEVER deletes a winner's final. A mid-sequence failure rolls
+//     back exactly the files THAT invocation created — its temps (unique
+//     per-call names) and its own published finals (atomic, ownership-verified)
+//     — a losing concurrent materializer never deletes the winner's temps or
+//     finals, across every context, even separate processes that share no lock
+//     state. A partial final left by a CRASHED materializer (its rollback never
+//     ran) fails closed on the next materialize — never overwritten, never
+//     reclaimed by a writer — and is retired when the backup/recovery manager
+//     quarantines or discards the destination directory it sits in.
 //
 //     A per-destination lock keyed by the destination's resolved realpath
 //     additionally serializes writers WITHIN a shared lock buffer (worker
 //     threads sharing BlobSeamsOptions.lockBuffer fail a genuinely-contended
 //     destination closed, fast). The lock is an optimization and fast-fail, not
-//     the correctness authority: the no-clobber publish + ownership-verified
-//     rollback are what keep concurrent materializers collision-free even when
-//     they never share any lock state (separate processes).
+//     the correctness authority: the no-clobber publish + atomic
+//     ownership-verified rollback are what keep concurrent materializers
+//     collision-free even when they never share any lock state (separate
+//     processes).
 //
 // The seam's own digest verification at `materialize` time is against the
 // BlobStore's recorded sha256 (the digests the manifest's census links to);
@@ -79,6 +89,7 @@ import {
   mkdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   unlinkSync,
@@ -230,6 +241,16 @@ function releaseDestinationLock(slots            , realPath        )       {
 
 
 
+                
+                                       
+
+
+
+
+
+
+
+
 
 
 
@@ -362,9 +383,15 @@ function resolveBlobDestinationDir(destBlobDir        )         {
 // otherwise), unlike rename(2) which silently replaces a destination. This is
 // the load-bearing no-final-overwrite guarantee: a later writer can NEVER
 // overwrite an earlier winner's final, no matter which processes or lock
-// buffers are involved. Returns the final's identity for ownership-verified
-// rollback.
+// buffers are involved. Returns the final's identity for the atomic
+// ownership-verified rollback.
 function publishNoClobber(tmp        , final        , what        )               {
+  // Record the identity from the TEMP before the link: the temp is exclusively
+  // this invocation's (unique token + 'wx' creation), so its dev+ino is the
+  // exact identity of the file being published, with no window in which a
+  // foreign file at the final path could be attributed to this invocation.
+  const st = statSync(tmp);
+  const identity = { dev: st.dev, ino: st.ino };
   try {
     linkSync(tmp, final);
   } catch (err) {
@@ -373,29 +400,51 @@ function publishNoClobber(tmp        , final        , what        )             
     }
     throw err;
   }
-  // The temp and the final now name the SAME inode; record its identity so a
-  // later failure can remove this invocation's final only while it is still
-  // that exact file.
-  const st = statSync(final);
-  return { dev: st.dev, ino: st.ino };
+  return identity;
 }
 
 // Ownership-verified rollback of a final this invocation published: remove it
-// ONLY while the file at `finalPath` is still the recorded identity. If the
-// path no longer exists, or now holds a DIFFERENT file (a winner's final that
-// replaced this one after it was removed), leave it alone — a losing
-// materializer must never delete a winner's final.
+// ONLY while the path is still the exact file this invocation created. The
+// check and the removal are made ATOMIC by a RENAME-CLAIM: whatever currently
+// sits at the final path is first renamed (rename(2), atomic, same directory →
+// same filesystem) to a fresh claim name only THIS call can know, the claim is
+// then identity-checked, and only a matching claim is removed. A replacement
+// (a winner's final that took over the path) is renamed back untouched, so a
+// losing materializer never deletes a winner's final — and because the claim
+// name is random and known only to this invocation, no other actor can race
+// the check against the removal.
 function removeOwnedFile(finalPath        , identity                          )       {
   if (!identity) return;
-  let current                             ;
+  const claimPath = `${finalPath}.${randomBytes(6).toString('hex')}.claim`;
+  let claimed                              ;
   try {
-    current = statSync(finalPath);
+    renameSync(finalPath, claimPath);
   } catch {
     return; // already gone — nothing this invocation owns remains
   }
-  if (current.dev !== identity.dev || current.ino !== identity.ino) return;
   try {
-    rmSync(finalPath, { force: true });
+    claimed = lstatSync(claimPath);
+  } catch {
+    return; // the claim vanished before it could be inspected
+  }
+  if (claimed.dev !== identity.dev || claimed.ino !== identity.ino) {
+    // A winner's/foreign file now holds the final path — restore it WITHOUT
+    // clobbering anything that may have been published into the freed name
+    // since the claim: link(2) succeeds only while the final name is free. If
+    // the name is already taken again, the claimed file stays under its unique
+    // claim name (litter, never deletion or overwrite of a winner's file).
+    try {
+      linkSync(claimPath, finalPath);
+      rmSync(claimPath, { force: true });
+    } catch {
+      /* best-effort restore of the winner's final */
+    }
+    return;
+  }
+  try {
+    // The claim is the file this invocation created — remove only that name
+    // (never recursive: a matching claim is always the regular file we wrote).
+    rmSync(claimPath, { force: true });
   } catch {
     /* best-effort rollback of the partial generation */
   }
@@ -413,16 +462,18 @@ function removeOwnedFile(finalPath        , identity                          ) 
 // final. A mid-sequence failure rolls back exactly the files THIS invocation
 // created: its own temps (unique names, so a concurrent materializer's files
 // can never be removed here) and any final it published, and only while that
-// final's identity still matches (removeOwnedFile — a loser never deletes a
-// winner's final). The per-destination lock additionally fails a contended
-// destination closed fast within a shared lock buffer; the guarantees above
-// hold with or without it.
+// final is still the exact file it wrote (removeOwnedFile — an atomic
+// rename-claim + identity check, so a losing materializer never deletes a
+// winner's final, with no check-then-remove window). The per-destination lock
+// additionally fails a contended destination closed fast within a shared lock
+// buffer; the guarantees above hold with or without it.
 function writeGenerationAtomically(
   destRealDir        ,
   generation        ,
   bytes        ,
   tempToken              ,
   lockSlots            ,
+  afterByteFinalPublish             ,
 )       {
   if (!tryAcquireDestinationLock(lockSlots, destRealDir)) {
     throw new Error(
@@ -450,6 +501,7 @@ function writeGenerationAtomically(
       sidecarCreated = true;
       byteFinalIdentity = publishNoClobber(byteTmp, byteFinal, `generation ${name}`);
       unlinkSync(byteTmp);
+      afterByteFinalPublish?.();
       sidecarFinalIdentity = publishNoClobber(sidecarTmp, sidecarFinal, `digest sidecar ${sidecarName}`);
       unlinkSync(sidecarTmp);
     } catch (err) {
@@ -550,6 +602,7 @@ export function createBlobSeams(options                  )            {
   // threads (see BlobSeamsOptions).
   const materializeToken = options.tempToken ?? (() => randomBytes(6).toString('hex'));
   const lockSlots = new Int32Array(options.lockBuffer ?? defaultLockBuffer);
+  const afterByteFinalPublish = options.afterByteFinalPublish;
 
   // ---- backup side (BackupBlobSource) ------------------------------------
 
@@ -618,7 +671,7 @@ export function createBlobSeams(options                  )            {
       );
     }
     const destRealDir = resolveBlobDestinationDir(destBlobDir);
-    writeGenerationAtomically(destRealDir, generation, bytes, materializeToken, lockSlots);
+    writeGenerationAtomically(destRealDir, generation, bytes, materializeToken, lockSlots, afterByteFinalPublish);
     return [{ name, size: bytes.length }];
   }
 
@@ -656,7 +709,7 @@ export function createBlobSeams(options                  )            {
       );
     }
     const destRealDir = resolveBlobDestinationDir(destBlobDir);
-    writeGenerationAtomically(destRealDir, generation, bytes, materializeToken, lockSlots);
+    writeGenerationAtomically(destRealDir, generation, bytes, materializeToken, lockSlots, afterByteFinalPublish);
     return [{ name: verified.name, size: bytes.length }];
   }
 
