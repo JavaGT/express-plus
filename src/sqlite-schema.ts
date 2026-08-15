@@ -402,6 +402,7 @@ interface SqliteSchemaInput {
   name?: unknown;
   tables?: unknown;
   externalTables?: unknown;
+  externalTriggers?: unknown;
   migrations?: unknown;
   virtualTables?: unknown;
 }
@@ -518,6 +519,26 @@ function validateSpec(input: unknown): void {
       columnsByName.set(columnKey, { name: columnName });
     }
     referencedTablesByName.set(externalKey, { table: externalTable as SqliteTableSpec, columnsByName });
+  }
+
+  // Out-of-band triggers (on external or framework tables) the fixture/app
+  // created; declared as schema-owned knowledge for the census. Duplicate
+  // names within one schema are a declaration error.
+  if (spec.externalTriggers !== undefined && !Array.isArray(spec.externalTriggers)) {
+    throw new Error('schema externalTriggers must be an array');
+  }
+  const externalTriggers = (spec.externalTriggers ?? []) as unknown[];
+  const seenExternalTriggers = new Set<string>();
+  for (const trigger of externalTriggers) {
+    if (trigger === null || typeof trigger !== 'object') {
+      throw new Error('external trigger declaration must be an object');
+    }
+    requireName((trigger as LooseTrigger).name, 'external trigger name');
+    const triggerKey = folded((trigger as LooseTrigger).name as string);
+    if (seenExternalTriggers.has(triggerKey)) {
+      throw new Error(`duplicate external trigger "${(trigger as LooseTrigger).name}"`);
+    }
+    seenExternalTriggers.add(triggerKey);
   }
 
   // A virtual table claims a real table name, so it must not collide with an
@@ -828,6 +849,9 @@ export interface SqliteSchemaSpec {
   name: string;
   tables: readonly SqliteTableSpec[];
   externalTables?: readonly { name: string; columns: readonly string[] }[];
+  // Triggers the fixture/application created out-of-band (on external or
+  // framework tables); declared as schema-owned knowledge for the census.
+  externalTriggers?: readonly { name: string }[];
   virtualTables?: readonly SqliteVirtualTableSpec[];
   migrations?: readonly SqliteMigrationSpec[];
 }
@@ -838,6 +862,8 @@ export interface SqliteSchemaDescription {
   tables: readonly SqliteTableSpec[];
   /** Tables supplied outside this schema's lifecycle, retained for startup census validation. */
   externalTables: readonly { name: string; columns: readonly string[] }[];
+  /** Triggers supplied outside this schema's lifecycle, retained for startup census validation. */
+  externalTriggers: readonly { name: string }[];
   virtualTables: readonly SqliteVirtualTableSpec[];
   triggers: readonly SqliteTriggerSpec[];
   migrations: readonly SqliteMigrationSpec[];
@@ -878,6 +904,7 @@ export function defineSqliteSchema(spec: SqliteSchemaInput): SqliteSchemaDescrip
     name: table.name,
     columns: Object.freeze([...table.columns]),
   })));
+  const externalTriggers = Object.freeze((validated.externalTriggers ?? []).map((trigger) => Object.freeze({ name: trigger.name })));
   const virtualTables = Object.freeze((validated.virtualTables ?? []).map((virtualTable) => Object.freeze({
     ...virtualTable,
     options: Object.freeze([...virtualTable.options]),
@@ -902,6 +929,7 @@ export function defineSqliteSchema(spec: SqliteSchemaInput): SqliteSchemaDescrip
     tableNames: Object.freeze(tableNames),
     tables,
     externalTables,
+    externalTriggers,
     virtualTables,
     triggers,
     migrations: Object.freeze(migrations),

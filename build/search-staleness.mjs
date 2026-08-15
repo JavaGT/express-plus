@@ -13,9 +13,10 @@
 //      source only (the scoped reader reads committed rows), so a plugin can
 //      never index uncommitted state.
 //   2. DURABILITY — the ledger is a SQLite table (_SearchStaleness) created by
-//      the bridge when engaged. It is operational, plugin-owned state, not
-//      domain history: it survives restart and a pending set is re-processable
-//      by a fresh bridge over the same database.
+//      the bridge when engaged. It is framework-owned shared operational state
+//      (declared centrally in operational-ledger-ddl.ts; no individual plugin
+//      owns it), not domain history: it survives restart and a pending set is
+//      re-processable by a fresh bridge over the same database.
 //   3. COALESCING — the primary key is (sourceResource, sourceKey). Every
 //      notification for one source key UPSERTs the same row (collapsing to the
 //      newest notification with the highest priority seen), and a drain
@@ -53,6 +54,7 @@
 import { SEARCH_STALENESS_LEDGER_TABLE,                                                                     } from './search-plugin.mjs';
 
 import { normalizeRevocationScope,                              } from './live-fanout.mjs';
+import { renderSearchStalenessDdl } from './operational-ledger-ddl.mjs';
 
 // The closed vocabulary of a staleness record's cause. A source change is
 // ordinary reconciliation input; a revocation or erasure is a HIGH-priority
@@ -223,22 +225,14 @@ function priorityLabel(priority        )                          {
   return priority >= SEARCH_STALENESS_PRIORITY_HIGH ? 'high' : 'ordinary';
 }
 
-// The durable ledger DDL. Plugin-owned operational state: created by the
-// bridge when engaged, never by the framework DDL generators (the census test
-// owns the framework table list), and carrying no triggers on source tables.
+// The durable ledger DDL. Framework-owned shared operational state: declared
+// centrally in operational-ledger-ddl.ts (the census owns the framework table
+// list), created lazily by the bridge when engaged, and carrying no triggers on
+// source tables. The canonical name is declared there; a custom name is
+// rendered by the same builder so the executed DDL can never drift from the
+// declaration.
 export function searchStalenessDdl(tableName         = DEFAULT_TABLE_NAME)         {
-  return `CREATE TABLE IF NOT EXISTS ${tableName} (
-  sourceResource TEXT NOT NULL,
-  sourceKey TEXT NOT NULL,
-  kind TEXT NOT NULL,
-  priority INTEGER NOT NULL,
-  affected TEXT NOT NULL,
-  payload TEXT NOT NULL,
-  tier TEXT,
-  changedAt TEXT NOT NULL,
-  committedAt TEXT NOT NULL,
-  PRIMARY KEY (sourceResource, sourceKey)
-);`;
+  return renderSearchStalenessDdl(tableName);
 }
 
 

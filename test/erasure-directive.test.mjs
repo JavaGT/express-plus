@@ -7,6 +7,43 @@ import workbench, { durableHistory, erasureDirective, erasureDirectivePreparatio
 import { generateFrameworkDDL, prepareErasureDirective } from '../build/internal.mjs';
 import { frameworkTableNames } from '../build/server.mjs';
 import { frameworkTableNamesWithoutAuthCompile } from '../build/framework-table-names.mjs';
+import { defineSqliteSchema } from '../build/server.mjs';
+
+// Fixture tables the tests create out-of-band (application domain tables plus
+// the deliberately non-canonical underscore identifiers used to prove the
+// erasure guard denies them) and the triggers they carry; declared through the
+// externalTables/externalTriggers seams so the settled census attributes them
+// to this schema. Declaring does not create them and does not grant write
+// authority — the guard under test still denies every access.
+const fixtureSchema = defineSqliteSchema({
+  name: 'erasure-directive-fixtures',
+  tables: [],
+  externalTables: [
+    { name: 'DomainSource', columns: ['id'] },
+    { name: 'DomainCleanup', columns: ['id'] },
+    { name: 'DomainSourceIntegrity', columns: ['sourceId', 'value'] },
+    { name: 'OtherTable', columns: ['id'] },
+    { name: 'BaseTable', columns: ['id'] },
+    { name: 'Parent', columns: ['id'] },
+    { name: 'Child', columns: ['id'] },
+    { name: '_ApplicationDeletion', columns: ['id', 'status'] },
+    { name: '_ApplicationCleanupOutbox', columns: ['id', 'deletionId'] },
+    { name: '_ApplicationChild', columns: ['id', 'parentId'] },
+    { name: '_ApplicationParent', columns: ['id'] },
+    { name: '_ApplicationPrivate', columns: ['id'] },
+    { name: '__ApplicationPrivate', columns: ['id'] },
+    { name: '_Application Private', columns: ['id'] },
+    { name: '_Application"Private', columns: ['id'] },
+  ],
+  externalTriggers: [
+    { name: 'source_trigger' },
+    { name: 'source_view_trigger' },
+    { name: 'other_trigger' },
+    { name: 'log_trigger' },
+    { name: 'domain_source_integrity' },
+    { name: 'cleanup_escape' },
+  ],
+});
 
 const scope = 'Project:project-1';
 const oldData = JSON.stringify({ projectId: 'project-1', id: 'artefact-1', sensitive: 'remove-me' });
@@ -64,7 +101,7 @@ function app(db, makeDirective, erasure = true) {
   const privilege = erasure === true ? true : {
     tables: erasure.tables ?? ['DomainCleanup'], readTables: erasure.readTables ?? [], ...erasure,
   };
-  return workbench({ db, actions: [{
+  return workbench({ db, schema: fixtureSchema, actions: [{
     type: 'lifecycle.purge', erasure: privilege, history: { cursor: 'excluded' }, authorize: () => true,
     handler(context) {
       return { events: [{ type: 'lifecycle.purged', scope, data: { done: true } }], directive: makeDirective(context.db) };
@@ -259,7 +296,7 @@ test('preparation receives authentic frozen action/subject context with canonica
 
 test('preparation action context is snapshotted before the handler can mutate its request', async () => {
   const db = fixture(); let observed;
-  const instance = workbench({ db, actions: [{
+  const instance = workbench({ db, schema: fixtureSchema, actions: [{
     type: 'lifecycle.purge', erasure: { tables: [], readTables: [], prepare({ context }) { observed = JSON.parse(JSON.stringify(context)); } },
     history: { cursor: 'excluded' }, authorize: () => true,
     handler(context) {
@@ -282,7 +319,7 @@ test('preparation action context is snapshotted before the handler can mutate it
 
 test('preparation action context is snapshotted before authorization can mutate its request', async () => {
   const db = fixture(); let observed; let authorizationCalls = 0;
-  const instance = workbench({ db, actions: [{
+  const instance = workbench({ db, schema: fixtureSchema, actions: [{
     type: 'lifecycle.purge', erasure: { tables: [], readTables: [], prepare({ context }) { observed = JSON.parse(JSON.stringify(context)); } },
     history: { cursor: 'excluded' },
     authorize({ payload, principal }) {
@@ -452,7 +489,7 @@ test('private projection replay does not invoke erasure preparation', async () =
 
 test('ordinary actions cannot opt into erasure preparation', async () => {
   const db = fixture();
-  const ordinary = workbench({ db, actions: [{
+  const ordinary = workbench({ db, schema: fixtureSchema, actions: [{
     type: 'ordinary.action', erasure: { tables: [], readTables: [], prepare() {} }, authorize: () => true, handler: () => [],
   }] });
   await assert.rejects(ordinary.start(), /must exclude its history cursor/);
@@ -493,7 +530,7 @@ test('a stale erasure manifest rolls back its new event and leaves existing hist
 
 test('only an explicitly privileged, cursor-excluded registered action can return an erasure directive', async () => {
   const db = fixture();
-  const unprivileged = workbench({ db, actions: [{
+  const unprivileged = workbench({ db, schema: fixtureSchema, actions: [{
     type: 'not.purge', history: { cursor: 'excluded' }, authorize: () => true,
     handler(context) { return { events: [], directive: directive(context.db) }; },
   }] });
@@ -501,7 +538,7 @@ test('only an explicitly privileged, cursor-excluded registered action can retur
   const result = await unprivileged.dispatch({ actionId: 'not-purge', type: 'not.purge', payload: {}, principal: { type: 'user', id: 'u1' }, scope });
   assert.equal(result.ok, false);
   assert.equal(db.prepare('SELECT eventType FROM _Log WHERE scope = ? AND seq = 1').get(scope).eventType, 'artefact.deleted');
-  const invalid = workbench({ db: new DatabaseSync(':memory:'), actions: [{
+  const invalid = workbench({ db: new DatabaseSync(':memory:'), schema: fixtureSchema, actions: [{
     type: 'bad.purge', erasure: true, authorize: () => true, handler: () => [],
   }] });
   await assert.rejects(invalid.start(), /must exclude its history cursor/);
@@ -559,7 +596,7 @@ test('erasure prunes durableHistory frame cursors and erases private facts so er
       },
     },
   });
-  const instance = workbench({ db, history, actions: [
+  const instance = workbench({ db, schema: fixtureSchema, history, actions: [
     {
       type: 'document.set', authorize: () => true,
       handler({ payload }) {

@@ -1,5 +1,6 @@
 /// <reference types="node" />
 
+import type { Readable } from 'node:stream';
 import type {
   BoundWorkbenchEntity,
   EntityDeclaration,
@@ -845,6 +846,8 @@ export interface SqliteSchemaResult {
   readonly tables: readonly Readonly<TableDeclaration>[];
   /** Tables supplied outside this schema's lifecycle, used for startup census validation. */
   readonly externalTables: readonly { readonly name: string; readonly columns: readonly string[] }[];
+  /** Triggers supplied outside this schema's lifecycle, used for startup census validation. */
+  readonly externalTriggers: readonly { readonly name: string }[];
   readonly virtualTables: readonly Readonly<VirtualTableDeclaration>[];
   readonly triggers: readonly Readonly<TriggerDeclaration>[];
   readonly migrations: readonly NamespacedMigration[];
@@ -860,6 +863,7 @@ export interface SqliteSchemaResult {
 export function defineSqliteSchema(spec: {
   name: string;
   externalTables?: readonly { name: string; columns: readonly string[] }[];
+  externalTriggers?: readonly { name: string }[];
   virtualTables?: readonly VirtualTableDeclaration[];
   tables: readonly TableDeclaration[];
   migrations?: readonly NamespacedMigration[];

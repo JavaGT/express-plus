@@ -396,6 +396,32 @@ test('reserved namespace: external table declaration claiming a framework table'
   assert.deepEqual(errorCodes(result), ['reserved-namespace']);
 });
 
+test('external triggers are schema-owned knowledge for the census', () => {
+  const schema = {
+    name: 'app',
+    tables: [],
+    externalTables: [{ name: 'Note', columns: ['id'] }],
+    externalTriggers: [{ name: 'note_audit' }, { name: 'note_guard' }],
+  };
+  const result = buildOwnershipCensus({
+    schemaDeclarations: [schema],
+    observed: [
+      { type: 'table', name: 'Note' },
+      { type: 'trigger', name: 'note_audit' },
+      { type: 'trigger', name: 'note_guard' },
+    ],
+  });
+  assert.deepEqual(errorCodes(result), [], `unexpected errors: ${JSON.stringify(result.errors)}`);
+  assert.equal(result.census.get(censusKey('trigger', 'note_audit')).kind, 'schema');
+  assert.equal(result.census.get(censusKey('trigger', 'note_guard')).owner, 'app');
+});
+
+test('reserved namespace: an external trigger declaration claiming a framework trigger name', () => {
+  const schema = { name: 'app', tables: [], externalTriggers: [{ name: 'idx__job_claim' }] };
+  const result = buildOwnershipCensus({ schemaDeclarations: [schema] });
+  assert.deepEqual(errorCodes(result), ['reserved-namespace']);
+});
+
 test('reserved registry exports: without-auth-compile is a subset of the full registry', () => {
   for (const name of frameworkReservedNamesWithoutAuthCompile) {
     assert.ok(frameworkReservedNames.has(name), `full registry must include ${name}`);
@@ -403,6 +429,13 @@ test('reserved registry exports: without-auth-compile is a subset of the full re
   // The full registry additionally knows auth-entity generated objects.
   assert.ok(frameworkReservedNames.has('idx_session_schedule_createdat'));
   assert.ok(frameworkObjects.some((object) => object.kind === 'index' && object.name === 'idx_Session_schedule_createdAt' && object.fromAuthEntity === 'Session'));
+  // The lazily materialized operational ledgers are declared centrally and are
+  // framework-owned from the first boot (declaring != creating).
+  for (const ledger of ['_SearchStaleness', '_DerivedResource', '_SchemaMaintenance']) {
+    assert.ok(frameworkReservedNames.has(ledger.toLowerCase()), `${ledger} is reserved`);
+    assert.ok(frameworkTableNames.includes(ledger), `${ledger} is a framework table`);
+    assert.ok(frameworkObjects.some((object) => object.kind === 'table' && object.name === ledger), `${ledger} is a framework object`);
+  }
   // Existing framework table census is unchanged (A5 rewires without breaking boot).
   assert.ok(Array.isArray(frameworkTableNames) && Object.isFrozen(frameworkTableNames));
 });

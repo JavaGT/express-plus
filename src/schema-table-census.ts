@@ -9,6 +9,7 @@ import {
   User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor,
 } from './auth/entities.ts';
 import { MIGRATION_DDL } from './migrations.ts';
+import { OPERATIONAL_LEDGER_DDL } from './operational-ledger-ddl.ts';
 import {
   collectTableNamesFromDdl as collectNames,
   collectObjectNamesFromDdl,
@@ -77,6 +78,9 @@ function collectFrameworkTableNames(): readonly string[] {
     entries.push({ source: 'framework DDL', sql });
   }
   entries.push({ source: 'migration DDL', sql: MIGRATION_DDL });
+  for (const sql of OPERATIONAL_LEDGER_DDL) {
+    entries.push({ source: 'operational ledger DDL', sql });
+  }
   for (const entity of AUTH_ENTITIES) {
     for (const sql of generateDDL(entity)) {
       entries.push({ source: `auth entity ${entity.name}`, sql });
@@ -160,6 +164,9 @@ function collectFrameworkObjectsList(): readonly FrameworkOwnedObject[] {
     frameworkEntries.push({ source: 'framework DDL', sql });
   }
   frameworkEntries.push({ source: 'migration DDL', sql: MIGRATION_DDL });
+  for (const sql of OPERATIONAL_LEDGER_DDL) {
+    frameworkEntries.push({ source: 'operational ledger DDL', sql });
+  }
   pushSet('tables', 'table', frameworkEntries, 'framework');
   pushSet('indexes', 'index', frameworkEntries, 'framework');
   pushSet('triggers', 'trigger', frameworkEntries, 'framework');

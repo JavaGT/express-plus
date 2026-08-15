@@ -165,7 +165,7 @@ test('authorizeFieldOp rejects a write to a protected field with a generic 403 (
 test('live subscribe interest error never reveals the requested field name', async () => {
   const { db, app } = bootDoc();
   const conn = { id: 'c1', closed: false, principal: bob, send() {} };
-  const fanout = { subscriptionCount: () => 0, hasSubscription: () => false };
+  const fanout = { subscriptionCount: () => 0, collectionSubscriptionCount: () => 0, hasSubscription: () => false };
   const deps = {
     resolveEntity: (name) => app.entities.get(name),
     mayVerb: async () => true,

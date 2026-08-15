@@ -16,8 +16,20 @@ import { runWorkbenchMigrations, appliedWorkbenchVersion, ensureWorkbenchMigrati
 import { checksumOf } from '../build/migrations.mjs';
 import { applyTextOp, createTextState, textCheckpoint } from '../build/annotated-text.mjs';
 import { createTextFamily, materializeText, restoreTextFamily, textFamilyCheckpoint } from '../build/annotated-text-continuous.mjs';
+import { defineSqliteSchema } from '../build/server.mjs';
 
 const prefix = 'Doc_body';
+
+// The parent entity table the A10 legacy-schema test pre-creates alongside the
+// Transcript entity; declared through the externalTables seam so the settled
+// census attributes it to this schema (Workbench does not create it).
+const fixtureSchema = defineSqliteSchema({
+  name: 'authoring-checkpoint-fixtures',
+  tables: [],
+  externalTables: [
+    { name: 'Project', columns: ['id'] },
+  ],
+});
 
 // Canonical (fresh-DB) authoring stream tables, exactly as the package DDL emits.
 function baseDocTable() {
@@ -538,21 +550,25 @@ test('A10: app.prepareSchema upgrades a legacy authoring schema via the built-in
     combine({ left, right }) { return Object.freeze({ version: 1, payload: Object.freeze({ text: `${left?.payload.text ?? ''}${right?.payload.text ?? ''}` }) }); },
   }));
   const db = new DatabaseSync(':memory:');
-  // Legacy authoring tables (pre-dedup shape) AND the parent entity table.
+  // Legacy authoring tables (pre-dedup shape) AND the parent entity table. The
+  // prefix must match the registered entity's own annotated-text prefix
+  // (Transcript_body) so the legacy family IS the entity's family: the census
+  // declares it and the built-in migration rebuilds it in place.
+  const legacyPrefix = 'Transcript_body';
   db.exec(`
     CREATE TABLE Transcript (id TEXT PRIMARY KEY);
     CREATE TABLE Project (id TEXT PRIMARY KEY);
     CREATE TABLE User (id TEXT PRIMARY KEY);
-    CREATE TABLE ${prefix}_authoring_stream (id TEXT PRIMARY KEY, document_id TEXT NOT NULL, principal_type TEXT NOT NULL, principal_id TEXT NOT NULL, created_at TEXT NOT NULL, last_used_at TEXT NOT NULL, expires_at TEXT NOT NULL);
-    CREATE TABLE ${prefix}_authoring_lease (id TEXT PRIMARY KEY, stream_id TEXT NOT NULL, client_nonce_hash TEXT NOT NULL, acknowledged_fence INTEGER NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL);
-    CREATE TABLE ${prefix}_authoring_position (token TEXT PRIMARY KEY, lease_id TEXT NOT NULL, issued_fence INTEGER NOT NULL, block_id TEXT, family_checkpoint TEXT NOT NULL, visible_at_issue INTEGER NOT NULL, created_at TEXT NOT NULL);
-    CREATE TABLE ${prefix}_authoring_group (token TEXT PRIMARY KEY, lease_id TEXT NOT NULL, issued_fence INTEGER NOT NULL, group_id TEXT, visible_blocks TEXT NOT NULL, assignable INTEGER NOT NULL, created_at TEXT NOT NULL);
-    CREATE TABLE ${prefix}_authoring_snapshot (id TEXT PRIMARY KEY, lease_id TEXT NOT NULL, fence INTEGER NOT NULL, issued_at TEXT NOT NULL, acknowledged_at TEXT);
-    CREATE TABLE ${prefix}_authoring_snapshot_position (snapshot_id TEXT NOT NULL, position_token TEXT NOT NULL, PRIMARY KEY (snapshot_id, position_token));
-    CREATE TABLE ${prefix}_authoring_split (lease_id TEXT NOT NULL, temporary_block TEXT NOT NULL, authoritative_block_id TEXT NOT NULL, position_token TEXT NOT NULL, action_id TEXT NOT NULL, mutation_id TEXT NOT NULL, fence INTEGER NOT NULL, created_at TEXT NOT NULL);
+    CREATE TABLE ${legacyPrefix}_authoring_stream (id TEXT PRIMARY KEY, document_id TEXT NOT NULL, principal_type TEXT NOT NULL, principal_id TEXT NOT NULL, created_at TEXT NOT NULL, last_used_at TEXT NOT NULL, expires_at TEXT NOT NULL);
+    CREATE TABLE ${legacyPrefix}_authoring_lease (id TEXT PRIMARY KEY, stream_id TEXT NOT NULL, client_nonce_hash TEXT NOT NULL, acknowledged_fence INTEGER NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL);
+    CREATE TABLE ${legacyPrefix}_authoring_position (token TEXT PRIMARY KEY, lease_id TEXT NOT NULL, issued_fence INTEGER NOT NULL, block_id TEXT, family_checkpoint TEXT NOT NULL, visible_at_issue INTEGER NOT NULL, created_at TEXT NOT NULL);
+    CREATE TABLE ${legacyPrefix}_authoring_group (token TEXT PRIMARY KEY, lease_id TEXT NOT NULL, issued_fence INTEGER NOT NULL, group_id TEXT, visible_blocks TEXT NOT NULL, assignable INTEGER NOT NULL, created_at TEXT NOT NULL);
+    CREATE TABLE ${legacyPrefix}_authoring_snapshot (id TEXT PRIMARY KEY, lease_id TEXT NOT NULL, fence INTEGER NOT NULL, issued_at TEXT NOT NULL, acknowledged_at TEXT);
+    CREATE TABLE ${legacyPrefix}_authoring_snapshot_position (snapshot_id TEXT NOT NULL, position_token TEXT NOT NULL, PRIMARY KEY (snapshot_id, position_token));
+    CREATE TABLE ${legacyPrefix}_authoring_split (lease_id TEXT NOT NULL, temporary_block TEXT NOT NULL, authoritative_block_id TEXT NOT NULL, position_token TEXT NOT NULL, action_id TEXT NOT NULL, mutation_id TEXT NOT NULL, fence INTEGER NOT NULL, created_at TEXT NOT NULL);
   `);
-  db.prepare(`INSERT INTO ${prefix}_authoring_lease (id, stream_id, client_nonce_hash, acknowledged_fence, created_at, expires_at) VALUES ('lease-1', 's1', 'n1', 0, '2020-01-01', '2099-01-01')`).run();
-  db.prepare(`INSERT INTO ${prefix}_authoring_position (token, lease_id, issued_fence, block_id, family_checkpoint, visible_at_issue, created_at) VALUES ('pos-1', 'lease-1', 1, 'block-1', '{"a":1}', 1, '2020-01-01')`).run();
+  db.prepare(`INSERT INTO ${legacyPrefix}_authoring_lease (id, stream_id, client_nonce_hash, acknowledged_fence, created_at, expires_at) VALUES ('lease-1', 's1', 'n1', 0, '2020-01-01', '2099-01-01')`).run();
+  db.prepare(`INSERT INTO ${legacyPrefix}_authoring_position (token, lease_id, issued_fence, block_id, family_checkpoint, visible_at_issue, created_at) VALUES ('pos-1', 'lease-1', 1, 'block-1', '{"a":1}', 1, '2020-01-01')`).run();
 
   const body = annotatedText({
     project: 'project',
@@ -565,16 +581,16 @@ test('A10: app.prepareSchema upgrades a legacy authoring schema via the built-in
     owner: ref('User'),
     body,
   });
-  const app = workbench({ db, entities: [TranscriptEntity] });
+  const app = workbench({ db, schema: fixtureSchema, entities: [TranscriptEntity] });
   await app.prepareSchema();
 
   // The built-in migration rebuilt the position table into canonical shape.
-  const positionColumns = new Set(db.prepare(`PRAGMA table_info(${prefix}_authoring_position)`).all().map((r) => r.name));
+  const positionColumns = new Set(db.prepare(`PRAGMA table_info(${legacyPrefix}_authoring_position)`).all().map((r) => r.name));
   assert.ok(positionColumns.has('checkpoint_id'), 'position has checkpoint_id after app boot');
   assert.ok(positionColumns.has('family_checkpoint') === false, 'legacy family_checkpoint column removed after app boot');
   const applied = db.prepare("SELECT MAX(version) AS v FROM _SchemaMigration WHERE namespace = 'workbench'").get();
   assert.equal(applied.v, 5, 'Workbench migrations v1–v5 recorded');
-  assert.equal(count(db, `${prefix}_authoring_position`), 0, 'pre-migration legacy positions cleared');
+  assert.equal(count(db, `${legacyPrefix}_authoring_position`), 0, 'pre-migration legacy positions cleared');
   app.db.close();
 });
 

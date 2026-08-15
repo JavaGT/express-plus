@@ -3,7 +3,19 @@ import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 
 import workbench from '../build/index.mjs';
-import { readCommittedCursor } from '../build/server.mjs';
+import { readCommittedCursor, defineSqliteSchema } from '../build/server.mjs';
+
+// The fixture tables the tests create out-of-band and the application
+// projections write; declared through the externalTables seam so the census
+// attributes them to this schema instead of rejecting them as undeclared.
+const fixtureSchema = defineSqliteSchema({
+  name: 'registered-action-fixtures',
+  tables: [],
+  externalTables: [
+    { name: 'Source', columns: ['id', 'projectId', 'name'] },
+    { name: 'ExternalWrite', columns: ['id'] },
+  ],
+});
 
 function sourceAction(_db, authorize = () => true) {
   return {
@@ -30,7 +42,7 @@ function sourceAction(_db, authorize = () => true) {
 async function appWith(action) {
   const db = new DatabaseSync(':memory:');
   db.exec('CREATE TABLE Source (id TEXT PRIMARY KEY, projectId TEXT NOT NULL, name TEXT NOT NULL)');
-  const app = workbench({ db, actions: [action(db)] });
+  const app = workbench({ db, actions: [action(db)], schema: fixtureSchema });
   await app.start();
   return { app, db };
 }
@@ -97,7 +109,7 @@ test('registered action re-enters the public writer without releasing its transa
     }],
   };
   db.exec('CREATE TABLE Source (id TEXT PRIMARY KEY, projectId TEXT NOT NULL, name TEXT NOT NULL)');
-  app = workbench({ db, actions: [action] });
+  app = workbench({ db, actions: [action], schema: fixtureSchema });
   await app.start();
 
   const dispatch = app.dispatch({
@@ -135,7 +147,7 @@ test('a failed re-entrant writer stays inside the dispatch rollback', async () =
       throw new Error('reject re-entrant action');
     },
   };
-  app = workbench({ db, actions: [action] });
+  app = workbench({ db, actions: [action], schema: fixtureSchema });
   await app.start();
 
   const result = await app.dispatch({

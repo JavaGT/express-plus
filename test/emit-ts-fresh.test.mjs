@@ -36,6 +36,7 @@ function walkEmitted(dir, out = []) {
 
 function expectedRuntime(source) {
   return stripTypeScriptTypes(source, { filename: 'module.ts' })
+    .replaceAll(/[ \t]+$/gm, '')
     .replaceAll(/from\s+(['"])(\.\.?\/[^'"]+)\.ts\1/g, 'from $1$2.mjs$1')
     .replaceAll(/import\s+(['"])(\.\.?\/[^'"]+)\.ts\1/g, 'import $1$2.mjs$1')
     .replaceAll(/import\s*\(\s*(['"])(\.\.?\/[^'"]+)\.ts\1\s*\)/g, 'import($1$2.mjs$1)');

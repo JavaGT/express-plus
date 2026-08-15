@@ -229,7 +229,7 @@ test('admission denial — unknown entity fails closed', async () => {
       signal: null,
       deliver: async () => {},
     }),
-    /entity 'BadKey' not found/,
+    /unknown entity 'BadKey'/,
   );
 
   core.close();

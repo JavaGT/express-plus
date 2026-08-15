@@ -38,7 +38,7 @@ function dependencies({ allowed = true } = {}) {
     dependencies: {
       resolveEntity: (name) => name === 'Doc' ? annotatedEntity() : null,
       mayVerb: async () => allowed,
-      fanout: { subscriptionCount: () => 0, hasSubscription: () => false },
+      fanout: { subscriptionCount: () => 0, collectionSubscriptionCount: () => 0, hasSubscription: () => false },
       db,
     },
   };
@@ -102,7 +102,7 @@ test('caret interest requires a compiled declared caret association', async () =
     const deps = {
       resolveEntity: (name) => name === 'WithCaret' ? WithCaret : name === 'WithoutCaret' ? WithoutCaret : null,
       mayVerb: async () => true,
-      fanout: { subscriptionCount: () => 0, hasSubscription: () => false }, db,
+      fanout: { subscriptionCount: () => 0, collectionSubscriptionCount: () => 0, hasSubscription: () => false }, db,
     };
     const conn = { principal: { type: 'user', id: 'alice' } };
     assert.equal((await authorizeSubscription({ type: 'subscribe', entity: 'WithCaret', id: 'd1', carets: ['body'] }, conn, deps)).admitted, true);

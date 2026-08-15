@@ -134,11 +134,6 @@ export function createWebSocketLiveDelivery(httpServer        , {
         if (woken.has(ev.scope)) continue;
         woken.add(ev.scope);
         core.wake(ev.scope);
-        const collection = ev.scope.includes(':') ? ev.scope.slice(0, ev.scope.indexOf(':')) : null;
-        if (collection && !woken.has(collection)) {
-          woken.add(collection);
-          core.wake(collection);
-        }
       }
     };
   }

@@ -6,6 +6,7 @@
 
 import { constants } from 'node:sqlite';
 
+import { DERIVED_RESOURCE_TABLE_DDL } from './operational-ledger-ddl.mjs';
 
 export const DERIVED_RESOURCE_TABLE = '_DerivedResource';
 
@@ -48,13 +49,7 @@ export const DERIVED_RESOURCE_TABLE = '_DerivedResource';
 
 
 
-const DDL = `CREATE TABLE IF NOT EXISTS ${DERIVED_RESOURCE_TABLE} (
-  id TEXT PRIMARY KEY,
-  state TEXT NOT NULL,
-  attempts INTEGER NOT NULL,
-  lastError TEXT,
-  updatedAt TEXT NOT NULL
-)`;
+const DDL = DERIVED_RESOURCE_TABLE_DDL;
 const STATUSES = new Set                       (['absent', 'preparing', 'current', 'stale', 'rebuilding', 'failed']);
 const TRANSITIONS                                                                            = {
   absent: ['preparing'], preparing: ['current', 'failed'], current: ['stale'],

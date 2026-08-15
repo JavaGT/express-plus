@@ -993,9 +993,15 @@ export default function workbench({
           }
           // The global PRAGMA output names pages rather than schema objects. Run
           // it once per census relation so a failure always has its declared
-          // owner, without exposing table data in the diagnostic.
+          // owner, without exposing table data in the diagnostic. A declared
+          // but not-yet-materialized object (a lazily created operational ledger,
+          // e.g. _DerivedResource with no registered derived resources) is not
+          // present and has nothing to check — skip it, exactly like the census
+          // skips objects that predate the boot.
+          const presentObjects = new Set(observedSchemaObjects(app.db).map(schemaObjectKey));
           for (const entry of settledCensus.values()) {
             if (entry.objectKind !== 'table' && entry.objectKind !== 'virtual-table') continue;
+            if (!presentObjects.has(schemaObjectKey({ type: entry.objectKind, name: entry.name }))) continue;
             const findings = app.db.prepare(`PRAGMA integrity_check(${quotedSqlLiteral(entry.name)})`).all()
               .flatMap((row                         ) => Object.values(row).filter((value)                  => typeof value === 'string' && value !== 'ok'));
             if (findings.length > 0) {

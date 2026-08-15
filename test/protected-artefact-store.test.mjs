@@ -3,6 +3,21 @@ import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench from '../build/index.mjs';
+import { defineSqliteSchema } from '../build/server.mjs';
+
+// Fixture tables the tests create out-of-band and the app's protected-artefact
+// writes mutate; declared through the externalTables seam for the settled census.
+const fixtureSchema = defineSqliteSchema({
+  name: 'protected-artefact-store-fixtures',
+  tables: [],
+  externalTables: [
+    { name: 'SpeakerObservation', columns: ['id', 'profileId', 'vector', 'createdAt'] },
+    { name: 'Base', columns: ['id'] },
+    { name: 'Parent', columns: ['id'] },
+    { name: 'Child', columns: ['id', 'profileId'] },
+  ],
+  externalTriggers: [{ name: 'obs_escape' }],
+});
 
 const scope = 'Project:project-1';
 const user = { type: 'user', id: 'u1', attributes: {} };
@@ -68,7 +83,7 @@ function commitRequest(overrides = {}) {
 async function appWith(actions) {
   const db = new DatabaseSync(':memory:');
   db.exec('CREATE TABLE SpeakerObservation (id TEXT PRIMARY KEY, profileId TEXT NOT NULL, vector TEXT NOT NULL, createdAt TEXT NOT NULL)');
-  const app = workbench({ db, actions });
+  const app = workbench({ schema: fixtureSchema, db, actions });
   await app.start();
   return { app, db };
 }
@@ -200,7 +215,7 @@ test('protected writes reject views, shadowed tables, triggers, and foreign-key 
   for (const entry of cases) {
     const db = new DatabaseSync(':memory:');
     entry.setup(db);
-    const app = workbench({ db, actions: [observationAction()] });
+    const app = workbench({ schema: fixtureSchema, db, actions: [observationAction()] });
     await app.start();
     const result = await app.dispatch(commitRequest());
     assert.equal(result.ok, false, entry.name);
@@ -251,7 +266,7 @@ test('protected-artefact actions require single dispatch', async () => {
 });
 
 test('protected-artefact actions fail closed without a durable database', async () => {
-  const app = workbench({ actions: [observationAction()] });
+  const app = workbench({ schema: fixtureSchema, actions: [observationAction()] });
   await app.start();
 
   const result = await app.dispatch(commitRequest());
@@ -272,7 +287,7 @@ test('malformed protectedArtefacts declarations fail at app assembly', async () 
   for (const protectedArtefacts of declarations) {
     const db = new DatabaseSync(':memory:');
     db.exec('CREATE TABLE SpeakerObservation (id TEXT PRIMARY KEY)');
-    const app = workbench({ db, actions: [{ type: 'x.commit', authorize: () => true, protectedArtefacts, handler: () => [] }] });
+    const app = workbench({ schema: fixtureSchema, db, actions: [{ type: 'x.commit', authorize: () => true, protectedArtefacts, handler: () => [] }] });
     await assert.rejects(app.start(), /protectedArtefacts/);
   }
 });

@@ -13,6 +13,16 @@ import workbench, {
   subscribe,
 } from '../build/index.mjs';
 import { entity } from '../build/internal.mjs';
+import { defineSqliteSchema } from '../build/server.mjs';
+
+// Fixture table created out-of-band and written by the app's projection.
+const fixtureSchema = defineSqliteSchema({
+  name: 'post-commit-registration-facade-fixtures',
+  tables: [],
+  externalTables: [
+    { name: 'Artefact', columns: ['id', 'project'] },
+  ],
+});
 import {
   operationalConsumerAdmin,
   createPostCommitEffectRunner,
@@ -52,6 +62,7 @@ test('app registers operational consumers via public options without selecting f
   const db = new DatabaseSync(':memory:');
   const app = workbench({
     db,
+    schema: fixtureSchema,
     entities: [noteEntity()],
     operationalConsumers: [consumer],
   });
@@ -89,6 +100,7 @@ test('host auto-wires postCommitEffects; createPostCommitEffectRunner remains ad
   db.exec("CREATE TABLE Artefact (id TEXT PRIMARY KEY, project TEXT NOT NULL); INSERT INTO Artefact VALUES ('a1', 'source')");
   const app = workbench({
     db,
+    schema: fixtureSchema,
     actions: [{
       type: 'artefact.transfer',
       authorize: () => true,

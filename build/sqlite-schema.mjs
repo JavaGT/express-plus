@@ -424,6 +424,7 @@ function compileTrigger(tableName        , trigger                   )         {
 
 
 
+
 function validateSpec(input         )       {
   if (input === null || typeof input !== 'object') throw new Error('schema declaration must be an object');
   const spec = input                     ;
@@ -518,6 +519,26 @@ function validateSpec(input         )       {
       columnsByName.set(columnKey, { name: columnName });
     }
     referencedTablesByName.set(externalKey, { table: externalTable                   , columnsByName });
+  }
+
+  // Out-of-band triggers (on external or framework tables) the fixture/app
+  // created; declared as schema-owned knowledge for the census. Duplicate
+  // names within one schema are a declaration error.
+  if (spec.externalTriggers !== undefined && !Array.isArray(spec.externalTriggers)) {
+    throw new Error('schema externalTriggers must be an array');
+  }
+  const externalTriggers = (spec.externalTriggers ?? [])             ;
+  const seenExternalTriggers = new Set        ();
+  for (const trigger of externalTriggers) {
+    if (trigger === null || typeof trigger !== 'object') {
+      throw new Error('external trigger declaration must be an object');
+    }
+    requireName((trigger                ).name, 'external trigger name');
+    const triggerKey = folded((trigger                ).name          );
+    if (seenExternalTriggers.has(triggerKey)) {
+      throw new Error(`duplicate external trigger "${(trigger                ).name}"`);
+    }
+    seenExternalTriggers.add(triggerKey);
   }
 
   // A virtual table claims a real table name, so it must not collide with an
@@ -847,6 +868,11 @@ function validateColumnList(columns         , knownColumns                      
 
 
 
+
+
+
+
+
 export function defineSqliteSchema(spec                   )                          {
   validateSpec(spec);
   const validated = spec                    ;
@@ -878,6 +904,7 @@ export function defineSqliteSchema(spec                   )                     
     name: table.name,
     columns: Object.freeze([...table.columns]),
   })));
+  const externalTriggers = Object.freeze((validated.externalTriggers ?? []).map((trigger) => Object.freeze({ name: trigger.name })));
   const virtualTables = Object.freeze((validated.virtualTables ?? []).map((virtualTable) => Object.freeze({
     ...virtualTable,
     options: Object.freeze([...virtualTable.options]),
@@ -902,6 +929,7 @@ export function defineSqliteSchema(spec                   )                     
     tableNames: Object.freeze(tableNames),
     tables,
     externalTables,
+    externalTriggers,
     virtualTables,
     triggers,
     migrations: Object.freeze(migrations),

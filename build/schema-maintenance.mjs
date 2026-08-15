@@ -8,6 +8,7 @@
 
 import { createMaintenanceSeam } from './maintenance.mjs';
 
+import { SCHEMA_MAINTENANCE_TABLE_DDL } from './operational-ledger-ddl.mjs';
 
 export const SCHEMA_MAINTENANCE_TABLE = '_SchemaMaintenance';
 
@@ -38,14 +39,7 @@ export const SCHEMA_MAINTENANCE_TABLE = '_SchemaMaintenance';
 
 
 
-const DDL = `CREATE TABLE IF NOT EXISTS ${SCHEMA_MAINTENANCE_TABLE} (
-  id TEXT PRIMARY KEY,
-  description TEXT NOT NULL,
-  state TEXT NOT NULL,
-  progress TEXT NOT NULL,
-  attempts INTEGER NOT NULL,
-  lastError TEXT
-)`;
+const DDL = SCHEMA_MAINTENANCE_TABLE_DDL;
 
 function encodeProgress(progress         )         {
   const encoded = JSON.stringify(progress ?? null);

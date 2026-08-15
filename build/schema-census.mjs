@@ -105,6 +105,9 @@ import {
 
 
 
+
+
+
 // A physical object observed in the database (e.g. from sqlite_master during
 // the boot validation phase), classified against the census.
 
@@ -472,6 +475,15 @@ export function buildOwnershipCensus(input             )               {
       columnModel.set(folded(external.name), {
         columns: external.columns.map((name) => ({ name })),
       });
+    }
+    // Triggers the fixture/app created out-of-band on external or framework
+    // tables (declared knowledge, same non-exclusive attribution as external
+    // tables: another participant may claim the same trigger name).
+    for (const trigger of schema.externalTriggers ?? []) {
+      if (refuseReserved('trigger', trigger.name, 'schema', schema.name)) continue;
+      if (!book.census.has(censusKey('trigger', trigger.name))) {
+        book.claim('trigger', trigger.name, 'schema', schema.name);
+      }
     }
   }
 

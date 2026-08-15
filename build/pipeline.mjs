@@ -30,7 +30,6 @@ import { protectedArtefactCapability } from './protected-artefact-store.mjs';
 import { executeAtomicOperations, isAtomicOperation,                                                   } from './atomic-operations.mjs';
 import { admitRowTransition } from './field-admission.mjs';
 import { writeInvalidationInTxn } from './invalidation-ledger.mjs';
-import { tryParseScopeKey } from './scope-handle.mjs';
 
 // `action(type)` — declare an imperative request type. The handler that turns it
 // into events is attached later by the entity/dispatch wiring.
@@ -529,16 +528,6 @@ export function liveMutationVariant({
           revision,
           updatedAt: now,
         });
-        const handle = tryParseScopeKey(ev.scope);
-        if (handle) {
-          const collectionRevision = bumpRevision(db            , handle.entity);
-          writeInvalidationInTxn(db            , {
-            resourceKey: handle.entity,
-            kind: 'collection',
-            revision: collectionRevision,
-            updatedAt: now,
-          });
-        }
       }
       const resourceKey = finalizedEvents[0]?.scope ?? (owningScope          );
       const committedRevision = touched.get(resourceKey) ?? readLiveRevision(db            , resourceKey);

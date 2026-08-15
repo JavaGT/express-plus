@@ -9,7 +9,7 @@ import {
   User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor,
 } from './auth/entities.mjs';
 import { MIGRATION_DDL } from './migrations.mjs';
-import { searchStalenessDdl } from './search-staleness.mjs';
+import { OPERATIONAL_LEDGER_DDL } from './operational-ledger-ddl.mjs';
 import {
   collectTableNamesFromDdl as collectNames,
   collectObjectNamesFromDdl,
@@ -78,7 +78,9 @@ function collectFrameworkTableNames()                    {
     entries.push({ source: 'framework DDL', sql });
   }
   entries.push({ source: 'migration DDL', sql: MIGRATION_DDL });
-  entries.push({ source: 'search staleness ledger DDL', sql: searchStalenessDdl() });
+  for (const sql of OPERATIONAL_LEDGER_DDL) {
+    entries.push({ source: 'operational ledger DDL', sql });
+  }
   for (const entity of AUTH_ENTITIES) {
     for (const sql of generateDDL(entity)) {
       entries.push({ source: `auth entity ${entity.name}`, sql });
@@ -162,7 +164,9 @@ function collectFrameworkObjectsList()                                  {
     frameworkEntries.push({ source: 'framework DDL', sql });
   }
   frameworkEntries.push({ source: 'migration DDL', sql: MIGRATION_DDL });
-  frameworkEntries.push({ source: 'search staleness ledger DDL', sql: searchStalenessDdl() });
+  for (const sql of OPERATIONAL_LEDGER_DDL) {
+    frameworkEntries.push({ source: 'operational ledger DDL', sql });
+  }
   pushSet('tables', 'table', frameworkEntries, 'framework');
   pushSet('indexes', 'index', frameworkEntries, 'framework');
   pushSet('triggers', 'trigger', frameworkEntries, 'framework');

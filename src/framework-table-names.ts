@@ -6,6 +6,7 @@
 // name the framework reserves (S2/A2, consideration #5).
 import { generateFrameworkDDL } from './ddl.ts';
 import { MIGRATION_DDL } from './migrations.ts';
+import { OPERATIONAL_LEDGER_DDL } from './operational-ledger-ddl.ts';
 
 const AUTH_TABLE_NAMES = ['User', 'Session', 'Inbox', 'Credential', 'Invitation', 'ApiKey', 'TwoFactor'];
 const CREATE_TABLE_NAME = /CREATE\s+(?:VIRTUAL\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?("(?:""|[^"])+"|`(?:``|[^`])+`|\[(?:]]|[^\]])+]|[A-Za-z_][A-Za-z0-9_]*)/iy;
@@ -189,6 +190,7 @@ export const frameworkTableNamesWithoutAuthCompile = Object.freeze([
     ...collectTableNamesFromDdl([
       ...generateFrameworkDDL().map((sql: string) => ({ source: 'framework DDL', sql })),
       { source: 'migration DDL', sql: MIGRATION_DDL },
+      ...OPERATIONAL_LEDGER_DDL.map((sql) => ({ source: 'operational ledger DDL', sql })),
     ]),
     ...AUTH_TABLE_NAMES,
   ]),
@@ -206,6 +208,7 @@ export const frameworkReservedNamesWithoutAuthCompile: ReadonlySet<string> = Obj
       [
         ...generateFrameworkDDL().map((sql: string) => ({ source: 'framework DDL', sql })),
         { source: 'migration DDL', sql: MIGRATION_DDL },
+        ...OPERATIONAL_LEDGER_DDL.map((sql) => ({ source: 'operational ledger DDL', sql })),
       ],
       { tables: true, indexes: true, triggers: true, virtualTables: true },
     );

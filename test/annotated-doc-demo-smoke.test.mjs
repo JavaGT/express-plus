@@ -43,6 +43,7 @@ test('annotated-doc migration rebuilds the annotation family CHECK to include se
   await initial.app.prepareSchema();
   db.exec(`
     DROP TABLE _SchemaMigration;
+    DROP TABLE _SchemaMaintenance;
     DROP TABLE Doc_body_annotation;
     CREATE TABLE Doc_body_annotation (
       id TEXT PRIMARY KEY,

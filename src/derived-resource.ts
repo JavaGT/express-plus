@@ -6,6 +6,7 @@
 
 import { constants } from 'node:sqlite';
 import type { DbHandle } from './driver.ts';
+import { DERIVED_RESOURCE_TABLE_DDL } from './operational-ledger-ddl.ts';
 
 export const DERIVED_RESOURCE_TABLE = '_DerivedResource';
 export type DerivedResourceStatus = 'absent' | 'preparing' | 'current' | 'stale' | 'rebuilding' | 'failed';
@@ -48,13 +49,7 @@ type AuthorizerHandle = DbHandle & {
   setAuthorizer(callback: ((action: number, arg1: string | null, arg2: string | null, dbName: string | null) => number) | null): void;
 };
 
-const DDL = `CREATE TABLE IF NOT EXISTS ${DERIVED_RESOURCE_TABLE} (
-  id TEXT PRIMARY KEY,
-  state TEXT NOT NULL,
-  attempts INTEGER NOT NULL,
-  lastError TEXT,
-  updatedAt TEXT NOT NULL
-)`;
+const DDL = DERIVED_RESOURCE_TABLE_DDL;
 const STATUSES = new Set<DerivedResourceStatus>(['absent', 'preparing', 'current', 'stale', 'rebuilding', 'failed']);
 const TRANSITIONS: Readonly<Record<DerivedResourceStatus, readonly DerivedResourceStatus[]>> = {
   absent: ['preparing'], preparing: ['current', 'failed'], current: ['stale'],

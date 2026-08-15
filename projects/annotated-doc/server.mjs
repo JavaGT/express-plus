@@ -190,81 +190,9 @@ function migrateCommentColors(db) {
   ).run(PALETTE[0]);
 }
 
-// The demo declaration grew a `confidential` protecting annotation family. The
-// annotation table's CHECK constraint is baked in at first DDL; rebuild it so
-// the family column accepts both 'comment' and 'confidential', preserving rows.
-function migrateAnnotationFamilies(db) {
-  const existing = db.prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'Doc_body_annotation'`).get();
-  if (!existing || existing.sql.includes("'confidential'")) return;
-  db.exec(`
-    PRAGMA foreign_keys = OFF;
-    CREATE TABLE Doc_body_annotation_new (
-      id TEXT PRIMARY KEY,
-      document_id TEXT NOT NULL,
-      project_id TEXT NOT NULL,
-      owner_id TEXT NOT NULL,
-      family TEXT NOT NULL CHECK (family IN ('comment', 'confidential')),
-      FOREIGN KEY (document_id) REFERENCES Doc(id) ON DELETE CASCADE,
-      FOREIGN KEY (project_id) REFERENCES Project(id) ON DELETE CASCADE,
-      FOREIGN KEY (owner_id) REFERENCES User(id) ON DELETE CASCADE
-    );
-    INSERT INTO Doc_body_annotation_new (id, document_id, project_id, owner_id, family)
-      SELECT id, document_id, project_id, owner_id, family FROM Doc_body_annotation;
-    DROP TABLE Doc_body_annotation;
-    ALTER TABLE Doc_body_annotation_new RENAME TO Doc_body_annotation;
-    PRAGMA foreign_keys = ON;
-  `);
-}
-
-// v3: the declaration added the `sensitive` protected-target family. Rebuild the
-// annotation CHECK again when it predates `sensitive` (idempotent).
-function migrateSensitiveFamily(db) {
-  const existing = db.prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'Doc_body_annotation'`).get();
-  if (!existing || existing.sql.includes("'sensitive'")) return;
-  db.exec(`
-    PRAGMA foreign_keys = OFF;
-    CREATE TABLE Doc_body_annotation_new (
-      id TEXT PRIMARY KEY,
-      document_id TEXT NOT NULL,
-      project_id TEXT NOT NULL,
-      owner_id TEXT NOT NULL,
-      family TEXT NOT NULL CHECK (family IN ('comment', 'sensitive', 'confidential')),
-      FOREIGN KEY (document_id) REFERENCES Doc(id) ON DELETE CASCADE,
-      FOREIGN KEY (project_id) REFERENCES Project(id) ON DELETE CASCADE,
-      FOREIGN KEY (owner_id) REFERENCES User(id) ON DELETE CASCADE
-    );
-    INSERT INTO Doc_body_annotation_new (id, document_id, project_id, owner_id, family)
-      SELECT id, document_id, project_id, owner_id, family FROM Doc_body_annotation;
-    DROP TABLE Doc_body_annotation;
-    ALTER TABLE Doc_body_annotation_new RENAME TO Doc_body_annotation;
-    PRAGMA foreign_keys = ON;
-  `);
-}
-
-// v4: the declaration added the `code` codebook family. Rebuild the annotation
-// CHECK again when it predates `code` (idempotent).
-function migrateCodeFamily(db) {
-  const existing = db.prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'Doc_body_annotation'`).get();
-  if (!existing || existing.sql.includes("'code'")) return;
-  db.exec(`
-    PRAGMA foreign_keys = OFF;
-    CREATE TABLE Doc_body_annotation_new (
-      id TEXT PRIMARY KEY,
-      document_id TEXT NOT NULL,
-      project_id TEXT NOT NULL,
-      owner_id TEXT NOT NULL,
-      family TEXT NOT NULL CHECK (family IN ('comment', 'sensitive', 'confidential', 'code')),
-      FOREIGN KEY (document_id) REFERENCES Doc(id) ON DELETE CASCADE,
-      FOREIGN KEY (project_id) REFERENCES Project(id) ON DELETE CASCADE,
-      FOREIGN KEY (owner_id) REFERENCES User(id) ON DELETE CASCADE
-    );
-    INSERT INTO Doc_body_annotation_new (id, document_id, project_id, owner_id, family)
-      SELECT id, document_id, project_id, owner_id, family FROM Doc_body_annotation;
-    DROP TABLE Doc_body_annotation;
-    ALTER TABLE Doc_body_annotation_new RENAME TO Doc_body_annotation;
-    PRAGMA foreign_keys = ON;
-  `);
-}
+// v2/v3/v4 moved to maintenance steps below (see createAnnotatedDocApp): the
+// annotation family CHECK rebuilds must run with foreign-key enforcement off,
+// which only the maintenance seam provides.
 
 function listDocs(app) {
   return app.db.prepare(
@@ -297,15 +225,58 @@ function useTail(req) {
   return '';
 }
 
+// v2/v3/v4: the annotation family CHECK grew over time ('confidential',
+// 'sensitive', then 'code'). Each rebuild must DROP + RENAME the annotation
+// table, and SQLite would cascade-delete its FK-referencing child rows unless
+// foreign-key enforcement is OFF — which the transactional migration lane
+// deliberately refuses (app.ts Phase 7: foreign_keys changes belong to the
+// maintenance seam). So the rebuilds are MAINTENANCE steps running under the
+// seam's withForeignKeysDisabled, not migrations. Each step is idempotent: it
+// rebuilds only when the live CHECK predates its marker, and the maintenance
+// ledger records completion so a settled boot skips them.
+function rebuildAnnotationFamilies(db, familiesSql, marker) {
+  const existing = db.prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'Doc_body_annotation'`).get();
+  if (!existing || existing.sql.includes(marker)) return;
+  db.exec(`
+    CREATE TABLE Doc_body_annotation_new (
+      id TEXT PRIMARY KEY,
+      document_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      owner_id TEXT NOT NULL,
+      family TEXT NOT NULL CHECK (family IN (${familiesSql})),
+      UNIQUE (id, document_id),
+      FOREIGN KEY (document_id) REFERENCES Doc(id) ON DELETE CASCADE,
+      FOREIGN KEY (project_id) REFERENCES Project(id) ON DELETE CASCADE,
+      FOREIGN KEY (owner_id) REFERENCES User(id) ON DELETE CASCADE
+    );
+    INSERT INTO Doc_body_annotation_new (id, document_id, project_id, owner_id, family)
+      SELECT id, document_id, project_id, owner_id, family FROM Doc_body_annotation;
+    DROP TABLE Doc_body_annotation;
+    ALTER TABLE Doc_body_annotation_new RENAME TO Doc_body_annotation;
+  `);
+}
+
+function annotationFamilyMaintenanceStep(id, description, familiesSql, marker) {
+  return {
+    id,
+    description,
+    async run({ db, withForeignKeysDisabled }) {
+      await withForeignKeysDisabled(() => rebuildAnnotationFamilies(db, familiesSql, marker));
+    },
+  };
+}
+
 export function createAnnotatedDocApp({ db = DB_PATH } = {}) {
   const app = workbench({
     db,
      entities: [Project, Comment, Code, Doc],
     migrations: [
       { namespace: 'annotated-doc', name: 'comment-colors', version: 1, up: migrateCommentColors },
-      { namespace: 'annotated-doc', name: 'annotation-families', version: 2, up: migrateAnnotationFamilies },
-      { namespace: 'annotated-doc', name: 'sensitive-family', version: 3, up: migrateSensitiveFamily },
-      { namespace: 'annotated-doc', name: 'code-family', version: 4, up: migrateCodeFamily },
+    ],
+    maintenanceSteps: [
+      annotationFamilyMaintenanceStep('annotation-families-confidential', 'rebuild the annotation family CHECK to include confidential', "'comment', 'confidential'", "'confidential'"),
+      annotationFamilyMaintenanceStep('annotation-families-sensitive', 'rebuild the annotation family CHECK to include sensitive', "'comment', 'sensitive', 'confidential'", "'sensitive'"),
+      annotationFamilyMaintenanceStep('annotation-families-code', 'rebuild the annotation family CHECK to include code', "'comment', 'sensitive', 'confidential', 'code'", "'code'"),
     ],
   });
   const principalOf = principalOfFromRequest;

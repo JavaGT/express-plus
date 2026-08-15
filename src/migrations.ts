@@ -32,6 +32,7 @@ export {
   validateMigrations,
   runMigrations,
   isReservedNamespace,
+  NonTransactionalMigrationError,
   type Migration,
   type MigrationRunOptions,
   type AppliedLedgerRow,

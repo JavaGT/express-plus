@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import workbench from '../build/internal.mjs';
 import { defineSqliteSchema } from '../build/server.mjs';
+import { SEARCH_STALENESS_LEDGER_DDL, DERIVED_RESOURCE_TABLE_DDL, SCHEMA_MAINTENANCE_TABLE_DDL } from '../build/operational-ledger-ddl.mjs';
 
 function schema() {
   return defineSqliteSchema({
@@ -62,6 +63,63 @@ test('schema lifecycle reports an undeclared physical object', async () => {
     );
   } finally {
     db.close();
+  }
+});
+
+test('schema lifecycle discriminates declared external fixtures from undeclared intruders', async () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    // A legitimate application table the app writes (declared ONLY via the
+    // externalTables seam) sits beside a genuine intruder. The census must
+    // admit exactly the declared fixture and name the intruder.
+    db.exec('CREATE TABLE Artefact (id TEXT PRIMARY KEY, project TEXT); CREATE TABLE Intruder (id TEXT PRIMARY KEY)');
+    const fixtureSchema = defineSqliteSchema({
+      name: 'discrimination-fixtures',
+      tables: [],
+      externalTables: [{ name: 'Artefact', columns: ['id', 'project'] }],
+    });
+    const app = workbench({ db, schema: fixtureSchema });
+    await assert.rejects(app.prepareSchema(), /observed table "Intruder" is not declared by any lifecycle participant/);
+    const artefact = app.schemaReport().objects.find((entry) => entry.name === 'Artefact');
+    assert.equal(artefact.ownerKind, 'schema', 'the declared fixture is schema-owned');
+    assert.equal(artefact.owner, 'discrimination-fixtures');
+    assert.equal(artefact.state, 'present');
+    const intruder = app.schemaReport().objects.find((entry) => entry.name === 'Intruder');
+    assert.equal(intruder.ownerKind, 'undeclared', 'the undeclared table stays undeclared');
+  } finally {
+    db.close();
+  }
+});
+
+test('reboot: lazily materialized operational ledgers stay framework-owned and boot succeeds', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'workbench-op-ledgers-'));
+  const databasePath = join(root, 'data.sqlite');
+  let db = new DatabaseSync(databasePath);
+  try {
+    const firstApp = workbench({ db });
+    await firstApp.prepareSchema();
+    // A settled database may hold the operational ledgers from a previous boot
+    // (or a previous lifecycle phase). Materialize all three explicitly.
+    for (const ddl of [SEARCH_STALENESS_LEDGER_DDL, DERIVED_RESOURCE_TABLE_DDL, SCHEMA_MAINTENANCE_TABLE_DDL]) {
+      db.exec(ddl);
+    }
+    db.close();
+    // Reconstruct the app over the same database: the ledgers must stay
+    // framework-owned (declared centrally, not re-admitted as lifecycle
+    // strangers) and the boot must succeed.
+    db = new DatabaseSync(databasePath);
+    const rebootedApp = workbench({ db });
+    await rebootedApp.prepareSchema();
+    const report = rebootedApp.schemaReport();
+    for (const name of ['_SearchStaleness', '_DerivedResource', '_SchemaMaintenance']) {
+      const entry = report.objects.find((object) => object.name === name);
+      assert.ok(entry, `${name} appears in the settled schema report`);
+      assert.equal(entry.ownerKind, 'framework', `${name} stays framework-owned on reboot`);
+      assert.equal(entry.state, 'present', `${name} is present on reboot`);
+    }
+  } finally {
+    db.close();
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
