@@ -322,6 +322,53 @@ test('a live-tier mutation on a database-less app is refused; no in-memory event
   assert.equal(app.kernel.log.length, 0, 'no in-memory event/log entry is written');
 });
 
+// An atomic operation cannot be resolved without a durable database (its read
+// runs inside the commit's write transaction), so a live-tier ATOMIC action on
+// a no-db app must receive the SAME named refusal — before the handler or its
+// atomic context ever runs — instead of surfacing as an internal `atomic.row`
+// error. The read and handler throw if ever invoked: the refusal must happen
+// before any atomic-context or handler work. Both single and batch dispatch
+// fail closed identically.
+function noDbLiveAtomicApp() {
+  return workbench({
+    entities: [LiveNote],
+    actions: [{
+      type: 'LiveNote.bump',
+      authorize: async () => true,
+      handler: atomicOperation({
+        entity: LiveNote,
+        read: () => { throw new Error('no-db atomic read must never run'); },
+      }, () => { throw new Error('no-db atomic handler must never run'); }),
+    }],
+  });
+}
+
+test('a live-tier ATOMIC action on a database-less app is refused before any handler/atomic work (single + batch)', async (t) => {
+  const app = noDbLiveAtomicApp();
+  t.after(async () => { await app.shutdown(); });
+  await app.start();
+
+  const single = await app.dispatch({
+    actionId: randomUUID(), type: 'LiveNote.bump',
+    payload: { atomicOperations: [increment('count')] },
+    principal: user,
+  });
+  assert.equal(single.ok, false, 'a live-tier atomic mutation must be refused without a database');
+  assert.equal(single.failure.category, 'invalid-input', 'the refusal is named, never an internal error');
+  assert.match(single.failure.message, /live-tier mutations require a durable database/);
+  assert.equal(app.kernel.log.length, 0, 'no in-memory event/log entry is written');
+
+  const batched = await app.batch(
+    [{ type: 'LiveNote.bump', payload: { atomicOperations: [increment('count')] } }],
+    { principal: user },
+  );
+  assert.equal(batched.ok, false, 'a batched live-tier atomic mutation must be refused without a database');
+  assert.equal(batched.failure.category, 'invalid-input', 'the refusal is named, never an internal error');
+  assert.match(batched.failure.message, /live-tier mutations require a durable database/);
+  assert.equal(batched.failure.details.actionIndex, 0, 'the refusing action is identified in the batch');
+  assert.equal(app.kernel.log.length, 0, 'no in-memory event/log entry is written');
+});
+
 // ---- 5. regression — the durable lane is unchanged --------------------------
 
 test('the app-level durable lane still writes _Log + _ActionReceipt for history entities', async (t) => {

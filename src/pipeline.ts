@@ -1129,6 +1129,35 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     const emitsLiveTier = (events: any[]) => tierOfEvent !== undefined
       && events.some((e) => tierOfEvent(handleOfEvent(e)) === 'live');
 
+    // A live-tier ATOMIC action must be refused with the same named error
+    // BEFORE the handler runs (#114): the in-memory kernel has no transaction to
+    // resolve the `atomic` context from, so an atomic handler invoked here would
+    // throw an internal `atomic.row` error that bypasses the fail-closed refusal
+    // (the post-hoc emitsLiveTier check below never sees its events). The tier
+    // is resolved off the atomic registration's entity name — the handle the
+    // handler's own update event would carry — so a `live`-tier entity is
+    // refused before any handler/atomic context work. An unresolvable entity
+    // name falls back to the durable lane (treated as not live), matching
+    // handleOfEvent's unparseable-type fallback.
+    const liveAtomicRefusal = (handler: any, context: Record<string, unknown>, details?: unknown) => {
+      if (tierOfEvent === undefined || handler?.atomicOperation?.entity?.name === undefined) return null;
+      let live = false;
+      try {
+        live = tierOfEvent(parseEventType(`${handler.atomicOperation.entity.name}.updated`)) === 'live';
+      } catch {
+        live = false;
+      }
+      if (!live) return null;
+      return executionFailure(
+        new ValidationError(
+          'live-tier mutations require a durable database — live mutations write no _Log row ' +
+          'and need the _LiveRevision, _InvalidationLedger, and _NoHistoryReceipt tables a database provides',
+        ),
+        context,
+        details,
+      );
+    };
+
     function dispatch({ actionId, type, payload, principal, scope = '' }: any) {
       const handler = checkHandler(handlers, type);
       if (!handler) return unknownActionOutcome(type);
@@ -1164,6 +1193,11 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
       // re-running the handler — no duplicate state change (SPEC §7).
       const dedupe = checkInMemoryDedupe(dispatched, scope, actionId);
       if (dedupe) return dedupe;
+
+      // Refuse a live-tier atomic action before running it (no-db fail-closed,
+      // #114): the in-memory kernel cannot resolve its `atomic` context.
+      const liveRefusal = liveAtomicRefusal(handler, { actionId, type });
+      if (liveRefusal) return liveRefusal;
 
       // Run the handler, then assign each emitted event a per-scope monotonic
       // sequence number and append to the log.
@@ -1228,6 +1262,18 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
       }
       const dedupe = checkInMemoryDedupe(dispatched, scope, actionId);
       if (dedupe) return dedupe;
+      // Refuse a live-tier atomic action before running ANY handler in the batch
+      // (no-db fail-closed, #114): the in-memory kernel cannot resolve its
+      // `atomic` context, and a batch is all-or-nothing — no handler may run
+      // when a member would fail with the named live-tier refusal.
+      for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
+        const liveRefusal = liveAtomicRefusal(
+          handlers[actions[actionIndex].type],
+          { actionId, type: actions[actionIndex].type },
+          { actionIndex },
+        );
+        if (liveRefusal) return liveRefusal;
+      }
       const allEmitted = [];
       for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
         const action = actions[actionIndex];
