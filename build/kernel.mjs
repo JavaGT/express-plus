@@ -5,7 +5,8 @@ import {
   clearRemovedScheduleReceipts,
   rearmChangedScheduleReceipts,
 } from './schedule-runtime.mjs';
-import { createServer, durableMutationVariant } from './pipeline.mjs';
+import { createServer, durableMutationVariant, liveMutationVariant } from './pipeline.mjs';
+
 import { buildEffectsRegistry, validateEffects, executeEffectsForEvent } from './effect-compiler.mjs';
 import { User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor } from './auth/entities.mjs';
 import {
@@ -192,6 +193,14 @@ function collectAppEntities(app     ) {
     Object.defineProperty(handler, 'privateFactProjection', {
       value: declaration.projections?.some((projection     ) => projection?.privateFact === true) ?? false,
     });
+    // An action wrapped by `atomicOperation(...)` (S3/A6) carries its
+    // in-transaction read + resolution registration on the raw handler. The
+    // wrapper must forward it — commitEvents resolves and field-admits atomic
+    // operations off the REGISTERED handler it runs, so an app-level atomic
+    // action behaves exactly like the package-internal path.
+    if (declaration.handler?.atomicOperation) {
+      Object.defineProperty(handler, 'atomicOperation', { value: declaration.handler.atomicOperation });
+    }
     handlers[declaration.type] = handler;
     for (const projection of declaration.projections ?? []) {
       if (!Array.isArray(projection?.eventTypes) || typeof projection.apply !== 'function') {
@@ -412,6 +421,23 @@ export const POST_COMMIT_CONSUMER_KINDS = Object.freeze([
   'best-effort-external-consumer',
 ]);
 
+// The post-commit consumers wired into the app kernel's LIVE mutation lane
+// (S3/A8, #114). The live lane writes no `_Log` row, so only the event-driven
+// consumers with live meaning are engaged: live delivery (the lane's whole
+// purpose), blob finalize (a live entity may carry blob fields — the in-txn
+// adopt still needs its post-commit finalize), the projected.async recompute
+// (a live row can declare projected fields), and the search-staleness ledger
+// (whose `tier` column explicitly supports 'live'). The `_Log`-cursor-driven
+// consumers stay on the durable lane: email + operational sweep committed
+// `_Log` rows, durable effects anchor jobs to `_Log` seqs (live events have
+// none), and the pending-blob reconcile scans its own claim table.
+const LIVE_LANE_CONSUMER_NAMES = new Set([
+  'blob.finalize',
+  'live',
+  'projected.async',
+  'search-staleness',
+]);
+
 function engagedPostCommitConsumerDescriptors(app     , entities     , { blobFinalizeConsumer, pendingBlobConsumer, durableEffectsRegistry, operationalConsumer }     ) {
   return [
     { name: 'blob.finalize', kind: 'durable-projection-consumer', consumer: blobFinalizeConsumer },
@@ -504,6 +530,25 @@ export function buildKernel(app     ) {
   const annotatedKernel = createAnnotatedTextKernelSeam(entities);
   Object.assign(generatedHistoryActions, annotatedKernel.historyActions);
 
+  // S3/A8 — wire the live (no-history) mutation lane into the app kernel
+  // (JavaGT/workbench#114). `tierOfEvent` resolves an emitted event's handle to
+  // its entity's live-data tier: a `live`-tier entity routes through the live
+  // variant (no `_Log` append, `_LiveRevision` bump + `_InvalidationLedger`
+  // marker, `_NoHistoryReceipt` idempotency, no `_ActionReceipt` payload
+  // retention); everything else takes the durable lane byte-for-byte. Without
+  // a database there is no durable lane to fork from (and live mutations
+  // require one), so the wiring stays off and the kernel keeps its ephemeral
+  // in-memory path. The live pipeline shares the SAME projection, admission,
+  // blob-adoption, and in-txn effect machinery as the durable lane — only the
+  // post-commit fan-out is the live-relevant subset (LIVE_LANE_CONSUMER_NAMES).
+  const tierOfEvent = (handle     )                       => {
+    if (!handle || typeof handle.entity !== 'string') return undefined;
+    return entities.get(handle.entity)?.tier === 'live' ? 'live' : 'history';
+  };
+  const livePostCommitConsumers = postCommitConsumerDescriptors
+    .filter((descriptor) => LIVE_LANE_CONSUMER_NAMES.has(descriptor.name))
+    .map((descriptor) => descriptor.consumer);
+
   // Generated CRUD is authorized by row admission. Registered actions own an
   // explicit authorization function which runs at both durable auth gates.
   return createServer({
@@ -571,5 +616,17 @@ export function buildKernel(app     ) {
       executeEffectsForEvent,
       postCommitConsumers: postCommitConsumerDescriptors.map((d) => d.consumer),
     }),
+    // The no-history mutation lane (S3/A2, #100): engaged only when a database
+    // exists (createServer fails closed otherwise), always paired with its
+    // tier resolver so a `live`-tier entity can never fall through to `_Log`.
+    livePipeline: app.db ? liveMutationVariant({
+      projectionConsumers: projections,
+      admission: buildDurableAdmission(app, annotatedKernel),
+      blobAdapter: blobAdapter       ,
+      effectsRegistry: effectsRegistry.size > 0 ? effectsRegistry : null,
+      executeEffectsForEvent,
+      postCommitConsumers: livePostCommitConsumers,
+    }) : undefined,
+    tierOfEvent: app.db ? tierOfEvent : undefined,
   });
 }
