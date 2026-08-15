@@ -6,7 +6,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import workbench from '../build/internal.mjs';
 import { defineSqliteSchema } from '../build/server.mjs';
-import { SEARCH_STALENESS_LEDGER_DDL, DERIVED_RESOURCE_TABLE_DDL, SCHEMA_MAINTENANCE_TABLE_DDL } from '../build/operational-ledger-ddl.mjs';
+import { SEARCH_STALENESS_LEDGER_DDL, DERIVED_RESOURCE_TABLE_DDL, SCHEMA_MAINTENANCE_TABLE_DDL, SEARCH_STALENESS_TABLE_NAME, DERIVED_RESOURCE_TABLE_NAME, SCHEMA_MAINTENANCE_TABLE_NAME } from '../build/operational-ledger-ddl.mjs';
+import { SEARCH_STALENESS_LEDGER_TABLE } from '../build/search-plugin.mjs';
+import { DERIVED_RESOURCE_TABLE } from '../build/derived-resource.mjs';
+import { SCHEMA_MAINTENANCE_TABLE } from '../build/schema-maintenance.mjs';
 
 function schema() {
   return defineSqliteSchema({
@@ -111,7 +114,7 @@ test('reboot: lazily materialized operational ledgers stay framework-owned and b
     const rebootedApp = workbench({ db });
     await rebootedApp.prepareSchema();
     const report = rebootedApp.schemaReport();
-    for (const name of ['_SearchStaleness', '_DerivedResource', '_SchemaMaintenance']) {
+    for (const name of [SEARCH_STALENESS_TABLE_NAME, DERIVED_RESOURCE_TABLE_NAME, SCHEMA_MAINTENANCE_TABLE_NAME]) {
       const entry = report.objects.find((object) => object.name === name);
       assert.ok(entry, `${name} appears in the settled schema report`);
       assert.equal(entry.ownerKind, 'framework', `${name} stays framework-owned on reboot`);
@@ -121,6 +124,26 @@ test('reboot: lazily materialized operational ledgers stay framework-owned and b
     db.close();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('operational-ledger rename drift: the runtime table name each lifecycle module queries equals the census-declared name', () => {
+  // The census declares the ledgers framework-owned (operational-ledger-ddl.ts)
+  // and the lifecycle modules create/query them by the same single source. An
+  // independent literal on either side would let a rename silently separate the
+  // runtime-created table from the census-declared name. These pairs must stay
+  // equal — the runtime constants are aliases of the census names, not copies.
+  const pairs = [
+    [SEARCH_STALENESS_LEDGER_TABLE, SEARCH_STALENESS_TABLE_NAME, 'search staleness'],
+    [DERIVED_RESOURCE_TABLE, DERIVED_RESOURCE_TABLE_NAME, 'derived resource'],
+    [SCHEMA_MAINTENANCE_TABLE, SCHEMA_MAINTENANCE_TABLE_NAME, 'schema maintenance'],
+  ];
+  for (const [runtimeName, censusName, label] of pairs) {
+    assert.equal(runtimeName, censusName, `${label} runtime ledger table must match the census-declared name`);
+  }
+  // And the census-declared names are what the framework-owned DDL creates.
+  assert.match(SEARCH_STALENESS_LEDGER_DDL, new RegExp(`CREATE TABLE IF NOT EXISTS ${SEARCH_STALENESS_TABLE_NAME} `));
+  assert.match(DERIVED_RESOURCE_TABLE_DDL, new RegExp(`CREATE TABLE IF NOT EXISTS ${DERIVED_RESOURCE_TABLE_NAME} `));
+  assert.match(SCHEMA_MAINTENANCE_TABLE_DDL, new RegExp(`CREATE TABLE IF NOT EXISTS ${SCHEMA_MAINTENANCE_TABLE_NAME} `));
 });
 
 test('schema lifecycle rejects an undeclared object created after app construction', async () => {

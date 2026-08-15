@@ -41,6 +41,7 @@
 
 import { buildCheckRegistry } from './registry.ts';
 import { compileReadScope, NonCompilableError } from './scope-sql.ts';
+import { SEARCH_STALENESS_TABLE_NAME } from './operational-ledger-ddl.ts';
 import {
   SEARCH_DEFAULT_TIMEOUT_MS,
   searchPageWindow,
@@ -315,7 +316,7 @@ const BARE_SQL_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 // that use it (namespace guarantee, review #109 finding 4). A bridge built with
 // a custom tableName is the caller's own naming choice; the guarantee covers
 // the framework default.
-export const SEARCH_STALENESS_LEDGER_TABLE = '_SearchStaleness';
+export const SEARCH_STALENESS_LEDGER_TABLE = SEARCH_STALENESS_TABLE_NAME;
 
 const OWNED_OBJECT_KINDS: ReadonlySet<SearchOwnedObjectKind> = new Set([
   'table',

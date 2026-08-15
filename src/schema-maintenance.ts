@@ -8,9 +8,9 @@
 import type { DbHandle } from './driver.ts';
 import { createMaintenanceSeam } from './maintenance.ts';
 import type { WriteQueue } from './write-queue.ts';
-import { SCHEMA_MAINTENANCE_TABLE_DDL } from './operational-ledger-ddl.ts';
+import { SCHEMA_MAINTENANCE_TABLE_DDL, SCHEMA_MAINTENANCE_TABLE_NAME } from './operational-ledger-ddl.ts';
 
-export const SCHEMA_MAINTENANCE_TABLE = '_SchemaMaintenance';
+export const SCHEMA_MAINTENANCE_TABLE = SCHEMA_MAINTENANCE_TABLE_NAME;
 
 export type SchemaMaintenanceStep = {
   readonly id: string;

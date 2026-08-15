@@ -8,9 +8,9 @@
 
 import { createMaintenanceSeam } from './maintenance.mjs';
 
-import { SCHEMA_MAINTENANCE_TABLE_DDL } from './operational-ledger-ddl.mjs';
+import { SCHEMA_MAINTENANCE_TABLE_DDL, SCHEMA_MAINTENANCE_TABLE_NAME } from './operational-ledger-ddl.mjs';
 
-export const SCHEMA_MAINTENANCE_TABLE = '_SchemaMaintenance';
+export const SCHEMA_MAINTENANCE_TABLE = SCHEMA_MAINTENANCE_TABLE_NAME;
 
 
 

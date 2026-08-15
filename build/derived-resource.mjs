@@ -6,9 +6,9 @@
 
 import { constants } from 'node:sqlite';
 
-import { DERIVED_RESOURCE_TABLE_DDL } from './operational-ledger-ddl.mjs';
+import { DERIVED_RESOURCE_TABLE_DDL, DERIVED_RESOURCE_TABLE_NAME } from './operational-ledger-ddl.mjs';
 
-export const DERIVED_RESOURCE_TABLE = '_DerivedResource';
+export const DERIVED_RESOURCE_TABLE = DERIVED_RESOURCE_TABLE_NAME;
 
 
 
