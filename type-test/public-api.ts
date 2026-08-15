@@ -33,6 +33,7 @@ import {
   type Invitation, type JobQueue, type JobRow, type LiveDelivery, type LiveDeliveryActivation, type LiveDeliveryBootstrap, type LiveDeliveryCatchup, type LiveDeliveryEnvelope as ServerLiveDeliveryEnvelope, type Migration, type UserPrincipal,
   type ClaimedBlobLifecycle, type ClaimedBlobLifecycleState, type WorkbenchDatabase, type OperationalConsumerAdmin, type OperationalFailure, type PostCommitEffectRunner,
    type ByteStore, type ByteStoreCapabilities, type ByteStoreDurability,
+   type BlobCleanupState,
    createSearchPluginRegistry, createSearchSourceReader, createSearchOwnedIndexCapability, createVectorPlugin,
    type SearchPlugin, type SearchPluginContext, type SearchOwnedIndex, type SearchSourceReader,
    type SearchOwnedIndexCapabilityOptions, type VectorPlugin,
@@ -317,6 +318,8 @@ const app: WorkbenchApp = workbench({
   blobReapTtlMs: 3_600_000,
   logRetentionDays: 30,
   logRetentionIntervalMs: 60_000,
+  blobRetention: { replacedGenerationRetentionMs: 123_000 },
+  blobLowDiskHeadroomBytes: 42,
 }).mount('/projects', Project);
 const startedApp: Promise<WorkbenchApp> = app.start();
 app.onShutdown('typed cleanup', () => undefined, { timeoutMs: 1000 });
@@ -517,13 +520,21 @@ customByteStore.capabilities.purgeOnStart;
 const bogusDurability: ByteStoreDurability = 'volatile';
 const surfacedCapabilities: ByteStoreCapabilities = blobs.capabilities;
 const declaredDurability: ByteStoreDurability = surfacedCapabilities.durability;
-const orphanDanglerCounts: { orphans: number; danglers: number } = blobs.reap({ ttl: 60_000, census: compileBlobCensus({ entities: new Map() }) });
+const orphanDanglerCounts: Promise<{ orphans: number; danglers: number }> = blobs.reap({ ttl: 60_000, census: compileBlobCensus({ entities: new Map() }) });
+void orphanDanglerCounts;
 blobs.discardPending('pending-1');
 blobs.discard('final-1');
 // @ts-expect-error pathFor was retired from the portable ByteStore surface (S6/A2)
 customByteStore.pathFor;
 // @ts-expect-error pathFor was retired from the portable BlobStore surface (S6/A2)
 blobs.pathFor;
+// S6/A5 generation replacement + durable cleanup surface:
+blobs.replace('gen-old', { bytes: 'new-bytes' });
+const switched: { adopted: number; replaced: number } = blobs.switchReplacement(db, 'gen-old', 'gen-new');
+const cleanup: BlobCleanupState | undefined = blobs.cleanupState('gen-old');
+const pendingCleanupIds: readonly string[] = blobs.pendingCleanups();
+const freeBytesNow: number | null | undefined = customByteStore.freeBytes?.();
+void [switched, cleanup, pendingCleanupIds, freeBytesNow];
 void [job, blobs, customByteStore, surfacedCapabilities, declaredDurability, bogusDurability, orphanDanglerCounts, runMigrations(db, [migration]), readCommittedCursor(db, 'Project:project-1')];
 const live: LiveDelivery = createLiveDelivery({ db, entities: new Map(), mayVerb: () => true });
 createLiveDelivery({ db, entities: new Map(), mayVerb: () => true, snapshots: [] });

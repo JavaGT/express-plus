@@ -253,6 +253,8 @@ export default function workbench({
   blobReapTtlMs = maintenanceDefaults.blobReapTtlMs,
   logRetentionDays = maintenanceDefaults.logRetentionDays,
   logRetentionIntervalMs = maintenanceDefaults.logRetentionIntervalMs,
+  blobRetention = maintenanceDefaults.blobRetention,
+  blobLowDiskHeadroomBytes = maintenanceDefaults.blobLowDiskHeadroomBytes,
   operationalConsumers = [],
   blobLifecycle,
 }: any = {}) {
@@ -548,6 +550,8 @@ export default function workbench({
       blobReapTtlMs,
       logRetentionDays,
       logRetentionIntervalMs,
+      blobRetention,
+      blobLowDiskHeadroomBytes,
     });
     // The shared clock is the single timer for all framework reapers (schedule,
     // tick, job-queue lease, blob, log-retention, job-worker polls). Created once
@@ -629,8 +633,12 @@ export default function workbench({
     // synchronously-opened db and is DEFERRED to the open for an adapter-backed
     // app (installPendingDb below).
     const attachHandleResources = (handle: any): void => {
+      // S6/A5 #5: the app's low-disk headroom travels with the store so the
+      // /blobs upload route and the pending-blob stage both refuse new uploads
+      // below the threshold (fail closed on an undeclaring durable backend).
+      const blobStoreOptions = { lowDiskHeadroomBytes: app._maintenance.blobLowDiskHeadroomBytes };
       if (blobOpts && typeof blobOpts.writePending === 'function') {
-        app.blobs = createBlobStore({ db: handle, bytes: blobOpts });
+        app.blobs = createBlobStore({ db: handle, bytes: blobOpts, ...blobStoreOptions });
       } else if (blobRoot) {
         // `blobRoot` was already refused (explicit) or resolved to the owned
         // directory's managed `blobs/` before the adapter opened (managed-path
@@ -642,11 +650,12 @@ export default function workbench({
           root: blobRoot,
           ...(blobStagingRoot ? { stagingRoot: blobStagingRoot } : {}),
           db: handle,
+          ...blobStoreOptions,
         });
       } else {
         // Memory database with no explicit blobs config: the in-memory fake
         // byte store (S6/A1) — never a disk root, never cwd/.blobs.
-        app.blobs = createBlobStore({ db: handle, bytes: memoryBlobs() });
+        app.blobs = createBlobStore({ db: handle, bytes: memoryBlobs(), ...blobStoreOptions });
       }
       app.postCommitEffects = createPostCommitEffectRunner({ db: handle });
       // The staleness ledger (S4/A2) is engaged with the SAME handle: durable

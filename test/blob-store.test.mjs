@@ -159,7 +159,7 @@ test('reaper orphan sweep', async () => {
   // Manually set createdAt to the past
   db.prepare('UPDATE BlobStore SET createdAt = ? WHERE id = ?').run(staleDate, id);
   
-  const { orphans } = store.reap({ ttl: 3600_000, census: EMPTY_BLOB_CENSUS });
+  const { orphans } = await store.reap({ ttl: 3600_000, census: EMPTY_BLOB_CENSUS });
   assert.equal(orphans, 1, 'stale pending blob swept');
   
   assert.equal(store.stat(id), undefined, 'row deleted');
@@ -180,7 +180,7 @@ test('reaper refcount sweep', async () => {
   store.finalize(id);
   
   // No reference → dangling
-  let result = store.reap({ ttl: 3600_000, census: photoCensus });
+  let result = await store.reap({ ttl: 3600_000, census: photoCensus });
   assert.equal(result.danglers, 1, 'dangling blob swept');
   assert.equal(store.stat(id), undefined, 'dangling row deleted');
   
@@ -196,7 +196,7 @@ test('reaper refcount sweep', async () => {
   // Create reference
   db.prepare('INSERT INTO Photo (id, data) VALUES (?, ?)').run(randomUUID(), refId);
   
-  result = store.reap({ ttl: 3600_000, census: photoCensus });
+  result = await store.reap({ ttl: 3600_000, census: photoCensus });
   assert.equal(result.danglers, 0, 'referenced blob kept');
   assert.ok(store.stat(refId), 'referenced row exists');
   
@@ -211,7 +211,7 @@ test('reaper treats an empty census as no adopted blob references', async () => 
   db.exec('COMMIT');
   store.finalize(id);
 
-  const result = store.reap({ ttl: 3600_000, census: EMPTY_BLOB_CENSUS });
+  const result = await store.reap({ ttl: 3600_000, census: EMPTY_BLOB_CENSUS });
 
   assert.equal(result.danglers, 1, 'an empty census declares no adopted references');
   assert.equal(store.stat(id), undefined, 'the unreferenced adopted blob is reaped');

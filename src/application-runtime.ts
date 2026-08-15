@@ -17,19 +17,29 @@ import { retentionPrune } from './committed-log.ts';
 import { getLog, withLog } from './log.ts';
 import type { FrameworkLog } from './log.ts';
 import { EMPTY_BLOB_CENSUS, type BlobCensus } from './blob-census.ts';
+import { blobRetentionDefaults, validateBlobRetentionPolicies, type BlobRetentionPolicies } from './blob-retention.ts';
+import type { BlobReapOptions } from './blob-store.ts';
 import { installBatchHttpDispatcher, installHistoryHttpDispatcher } from './application-action-http.ts';
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.ts';
 import { rawRow } from './entity/query.ts';
 import type { FieldDescriptor, LiveEntityRecord } from './live-fanout.ts';
 
 const BLOB_REAP_INTERVAL_MS = 10 * 60_000;
-const BLOB_REAP_TTL_MS = 60 * 60_000;
+
+// S6/A5 #5 low-disk guard default: refuse new uploads below 256 MiB of free
+// disk so a full disk can never compromise SQLite/WAL durability mid-commit.
+// Configurable via the maintenance options; 0 disables the guard.
+export const DEFAULT_LOW_DISK_HEADROOM_BYTES = 256 * 1024 * 1024;
 
 export interface RuntimeMaintenance {
   blobReapIntervalMs: number;
   blobReapTtlMs: number;
   logRetentionDays: number;
   logRetentionIntervalMs: number;
+  /** Named blob retention policies (S6/A5) — the single TTL source; no scattered literals. */
+  blobRetention: Readonly<BlobRetentionPolicies>;
+  /** Low-disk upload guard (S6/A5 #5): refuse new uploads below this many free bytes (0 disables). */
+  blobLowDiskHeadroomBytes: number;
 }
 
 interface RuntimeDatabase {
@@ -76,9 +86,11 @@ interface RuntimeApp {
   resolveRoutes(): Promise<unknown>;
   clock: RuntimeClock;
   jobs?: { stop?(): unknown; startReaper?(): unknown };
-  blobs?: { reap(options: { ttl: number; census: BlobCensus }): unknown };
+  blobs?: { reap(options: BlobReapOptions): unknown };
   blobCensus?: BlobCensus;
   pendingBlobLifecycle?: { reap(): unknown; reconcile(): unknown };
+  /** S1/A6 recycle seam (S6/A5): the reaper routes replaced/dangling generations through it before removing live bytes. */
+  blobRecycleSeam?: { bin(deletion: { generations: readonly string[] }): Promise<unknown> } | null;
   reconcileBlobFinalize?(db: unknown): unknown;
   reconcileEmailDelivery?(db: unknown): unknown;
   reconcileOperationalConsumers?(): unknown;
@@ -162,7 +174,16 @@ function engageMaintenance(app: RuntimeApp, log: FrameworkLog): void {
   const options = app._maintenance;
   if (app.blobs) {
     app.sweepBlobs = () => app.writeQueue.run(() =>
-      app.blobs!.reap({ ttl: options.blobReapTtlMs, census: app.blobCensus ?? EMPTY_BLOB_CENSUS })
+      app.blobs!.reap({
+        ttl: options.blobReapTtlMs,
+        census: app.blobCensus ?? EMPTY_BLOB_CENSUS,
+        // The named 'replaced-generation' policy (S6/A5): replaced generations
+        // are reclaimed only once this retention window has elapsed.
+        replacedRetentionMs: options.blobRetention.replacedGenerationRetentionMs,
+        // Route replaced/dangling generations through the S1/A6 recycling bin
+        // (S6/A5 #4) when the app owns a recycle seam.
+        ...(app.blobRecycleSeam ? { recycle: app.blobRecycleSeam } : {}),
+      })
     );
     app.clock.add({
       name: 'blob-reaper',
@@ -302,9 +323,13 @@ export function startApplication(app: RuntimeApp): Promise<RuntimeApp> {
 
 export const maintenanceDefaults: Readonly<RuntimeMaintenance> = Object.freeze({
   blobReapIntervalMs: BLOB_REAP_INTERVAL_MS,
-  blobReapTtlMs: BLOB_REAP_TTL_MS,
+  // The abandoned-upload TTL is a named policy (S6/A5) — the scalar remains for
+  // back-compat, defaulting from the policy so no TTL literal lives here.
+  blobReapTtlMs: blobRetentionDefaults.abandonedUploadTtlMs,
   logRetentionDays: 0,
   logRetentionIntervalMs: BLOB_REAP_INTERVAL_MS,
+  blobRetention: blobRetentionDefaults,
+  blobLowDiskHeadroomBytes: DEFAULT_LOW_DISK_HEADROOM_BYTES,
 });
 
 export function validateMaintenanceOptions(options: RuntimeMaintenance): Readonly<RuntimeMaintenance> {
@@ -320,5 +345,19 @@ export function validateMaintenanceOptions(options: RuntimeMaintenance): Readonl
       throw new TypeError(`${name} must be a finite non-negative number`);
     }
   }
-  return Object.freeze({ ...options });
+  // The named retention policies (S6/A5) validate centrally in
+  // blob-retention.ts; absent → the shared defaults.
+  const blobRetention = validateBlobRetentionPolicies(options.blobRetention);
+  const blobLowDiskHeadroomBytes = options.blobLowDiskHeadroomBytes ?? maintenanceDefaults.blobLowDiskHeadroomBytes;
+  if (typeof blobLowDiskHeadroomBytes !== 'number' || !Number.isFinite(blobLowDiskHeadroomBytes) || blobLowDiskHeadroomBytes < 0) {
+    throw new TypeError('blobLowDiskHeadroomBytes must be a finite non-negative number of bytes (0 disables the guard)');
+  }
+  return Object.freeze({
+    blobReapIntervalMs: options.blobReapIntervalMs,
+    blobReapTtlMs: options.blobReapTtlMs,
+    logRetentionDays: options.logRetentionDays,
+    logRetentionIntervalMs: options.logRetentionIntervalMs,
+    blobRetention,
+    blobLowDiskHeadroomBytes,
+  });
 }

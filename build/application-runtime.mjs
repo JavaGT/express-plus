@@ -17,14 +17,26 @@ import { retentionPrune } from './committed-log.mjs';
 import { getLog, withLog } from './log.mjs';
 
 import { EMPTY_BLOB_CENSUS,                 } from './blob-census.mjs';
+import { blobRetentionDefaults, validateBlobRetentionPolicies,                            } from './blob-retention.mjs';
+
 import { installBatchHttpDispatcher, installHistoryHttpDispatcher } from './application-action-http.mjs';
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
 import { rawRow } from './entity/query.mjs';
 
 
 const BLOB_REAP_INTERVAL_MS = 10 * 60_000;
-const BLOB_REAP_TTL_MS = 60 * 60_000;
 
+// S6/A5 #5 low-disk guard default: refuse new uploads below 256 MiB of free
+// disk so a full disk can never compromise SQLite/WAL durability mid-commit.
+// Configurable via the maintenance options; 0 disables the guard.
+export const DEFAULT_LOW_DISK_HEADROOM_BYTES = 256 * 1024 * 1024;
+
+
+
+
+
+
+                                             
 
 
 
@@ -162,7 +174,16 @@ function engageMaintenance(app            , log              )       {
   const options = app._maintenance;
   if (app.blobs) {
     app.sweepBlobs = () => app.writeQueue.run(() =>
-      app.blobs .reap({ ttl: options.blobReapTtlMs, census: app.blobCensus ?? EMPTY_BLOB_CENSUS })
+      app.blobs .reap({
+        ttl: options.blobReapTtlMs,
+        census: app.blobCensus ?? EMPTY_BLOB_CENSUS,
+        // The named 'replaced-generation' policy (S6/A5): replaced generations
+        // are reclaimed only once this retention window has elapsed.
+        replacedRetentionMs: options.blobRetention.replacedGenerationRetentionMs,
+        // Route replaced/dangling generations through the S1/A6 recycling bin
+        // (S6/A5 #4) when the app owns a recycle seam.
+        ...(app.blobRecycleSeam ? { recycle: app.blobRecycleSeam } : {}),
+      })
     );
     app.clock.add({
       name: 'blob-reaper',
@@ -302,9 +323,13 @@ export function startApplication(app            )                      {
 
 export const maintenanceDefaults                               = Object.freeze({
   blobReapIntervalMs: BLOB_REAP_INTERVAL_MS,
-  blobReapTtlMs: BLOB_REAP_TTL_MS,
+  // The abandoned-upload TTL is a named policy (S6/A5) — the scalar remains for
+  // back-compat, defaulting from the policy so no TTL literal lives here.
+  blobReapTtlMs: blobRetentionDefaults.abandonedUploadTtlMs,
   logRetentionDays: 0,
   logRetentionIntervalMs: BLOB_REAP_INTERVAL_MS,
+  blobRetention: blobRetentionDefaults,
+  blobLowDiskHeadroomBytes: DEFAULT_LOW_DISK_HEADROOM_BYTES,
 });
 
 export function validateMaintenanceOptions(options                    )                               {
@@ -320,5 +345,19 @@ export function validateMaintenanceOptions(options                    )         
       throw new TypeError(`${name} must be a finite non-negative number`);
     }
   }
-  return Object.freeze({ ...options });
+  // The named retention policies (S6/A5) validate centrally in
+  // blob-retention.ts; absent → the shared defaults.
+  const blobRetention = validateBlobRetentionPolicies(options.blobRetention);
+  const blobLowDiskHeadroomBytes = options.blobLowDiskHeadroomBytes ?? maintenanceDefaults.blobLowDiskHeadroomBytes;
+  if (typeof blobLowDiskHeadroomBytes !== 'number' || !Number.isFinite(blobLowDiskHeadroomBytes) || blobLowDiskHeadroomBytes < 0) {
+    throw new TypeError('blobLowDiskHeadroomBytes must be a finite non-negative number of bytes (0 disables the guard)');
+  }
+  return Object.freeze({
+    blobReapIntervalMs: options.blobReapIntervalMs,
+    blobReapTtlMs: options.blobReapTtlMs,
+    logRetentionDays: options.logRetentionDays,
+    logRetentionIntervalMs: options.logRetentionIntervalMs,
+    blobRetention,
+    blobLowDiskHeadroomBytes,
+  });
 }

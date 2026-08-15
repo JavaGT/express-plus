@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import workbench from '../build/index.mjs';
+import { maintenanceDefaults } from '../build/application-runtime.mjs';
+import { blobRetentionDefaults } from '../build/blob-retention.mjs';
 
 const invalidOptions = [
   ['blobReapIntervalMs', 0],
@@ -40,6 +42,10 @@ test('maintenance accepts zero blob TTL and fractional retention days', async ()
     blobReapTtlMs: 0,
     logRetentionDays: 0.5,
     logRetentionIntervalMs: 1,
+    // S6/A5: the named retention policies + low-disk headroom default in when
+    // they are not configured — the single TTL source, no scattered literals.
+    blobRetention: blobRetentionDefaults,
+    blobLowDiskHeadroomBytes: maintenanceDefaults.blobLowDiskHeadroomBytes,
   });
   await app.shutdown();
 });

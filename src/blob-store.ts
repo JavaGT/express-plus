@@ -25,6 +25,20 @@
 // The BYTE storage — where the bytes physically live — is delegated to an
 // injected byte store (`bytes`), defaulting to fsBlobs (seam-review §2.2). Only
 // the byte half is swappable; lifecycle + metadata are framework invariants.
+//
+// S6/A5 (workbench#94) adds: GENERATION REPLACEMENT (replace stages new bytes,
+// switchReplacement atomically switches the owning reference inside the
+// caller's coordinated turn, a failed switch leaves the old generation readable
+// and authoritative, and the reaper reclaims a replaced generation only once it
+// is unreferenced AND the named 'replaced-generation' retention elapsed);
+// DURABLE CLEANUP STATE (a failed byte deletion is recorded on the row —
+// cleanupError/cleanupAttempts — retried by the next sweep, and never reported
+// complete until the pending slot, final slot, and metadata row are verified
+// gone); RECYCLE ROUTING (replaced and dangling generations are binned through
+// the S1/A6 recycle seam BEFORE live bytes are removed, so retained backups
+// move their copies into the recoverable bin); and the LOW-DISK GUARD (new
+// uploads are refused below a configurable free-disk headroom, fail closed).
+//
 // `workbench({ blobs: { root } })` constructs fsBlobs internally (back-compat —
 // an explicit root, refused on overlap with the owned directory);
 // `workbench({ blobs: byteStore })` accepts any conforming byte-store object
@@ -72,12 +86,43 @@ export interface BlobStoreRow {
   size: number;
   mime: string | null;
   createdAt: string;
+  /** The generation id that replaced this generation (status 'replaced'). */
+  replacedBy?: string | null;
+  /** ISO instant the owning reference switched to the replacement generation. */
+  replacedAt?: string | null;
+  /** Durable cleanup state: last failure message while removing this generation's bytes. */
+  cleanupError?: string | null;
+  /** Durable cleanup state: how many byte-removal attempts failed so far. */
+  cleanupAttempts?: number;
+}
+
+/**
+ * The S1/A6 recycle seam consumed by the reaper (S6/A5). When present, a
+ * replaced/dangling generation is routed to the recycling bin BEFORE its live
+ * bytes are removed, so every retained backup holding the generation moves its
+ * copy into the recoverable bin (bin() is idempotent per generation). The
+ * concrete implementation is the S6/A6 `RecycleBlobSeam`-backed recycle
+ * manager; `createRecycleManager({ blobs })` in src/backup/recycle.ts satisfies
+ * this shape.
+ */
+export interface BlobRecycleSeam {
+  bin(deletion: { generations: readonly string[] }): Promise<unknown>;
 }
 
 export interface BlobReapOptions {
   ttl: number;
   /** Compiled blob-reference census (S6/A3) — the refcount sweep's ONLY column source. */
   census: BlobCensus;
+  /**
+   * Replaced-generation retention in ms (named policy 'replaced-generation',
+   * S6/A5). A replaced generation is reclaimed only when the owning reference
+   * switched away AND this retention window has elapsed. Absent or 0 → the
+   * sweep never reclaims replaced generations (fail closed: retention must
+   * explicitly permit).
+   */
+  replacedRetentionMs?: number;
+  /** S1/A6 recycle seam (see BlobRecycleSeam). Optional; without it the reaper removes live bytes but never routes backup copies to the bin. */
+  recycle?: BlobRecycleSeam;
 }
 
 export interface BlobStore {
@@ -104,10 +149,58 @@ export interface BlobStore {
   readRangeStream(id: string, range?: [start?: number, end?: number], options?: { signal?: AbortSignal }): Readable;
   discardPending(id: string): void;
   discard(id: string): void;
-  reap(options: BlobReapOptions): { orphans: number; danglers: number };
+  /**
+   * Generation replacement (S6/A5): stage NEW bytes for an existing adopted
+   * generation, validate the previous generation (exists, adopted, readable),
+   * then switch atomically via switchReplacement in the caller's coordinated
+   * turn. A failure at any point (stage, validation, adopt, or switch) leaves
+   * the old generation readable and authoritative — nothing is reaped until
+   * the switch committed and the named 'replaced-generation' retention elapsed.
+   */
+  replace(previousId: string, options: BlobUploadOptions): BlobReplacementStage;
+  /**
+   * Atomically switch the generation inside the CALLER'S transaction: the
+   * replacement generation is adopted (pending → adopted) AND the previous
+   * generation is marked 'replaced' (with its replacement + switch instant
+   * recorded). One metadata pair in the caller's turn — a failed switch throws
+   * and rolls back, leaving the old generation authoritative.
+   */
+  switchReplacement(dbOrTxn: Pick<DbHandle, 'prepare'>, previousId: string, newId: string): BlobSwitchResult;
+  reap(options: BlobReapOptions): Promise<{ orphans: number; danglers: number }>;
   stat(id: string): BlobStoreRow | undefined;
+  /** Durable cleanup state for one generation (S6/A5), or undefined when the row is gone / never failed. */
+  cleanupState(id: string): BlobCleanupState | undefined;
+  /** Ids currently carrying durable cleanup state (a failed byte deletion awaiting retry). */
+  pendingCleanups(): readonly string[];
   /** The injected byte store's honest capability declaration, surfaced. */
   readonly capabilities: ByteStoreCapabilities;
+}
+
+export interface BlobReplacementStage {
+  /** The new generation id (staged as 'pending', switchable via switchReplacement). */
+  id: string;
+  /** The generation this staged replacement replaces. */
+  previousId: string;
+  md5: string;
+  sha256: string;
+  size: number;
+  mime: string | null;
+}
+
+export interface BlobSwitchResult {
+  /** 1 when the replacement generation transitioned pending → adopted. */
+  adopted: number;
+  /** 1 when the previous generation transitioned adopted → replaced. */
+  replaced: number;
+}
+
+export interface BlobCleanupState {
+  id: string;
+  status: string;
+  replacedBy: string | null;
+  replacedAt: string | null;
+  cleanupError: string | null;
+  cleanupAttempts: number;
 }
 
 // The retired `pathFor` (S6/A2), kept ONLY behind this explicit internal/test
@@ -129,9 +222,26 @@ export interface BlobStoreOptions {
   stagingRoot?: string;
   db: DbHandle;
   bytes?: ByteStore;
+  /**
+   * Low-disk guard (S6/A5): the minimum free bytes a durable byte store must
+   * declare before a new upload is accepted. 0 (the store-level default)
+   * disables the guard here — the application's `maintenanceDefaults` policy
+   * supplies the real headroom. Fail-closed: a durable byte store that cannot
+   * declare free space refuses uploads.
+   */
+  lowDiskHeadroomBytes?: number;
 }
 
-export function createBlobStore({ root, stagingRoot, db, bytes }: BlobStoreOptions): BlobStore {
+// The failure a durable byte store throws when free space is below (or
+// unknowable against) the configured headroom — fail closed before a new
+// upload compromises database durability (#27).
+export const BLOB_STORAGE_UNDER_DISK_LIMIT = 'BLOB_STORAGE_UNDER_DISK_LIMIT';
+
+function lowDiskError(): Error & { code: string } {
+  return Object.assign(new Error(BLOB_STORAGE_UNDER_DISK_LIMIT), { code: BLOB_STORAGE_UNDER_DISK_LIMIT });
+}
+
+export function createBlobStore({ root, stagingRoot, db, bytes, lowDiskHeadroomBytes = 0 }: BlobStoreOptions): BlobStore {
   // The byte store owns where bytes live (node:fs by default; S3 later). It is
   // the ONLY seam for byte storage — every read/write/remove/finalize goes
   // through it. `root` is accepted for back-compat (`blobs: { root }`): when no
@@ -139,9 +249,25 @@ export function createBlobStore({ root, stagingRoot, db, bytes }: BlobStoreOptio
   // be passed directly as `root`'s replacement once a caller hands a store in.
   const store: ByteStore = bytes
     ?? fsBlobs(stagingRoot ? { root: root as string, stagingRoot } : { root: root as string });
-  const { writePending, finalizePending, readRange, readPending, readRangeStream, remove } = store;
+  const { writePending, finalizePending, readRange, readPending, readRangeStream, remove, exists } = store;
+
+  // The low-disk guard (#27): before accepting a NEW upload, a durable byte
+  // store must declare free space at or above the configured headroom — else
+  // the upload is refused (fail closed) so disk headroom can never compromise
+  // database durability. An ephemeral store (memoryBlobs) has no disk to guard.
+  // A durable store that cannot declare free space refuses uploads: the guard
+  // never guesses, and a backend that cannot prove headroom cannot prove a
+  // durable commit either.
+  function assertDiskHeadroom(): void {
+    if (store.capabilities.durability !== 'durable' || lowDiskHeadroomBytes <= 0) return;
+    const freeBytes = typeof (store as { freeBytes?: () => number | null }).freeBytes === 'function'
+      ? (store as { freeBytes: () => number | null }).freeBytes()
+      : null;
+    if (freeBytes === null || freeBytes < lowDiskHeadroomBytes) throw lowDiskError();
+  }
 
   function upload({ bytes: uploadBytes, mime, id }: BlobUploadOptions = { bytes: undefined as never }) {
+    assertDiskHeadroom();
     let blobId = id ?? randomUUID();
     safeId(blobId);
 
@@ -208,38 +334,142 @@ export function createBlobStore({ root, stagingRoot, db, bytes }: BlobStoreOptio
 
   // Pending-blob lifecycle owns removal of staged generations. This is not an
   // application escape hatch: only the package lifecycle invokes it after its
-  // durable state transition has selected an unclaimed generation.
+  // durable state transition has selected an unclaimed generation. Verified
+  // (S6/A5 #3): the metadata row is deleted only once the pending slot is
+  // confirmed gone, so a failed removal is never reported complete.
   function discardPending(id: string): void {
     safeId(id);
-    remove(id, { pending: true });
+    if (exists(id, { pending: true })) remove(id, { pending: true });
+    if (exists(id, { pending: true })) throw new Error('pending blob bytes could not be removed');
     db.prepare('DELETE FROM BlobStore WHERE id = ? AND status = ?').run(id, 'pending');
   }
 
   // Pending-blob deletion is package-owned. Remove both locations because a
   // deletion request may race finalization and either slot may be present.
+  // Verified: the row is deleted only after pending AND final slots are
+  // confirmed gone — a failed byte deletion keeps the row (durable state) and
+  // is never reported complete.
   function discard(id: string): void {
     safeId(id);
-    remove(id, { pending: true });
-    remove(id, { pending: false });
+    if (exists(id, { pending: true })) remove(id, { pending: true });
+    if (exists(id, { pending: false })) remove(id, { pending: false });
+    if (exists(id, { pending: true }) || exists(id, { pending: false })) {
+      throw new Error('blob bytes could not be removed');
+    }
     db.prepare('DELETE FROM BlobStore WHERE id = ?').run(id);
   }
 
-  function reap({ ttl, census }: BlobReapOptions): { orphans: number; danglers: number } {
+  // Stage NEW bytes for an existing adopted generation (S6/A5 #1). The old
+  // generation must be adopted AND readable — a failed validation (missing,
+  // not adopted, unreadable, or a failed staging write) throws before anything
+  // switched, leaving the old generation readable and authoritative. The staged
+  // replacement is a normal 'pending' generation the caller switches into the
+  // owning reference via switchReplacement inside their coordinated txn.
+  function replace(previousId: string, options: BlobUploadOptions): BlobReplacementStage {
+    safeId(previousId);
+    const previous = db.prepare('SELECT status FROM BlobStore WHERE id = ?').get(previousId) as { status?: string } | undefined;
+    if (!previous) throw new Error(`replaced generation '${previousId}' does not exist`);
+    if (previous.status !== 'adopted') {
+      throw new Error(`replaced generation '${previousId}' is '${previous.status}', not adopted — refusing to stage a replacement`);
+    }
+    try {
+      readRangeBytes(previousId);
+    } catch (error) {
+      throw new Error(
+        `replaced generation '${previousId}' is unreadable — refusing to stage a replacement: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    const staged = upload(options);
+    return { id: staged.id, previousId, md5: staged.md5, sha256: staged.sha256, size: staged.size, mime: staged.mime };
+  }
+
+  // Atomically switch the generation inside the CALLER'S coordinated turn:
+  // the staged replacement is adopted and the previous generation is marked
+  // 'replaced' (recording the replacement + switch instant) in ONE metadata
+  // pair. A failed transition (replacement not pending, previous not adopted)
+  // THROWS — the caller's transaction rolls back and the old generation stays
+  // readable and authoritative. Post-commit, the blob-finalize consumer
+  // finalizes the replacement's bytes and the reaper reclaims the replaced
+  // generation only once it is unreferenced and the named 'replaced-generation'
+  // retention has elapsed.
+  function switchReplacement(dbOrTxn: Pick<DbHandle, 'prepare'>, previousId: string, newId: string): BlobSwitchResult {
+    safeId(previousId);
+    safeId(newId);
+    const now = new Date().toISOString();
+    const adopted = dbOrTxn.prepare('UPDATE BlobStore SET status = ? WHERE id = ? AND status = ?').run('adopted', newId, 'pending');
+    const replaced = dbOrTxn.prepare('UPDATE BlobStore SET status = ?, replacedBy = ?, replacedAt = ? WHERE id = ? AND status = ?')
+      .run('replaced', newId, now, previousId, 'adopted');
+    if (adopted.changes !== 1) {
+      throw new Error(`replacement generation '${newId}' is not staged as pending — the switch cannot commit`);
+    }
+    if (replaced.changes !== 1) {
+      throw new Error(`previous generation '${previousId}' is not an adopted generation — the switch cannot commit`);
+    }
+    return { adopted: adopted.changes, replaced: replaced.changes };
+  }
+
+  // Record a failed byte deletion durably on the row (S6/A5 #3): the row
+  // survives with its cleanup state so the next sweep retries it. It is never
+  // reported complete until the removal verifies — the row is deleted only by
+  // a successful, verified reap.
+  function recordCleanupFailure(id: string, error: unknown): void {
+    db.prepare('UPDATE BlobStore SET cleanupError = ?, cleanupAttempts = cleanupAttempts + 1 WHERE id = ?')
+      .run(String((error as { message?: unknown })?.message ?? error), id);
+  }
+
+  // The one verified removal path for the reaper. With a recycle seam, the
+  // generation is routed to the S1/A6 bin BEFORE any live byte is removed (a
+  // bin failure keeps the generation durable — never a silently-kept backup
+  // copy). Removal is explicit + verified: each slot that exists is removed,
+  // and the metadata row is deleted only when BOTH slots are confirmed gone.
+  async function attemptReap(id: string, { bin = true, recycle: seam }: { bin?: boolean; recycle?: BlobRecycleSeam } = {}): Promise<'reaped' | 'retained'> {
+    if (bin && seam) {
+      try {
+        await seam.bin({ generations: [id] });
+      } catch (error) {
+        recordCleanupFailure(id, error);
+        return 'retained';
+      }
+    }
+    try {
+      if (exists(id, { pending: true })) remove(id, { pending: true });
+      if (exists(id, { pending: false })) remove(id, { pending: false });
+      if (exists(id, { pending: true }) || exists(id, { pending: false })) {
+        throw new Error('blob bytes could not be removed');
+      }
+      db.prepare('DELETE FROM BlobStore WHERE id = ?').run(id);
+      return 'reaped';
+    } catch (error) {
+      recordCleanupFailure(id, error);
+      return 'retained';
+    }
+  }
+
+  async function reap({ ttl, census, replacedRetentionMs, recycle }: BlobReapOptions): Promise<{ orphans: number; danglers: number }> {
     const now = Date.now();
     let orphans = 0;
     let danglers = 0;
 
+    // 0. Durable-cleanup retry sweep: rows carrying a previously-failed byte
+    // deletion are retried. Recycle is re-emitted (bin() is idempotent per
+    // generation), removal is verified, and only a fully-verified reap deletes
+    // the row — cleanup is never reported complete until then.
+    const cleanupRows = db.prepare('SELECT id FROM BlobStore WHERE cleanupError IS NOT NULL').all() as Array<{ id: string }>;
+    for (const row of cleanupRows) {
+      await attemptReap(row.id, { recycle });
+    }
+
     // 1. Orphan sweep: stale pending blobs (uploaded, never adopted by any
     // committed dispatch — no committed event exists to recover them from).
+    // Never routed to the recycle bin: an abandoned upload was never adopted,
+    // never censused, and so never reached a backup.
     const staleDate = new Date(now - ttl).toISOString();
     const pendingRows = db.prepare(
       'SELECT id, createdAt FROM BlobStore WHERE status = ? AND createdAt < ?',
     ).all('pending', staleDate) as Array<{ id: string; createdAt: string }>;
     for (const row of pendingRows) {
       if (db.prepare('SELECT 1 FROM _PendingBlob WHERE blobId = ?').get(row.id)) continue;
-      remove(row.id, { pending: true });
-      db.prepare('DELETE FROM BlobStore WHERE id = ? AND status = ?').run(row.id, 'pending');
-      orphans++;
+      if (await attemptReap(row.id, { bin: false, recycle }) === 'reaped') orphans++;
     }
 
     // 2. Refcount sweep: adopted blobs with no references, driven by the
@@ -248,40 +478,78 @@ export function createBlobStore({ root, stagingRoot, db, bytes }: BlobStoreOptio
     // table that is not (yet) provisioned holds no rows and so references
     // nothing (skipped after one catalog check). Matching content hashes never
     // merge ownership (#7): every id is checked against its own references.
+    const referenceQueries = prepareReferenceQueries(census);
     const adoptedForRefcount = db.prepare('SELECT id FROM BlobStore WHERE status = ?').all('adopted') as Array<{ id: string }>;
-    if (adoptedForRefcount.length > 0) {
-      const existingTables = new Set<string>();
-      const tableStmt = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?");
-      for (const ref of census.references) {
-        if (!existingTables.has(ref.table) && tableStmt.get(ref.table)) existingTables.add(ref.table);
-      }
-      const referenceQueries = census.references
-        .filter((ref) => existingTables.has(ref.table))
-        .map((ref) => ({ query: db.prepare(`SELECT 1 FROM "${ref.table}" WHERE "${ref.column}" = ? LIMIT 1`) }));
-      for (const row of adoptedForRefcount) {
-        if (db.prepare("SELECT 1 FROM _PendingBlob WHERE blobId = ? AND status IN ('claimed', 'finalized', 'recovery-failed', 'delete-requested')").get(row.id)) continue;
-        let referenced = false;
-        for (const { query } of referenceQueries) {
-          if (query.get(row.id)) {
-            referenced = true;
-            break;
-          }
-        }
-        if (!referenced) {
-          remove(row.id, { pending: false });
-          db.prepare('DELETE FROM BlobStore WHERE id = ?').run(row.id);
-          danglers++;
-        }
+    for (const row of adoptedForRefcount) {
+      if (db.prepare("SELECT 1 FROM _PendingBlob WHERE blobId = ? AND status IN ('claimed', 'finalized', 'recovery-failed', 'delete-requested')").get(row.id)) continue;
+      if (isReferenced(referenceQueries, row.id)) continue;
+      if (await attemptReap(row.id, { recycle }) === 'reaped') danglers++;
+    }
+
+    // 3. Replaced-generation sweep (S6/A5 #1/#2): a generation the owning
+    // reference switched away from is reclaimed ONLY when it is unreferenced
+    // AND the named 'replaced-generation' retention window has elapsed.
+    // Absent/zero retention refuses the reap (fail closed: retention must
+    // explicitly permit). A generation with a live _PendingBlob lifecycle row
+    // is owned by the pending-blob pipeline and skipped here.
+    if (replacedRetentionMs != null && replacedRetentionMs > 0) {
+      const replacedRows = db.prepare('SELECT id, replacedAt FROM BlobStore WHERE status = ?').all('replaced') as Array<{ id: string; replacedAt: string | null }>;
+      for (const row of replacedRows) {
+        if (!row.replacedAt || Number.isNaN(Date.parse(row.replacedAt))) continue;
+        if (now - Date.parse(row.replacedAt) < replacedRetentionMs) continue;
+        if (db.prepare('SELECT 1 FROM _PendingBlob WHERE blobId = ?').get(row.id)) continue;
+        if (isReferenced(referenceQueries, row.id)) continue;
+        if (await attemptReap(row.id, { recycle }) === 'reaped') danglers++;
       }
     }
 
     return { orphans, danglers };
   }
 
+  // Compile the census's reference existence queries ONCE per sweep. A
+  // declared table that is not (yet) provisioned holds no rows and so
+  // references nothing (skipped after one catalog check) — the same discipline
+  // as the pre-#94 reaper, extracted so the adopted + replaced sweeps share one
+  // query set.
+  function prepareReferenceQueries(census: BlobCensus): Array<{ query: { get(id: string): unknown } }> {
+    const existingTables = new Set<string>();
+    const tableStmt = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?");
+    for (const ref of census.references) {
+      if (!existingTables.has(ref.table) && tableStmt.get(ref.table)) existingTables.add(ref.table);
+    }
+    return census.references
+      .filter((ref) => existingTables.has(ref.table))
+      .map((ref) => ({ query: db.prepare(`SELECT 1 FROM "${ref.table}" WHERE "${ref.column}" = ? LIMIT 1`) }));
+  }
+
   function stat(id: string): BlobStoreRow | undefined {
     safeId(id);
     const row = db.prepare('SELECT id, status, md5, sha256, size, mime, createdAt FROM BlobStore WHERE id = ?').get(id) as BlobStoreRow | undefined;
     return row;
+  }
+
+  // Durable cleanup state observability (S6/A5 #3): undefined when the row is
+  // gone or never failed; otherwise the row's current cleanup/replacement
+  // record. Ops and tests use this to confirm a deletion was retried and never
+  // reported complete before verification.
+  function cleanupState(id: string): BlobCleanupState | undefined {
+    safeId(id);
+    const row = db.prepare(
+      'SELECT id, status, replacedBy, replacedAt, cleanupError, cleanupAttempts FROM BlobStore WHERE id = ?',
+    ).get(id) as BlobCleanupState | undefined;
+    if (!row) return undefined;
+    return {
+      id: row.id,
+      status: row.status,
+      replacedBy: row.replacedBy ?? null,
+      replacedAt: row.replacedAt ?? null,
+      cleanupError: row.cleanupError ?? null,
+      cleanupAttempts: row.cleanupAttempts ?? 0,
+    };
+  }
+
+  function pendingCleanups(): readonly string[] {
+    return (db.prepare('SELECT id FROM BlobStore WHERE cleanupError IS NOT NULL').all() as Array<{ id: string }>).map((row) => row.id);
   }
 
   const internalHandle: BlobStoreInternalHandle = {};
@@ -297,9 +565,22 @@ export function createBlobStore({ root, stagingRoot, db, bytes }: BlobStoreOptio
     readRangeStream: readRangeStreamBytes,
     discardPending,
     discard,
+    replace,
+    switchReplacement,
     reap,
     stat,
+    cleanupState,
+    pendingCleanups,
     capabilities: store.capabilities,
     ...internalHandle,
   };
+}
+
+// One reference is enough to keep a generation alive: the shared existence
+// test used by the refcount + replaced sweeps.
+function isReferenced(referenceQueries: Array<{ query: { get(id: string): unknown } }>, id: string): boolean {
+  for (const { query } of referenceQueries) {
+    if (query.get(id)) return true;
+  }
+  return false;
 }

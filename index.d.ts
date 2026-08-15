@@ -1554,6 +1554,21 @@ export interface WorkbenchOptions {
   logRetentionDays?: number;
   /** Durable-log sweep cadence in milliseconds; must be finite and > 0. */
   logRetentionIntervalMs?: number;
+  /** Named blob retention policies (S6/A5): a partial override is filled from the central defaults. */
+  blobRetention?: Readonly<Partial<{
+    /** Abandoned-upload TTL (ms): a staged, never-claimed upload is reaped after this. */
+    abandonedUploadTtlMs: number;
+    /** Replaced-generation retention (ms): the readable window after the owning reference switched before reap. */
+    replacedGenerationRetentionMs: number;
+    /** Deleted-file cleanup (ms): the deleted live-bytes sweep delay (0 = immediate). */
+    deletedFileCleanupMs: number;
+    /** Privacy-erasure (ms): the erasure-class deletion sweep delay (0 = immediate). */
+    privacyErasureMs: number;
+    /** Backup-retention (ms): how long retained backups hold generation copies before trim. */
+    backupRetentionMs: number;
+  }>>;
+  /** Low-disk upload guard (S6/A5 #5): refuse new uploads below this many free bytes (0 disables). */
+  blobLowDiskHeadroomBytes?: number;
   operationalConsumers?: readonly OperationalConsumer<unknown, any>[];
   blobLifecycle?: BlobLifecycleOptions;
 }

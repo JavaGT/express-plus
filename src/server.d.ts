@@ -607,18 +607,7 @@ export interface BlobStore {
       }
     | undefined;
   /** Durable cleanup state for one generation (S6/A5), or undefined when the row is gone / never failed. */
-  cleanupState(
-    id: string,
-  ):
-    | {
-        id: string;
-        status: string;
-        replacedBy: string | null;
-        replacedAt: string | null;
-        cleanupError: string | null;
-        cleanupAttempts: number;
-      }
-    | undefined;
+  cleanupState(id: string): BlobCleanupState | undefined;
   /** Ids currently carrying durable cleanup state (a failed byte deletion awaiting retry). */
   pendingCleanups(): readonly string[];
   /**
@@ -629,6 +618,21 @@ export interface BlobStore {
    * boundary only.
    */
   readonly capabilities: ByteStoreCapabilities;
+}
+
+/**
+ * Durable cleanup state for one generation (S6/A5): a failed byte deletion is
+ * recorded on the row (cleanupError/cleanupAttempts) and retried by the next
+ * sweep; cleanup is never reported complete until pending + final slots and the
+ * metadata row are verified gone.
+ */
+export interface BlobCleanupState {
+  id: string;
+  status: string;
+  replacedBy: string | null;
+  replacedAt: string | null;
+  cleanupError: string | null;
+  cleanupAttempts: number;
 }
 
 // ---------------------------------------------------------------------------

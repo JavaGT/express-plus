@@ -360,7 +360,11 @@ export function generateFrameworkDDL(): string[] {
   sha256 TEXT,
   size INTEGER,
   mime TEXT,
-  createdAt TEXT NOT NULL
+  createdAt TEXT NOT NULL,
+  replacedBy TEXT,
+  replacedAt TEXT,
+  cleanupError TEXT,
+  cleanupAttempts INTEGER NOT NULL DEFAULT 0
 );`,
     'CREATE INDEX IF NOT EXISTS idx_blob_status ON BlobStore(status);',
     `CREATE TABLE IF NOT EXISTS _OperationalConsumerDeclaration (
@@ -493,6 +497,18 @@ export function executeFrameworkDDL(db: DbHandle): void {
   ensureActionReceiptColumns(db);
   ensureAuthEntityColumns(db);
   ensurePendingBlobColumns(db);
+  ensureBlobStoreColumns(db);
+}
+
+function ensureBlobStoreColumns(db: DbHandle): void {
+  // S6/A5 replacement + durable-cleanup state: generation-replacement metadata
+  // (replacedBy/replacedAt) and the durable failed-deletion ledger
+  // (cleanupError/cleanupAttempts) on the BlobStore row itself — a failed byte
+  // deletion keeps the row until the next sweep retries and verifies it.
+  const cols = new Set(db.prepare('PRAGMA table_info(BlobStore)').all().map((r) => r.name));
+  for (const [name, type] of [['replacedBy', 'TEXT'], ['replacedAt', 'TEXT'], ['cleanupError', 'TEXT'], ['cleanupAttempts', 'INTEGER NOT NULL DEFAULT 0']]) {
+    if (!cols.has(name)) db.exec(`ALTER TABLE BlobStore ADD COLUMN ${name} ${type}`);
+  }
 }
 
 function ensurePendingBlobColumns(db: DbHandle): void {

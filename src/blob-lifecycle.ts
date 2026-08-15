@@ -118,6 +118,30 @@ export function createBlobLifecycle({ blobs, entities, declaredBlobFields = [] }
     });
   };
 
+  // Replacement finalize pass (S6/A5): a generation switched in via
+  // switchReplacement has its bytes staged in the pending slot until finalize
+  // promotes them. Replacements whose owning committed event carried the new
+  // id are already finalized by the event sweep above; this pass covers the
+  // replacements recorded only in the switch metadata (BlobStore.replacedBy) —
+  // finalize each idempotently (a missing pending slot is a no-op, so every
+  // re-run is safe and cheap). A persistent byte-store failure keeps the
+  // replaced row's `replacedBy` recorded, so the next consumer batch or boot
+  // reconcile retries it.
+  async function finalizeReplacementGenerations(db: DbHandle): Promise<number> {
+    if (!blobs) return 0;
+    const replaced = db.prepare('SELECT replacedBy FROM BlobStore WHERE status = ? AND replacedBy IS NOT NULL').all('replaced') as Array<{ replacedBy: string }>;
+    let finalized = 0;
+    for (const row of replaced) {
+      try {
+        blobs.finalize(row.replacedBy);
+        finalized++;
+      } catch (err) {
+        getLog().warn('system', 'blob replacement finalize failed', { err, id: row.replacedBy });
+      }
+    }
+    return finalized;
+  }
+
   const blobFinalizeConsumer: BlobLifecycle['blobFinalizeConsumer'] = async (events, { db } = {}) => {
     // Dedup across the WHOLE batch, not per event: two events in one
     // afterCommit call (e.g. created + updated referencing the same blob)
@@ -155,6 +179,16 @@ export function createBlobLifecycle({ blobs, entities, declaredBlobFields = [] }
         getLog().warn('system', 'blob finalize consumer failed', { err, scope: event.scope, seq: event.seq });
       }
     }
+    // Post-batch replacement finalize: isolated (a failure never undoes the
+    // committed events) and best-effort — the boot reconcile sweeps any
+    // replacement that still needs it.
+    if (db) {
+      try {
+        await finalizeReplacementGenerations(db);
+      } catch (err) {
+        getLog().warn('system', 'blob replacement finalize sweep failed', { err });
+      }
+    }
   };
 
   async function reconcileBlobFinalize(db: DbHandle): Promise<{ finalized: number }> {
@@ -173,6 +207,10 @@ export function createBlobLifecycle({ blobs, entities, declaredBlobFields = [] }
         return 'block';
       }
     });
+    // The replacement pass is uncursored (it replays the switch METADATA, not
+    // committed events): finalize every switched-in replacement idempotently so
+    // a crash between switch-commit and event-driven finalize is recovered here.
+    finalized += await finalizeReplacementGenerations(db);
     return { finalized };
   }
 
