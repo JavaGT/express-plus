@@ -59,6 +59,13 @@ import {
   type AnnotatedTextChangedRange, type AnnotatedTextCoordinatedPosition,
   type AnnotatedTextRange, type AnnotatedTextRedactionMarker,
 } from 'workbench/annotated-text-coords';
+import {
+  acknowledgeAndPruneSnapshot, buildAuthoringEnvelope, ensureLease, ensureStream,
+  hashClientNonce, issueAuthoringSnapshot, projectEndpointToOffset,
+  restoreTextFamilySerialized, textFamilyBasis,
+  type AuthoringDatabase, type AuthoringFrontier, type AuthoringSnapshot,
+  type ContinuousTextFamily, type AuthoringStructuralEndpoint,
+} from 'workbench/annotated-text-authoring';
 import { DatabaseSync } from 'node:sqlite';
 import { Readable } from 'node:stream';
 
@@ -773,3 +780,41 @@ projected.async({});
 // @ts-expect-error projected.async invalid: from should be string array, not number
 projected.async({ compute: async () => 'x', from: 42 });
 void proj;
+
+// workbench/annotated-text-authoring — the server-side authoring seam. The
+// database parameter is structural, so a node:sqlite DatabaseSync (the
+// consumer's server handle) satisfies it without a cast.
+declare const authoringDb: AuthoringDatabase;
+const nativeAuthoringDb: AuthoringDatabase = nativeDb;
+const authoringStream = ensureStream({
+  db: authoringDb, prefix: 'annotatedText', documentId: 'document-1',
+  principalType: 'user', principalId: 'user-1',
+});
+const authoringLease = ensureLease({
+  db: authoringDb, prefix: 'annotatedText', streamId: authoringStream.id,
+  clientNonceHash: hashClientNonce('client-nonce'),
+});
+const authoringLeaseFence: number | undefined = authoringLease?.acknowledgedFence;
+const authoringSnapshot = issueAuthoringSnapshot({
+  db: authoringDb, prefix: 'annotatedText', leaseId: 'lease-1', fence: 0,
+  positions: [{ familyCheckpoint: { version: 1 }, visibleAtIssue: true }],
+});
+const authoringEnvelope = buildAuthoringEnvelope({
+  streamToken: authoringStream.id, leaseToken: 'lease-1', snapshotToken: 'snapshot-1',
+  fence: 0, positionFrames: [{ token: 'token-1' }],
+});
+const authoringEnvelopeVersion: 1 = authoringEnvelope.version;
+const authoringEnvelopeToken: string | undefined = authoringEnvelope.positionFrames[0]?.positionToken;
+const acknowledged = acknowledgeAndPruneSnapshot({
+  db: authoringDb, prefix: 'annotatedText', snapshotId: 'snapshot-1', leaseId: 'lease-1',
+});
+const acknowledgedFence: number | undefined = acknowledged?.fence;
+const family: ContinuousTextFamily = restoreTextFamilySerialized('{"id":"document-1","checkpoint":{"version":1}}');
+const basis = textFamilyBasis(family);
+const basisVersion: 1 = basis.version;
+const basisFrontier: AuthoringFrontier = basis.frontier;
+const endpoint: AuthoringStructuralEndpoint = { point: ['point', ['root'], 'left'], basisFrontier: [] };
+const endpointOffset: number = projectEndpointToOffset(family, endpoint);
+const authoringSnapshotId: string | undefined = authoringSnapshot?.snapshot.id;
+const authoringSnapshotShape: AuthoringSnapshot | undefined = authoringSnapshot?.snapshot;
+void [authoringLeaseFence, authoringEnvelopeVersion, authoringEnvelopeToken, acknowledgedFence, basisVersion, basisFrontier, endpointOffset, authoringSnapshotId, authoringSnapshotShape, nativeAuthoringDb];

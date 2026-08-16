@@ -71,6 +71,15 @@ export const PUBLIC_API = Object.freeze({
       'scalarStart', 'scalarEnd', 'changedRange',
     ]),
   }),
+  'workbench/annotated-text-authoring': Object.freeze({
+    default: false,
+    exact: true,
+    named: Object.freeze([
+      'ensureStream', 'ensureLease', 'issueAuthoringSnapshot', 'buildAuthoringEnvelope',
+      'hashClientNonce', 'acknowledgeAndPruneSnapshot',
+      'restoreTextFamilySerialized', 'textFamilyBasis', 'projectEndpointToOffset',
+    ]),
+  }),
 });
 
 const PRIVATE_ENTRYPOINTS = Object.freeze([
