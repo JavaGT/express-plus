@@ -21,7 +21,8 @@
       "workbench/client": ["./client.d.ts"],
       "workbench/server": ["./src/server.d.ts"],
       "workbench/annotated-text": ["./annotated-text.d.ts"],
-      "workbench/annotated-text-coords": ["./annotated-text-coords.d.ts"]
+      "workbench/annotated-text-coords": ["./annotated-text-coords.d.ts"],
+      "workbench/annotated-text-authoring": ["./annotated-text-authoring.d.ts"]
     }
   },
   "include": [
@@ -29,6 +30,7 @@
     "client.d.ts",
     "annotated-text.d.ts",
     "annotated-text-coords.d.ts",
+    "annotated-text-authoring.d.ts",
     "src/server.d.ts",
     "src/**/*.ts",
     "type-test/**/*.ts"
