@@ -26,7 +26,7 @@ import { restoreTextFamily, serializeCompactTextFamilyCheckpoint } from './annot
 
 // The package version that supplies the lane, recorded per ledger row. Keep in
 // sync with package.json when releasing.
-const WORKBENCH_PACKAGE_VERSION = '0.1.2';
+const WORKBENCH_PACKAGE_VERSION = '0.1.3';
 export const WORKBENCH_SUPPLIED_BY = `workbench@${WORKBENCH_PACKAGE_VERSION}`;
 
 const PREFIX_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
