@@ -24,6 +24,8 @@ export interface ProjectionSource {
   kind: 'projectionSource';
   schema: unknown;
   table: string;
+  /** Set for physical (host-declared) sources; null/undefined for schema sources. */
+  physicalColumns?: readonly string[];
   field: Record<string, SourceFieldHandle>;
 }
 
@@ -36,6 +38,13 @@ export interface SourceFieldHandle {
   direction?: 'asc' | 'desc';
 }
 
+export interface JoinSpec {
+  kind: 'join';
+  source: ProjectionSource;
+  on: { from: Readonly<SourceFieldHandle>; to: Readonly<SourceFieldHandle> };
+  select: Readonly<SourceFieldHandle[]>;
+}
+
 export interface ManyCollection {
   kind: 'many';
   source?: ProjectionSource;
@@ -43,6 +52,7 @@ export interface ManyCollection {
   key?: SourceFieldHandle;
   select?: SourceFieldHandle[];
   orderBy?: SourceFieldHandle[];
+  join?: JoinSpec;
 }
 
 export interface OutputObject {
@@ -89,6 +99,46 @@ export function projectionSource(schema: unknown, table: string): ProjectionSour
     field: new Proxy({}, {
       get(_, column) {
         if (typeof column !== 'string') return undefined;
+        return fieldHandleFor(source, column);
+      },
+    }),
+  };
+  const result = Object.freeze(source);
+  _sourceBrand.add(result);
+  return result;
+}
+
+/**
+ * A projection source over a host PHYSICAL table with an explicit column list,
+ * decoupled from the application-schema declaration gate. This is the Decision
+ * 0019 escape hatch for hub tables the host owns but cannot schema-declare
+ * (single-owner / entity-owned / framework grant tables): the host names the
+ * table and every column it will project, and the runtime validates the
+ * declaration against that explicit list — fail closed (only declared columns
+ * are ever projected). The field proxy exposes ONLY declared columns, so an
+ * undeclared handle is rejected at declaration time.
+ */
+export function projectionSourcePhysical(table: string, columns: readonly string[]): ProjectionSource {
+  if (typeof table !== 'string' || table.length === 0) {
+    throw new Error('projectionSourcePhysical requires a non-empty table name');
+  }
+  assertSqlIdentifier('projectionSourcePhysical table', table);
+  if (!Array.isArray(columns) || columns.length === 0) {
+    throw new Error('projectionSourcePhysical requires one or more columns');
+  }
+  const physicalColumns = Object.freeze([...new Set(columns)]);
+  for (const column of physicalColumns) {
+    assertSqlIdentifier('projectionSourcePhysical column', column);
+  }
+  const source: ProjectionSource = {
+    kind: 'projectionSource',
+    schema: null,
+    table,
+    physicalColumns,
+    field: new Proxy({}, {
+      get(_, column) {
+        if (typeof column !== 'string') return undefined;
+        if (!physicalColumns.includes(column)) return undefined;
         return fieldHandleFor(source, column);
       },
     }),
@@ -169,9 +219,40 @@ interface ManyOptions {
   key?: SourceFieldHandle;
   select?: SourceFieldHandle[];
   orderBy?: SourceFieldHandle[];
+  join?: JoinOptions;
 }
 
-principalSnapshot.many = function many(source: ProjectionSource, { via, key, select, orderBy }: ManyOptions = {}): ManyCollection {
+interface JoinOptions {
+  source: ProjectionSource;
+  on: { from: SourceFieldHandle; to: SourceFieldHandle };
+  select: SourceFieldHandle[];
+}
+
+function parseJoin(anchor: ProjectionSource, join: JoinOptions): JoinSpec {
+  assertBrand('principalSnapshot.many join.source', join.source, _sourceBrand, 'projectionSource');
+  const { from, to } = join.on;
+  assertBrand('principalSnapshot.many join.on.from', from, _sourceFieldBrand, 'source field handle');
+  assertBrand('principalSnapshot.many join.on.to', to, _sourceFieldBrand, 'source field handle');
+  validateSource('principalSnapshot.many join.on.from', from.source, anchor);
+  validateSource('principalSnapshot.many join.on.to', to.source, join.source);
+  if (!Array.isArray(join.select) || join.select.length === 0) {
+    throw new Error('principalSnapshot.many join requires one or more select field handles');
+  }
+  const select: SourceFieldHandle[] = [];
+  for (const handle of join.select) {
+    assertBrand('principalSnapshot.many join.select', handle, _sourceFieldBrand, 'source field handle');
+    validateSource('principalSnapshot.many join.select', handle.source, join.source);
+    select.push(handle);
+  }
+  return Object.freeze({
+    kind: 'join',
+    source: join.source,
+    on: Object.freeze({ from: Object.freeze({ ...from }), to: Object.freeze({ ...to }) }),
+    select: Object.freeze(select),
+  });
+}
+
+principalSnapshot.many = function many(source: ProjectionSource, { via, key, select, orderBy, join }: ManyOptions = {}): ManyCollection {
   assertBrand('principalSnapshot.many source', source, _sourceBrand, 'projectionSource');
   assertBrand('principalSnapshot.many via', via, _sourceFieldBrand, 'source field handle');
   validateSource('principalSnapshot.many via', via!.source, source);
@@ -191,6 +272,13 @@ principalSnapshot.many = function many(source: ProjectionSource, { via, key, sel
       validateSource('principalSnapshot.many orderBy', order.source, source);
     }
   }
+  let joinSpec: JoinSpec | undefined;
+  if (join !== undefined) {
+    if (join.source === source) {
+      throw new Error('principalSnapshot.many join.source must differ from the anchor source');
+    }
+    joinSpec = parseJoin(source, join);
+  }
   const result = Object.freeze({
     kind: 'many',
     source,
@@ -198,6 +286,7 @@ principalSnapshot.many = function many(source: ProjectionSource, { via, key, sel
     key,
     select: Object.freeze([...select]),
     orderBy: orderBy === undefined ? undefined : Object.freeze([...orderBy]),
+    join: joinSpec,
   });
   _manyBrand.add(result);
   return result as ManyCollection;

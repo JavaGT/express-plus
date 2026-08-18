@@ -1,5 +1,5 @@
 import { principalSnapshotScope, parsePrincipalSnapshotScope } from './principal-snapshot-scope.mjs';
-import { isPrincipalSnapshotDeclaration,                                   } from './principal-snapshot-declaration.mjs';
+import { isPrincipalSnapshotDeclaration,                                                          } from './principal-snapshot-declaration.mjs';
 
 
 const PRINCIPAL_PREFIX = 'PrincipalSnapshot:';
@@ -17,16 +17,45 @@ export function validatePrincipalSnapshotDeclarations(
   if (!schema || !Array.isArray(schema.tables)) throw new Error('principal snapshots require an application schema');
   const names = new Set        ();
   const tables = new Map                     (schema.tables.map((table) => [table.name, new Set(table.columns.map((column) => column.name))]));
+  // Resolve a source's declared columns: a physical (host-declared) source
+  // carries its own explicit column list, fail-closed; a schema source resolves
+  // against the frozen application schema.
+  const sourceColumns = (source                  )              => {
+    if (source.physicalColumns !== undefined) return new Set(source.physicalColumns);
+    const columnSet = tables.get(source.table);
+    if (!columnSet) throw new Error(`principal snapshot source table '${source.table}' must be declared in the application schema`);
+    return columnSet;
+  };
   for (const declaration of declarations) {
     if (!isPrincipalSnapshotDeclaration(declaration)) throw new TypeError('principalSnapshots accepts only principalSnapshot(...) declarations');
     if (names.has(declaration.name)) throw new Error(`principal snapshot '${declaration.name}' is declared more than once`);
     names.add(declaration.name);
     for (const collection of Object.values(declaration.fields)) {
-      if (collection.source .schema !== schema) throw new Error(`principal snapshot source '${collection.source .table}' must use the application schema`);
-      const columns = tables.get(collection.source .table);
-      if (!columns) throw new Error(`principal snapshot source table '${collection.source .table}' must be declared in the application schema`);
+      const source = collection.source ;
+      const physical = source.physicalColumns !== undefined;
+      if (!physical && source.schema !== schema) {
+        throw new Error(`principal snapshot source '${source.table}' must use the application schema`);
+      }
+      const columns = sourceColumns(source);
       for (const field of [collection.via, collection.key, ...(collection.select ?? []), ...(collection.orderBy ?? [])]) {
-        if (!columns.has(field .column)) throw new Error(`principal snapshot source column '${field .column}' must be declared on '${collection.source .table}'`);
+        if (!columns.has(field .column)) throw new Error(`principal snapshot source column '${field .column}' must be declared on '${source.table}'`);
+      }
+      const join = collection.join;
+      if (join !== undefined) {
+        // `on.from` is the anchor table's FK column; `on.to` and `join.select`
+        // are on the joined table.
+        if (!columns.has(join.on.from.column)) {
+          throw new Error(`principal snapshot join on.from column '${join.on.from.column}' must be declared on '${source.table}'`);
+        }
+        const joinColumns = sourceColumns(join.source);
+        if (!joinColumns.has(join.on.to.column)) {
+          throw new Error(`principal snapshot join on.to column '${join.on.to.column}' must be declared on '${join.source.table}'`);
+        }
+        for (const field of join.select) {
+          if (!joinColumns.has(field.column)) {
+            throw new Error(`principal snapshot join select column '${field.column}' must be declared on '${join.source.table}'`);
+          }
+        }
       }
     }
   }
@@ -160,18 +189,45 @@ function revisionFor(db          , declaration                              , pr
   return Number(row?.revision ?? 0);
 }
 
+function joinOutputKey(source                  , column        )         {
+  // Namespace joined columns by their table so the anchor's own columns can
+  // never collide with a denormalized related-display column.
+  return `${source.table}__${column}`;
+}
+
 function project(db          , declaration                              , principal                            )                          {
   const output                                                               = {};
   for (const [name, collection] of Object.entries(declaration.fields)) {
-    const selected = collection.select .map((field) => field.column);
-    const columns = selected.includes(collection.key .column) ? selected : [...selected, collection.key .column];
-    const ordering = collection.orderBy?.length
-      ? collection.orderBy.map((field) => `${quote(field.column)} ${field.direction === 'desc' ? 'DESC' : 'ASC'}`).join(', ')
-      : `${quote(collection.key .column)} ASC`;
-    const sql = `SELECT ${columns.map(quote).join(', ')} FROM ${quote(collection.source .table)} WHERE ${quote(collection.via .column)} = ? ORDER BY ${ordering}`;
+    const join = collection.join;
+    const nested = join !== undefined;
+    const anchorCols = (() => {
+      const selected = collection.select .map((field) => field.column);
+      return selected.includes(collection.key .column) ? selected : [...selected, collection.key .column];
+    })();
+    const joinCols = join?.select.map((field) => field.column) ?? [];
+    // Every projected column is aliased to its deterministic output key so the
+    // raw rows carry the final keys directly (no post-row rename).
+    const anchorAliases = nested ? anchorCols.map((column) => `A.${quote(column)} AS ${quote(`${collection.source .table}__${column}`)}`) : anchorCols.map(quote);
+    const joinAliases = nested ? joinCols.map((column) => `B.${quote(column)} AS ${quote(joinOutputKey(join .source, column))}`) : [];
+    const joinClause = nested
+      ? ` JOIN ${quote(join .source.table)} B ON B.${quote(join .on.to.column)} = A.${quote(join .on.from.column)}`
+      : '';
+    const orderByRaw = collection.orderBy?.length
+      ? collection.orderBy.map((field) => `${nested ? 'A.' : ''}${quote(field.column)} ${field.direction === 'desc' ? 'DESC' : 'ASC'}`).join(', ')
+      : `${nested ? 'A.' : ''}${quote(collection.key .column)} ASC`;
+    const tableClause = nested ? `${quote(collection.source .table)} A` : quote(collection.source .table);
+    const viaClause = `${nested ? 'A.' : ''}${quote(collection.via .column)} = ?`;
+    const sql = `SELECT ${[...anchorAliases, ...joinAliases].join(', ')} FROM ${tableClause}${joinClause} WHERE ${viaClause} ORDER BY ${orderByRaw}`;
     const rows = db.prepare(sql).all(principal.id).map((raw, rowIndex) => {
       const row                          = {};
-      for (const column of columns) row[column] = jsonValue(raw[column], `${name}[${rowIndex}].${column}`);
+      for (const column of anchorCols) {
+        const key = nested ? joinOutputKey(collection.source , column) : column;
+        row[key] = jsonValue(raw[key], `${name}[${rowIndex}].${key}`);
+      }
+      for (const column of joinCols) {
+        const key = joinOutputKey(join .source, column);
+        row[key] = jsonValue(raw[key], `${name}[${rowIndex}].${key}`);
+      }
       return Object.freeze(row);
     });
     output[name] = Object.freeze(rows);

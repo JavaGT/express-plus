@@ -43,6 +43,47 @@ table and column must exist, and every field handle must come from the declared
 source. Only declared columns are ever projected — an undeclared sensitive
 column never leaves the server.
 
+### 1b. Physical tables and joining display columns
+
+A hub's authoritative tables are not always schema-declarable (single-owner /
+entity-owned / framework-grant tables, and the display columns on a related
+root). Two extensions cover a real hub without weakening the read-only,
+recipient-anchored, declared-column guarantee:
+
+- **Physical sources** project a host table the app owns but cannot declare in
+  the schema. The host names the table and every column it will project; the
+  runtime validates the declaration against that explicit list and the field
+  proxy exposes ONLY declared columns (fail closed):
+
+  ```ts
+  const memberSource = projectionSourcePhysical('Project_members', ['Project_id', 'member_id', 'role']);
+  ```
+
+- **Joins** denormalize related display columns onto an anchored collection
+  without a second delivery authority. `on.from` is an FK column on the ANCHOR
+  table, `on.to` and `join.select` are on the JOINED table. Rows carry the
+  anchor's selected columns and the joined columns, namespaced by their table:
+
+  ```ts
+  const projectSource = projectionSourcePhysical('Project', ['id', 'name', 'colour', 'iconUpdatedAt']);
+
+  const memberships = principalSnapshot.many(memberSource, {
+    via: memberSource.field.member_id,          // WHERE member_id = <principal.id>
+    key: memberSource.field.Project_id,
+    select: principalSnapshot.select(memberSource.field.Project_id, memberSource.field.role),
+    join: {
+      source: projectSource,
+      on: { from: memberSource.field.Project_id, to: projectSource.field.id },
+      select: principalSnapshot.select(projectSource.field.name, projectSource.field.colour),
+    },
+  });
+  // rows: { Project_members__Project_id, Project_members__role, Project__name, Project__colour }
+  ```
+
+  The projection is still strictly per-recipient (`via = principal.id` on the
+  anchor), so the join never widens visibility beyond the anchored rows.
+
+
 ## 2. Attach delivery (server)
 
 The application seam is `app.attachLiveDelivery(options)`. It registers your

@@ -1325,12 +1325,29 @@ export interface ProjectionSourceFieldWithDirection extends ProjectionSourceFiel
 export interface ProjectionSource {
   readonly [projectionSourceBrand]: true;
   readonly kind: 'projectionSource';
-  readonly schema: import('./src/server.js').SqliteSchemaResult;
+  readonly schema: import('./src/server.js').SqliteSchemaResult | null;
   readonly table: string;
+  /** Set for physical (host-declared) sources; undefined for schema sources. */
+  readonly physicalColumns?: readonly string[];
   readonly field: Readonly<Record<string, ProjectionSourceField>>;
 }
 export function projectionSource(schema: import('./src/server.js').SqliteSchemaResult, table: string): ProjectionSource;
+/**
+ * A projection source over a host PYSICAL table with an explicit column list,
+ * decoupled from the application-schema declaration gate. For hub tables the
+ * host owns but cannot schema-declare (single-owner / entity-owned / framework
+ * grant tables). Fail closed: only the declared columns are ever projected, and
+ * the field proxy exposes only declared columns.
+ */
+export function projectionSourcePhysical(table: string, columns: readonly string[]): ProjectionSource;
 
+export interface PrincipalSnapshotJoin {
+  readonly [principalSnapshotManyBrand]: true;
+  readonly kind: 'join';
+  readonly source: ProjectionSource;
+  readonly on: { readonly from: ProjectionSourceField; readonly to: ProjectionSourceField };
+  readonly select: readonly ProjectionSourceField[];
+}
 export interface PrincipalSnapshotMany {
   readonly [principalSnapshotManyBrand]: true;
   readonly kind: 'many';
@@ -1339,6 +1356,7 @@ export interface PrincipalSnapshotMany {
   readonly key: ProjectionSourceField;
   readonly select: readonly ProjectionSourceField[];
   readonly orderBy?: readonly ProjectionSourceFieldWithDirection[];
+  readonly join?: PrincipalSnapshotJoin;
 }
 export interface PrincipalSnapshotObject {
   readonly [principalSnapshotObjectBrand]: true;
@@ -1356,7 +1374,13 @@ export interface PrincipalSnapshotDeclaration {
 export interface PrincipalSnapshotGrammar {
   (name: string, options: { principalType: Exclude<PrincipalType, 'anonymous'>; output: PrincipalSnapshotObject }): PrincipalSnapshotDeclaration;
   object(shape: Readonly<Record<string, PrincipalSnapshotMany>>): PrincipalSnapshotObject;
-  many(source: ProjectionSource, options: { via: ProjectionSourceField; key: ProjectionSourceField; select: readonly ProjectionSourceField[]; orderBy?: readonly ProjectionSourceFieldWithDirection[] }): PrincipalSnapshotMany;
+  many(source: ProjectionSource, options: {
+    via: ProjectionSourceField;
+    key: ProjectionSourceField;
+    select: readonly ProjectionSourceField[];
+    orderBy?: readonly ProjectionSourceFieldWithDirection[];
+    join?: { source: ProjectionSource; on: { from: ProjectionSourceField; to: ProjectionSourceField }; select: readonly ProjectionSourceField[] };
+  }): PrincipalSnapshotMany;
   select(...handles: readonly ProjectionSourceField[]): readonly ProjectionSourceField[];
   orderBy(handle: ProjectionSourceField, direction?: 'asc' | 'desc'): ProjectionSourceFieldWithDirection;
 }
