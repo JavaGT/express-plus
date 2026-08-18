@@ -181,7 +181,11 @@ test('application live delivery serves and wakes a principal snapshot through HT
     }),
   });
   const app = workbench({ db, schema });
-  app.attachLiveDelivery({ principalOf: () => user, principalSnapshots: [hub] });
+  app.attachLiveDelivery({
+    principalOf: () => user,
+    principalSnapshots: [hub],
+    principalSnapshotAuthorize: ({ principal }) => principal.type === 'user' && principal.id === 'u1',
+  });
   app.listen(0);
   await app.ready;
   t.after(async () => { app.httpServer.closeAllConnections?.(); await app.shutdown(); db.close(); });
@@ -190,6 +194,11 @@ test('application live delivery serves and wakes a principal snapshot through HT
   const scopeKey = encodeURIComponent('PrincipalSnapshot:user-hub/user/u1');
   const snapshotResult = await fetch(`${origin}/live-delivery/bootstrap?scope=${scopeKey}&mode=snapshot`).then((response) => response.json());
   assert.deepEqual(snapshotResult, { kind: 'snapshot', snapshot: { notices: [{ body: 'hello', id: 'n1' }] }, cursor: 0 });
+  // Reauthorization gate: a principal the host authorizer denies gets revoked,
+  // never a projection.
+  const deniedScope = encodeURIComponent('PrincipalSnapshot:user-hub/user/u2');
+  const denied = await fetch(`${origin}/live-delivery/bootstrap?scope=${deniedScope}&mode=snapshot`).then((response) => response.json());
+  assert.equal(denied.kind, 'revoked');
   const controller = new AbortController();
   const stream = await fetch(`${origin}/live-delivery/events?scope=${scopeKey}&after=0`, { signal: controller.signal });
   const reader = stream.body.getReader();

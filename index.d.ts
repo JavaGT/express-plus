@@ -1519,6 +1519,9 @@ export interface AppLiveDeliveryOptions {
   snapshots?: readonly SnapshotDeclaration[];
   /** Read-only principal-anchored recipient snapshots. */
   principalSnapshots?: readonly PrincipalSnapshotDeclaration[];
+  /** Host reauthorization for principal snapshots; every principal-snapshot
+   *  access fails closed without one. */
+  principalSnapshotAuthorize?: PrincipalSnapshotAuthorize | null;
   maxCatchupEvents?: number;
 }
 

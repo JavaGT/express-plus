@@ -184,8 +184,10 @@ host mutation ──> app.principalSnapshots.transaction ──> [_PrincipalSnap
 ```
 
 One-shot reads (`bootstrap`/`catchup`) run the same reauthorization before any
-projection; denials surface as `revoked`, which the HTTP skin maps to the
-transport's normal access-denied handling.
+projection; denials surface as `revoked` — the HTTP skin returns the explicit
+revoked JSON result for the one-shot request (bootstrap/catchup), and for a
+long-lived subscription ends the stream. A one-shot denial is not an HTTP 403;
+it is the same `{ kind: 'revoked' }` envelope the transport uses.
 
 ## Files
 
