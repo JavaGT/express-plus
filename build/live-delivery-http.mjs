@@ -210,6 +210,10 @@ export function createLiveDeliveryHttpHandler({ delivery, principalOf, path = '/
       releaseStream = release;
       // IncomingMessage 'close' also fires after a fully read request body;
       // only the response lifecycle represents an SSE stream cancellation.
+      // The principal resolves once here; principal-snapshot streams remain
+      // attached through the delivery's own reauthorization seam, which runs
+      // on every replacement/resync drain and tears the stream down via revoke
+      // when the host no longer admits the principal.
       res.once('close', release);
       let revoked = false;
       const activation = await delivery.subscribe({

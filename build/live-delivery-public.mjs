@@ -26,6 +26,7 @@ import { createPrincipalSnapshotDelivery, isPrincipalSnapshotScope, validatePrin
 
 
 
+
 function jsonSnapshot(value         , path = 'snapshot', ancestors = new Set         ())          {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
   if (typeof value === 'number') {
@@ -163,17 +164,23 @@ function jsonSnapshot(value         , path = 'snapshot', ancestors = new Set    
 
 
 
+
+
+
+
+
+
 // Package-private assembly for an application-owned activation. The public
 // factory below deliberately returns only the delivery protocol; application
 // lifecycle wiring retains the committed consumer, the shared core (which the
 // WebSocket transport presents over the same authority), and shutdown.
-export function createOwnedLiveDelivery({ db, entities, mayVerb, authorization, snapshots, principalSnapshots, schema, log = null, maxCatchupEvents = 1000, includeActionId = true }                          )                                                                                                                                                 {
+export function createOwnedLiveDelivery({ db, entities, mayVerb, authorization, snapshots, principalSnapshots, principalSnapshotAuthorize, schema, log = null, maxCatchupEvents = 1000, includeActionId = true }                          )                                                                                                                                                 {
   if (!Number.isSafeInteger(maxCatchupEvents) || maxCatchupEvents < 1) throw new TypeError('maxCatchupEvents must be a positive safe integer');
   const resolveEntity = typeof entities === 'function' ? entities : (name        ) => entities.get(name);
   const composites = compileSnapshots(snapshots, resolveEntity, db         )                                ;
   validatePrincipalSnapshotDeclarations(principalSnapshots         , schema         );
   const principalDelivery = (principalSnapshots                                  )?.length
-    ? createPrincipalSnapshotDelivery({ db: db         , declarations: principalSnapshots          })
+    ? createPrincipalSnapshotDelivery({ db: db         , declarations: principalSnapshots         , authorize: principalSnapshotAuthorize })
     : null;
   const requiredEntities = composites.requiredEntities ?? new Set();
 

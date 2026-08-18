@@ -12,7 +12,7 @@ import { createWriteQueue } from '../build/write-queue.mjs';
 import { validatePrincipalSnapshotDeclarations } from '../build/principal-snapshot-delivery.mjs';
 import { createOwnedLiveDelivery } from '../build/live-delivery-public.mjs';
 
-function setup() {
+function hubDatabase() {
   const db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);
   const schema = defineSqliteSchema({
@@ -29,9 +29,6 @@ function setup() {
     }],
   });
   schema.prepare(db);
-  db.prepare('INSERT INTO HubItem (id, recipientId, title, rank, hidden) VALUES (?, ?, ?, ?, ?)').run('b', 'u1', 'second', 2, 'secret');
-  db.prepare('INSERT INTO HubItem (id, recipientId, title, rank, hidden) VALUES (?, ?, ?, ?, ?)').run('a', 'u1', 'first', 1, 'secret');
-  db.prepare('INSERT INTO HubItem (id, recipientId, title, rank, hidden) VALUES (?, ?, ?, ?, ?)').run('c', 'u2', 'other', 1, 'secret');
   const source = projectionSource(schema, 'HubItem');
   const declaration = principalSnapshot('user-hub', {
     principalType: 'user',
@@ -44,7 +41,15 @@ function setup() {
       }),
     }),
   });
-  const delivery = createPrincipalSnapshotDelivery({ db, declarations: [declaration] });
+  return { db, schema, declaration };
+}
+
+function setup() {
+  const { db, schema, declaration } = hubDatabase();
+  db.prepare('INSERT INTO HubItem (id, recipientId, title, rank, hidden) VALUES (?, ?, ?, ?, ?)').run('b', 'u1', 'second', 2, 'secret');
+  db.prepare('INSERT INTO HubItem (id, recipientId, title, rank, hidden) VALUES (?, ?, ?, ?, ?)').run('a', 'u1', 'first', 1, 'secret');
+  db.prepare('INSERT INTO HubItem (id, recipientId, title, rank, hidden) VALUES (?, ?, ?, ?, ?)').run('c', 'u2', 'other', 1, 'secret');
+  const delivery = createPrincipalSnapshotDelivery({ db, declarations: [declaration], authorize: () => true });
   const app = { db, writeQueue: createWriteQueue(), _principalSnapshotTxActive: false };
   const runtime = createPrincipalSnapshotTransaction(app);
   app.principalSnapshots = { transaction: runtime.transaction };
@@ -223,6 +228,7 @@ test('owned live delivery forwards signal and revoke to principal snapshot subsc
     entities: new Map(),
     mayVerb: async () => true,
     principalSnapshots: [declaration],
+    principalSnapshotAuthorize: () => true,
     schema,
   });
   const scope = principalSnapshotScope({ declaration: declaration.name, principal: { type: 'user', id: 'u1' } });

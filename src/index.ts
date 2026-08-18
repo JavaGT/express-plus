@@ -52,4 +52,5 @@ export { emailSeam, noopTransport } from './email-seam.ts';
 export { defineOperationalEvent, operationalConsumer } from './operational-consumer.ts';
 export { principalSnapshot, projectionSource } from './principal-snapshot-declaration.ts';
 export { principalSnapshotScope } from './principal-snapshot-scope.ts';
+export type { PrincipalSnapshotAuthorize, PrincipalSnapshotAccessTrigger, PrincipalSnapshotAccessInput } from './principal-snapshot-delivery.ts';
 export { default } from './app.ts';

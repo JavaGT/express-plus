@@ -21,6 +21,7 @@ import { mayRow } from './row-grant.ts';
 import type { AuthorizationAdapter } from './authorization-adapter.ts';
 import { ensureStream, ensureLease, hashClientNonce, resolveStream, resolveLease, acknowledgeAndPruneSnapshot } from './annotated-text-authoring-stream.ts';
 import { createPrincipalSnapshotDelivery, isPrincipalSnapshotScope, validatePrincipalSnapshotDeclarations } from './principal-snapshot-delivery.ts';
+import type { PrincipalSnapshotAuthorize } from './principal-snapshot-delivery.ts';
 import type { Principal } from './principal.ts';
 import type { FrameworkLog } from './log.ts';
 import type { LiveDatabase, LiveEntityRecord, MayVerb, FieldDescriptor } from './live-fanout.ts';
@@ -157,6 +158,12 @@ export interface OwnedLiveDeliveryOptions {
   authorization?: AuthorizationAdapter | null;
   snapshots?: unknown;
   principalSnapshots?: unknown;
+  // Host reauthorization for principal snapshots (see
+  // PrincipalSnapshotAuthorize). Principal snapshots have no row scope to
+  // admit against, so this is a distinct seam from the entity `authorization`
+  // adapter; the app supplies a membership-aware implementation and every
+  // access fails closed without one.
+  principalSnapshotAuthorize?: PrincipalSnapshotAuthorize | null;
   schema?: unknown;
   log?: FrameworkLog | null;
   maxCatchupEvents?: number;
@@ -167,13 +174,13 @@ export interface OwnedLiveDeliveryOptions {
 // factory below deliberately returns only the delivery protocol; application
 // lifecycle wiring retains the committed consumer, the shared core (which the
 // WebSocket transport presents over the same authority), and shutdown.
-export function createOwnedLiveDelivery({ db, entities, mayVerb, authorization, snapshots, principalSnapshots, schema, log = null, maxCatchupEvents = 1000, includeActionId = true }: OwnedLiveDeliveryOptions): { delivery: OwnedLiveDelivery; consumer: (events: readonly LiveCommittedEvent[]) => Promise<void>; close: () => void; core: LiveDeliveryCore } {
+export function createOwnedLiveDelivery({ db, entities, mayVerb, authorization, snapshots, principalSnapshots, principalSnapshotAuthorize, schema, log = null, maxCatchupEvents = 1000, includeActionId = true }: OwnedLiveDeliveryOptions): { delivery: OwnedLiveDelivery; consumer: (events: readonly LiveCommittedEvent[]) => Promise<void>; close: () => void; core: LiveDeliveryCore } {
   if (!Number.isSafeInteger(maxCatchupEvents) || maxCatchupEvents < 1) throw new TypeError('maxCatchupEvents must be a positive safe integer');
   const resolveEntity = typeof entities === 'function' ? entities : (name: string) => entities.get(name);
   const composites = compileSnapshots(snapshots, resolveEntity, db as never) as unknown as CompiledSnapshots;
   validatePrincipalSnapshotDeclarations(principalSnapshots as never, schema as never);
   const principalDelivery = (principalSnapshots as readonly unknown[] | undefined)?.length
-    ? createPrincipalSnapshotDelivery({ db: db as never, declarations: principalSnapshots as never })
+    ? createPrincipalSnapshotDelivery({ db: db as never, declarations: principalSnapshots as never, authorize: principalSnapshotAuthorize })
     : null;
   const requiredEntities = composites.requiredEntities ?? new Set();
 

@@ -1373,6 +1373,22 @@ export interface PrincipalSnapshotTransactionApi {
 
 export function principalSnapshotScope(options: { declaration: string; principal: { type: Exclude<PrincipalType, 'anonymous'>; id: string } }): string;
 
+/**
+ * Host reauthorization for principal snapshots. Invoked before every recipient
+ * projection (bootstrap / catchup / subscribe / resync). A denial, an
+ * authorizer error, or a non-true result fails closed: one-shot reads return
+ * revoked, and an open subscription is revoked before any replacement
+ * projection is delivered. With NO authorizer supplied, every access is denied.
+ */
+export type PrincipalSnapshotAccessTrigger = 'bootstrap' | 'catchup' | 'subscribe' | 'resync';
+export interface PrincipalSnapshotAccessInput {
+  readonly declaration: PrincipalSnapshotDeclaration;
+  readonly principal: { readonly type: Exclude<PrincipalType, 'anonymous'>; readonly id: string };
+  readonly trigger: PrincipalSnapshotAccessTrigger;
+}
+export type PrincipalSnapshotAuthorize =
+  (input: PrincipalSnapshotAccessInput) => boolean | Promise<boolean>;
+
 export function inc(value: number): Readonly<{ kind: 'inc'; value: number }>;
 export function dec(value: number): Readonly<{ kind: 'dec'; value: number }>;
 export const self: Readonly<Record<string, unknown>>;

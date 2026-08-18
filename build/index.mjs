@@ -52,4 +52,5 @@ export { emailSeam, noopTransport } from './email-seam.mjs';
 export { defineOperationalEvent, operationalConsumer } from './operational-consumer.mjs';
 export { principalSnapshot, projectionSource } from './principal-snapshot-declaration.mjs';
 export { principalSnapshotScope } from './principal-snapshot-scope.mjs';
+
 export { default } from './app.mjs';

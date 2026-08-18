@@ -10,6 +10,7 @@ import { createLiveDeliveryWebSocket } from './live-delivery-websocket.ts';
 import { mayVerb } from './row-grant.ts';
 import type { AuthorizationAdapter } from './authorization-adapter.ts';
 import { validatePrincipalSnapshotDeclarations } from './principal-snapshot-delivery.ts';
+import type { PrincipalSnapshotAuthorize } from './principal-snapshot-delivery.ts';
 import { collapseForAdmission, type Principal } from './principal.ts';
 import type { FrameworkLog } from './log.ts';
 import type { LiveDatabase, LiveEntityRecord } from './live-fanout.ts';
@@ -20,6 +21,10 @@ export interface ApplicationLiveDeliveryOptions {
   maxSubscriptions?: number;
   snapshots?: readonly unknown[];
   principalSnapshots?: readonly unknown[];
+  // Host reauthorization for principal snapshots. The app supplies a
+  // membership-aware implementation; every principal-snapshot access fails
+  // closed without one.
+  principalSnapshotAuthorize?: PrincipalSnapshotAuthorize | null;
   maxCatchupEvents?: number;
   authorization?: AuthorizationAdapter;
 }
@@ -48,6 +53,7 @@ export function attachApplicationLiveDelivery(app: ApplicationLiveApp, {
   maxSubscriptions = 100,
   snapshots,
   principalSnapshots,
+  principalSnapshotAuthorize,
   maxCatchupEvents,
   authorization,
 }: ApplicationLiveDeliveryOptions): ApplicationLiveApp {
@@ -78,6 +84,7 @@ export function attachApplicationLiveDelivery(app: ApplicationLiveApp, {
     authorization,
     snapshots,
     principalSnapshots,
+    principalSnapshotAuthorize,
     schema: app.schema,
     log: app.log,
     maxCatchupEvents,

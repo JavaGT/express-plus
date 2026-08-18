@@ -10,7 +10,12 @@ import { createLiveDeliveryWebSocket } from './live-delivery-websocket.mjs';
 import { mayVerb } from './row-grant.mjs';
 
 import { validatePrincipalSnapshotDeclarations } from './principal-snapshot-delivery.mjs';
+
 import { collapseForAdmission,                } from './principal.mjs';
+
+
+
+
 
 
 
@@ -48,6 +53,7 @@ export function attachApplicationLiveDelivery(app                    , {
   maxSubscriptions = 100,
   snapshots,
   principalSnapshots,
+  principalSnapshotAuthorize,
   maxCatchupEvents,
   authorization,
 }                                )                     {
@@ -78,6 +84,7 @@ export function attachApplicationLiveDelivery(app                    , {
     authorization,
     snapshots,
     principalSnapshots,
+    principalSnapshotAuthorize,
     schema: app.schema,
     log: app.log,
     maxCatchupEvents,

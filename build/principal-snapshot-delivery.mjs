@@ -47,6 +47,33 @@ function jsonValue(value         , path        )                                
 
 
 
+// The circumstances under which a principal snapshot may be projected. Each
+// entry point names the trigger it is re-authorizing so an app implementation
+// can distinguish one-shot reads from long-lived subscription maintenance.
+
+
+
+
+
+
+
+
+/**
+ * The package-owned reauthorization seam for principal snapshots. Admission on
+ * declaration grammar alone (name + principal type + id) is a scope-level gate;
+ * the host's own authorization/membership state lives HERE. The delivery
+ * invokes the authorizer BEFORE every recipient projection: bootstrap,
+ * catch-up, subscription admission, and each replacement/resync drain. A denial
+ * fails closed — the request/subscription is revoked and no replacement
+ * projection is ever delivered to the denied principal. An authorizer error or
+ * a non-true result is a denial, never an admit. With NO authorizer supplied,
+ * every access is denied (fail closed): a deployment that attaches principal
+ * snapshots MUST declare one. Scope supplies a membership-aware
+ * implementation.
+ */
+
+
+
 
 
 
@@ -168,12 +195,17 @@ function resolution(
   return Object.freeze({ declaration, principal: Object.freeze({ type: parsed.type, id: parsed.id }) });
 }
 
-export function createPrincipalSnapshotDelivery({ db, declarations }
+export function createPrincipalSnapshotDelivery({ db, declarations, authorize }
+
 
 
  )                            {
   if (!db) throw new TypeError('principal snapshot delivery requires a database');
   const database = db;
+  // Fail closed when the host supplied no reauthorization seam: a
+  // principal-snapshot deployment MUST declare one (see
+  // PrincipalSnapshotAuthorize). Absent it, no principal is ever admitted.
+  const authorizer = authorize ?? null;
   const byName = new Map                                      ();
   for (const declaration of declarations ?? []) {
     if (!isPrincipalSnapshotDeclaration(declaration) || byName.has(declaration.name)) {
@@ -185,6 +217,18 @@ export function createPrincipalSnapshotDelivery({ db, declarations }
   const byScope = new Map                     ();
   let nextId = 1;
   let closed = false;
+
+  // Host reauthorization before any recipient projection. Strictly `true`
+  // admits; a denial, an authorizer error, or a non-true result all fail
+  // closed.
+  async function authorized(input                              )                   {
+    if (!authorizer) return false;
+    try {
+      return await authorizer(input) === true;
+    } catch {
+      return false;
+    }
+  }
 
   function pairedSnapshot(resolved                           )                                                                 {
     // Both reads are synchronous. The fence prevents returning source rows from a
@@ -229,6 +273,13 @@ export function createPrincipalSnapshotDelivery({ db, declarations }
         sub.dirty = false;
         const revision = revisionFor(database, sub.declaration, sub.principal);
         if (revision > sub.cursor) {
+          // Reauthorize BEFORE the replacement projection. A denial revokes
+          // the subscription here (remove -> revoke) so no resync envelope is
+          // ever delivered to a principal the host no longer admits.
+          if (!(await authorized({ declaration: sub.declaration, principal: sub.principal, trigger: 'resync' }))) {
+            remove(id);
+            return;
+          }
           await sub.deliver([{ type: 'resync', seq: revision, reason: 'recipient-snapshot-required' }]);
           if (!sub.active) return;
           sub.cursor = revision;
@@ -251,13 +302,20 @@ export function createPrincipalSnapshotDelivery({ db, declarations }
     async bootstrap({ principal, scope }                                                                             )                                            {
       if (closed) throw new Error('principal snapshot delivery is closed');
       const resolved = resolution(byName, principal, scope);
-      return resolved ? pairedSnapshot(resolved) : Object.freeze({ kind: 'revoked' });
+      if (!resolved) return Object.freeze({ kind: 'revoked' });
+      if (!(await authorized({ declaration: resolved.declaration, principal: resolved.principal, trigger: 'bootstrap' }))) {
+        return Object.freeze({ kind: 'revoked' });
+      }
+      return pairedSnapshot(resolved);
     },
     async catchup({ principal, scope, after }                                                                                            )                                            {
       if (closed) throw new Error('principal snapshot delivery is closed');
       const resolved = resolution(byName, principal, scope);
       if (!resolved) return Object.freeze({ kind: 'revoked' });
       if (!Number.isSafeInteger(after) || after < 0) throw new Error('after must be a nonnegative safe integer');
+      if (!(await authorized({ declaration: resolved.declaration, principal: resolved.principal, trigger: 'catchup' }))) {
+        return Object.freeze({ kind: 'revoked' });
+      }
       const revision = revisionFor(database, resolved.declaration, resolved.principal);
       return after === revision
         ? Object.freeze({ kind: 'catchup', envelopes: Object.freeze([]), cursor: revision })
@@ -272,6 +330,16 @@ export function createPrincipalSnapshotDelivery({ db, declarations }
         throw error;
       }
       if (!Number.isSafeInteger(after) || after < 0 || typeof deliver !== 'function') throw new Error('invalid principal snapshot subscription');
+      // Subscription admission consults the host authorizer BEFORE the
+      // subscription is installed. A denial revokes (tearing the transport
+      // down before any delivery) and rejects with the same terminal code the
+      // scope-level denial uses.
+      if (!(await authorized({ declaration: resolved.declaration, principal: resolved.principal, trigger: 'subscribe' }))) {
+        revoke?.();
+        const error                            = new Error('principal snapshot subscription denied');
+        error.code = 'live-delivery-revoked';
+        throw error;
+      }
       if (signal?.aborted) return { activate: async () => undefined };
       const id = nextId++;
       const sub                                     = {
