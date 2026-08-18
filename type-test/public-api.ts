@@ -43,6 +43,7 @@ import {
   createLiveDeliverySession, createScopeLiveStore, decodeResult, materializeAnnotatedTextSnapshot,
   type EventsSinceResponse, type LiveDeliveryCursor as ClientLiveDeliveryCursor, type LiveDeliverySession, type LiveStore, type ScopeLiveStore, type SnapshotResponse,
   type StaleResponse, type WsEnvelope,
+  type LiveDeliverySettlement, type ScopeDispatchResult,
 } from 'workbench/client';
 import {
   annotatedText, annotation, annotationAction, measurement, protectingAnnotation,
@@ -148,6 +149,17 @@ registerAnnotatedTextStructuralExtension('invalidAsyncMeasurement', {
   },
 });
 void [annotatedTextHandle, protecting];
+
+// ── ScopeDispatchResult carries an optional settlement (workbench#72) ───────
+// A legacy literal without a settlement must keep compiling (Scope deprecation
+// path); a dispatched document-path result carries one, mirroring the shell.
+const scopeResultWithoutSettlement: ScopeDispatchResult = { ok: true, status: 'committed', opId: 'op-1' };
+declare const scopeResultWithSettlement: ScopeDispatchResult;
+if (scopeResultWithSettlement.settlement) {
+  const scopeSettlement: LiveDeliverySettlement = scopeResultWithSettlement.settlement;
+  void scopeSettlement.wait();
+}
+void [scopeResultWithoutSettlement, scopeResultWithSettlement];
 
 declare const coordsMarkers: readonly AnnotatedTextRedactionMarker[];
 const wirePosition: AnnotatedTextCoordinatedPosition = wireToDisplayPosition({ offset: 2, affinity: 'right' }, coordsMarkers);

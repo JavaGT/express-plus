@@ -247,7 +247,7 @@ test('document session fails closed on block-era commands and still sends v9 ann
   for (const name of BLOCK_ERA_METHODS) {
     assert.equal(typeof session[name], 'undefined', `block-era ${name} must not exist on the session`);
   }
-  await session.applyAnnotation({
+  const applied = session.applyAnnotation({
     mutationId: 'ann-1',
     annotation: { id: 'a1', family: 'note', fields: {} },
     from: { offset: 0, affinity: 'right' },
@@ -261,6 +261,10 @@ test('document session fails closed on block-era commands and still sends v9 ann
     assert.equal('expected' in request.payload, false);
     assert.equal(JSON.stringify(request).includes('frontier'), false);
   }
+  const appliedResult = await applied;
+  assert.equal(appliedResult.ok, true);
+  assert.equal(appliedResult.settlement.opId, appliedResult.opId, 'the annotation result must expose its settlement under the result opId');
+  assert.deepEqual(await appliedResult.settlement.wait(), { opId: 'action-1', status: 'reconciled' });
   session.close();
 });
 
@@ -402,6 +406,8 @@ test('annotation removal is visible before its receipt and authoritative snapsho
   releaseReceipt();
   const result = await pending;
   assert.equal(result.ok, true);
+  assert.equal(result.settlement.opId, result.opId, 'the removal result must expose its settlement under the result opId');
+  assert.deepEqual(await result.settlement.wait(), { opId: result.opId, status: 'reconciled' });
   assert.deepEqual(session.document.ranges, []);
   assert.deepEqual(session.document.annotations, []);
   assert.equal(snapshotRequests.length, 2, 'the non-foldable annotation action still settles through an authoritative snapshot');

@@ -660,10 +660,19 @@ export interface ScopeOperation<Payload = unknown> {
   echoCursor: number | null;
 }
 
+/**
+ * A document-path dispatch result (`applyAnnotation` / `applyAnnotationAction`
+ * / `removeAnnotation`). Mirrors `LiveDeliveryDispatchResult`: a dispatched
+ * mutation carries the operation's `settlement`, whose `wait()` resolves
+ * `reconciled` once the positive receipt fence (`confirmedThrough`) is covered
+ * by an authorized replacement snapshot. The field is optional because the
+ * legacy `ScopeLiveStore.dispatch` path and plain local conflict shapes
+ * predate settlements and never carry one.
+ */
 export type ScopeDispatchResult =
-  | { ok: true; status: 'committed'; opId: string; value?: unknown }
-  | { ok: false; status: 'failed-rolled-back'; opId: string; failure: unknown }
-  | { ok: false; status: 'outcome-unknown'; opId: string; failure: unknown };
+  | { ok: true; status: 'committed'; opId: string; settlement?: LiveDeliverySettlement; value?: unknown }
+  | { ok: false; status: 'failed-rolled-back'; opId: string; settlement?: LiveDeliverySettlement; failure: unknown }
+  | { ok: false; status: 'outcome-unknown'; opId: string; settlement?: LiveDeliverySettlement; failure: unknown };
 
 export interface ScopeLiveStoreConfig<Snapshot> {
   baseUrl: string;
