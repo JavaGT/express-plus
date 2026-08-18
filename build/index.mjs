@@ -50,7 +50,7 @@ export { snapshot, object, one, keyed, select, include, orderBy, count, related,
 export { createInvitationApi } from './auth/invitation.mjs';
 export { emailSeam, noopTransport } from './email-seam.mjs';
 export { defineOperationalEvent, operationalConsumer } from './operational-consumer.mjs';
-export { principalSnapshot, projectionSource } from './principal-snapshot-declaration.mjs';
+export { principalSnapshot, projectionSource, projectionSourcePhysical } from './principal-snapshot-declaration.mjs';
 export { principalSnapshotScope } from './principal-snapshot-scope.mjs';
 
 export { default } from './app.mjs';
