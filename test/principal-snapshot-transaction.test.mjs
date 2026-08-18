@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { createPrincipalSnapshotTransaction } from '../build/principal-snapshot-transaction.mjs';
 import { principalSnapshot, projectionSource } from '../build/principal-snapshot-declaration.mjs';
 import { executeFrameworkDDL } from '../build/ddl.mjs';
@@ -10,8 +13,8 @@ function schema() {
   return Object.freeze({ tables: [] });
 }
 
-function makeApp() {
-  const db = new DatabaseSync(':memory:');
+function makeApp(location = ':memory:') {
+  const db = new DatabaseSync(location);
   executeFrameworkDDL(db);
   const app = { db };
   app.writeQueue = createWriteQueue();
@@ -488,4 +491,61 @@ test('transaction requires db', async () => {
     app.principalSnapshots.transaction(() => {}),
     /requires a database/,
   );
+});
+
+// ── Restart durability on a file-backed database ─────────────────────────────
+
+test('committed revision survives db close/reopen; rollback leaves no revision', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'workbench-psnapshot-'));
+  t.after(() => { try { rmSync(dir, { recursive: true, force: true }); } catch {} });
+  const file = join(dir, 'restart.sqlite');
+
+  const decl = makeDeclaration();
+  {
+    const { app, db, runtime } = makeApp(file);
+    runtime._registerDeclaration(decl);
+    db.exec('CREATE TABLE IF NOT EXISTS profile (id TEXT PRIMARY KEY, name TEXT)');
+    db.prepare('INSERT INTO profile (id, name) VALUES (?, ?)').run('u1', 'Alice');
+
+    // A rolled-back transaction must persist neither the host mutation nor a
+    // revision, even across a restart.
+    await assert.rejects(
+      app.principalSnapshots.transaction((tx) => {
+        db.prepare('UPDATE profile SET name = ? WHERE id = ?').run('Alicia', 'u1');
+        tx.invalidate(decl, { type: 'user', id: 'u1' });
+        throw new Error('rollback');
+      }),
+      /rollback/,
+    );
+    db.close();
+  }
+
+  {
+    // Reopen the file: the rollback left the host row and revision absent.
+    const { app, db, runtime } = makeApp(file);
+    runtime._registerDeclaration(decl);
+    assert.equal(db.prepare('SELECT name FROM profile WHERE id = ?').get('u1').name, 'Alice');
+    assert.equal(
+      db.prepare('SELECT revision FROM _PrincipalSnapshotRevision WHERE declaration = ? AND principalType = ? AND principalId = ?').get('test-decl', 'user', 'u1'),
+      undefined,
+      'a rolled-back transaction leaves no revision after restart',
+    );
+
+    // A committed transaction persists both the host mutation and the revision.
+    await app.principalSnapshots.transaction((tx) => {
+      db.prepare('UPDATE profile SET name = ? WHERE id = ?').run('Alicia', 'u1');
+      tx.invalidate(decl, { type: 'user', id: 'u1' });
+    });
+    db.close();
+  }
+
+  {
+    // Reopen again: the committed revision survived the close/reopen cycle.
+    const { db, runtime } = makeApp(file);
+    runtime._registerDeclaration(decl);
+    assert.equal(db.prepare('SELECT name FROM profile WHERE id = ?').get('u1').name, 'Alicia');
+    const rev = db.prepare('SELECT revision FROM _PrincipalSnapshotRevision WHERE declaration = ? AND principalType = ? AND principalId = ?').get('test-decl', 'user', 'u1');
+    assert.equal(rev.revision, 1, 'committed revision survives restart');
+    db.close();
+  }
 });

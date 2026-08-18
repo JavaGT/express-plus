@@ -298,3 +298,171 @@ test('principal delivery terminal drain error removal revokes exactly once', asy
   delivery.close();
   assert.equal(revokes, 1, 'close after the removed subscription does not double-release');
 });
+
+// ── Reauthorization (host membership seam) ───────────────────────────────────
+
+test('reauthorization: bootstrap and catchup revoke a principal the authorizer denies', async () => {
+  const { db, declaration } = hubDatabase();
+  const calls = [];
+  const delivery = createPrincipalSnapshotDelivery({
+    db,
+    declarations: [declaration],
+    authorize: ({ declaration: named, principal, trigger }) => {
+      calls.push({ declaration: named.name, id: principal.id, trigger });
+      return principal.id === 'u1';
+    },
+  });
+  const denied = principalSnapshotScope({ declaration: declaration.name, principal: { type: 'user', id: 'u2' } });
+  assert.deepEqual(await delivery.bootstrap({ principal: { type: 'user', id: 'u2' }, scope: denied }), { kind: 'revoked' });
+  assert.deepEqual(await delivery.catchup({ principal: { type: 'user', id: 'u2' }, scope: denied, after: 0 }), { kind: 'revoked' });
+  const admitted = principalSnapshotScope({ declaration: declaration.name, principal: { type: 'user', id: 'u1' } });
+  assert.equal((await delivery.bootstrap({ principal: { type: 'user', id: 'u1' }, scope: admitted })).kind, 'snapshot');
+  assert.deepEqual(calls.map((call) => call.trigger), ['bootstrap', 'catchup', 'bootstrap']);
+  assert.deepEqual(calls.map((call) => call.id), ['u2', 'u2', 'u1']);
+  assert.ok(calls.every((call) => call.declaration === 'user-hub'));
+  delivery.close();
+});
+
+test('reauthorization: subscription admission denial revokes before install', async () => {
+  const { db, declaration } = hubDatabase();
+  const delivery = createPrincipalSnapshotDelivery({ db, declarations: [declaration], authorize: () => false });
+  const scope = principalSnapshotScope({ declaration: declaration.name, principal: { type: 'user', id: 'u1' } });
+  let revokes = 0;
+  await assert.rejects(
+    () => delivery.subscribe({
+      principal: { type: 'user', id: 'u1' }, scope, after: 0, signal: new AbortController().signal,
+      deliver: async () => {},
+      revoke: () => { revokes += 1; },
+    }),
+    (error) => error.code === 'live-delivery-revoked',
+  );
+  assert.equal(revokes, 1, 'a denied subscription revokes the transport before any delivery');
+  delivery.close();
+});
+
+test('reauthorization: a resync drain denial revokes BEFORE delivering the replacement', async () => {
+  const { db, declaration } = hubDatabase();
+  let admit = true;
+  const triggers = [];
+  const delivery = createPrincipalSnapshotDelivery({
+    db,
+    declarations: [declaration],
+    authorize: ({ principal, trigger }) => {
+      triggers.push({ trigger, id: principal.id });
+      return admit;
+    },
+  });
+  const scope = principalSnapshotScope({ declaration: declaration.name, principal: { type: 'user', id: 'u1' } });
+  const delivered = [];
+  let revokes = 0;
+  const activation = await delivery.subscribe({
+    principal: { type: 'user', id: 'u1' }, scope, after: 0, signal: new AbortController().signal,
+    deliver: async (batch) => delivered.push(...batch),
+    revoke: () => { revokes += 1; },
+  });
+  assert.equal(await activation.activate(), 0, 'quiesces at its cursor while admitted');
+  db.prepare(
+    `INSERT INTO _PrincipalSnapshotRevision (declaration, principalType, principalId, revision) VALUES (?, ?, ?, 1)
+     ON CONFLICT(declaration, principalType, principalId) DO UPDATE SET revision = revision + 1`,
+  ).run(declaration.name, 'user', 'u1');
+  // Membership is revoked before the replacement drain runs.
+  admit = false;
+  assert.equal(await activation.activate(), undefined, 'a denied drain settles without a cursor');
+  assert.equal(revokes, 1, 'the denied principal is revoked exactly once');
+  assert.deepEqual(delivered, [], 'no replacement projection is delivered to the denied principal');
+  assert.deepEqual(triggers.map((call) => call.trigger), ['subscribe', 'resync']);
+  delivery.close();
+});
+
+test('reauthorization: wake-driven resync denial revokes without delivering', async () => {
+  const { db, declaration } = hubDatabase();
+  let admit = true;
+  const delivery = createPrincipalSnapshotDelivery({ db, declarations: [declaration], authorize: () => admit });
+  const scope = principalSnapshotScope({ declaration: declaration.name, principal: { type: 'user', id: 'u1' } });
+  const delivered = [];
+  let revokes = 0;
+  const activation = await delivery.subscribe({
+    principal: { type: 'user', id: 'u1' }, scope, after: 0, signal: new AbortController().signal,
+    deliver: async (batch) => delivered.push(...batch),
+    revoke: () => { revokes += 1; },
+  });
+  assert.equal(await activation.activate(), 0);
+  db.prepare(
+    `INSERT INTO _PrincipalSnapshotRevision (declaration, principalType, principalId, revision) VALUES (?, ?, ?, 1)
+     ON CONFLICT(declaration, principalType, principalId) DO UPDATE SET revision = revision + 1`,
+  ).run(declaration.name, 'user', 'u1');
+  admit = false;
+  delivery.wake(declaration, { type: 'user', id: 'u1' });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(revokes, 1, 'the wake-driven drain revokes the denied principal');
+  assert.deepEqual(delivered, [], 'no replacement is delivered after the wake');
+  assert.equal(await activation.activate(), undefined, 'the revoked subscription settles without a cursor');
+  delivery.close();
+});
+
+test('reauthorization: an authorizer error fails closed', async () => {
+  const { db, declaration } = hubDatabase();
+  const delivery = createPrincipalSnapshotDelivery({
+    db,
+    declarations: [declaration],
+    authorize: () => { throw new Error('policy boom'); },
+  });
+  const scope = principalSnapshotScope({ declaration: declaration.name, principal: { type: 'user', id: 'u1' } });
+  assert.deepEqual(await delivery.bootstrap({ principal: { type: 'user', id: 'u1' }, scope }), { kind: 'revoked' });
+  let revokes = 0;
+  await assert.rejects(
+    () => delivery.subscribe({
+      principal: { type: 'user', id: 'u1' }, scope, after: 0, signal: new AbortController().signal,
+      deliver: async () => {},
+      revoke: () => { revokes += 1; },
+    }),
+    (error) => error.code === 'live-delivery-revoked',
+  );
+  assert.equal(revokes, 1, 'an authorizer error revokes like a denial');
+  delivery.close();
+});
+
+test('principal delivery fails closed when no authorizer is supplied', async () => {
+  const { db, declaration } = hubDatabase();
+  const delivery = createPrincipalSnapshotDelivery({ db, declarations: [declaration] });
+  const scope = principalSnapshotScope({ declaration: declaration.name, principal: { type: 'user', id: 'u1' } });
+  assert.deepEqual(await delivery.bootstrap({ principal: { type: 'user', id: 'u1' }, scope }), { kind: 'revoked' });
+  assert.deepEqual(await delivery.catchup({ principal: { type: 'user', id: 'u1' }, scope, after: 0 }), { kind: 'revoked' });
+  await assert.rejects(
+    () => delivery.subscribe({
+      principal: { type: 'user', id: 'u1' }, scope, after: 0, signal: new AbortController().signal,
+      deliver: async () => {},
+    }),
+    (error) => error.code === 'live-delivery-revoked',
+  );
+  delivery.close();
+});
+
+// ── Multi-recipient isolation ────────────────────────────────────────────────
+
+test('two-recipient bootstrap delivers each recipient ONLY its own rows', async () => {
+  const { db, declaration } = hubDatabase();
+  // Distinct sensitive rows per recipient, with distinct secret cell values.
+  // The seeded rows from hubDatabase() are omitted; this table is populated
+  // only with the two recipients' own rows so an A/B cross-read is detectable
+  // by row content alone.
+  db.exec(`DELETE FROM HubItem`);
+  db.prepare('INSERT INTO HubItem (id, recipientId, title, rank, hidden) VALUES (?, ?, ?, ?, ?)').run('a1', 'u1', 'u1-private-alpha', 1, 's1');
+  db.prepare('INSERT INTO HubItem (id, recipientId, title, rank, hidden) VALUES (?, ?, ?, ?, ?)').run('a2', 'u1', 'u1-private-beta', 2, 's1');
+  db.prepare('INSERT INTO HubItem (id, recipientId, title, rank, hidden) VALUES (?, ?, ?, ?, ?)').run('b1', 'u2', 'u2-private-gamma', 1, 's2');
+  const delivery = createPrincipalSnapshotDelivery({ db, declarations: [declaration], authorize: () => true });
+  const one = principalSnapshotScope({ declaration: declaration.name, principal: { type: 'user', id: 'u1' } });
+  const two = principalSnapshotScope({ declaration: declaration.name, principal: { type: 'user', id: 'u2' } });
+  const u1 = await delivery.bootstrap({ principal: { type: 'user', id: 'u1' }, scope: one });
+  const u2 = await delivery.bootstrap({ principal: { type: 'user', id: 'u2' }, scope: two });
+  assert.equal(u1.kind, 'snapshot');
+  assert.equal(u2.kind, 'snapshot');
+  assert.deepEqual(u1.snapshot.items, [{ title: 'u1-private-alpha', id: 'a1' }, { title: 'u1-private-beta', id: 'a2' }]);
+  assert.deepEqual(u2.snapshot.items, [{ title: 'u2-private-gamma', id: 'b1' }]);
+  const titles = (result) => result.snapshot.items.map((item) => item.title);
+  assert.equal(titles(u1).includes('u2-private-gamma'), false, 'u1 never sees u2 rows');
+  assert.equal(titles(u2).includes('u1-private-alpha'), false, 'u2 never sees u1 rows');
+  assert.equal(titles(u2).includes('u1-private-beta'), false, 'u2 never sees u1 rows');
+  assert.equal('hidden' in u1.snapshot.items[0], false, 'undeclared columns never project');
+  delivery.close();
+});
