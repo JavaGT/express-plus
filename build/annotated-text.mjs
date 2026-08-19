@@ -136,13 +136,18 @@ export function assertFrontier(value         )           {
 export function frontierCounter(frontier          , actor        )         {
   assertFrontier(frontier);
   assertActor(actor);
+  return frontierCounterValidated(frontier, actor);
+}
+
+/** Read a frontier after its shape and actor ids have already been checked. */
+function frontierCounterValidated(frontier          , actor        )         {
   return frontier.find(([candidate]) => candidate === actor)?.[1] ?? 0;
 }
 
 export function frontierDominates(left          , right          )          {
   assertFrontier(left);
   assertFrontier(right);
-  return right.every(([actor, counter]) => frontierCounter(left, actor) >= counter);
+  return right.every(([actor, counter]) => frontierCounterValidated(left, actor) >= counter);
 }
 
 export function assertAnchor(value         )         {
@@ -170,7 +175,7 @@ function assertDeleteSpans(value         , deps          )                      
     assertClosedArray(span, 3, 'delete span');
     const [op, first, count] = span;
     const canonicalOp = assertOpId(op);
-    if (frontierCounter(deps, canonicalOp[0]) < canonicalOp[1]) fail('delete target was not observed');
+    if (frontierCounterValidated(deps, canonicalOp[0]) < canonicalOp[1]) fail('delete target was not observed');
     if (!Number.isSafeInteger(first) || first < 0 || !SAFE_POSITIVE(count)) fail('delete span bounds are invalid');
     if (previous !== null) {
       const compare = compareOpId(previous.op, canonicalOp);
@@ -197,14 +202,14 @@ export function assertTextOp(value         )         {
   const lamport = value[3];
   if (!SAFE_POSITIVE(lamport)) fail('Lamport clock must be a positive safe integer');
   const deps = assertFrontier(value[4]);
-  if (frontierCounter(deps, op[0]) !== op[1] - 1) fail('operation dependencies must include the previous local counter');
+  if (frontierCounterValidated(deps, op[0]) !== op[1] - 1) fail('operation dependencies must include the previous local counter');
   const body = value[5];
   if (!Array.isArray(body) || body.length < 2) fail('operation body is invalid');
   let canonicalBody            ;
   if (body[0] === 'insert' && body.length === 3) {
     assertClosedArray(body, 3, 'insert body');
     const anchor = assertAnchor(body[1]);
-    if (anchor[0] === 'element' && frontierCounter(deps, anchor[1][0][0]) < anchor[1][0][1]) {
+    if (anchor[0] === 'element' && frontierCounterValidated(deps, anchor[1][0][0]) < anchor[1][0][1]) {
       fail('insert anchor was not observed');
     }
     const text = assertWellFormedText(body[2]);
