@@ -3469,11 +3469,12 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
   let displayFamily = null;
   const pendingDisplayEdits = [];
   // Authoring-basis anchored endpoints for pending annotation applies, keyed by
-  // stable annotation id. Resolved ONCE at apply time against the family whose
+  // the operation's action identity (not annotation id, which is not unique
+  // across re-applies). Resolved ONCE at apply time against the family whose
   // text the authoring offsets are expressed against, so a foreign fold that
   // re-projects the still-pending apply places the SAME anchored endpoints
   // instead of re-anchoring the offsets against a shifted basis. Retired when
-  // the operation's echo lands (or on remove/close).
+  // the operation settles (echo/settlement consumed) or on remove/close.
   const pendingAnnotationRanges = new Map();
   let queuedDocumentText = null;
   let queuedAuthoringMutations = 0;
@@ -3708,8 +3709,10 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       // stays positional across a concurrent foreign edit.
       const edit = action?.payload?.version === 9 ? action.payload.edit : null;
       if (edit?.kind === 'annotation.apply') {
-        const id = edit.annotation?.id;
-        const range = id != null ? pendingAnnotationRanges.get(id) : undefined;
+        // Keyed by the operation's action identity so a reconciled/re-applied op
+        // drops its own captured range instead of leaking it.
+        const entry = pendingAnnotationRanges.get(action?.actionId);
+        const range = entry ? entry.range : undefined;
         // While the apply is still pending (publish() only re-projects pending,
         // non-echoed operations) the confirmed base never carries the
         // annotation yet, so we must always re-project it with the captured
@@ -3908,8 +3911,16 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     if (!annotation?.id || typeof annotation.id !== 'string' || annotation.id.length === 0) return null;
     const start = from?.offset;
     const end = to?.offset;
-    const fromAffinity = from?.affinity === 'left' ? 'left' : 'right';
-    const toAffinity = to?.affinity === 'left' ? 'left' : 'right';
+    // Affinities fail closed: require an explicit 'left' or 'right'. A
+    // missing/invalid affinity yields no captured range so the optimistic
+    // projection is left unchanged and the authoritative dispatch/validation
+    // decides — never a silent default that could show a guessed range.
+    const fromAffinity = from?.affinity;
+    const toAffinity = to?.affinity;
+    if ((fromAffinity !== 'left' && fromAffinity !== 'right')
+      || (toAffinity !== 'left' && toAffinity !== 'right')) {
+      return null;
+    }
     const text = materializeFamilyText(family);
     if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end)
       || start < 0 || end < start || end > text.length || start === end) {
@@ -4026,6 +4037,12 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
         return result;
       } finally {
         release();
+        // The operation's settlement (echo/settlement consumed: reconciled,
+        // failed, revoked, unavailable, or closed) is final — the op is no
+        // longer re-projected, so drop its captured annotation range to avoid
+        // leaking stale anchors. Keyed by the same action identity the
+        // optimistic projector uses.
+        pendingAnnotationRanges.delete(resolvedActionId);
         queuedAuthoringMutations -= 1;
         if (queuedAuthoringMutations <= 0) {
           queuedAuthoringMutations = 0;
@@ -4192,8 +4209,14 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       // v1 offset recipients) no anchored basis is captured and the offset-form
       // optimistic projection / confirmed echo reconciles the view instead.
       const resolved = resolvePendingAnnotationRange(displayFamily ?? familyReplica, annotation, from, to);
-      if (resolved !== null) pendingAnnotationRanges.set(annotation.id, resolved);
-      return queueAuthoringMutation(command, (current, actionId) => dispatchNow(current, actionId));
+      // Mint the action identity up front and key the captured range by it, so
+      // the optimistic projector looks it up and settlement retires it by the
+      // SAME operation identity (not annotation id, which is not unique).
+      const actionId = mintActionId();
+      if (resolved !== null) {
+        pendingAnnotationRanges.set(actionId, Object.freeze({ annotationId: annotation.id, range: resolved }));
+      }
+      return queueAuthoringMutation(command, (current, actionId) => dispatchNow(current, actionId), { actionId });
     },
     applyAnnotationAction(actionHandle, { mutationId, from, to, values }) {
         if (!actionHandle || (actionHandle.kind !== 'annotationEntityAction' && actionHandle.kind !== 'annotationAction') || typeof actionHandle.actionName !== 'string') {
@@ -4228,7 +4251,11 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
      },
     removeAnnotation({ mutationId, annotationId }) {
       flushOpenInsertBurst();
-      pendingAnnotationRanges.delete(annotationId);
+      // Retire any captured range for removed annotations by annotation id (the
+      // map is keyed by action identity, so scan for matching entries).
+      for (const [actionId, entry] of pendingAnnotationRanges) {
+        if (entry.annotationId === annotationId) pendingAnnotationRanges.delete(actionId);
+      }
       const command = { kind: 'annotation.remove', mutationId, annotationId };
       return queueAuthoringMutation(command, (current, actionId) => dispatchNow(current, actionId));
     },

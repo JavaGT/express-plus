@@ -280,14 +280,14 @@ function projectAnnotationApply(document, edit, options) {
   }
   const fromOffset = edit.from.offset;
   const toOffset = edit.to.offset;
-  const fromAffinity = edit.from.affinity === 'left' ? 'left' : 'right';
-  const toAffinity = edit.to.affinity === 'left' ? 'left' : 'right';
-  const text = document.text ?? '';
-  // The mirror of the server plan: an apply must be a forward, non-empty,
-  // in-bounds selection or it is inapplicable (never guess).
-  if (!Number.isSafeInteger(fromOffset) || !Number.isSafeInteger(toOffset)
-    || fromOffset < 0 || toOffset < fromOffset || toOffset > text.length
-    || fromOffset === toOffset) {
+  // Affinities fail closed: freshly-supplied offset input must state an explicit
+  // 'left' or 'right'; anything else (missing/invalid) leaves the projection
+  // unchanged so the authoritative dispatch/validation decides, never a silent
+  // default that could display a guessed range.
+  const fromAffinity = edit.from.affinity;
+  const toAffinity = edit.to.affinity;
+  if ((fromAffinity !== 'left' && fromAffinity !== 'right')
+    || (toAffinity !== 'left' && toAffinity !== 'right')) {
     return document;
   }
 
@@ -295,13 +295,26 @@ function projectAnnotationApply(document, edit, options) {
   const preResolved = options?.range;
   const family = options?.family;
   if (preResolved && isStructuralEndpoint(preResolved.start) && isStructuralEndpoint(preResolved.end)) {
-    // The session captured the authoring-basis anchored endpoints once; place
-    // them verbatim so a foreign fold that re-projects this pending apply does
-    // not re-anchor against a shifted basis.
+    // The session captured the authoring-basis anchored endpoints once and they
+    // were validated at capture time. They stay structurally valid even when a
+    // concurrent foreign edit shifts the CURRENT document text's character
+    // counts (e.g. a delete before the selection), so skip the current-text
+    // offset-bounds and empty-selection checks (those belong only to
+    // freshly-supplied offset input) and place the anchored endpoints verbatim;
+    // they resolve against the current family at point of use. A captured range
+    // that can no longer resolve (anchor lost / basis no longer dominating) is
+    // surfaced downstream as an unresolvable visible conflict, never a guess.
     range = Object.freeze({ annotationId: annotation.id, start: preResolved.start, end: preResolved.end });
   } else if (family && isAnchoredDocument(document)) {
-    // Anchor the authoring offsets against the given family (the session's
-    // authoring basis). Resolution failures are inapplicable — leave unprojected.
+    // Freshly-supplied offset input against an anchored document. Mirror of the
+    // server plan: the selection must be a forward, non-empty, in-bounds pair
+    // against the CURRENT text or it is inapplicable (never guess).
+    const text = document.text ?? '';
+    if (!Number.isSafeInteger(fromOffset) || !Number.isSafeInteger(toOffset)
+      || fromOffset < 0 || toOffset < fromOffset || toOffset > text.length
+      || fromOffset === toOffset) {
+      return document;
+    }
     try {
       range = Object.freeze({
         annotationId: annotation.id,
@@ -312,7 +325,14 @@ function projectAnnotationApply(document, edit, options) {
       return document;
     }
   } else if (!isAnchoredDocument(document)) {
-    // v1 / redacted offset surface: apply as a plain offset range.
+    // Freshly-supplied offset input against a v1 / redacted offset surface:
+    // apply as a plain offset range (forward, non-empty, in-bounds).
+    const text = document.text ?? '';
+    if (!Number.isSafeInteger(fromOffset) || !Number.isSafeInteger(toOffset)
+      || fromOffset < 0 || toOffset < fromOffset || toOffset > text.length
+      || fromOffset === toOffset) {
+      return document;
+    }
     range = Object.freeze({ annotationId: annotation.id, start: fromOffset, end: toOffset });
   } else {
     // Anchored document without a family or pre-resolved range: cannot anchor.

@@ -125,6 +125,70 @@ test('projectPendingAnnotatedTextDocument leaves an inapplicable apply unproject
   }, { family: baseFamily }), doc);
 });
 
+test('affinities must fail closed: an invalid or missing affinity leaves the projection unchanged', () => {
+  const baseFamily = seedHelloWorld();
+  const doc = emptyAnchoredDocument(baseFamily);
+  const apply = (from, to) => ({
+    payload: {
+      version: 9,
+      edit: {
+        kind: 'annotation.apply',
+        annotation: { id: 'c1', family: 'note', fields: { label: 'x' } },
+        from: { offset: from, affinity: from === 'right' ? 'right' : (from === 'left' ? 'left' : 'up') },
+        to: { offset: to, affinity: to === 'right' ? 'right' : (to === 'left' ? 'left' : 'down') },
+      },
+    },
+  });
+
+  // A valid affinity projects as before.
+  const valid = projectPendingAnnotatedTextDocument(doc,
+    applyAction({ id: 'c1', family: 'note', fields: { label: 'x' } }, 6, 11), { family: baseFamily });
+  assert.notEqual(valid, doc);
+  assert.equal(valid.ranges.length, 1);
+
+  // Invalid or missing affinities are inapplicable: the document is returned
+  // unchanged — never a silently-defaulted ('right') guessed range.
+  const invalidFrom = projectPendingAnnotatedTextDocument(doc, apply('up', 'right'), { family: baseFamily });
+  assert.equal(invalidFrom, doc);
+  const invalidTo = projectPendingAnnotatedTextDocument(doc, apply('right', 'down'), { family: baseFamily });
+  assert.equal(invalidTo, doc);
+  const missingFrom = projectPendingAnnotatedTextDocument(doc, {
+    payload: { version: 9, edit: { kind: 'annotation.apply', annotation: { id: 'c1', family: 'note', fields: {} }, from: { offset: 6 }, to: { offset: 11, affinity: 'right' } } },
+  }, { family: baseFamily });
+  assert.equal(missingFrom, doc);
+});
+
+test('a captured anchored range is not re-rejected against current text bounds after a foreign delete', () => {
+  const baseFamily = seedHelloWorld();
+  const doc = emptyAnchoredDocument(baseFamily);
+  // Capture [6, 11] ("world") against the original family, exactly as the
+  // session does at apply time.
+  const action = applyAction({ id: 'c1', family: 'note', fields: { label: 'x' } }, 6, 11);
+  const captured = Object.freeze({
+    annotationId: 'c1',
+    start: resolveOffsetToEndpoint(baseFamily, 6, baseFamily.checkpoint.frontier, 'right'),
+    end: resolveOffsetToEndpoint(baseFamily, 11, baseFamily.checkpoint.frontier, 'right'),
+  });
+  const projected = projectPendingAnnotatedTextDocument(doc, action, { range: captured });
+  assert.ok(projected !== doc);
+  assert.equal(projected.ranges.length, 1);
+  assert.deepEqual(resolveRangeOffsets(projected.ranges[0], baseFamily), { annotationId: 'c1', start: 6, end: 11 });
+
+  // A FOREIGN delete removes the leading character. Current text is now one
+  // char shorter, so the fresh-offset bounds check (toOffset > text.length)
+  // would wrongly reject [6, 11] — but the CAPTURED structural range must be
+  // honored verbatim and rebase to [5, 10] against the advanced family.
+  const foreignDelete = textOperationForOffsetEdit(
+    baseFamily, { kind: 'text.delete', from: { offset: 0, affinity: 'right' }, to: { offset: 1, affinity: 'right' } }, 'b'.repeat(32), 2,
+  );
+  const nextFamily = applyTextOperation(baseFamily, foreignDelete);
+  assert.equal(materializeText(nextFamily), 'ello world');
+  const reprojected = projectPendingAnnotatedTextDocument(doc, action, { range: captured });
+  assert.ok(reprojected !== doc, 'captured range must survive a foreign delete that shifts current text length');
+  assert.equal(reprojected.ranges.length, 1);
+  assert.deepEqual(resolveRangeOffsets(reprojected.ranges[0], nextFamily), { annotationId: 'c1', start: 5, end: 10 });
+});
+
 test('a pending annotation apply stays correct across a concurrent remote insert', async () => {
   const baseFamily = seedHelloWorld();
   const sources = [];
