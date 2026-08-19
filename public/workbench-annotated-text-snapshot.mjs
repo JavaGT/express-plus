@@ -1,5 +1,5 @@
 import { createAnnotatedTextSnapshotSessionBinding, getAnnotatedTextSnapshotSessionBinding } from './workbench-annotated-text-snapshot-internal.mjs';
-import { projectEndpointToOffset } from './workbench-annotated-text-continuous.mjs';
+import { projectEndpointToOffset, resolveOffsetToEndpoint } from './workbench-annotated-text-continuous.mjs';
 
 function deepFreeze(value) {
   if (value === null || typeof value !== 'object') return value;
@@ -203,7 +203,18 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options = {})
 // a precise delete of a stable annotation id, so its pending projection can
 // remove that id immediately; the authoritative delivery snapshot still owns
 // reconciliation and restores the preimage if the action is rejected.
-export function projectPendingAnnotatedTextDocument(document, action, _ignored) {
+//
+// annotation.apply / reapply projects a pending annotation at document-absolute
+// authoring offsets. The projection resolves those offsets to recipient-v2
+// anchored endpoints against the family (holding the historical basis, per
+// Decision 0025) so the placeholder range stays positional across a concurrent
+// foreign text edit instead of bolting an offset range onto the anchored
+// document. Reapply by stable annotation id is an upsert — the annotation and
+// its one range replace any same-id rows, never duplicate. An apply that cannot
+// be anchored (no family, unresolvable offsets) is left UNPROJECTED (returns
+// the document unchanged) rather than guessing a mutation; the session surfaces
+// the inapplicable apply as a conflict/failure to the caller.
+export function projectPendingAnnotatedTextDocument(document, action, options) {
   const edit = action?.payload?.version === 9 ? action.payload.edit : null;
   if (!edit) return document;
   if (edit.kind === 'annotation.remove') {
@@ -226,6 +237,9 @@ export function projectPendingAnnotatedTextDocument(document, action, _ignored) 
       ...(Array.isArray(document.orphans) ? { orphans: Object.freeze(orphans) } : {}),
     });
   }
+  if (edit.kind === 'annotation.apply') {
+    return projectAnnotationApply(document, edit, options);
+  }
   if (edit.kind !== 'text.insert' && edit.kind !== 'text.delete' && edit.kind !== 'text.replace') return document;
   const text = document?.text ?? '';
   const start = edit.kind === 'text.insert' ? edit.at.offset : edit.from.offset;
@@ -241,6 +255,96 @@ export function projectPendingAnnotatedTextDocument(document, action, _ignored) 
     ...document,
     text: spliced,
     ...(Array.isArray(document.ranges) ? { ranges } : {}),
+  });
+}
+
+// Whether `document` carries recipient-v2 anchored endpoints (the authoring
+// surface) rather than redacted/legacy offset ranges.
+function isAnchoredDocument(document) {
+  return document?.version === 2;
+}
+
+// A document with no ranges array yet is treated as offset-form only when it
+// is not a v2 recipient. This keeps the v1/redacted splice path unchanged.
+function projectAnnotationApply(document, edit, options) {
+  if (!document || typeof document !== 'object' || Array.isArray(document)) return document;
+  const annotation = edit.annotation;
+  if (!annotation || typeof annotation !== 'object' || Array.isArray(annotation)
+    || typeof annotation.id !== 'string' || annotation.id.length === 0
+    || typeof annotation.family !== 'string' || annotation.family.length === 0
+    || !annotation.fields || typeof annotation.fields !== 'object' || Array.isArray(annotation.fields)
+    || !edit.from || typeof edit.from !== 'object' || Array.isArray(edit.from)
+    || !edit.to || typeof edit.to !== 'object' || Array.isArray(edit.to)
+    || typeof edit.from.offset !== 'number' || typeof edit.to.offset !== 'number') {
+    return document;
+  }
+  const fromOffset = edit.from.offset;
+  const toOffset = edit.to.offset;
+  const fromAffinity = edit.from.affinity === 'left' ? 'left' : 'right';
+  const toAffinity = edit.to.affinity === 'left' ? 'left' : 'right';
+  const text = document.text ?? '';
+  // The mirror of the server plan: an apply must be a forward, non-empty,
+  // in-bounds selection or it is inapplicable (never guess).
+  if (!Number.isSafeInteger(fromOffset) || !Number.isSafeInteger(toOffset)
+    || fromOffset < 0 || toOffset < fromOffset || toOffset > text.length
+    || fromOffset === toOffset) {
+    return document;
+  }
+
+  let range;
+  const preResolved = options?.range;
+  const family = options?.family;
+  if (preResolved && isStructuralEndpoint(preResolved.start) && isStructuralEndpoint(preResolved.end)) {
+    // The session captured the authoring-basis anchored endpoints once; place
+    // them verbatim so a foreign fold that re-projects this pending apply does
+    // not re-anchor against a shifted basis.
+    range = Object.freeze({ annotationId: annotation.id, start: preResolved.start, end: preResolved.end });
+  } else if (family && isAnchoredDocument(document)) {
+    // Anchor the authoring offsets against the given family (the session's
+    // authoring basis). Resolution failures are inapplicable — leave unprojected.
+    try {
+      range = Object.freeze({
+        annotationId: annotation.id,
+        start: resolveOffsetToEndpoint(family, fromOffset, family.checkpoint.frontier, fromAffinity),
+        end: resolveOffsetToEndpoint(family, toOffset, family.checkpoint.frontier, toAffinity),
+      });
+    } catch {
+      return document;
+    }
+  } else if (!isAnchoredDocument(document)) {
+    // v1 / redacted offset surface: apply as a plain offset range.
+    range = Object.freeze({ annotationId: annotation.id, start: fromOffset, end: toOffset });
+  } else {
+    // Anchored document without a family or pre-resolved range: cannot anchor.
+    return document;
+  }
+
+  // Upsert the annotation entity by stable id (replace fields, never append a
+  // duplicate row for the same annotation).
+  const annotations = Array.isArray(document.annotations) ? [...document.annotations] : [];
+  const existingIndex = annotations.findIndex((candidate) => candidate?.id === annotation.id);
+  const projectedAnnotation = Object.freeze({
+    id: annotation.id,
+    family: annotation.family,
+    fields: Object.freeze({ ...annotation.fields }),
+    ...(annotation.owner ? { owner: annotation.owner } : {}),
+  });
+  const nextAnnotations = existingIndex >= 0
+    ? annotations.map((candidate, index) => (index === existingIndex ? projectedAnnotation : candidate))
+    : [...annotations, projectedAnnotation];
+
+  // Upsert the range by stable id: same-id replace keeps exactly ONE range at
+  // the latest selection (mirrors planTextRangeApply), never a duplicate.
+  const ranges = Array.isArray(document.ranges) ? document.ranges : [];
+  const nextRanges = Object.freeze([
+    ...ranges.filter((candidate) => candidate?.annotationId !== annotation.id),
+    range,
+  ]);
+
+  return Object.freeze({
+    ...document,
+    annotations: Object.freeze(nextAnnotations),
+    ...(Array.isArray(document.ranges) ? { ranges: nextRanges } : {}),
   });
 }
 

@@ -16,7 +16,7 @@ import { applyTextOp, createTextState, materializeText, restoreTextCheckpoint } 
 import { deleteText, insertText } from './workbench-text-edit.mjs';
 import { createAnnotatedTextSnapshotSessionBinding, revokeAnnotatedTextSnapshotSessionBinding } from './workbench-annotated-text-snapshot-internal.mjs';
 import { isOffsetRange, materializeAnnotatedTextSnapshot, projectPendingAnnotatedTextDocument, resolveRangeOffsets, shiftOffsetRangesOverText, tryResolveRangesOffsets } from './workbench-annotated-text-snapshot.mjs';
-import { applyOffsetTextEdit, applyTextOperation, materializeText as materializeFamilyText, restoreTextFamily } from './workbench-annotated-text-continuous.mjs';
+import { applyOffsetTextEdit, applyTextOperation, materializeText as materializeFamilyText, resolveOffsetToEndpoint, restoreTextFamily } from './workbench-annotated-text-continuous.mjs';
 import { annotatedTextAction } from './workbench-annotated-text-action.mjs';
 export { bindAnnotatedTextEditor } from './workbench-annotated-text-editor.mjs';
 export { materializeAnnotatedTextSnapshot };
@@ -3468,6 +3468,13 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
   let familyReplica = null;
   let displayFamily = null;
   const pendingDisplayEdits = [];
+  // Authoring-basis anchored endpoints for pending annotation applies, keyed by
+  // stable annotation id. Resolved ONCE at apply time against the family whose
+  // text the authoring offsets are expressed against, so a foreign fold that
+  // re-projects the still-pending apply places the SAME anchored endpoints
+  // instead of re-anchoring the offsets against a shifted basis. Retired when
+  // the operation's echo lands (or on remove/close).
+  const pendingAnnotationRanges = new Map();
   let queuedDocumentText = null;
   let queuedAuthoringMutations = 0;
   let resolutionFailedOnce = false;
@@ -3695,7 +3702,24 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     fold: foldAnnotatedTextDocument,
     optimistic(document, action) {
       // Blockless: the document is ONE text and the action carries absolute
-      // offsets; the text-splice projection needs no block mapping.
+      // offsets; the text-splice projection needs no block mapping. Pending
+      // annotation applies anchor their authoring offsets against the basis
+      // captured at apply time (see pendingAnnotationRanges) so the placeholder
+      // stays positional across a concurrent foreign edit.
+      const edit = action?.payload?.version === 9 ? action.payload.edit : null;
+      if (edit?.kind === 'annotation.apply') {
+        const id = edit.annotation?.id;
+        const range = id != null ? pendingAnnotationRanges.get(id) : undefined;
+        // While the apply is still pending (publish() only re-projects pending,
+        // non-echoed operations) the confirmed base never carries the
+        // annotation yet, so we must always re-project it with the captured
+        // authoring-basis range. projectAnnotationApply upserts by stable id,
+        // so the projection is idempotent across folds.
+        if (range != null) {
+          return projectPendingAnnotatedTextDocument(document, action, { range });
+        }
+        return projectPendingAnnotatedTextDocument(document, action, null);
+      }
       return projectPendingAnnotatedTextDocument(document, action, null);
     },
     serializeAction(action) {
@@ -3761,6 +3785,9 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
   function resetOptimisticProjection() {
     queuedDocumentText = null;
     displayFamily = familyReplica;
+    // A snapshot recovery reboots the family; captured authoring-basis anchors
+    // from before the reset are stale and must not be reused.
+    pendingAnnotationRanges.clear();
   }
   function displayEditFromCommand(command) {
     if (command?.kind === 'text.insert') {
@@ -3870,6 +3897,33 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       text: queuedDocumentText,
       ranges,
     });
+  }
+  // Resolve a pending annotation apply's authoring offsets to recipient-v2
+  // anchored endpoints against the family whose text those offsets are
+  // expressed against. Returns a frozen { annotationId, start, end } range or
+  // null when the selection is inapplicable (non-forward/empty/out-of-bounds)
+  // so the caller fails closed instead of guessing a projection.
+  function resolvePendingAnnotationRange(family, annotation, from, to) {
+    if (!family) return null;
+    if (!annotation?.id || typeof annotation.id !== 'string' || annotation.id.length === 0) return null;
+    const start = from?.offset;
+    const end = to?.offset;
+    const fromAffinity = from?.affinity === 'left' ? 'left' : 'right';
+    const toAffinity = to?.affinity === 'left' ? 'left' : 'right';
+    const text = materializeFamilyText(family);
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end)
+      || start < 0 || end < start || end > text.length || start === end) {
+      return null;
+    }
+    try {
+      return Object.freeze({
+        annotationId: annotation.id,
+        start: resolveOffsetToEndpoint(family, start, family.checkpoint.frontier, fromAffinity),
+        end: resolveOffsetToEndpoint(family, end, family.checkpoint.frontier, toAffinity),
+      });
+    } catch {
+      return null;
+    }
   }
   function publishAnnotatedDocument() {
     const view = currentAnnotatedDocument();
@@ -4130,9 +4184,18 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     applyAnnotation({ mutationId, annotation, from, to }) {
       flushOpenInsertBurst();
       const command = { kind: 'annotation.apply', mutationId, annotation, from, to };
+      // The apply is ALWAYS dispatched as a token-based v9 authoring action;
+      // the server anchors the authoring offsets authoritatively. A locally
+      // resolvable family is a best-effort enhancement that lets the optimistic
+      // placeholder anchor to recipient-v2 endpoints once and keep them
+      // positional across a concurrent foreign fold. Without one (family-less /
+      // v1 offset recipients) no anchored basis is captured and the offset-form
+      // optimistic projection / confirmed echo reconciles the view instead.
+      const resolved = resolvePendingAnnotationRange(displayFamily ?? familyReplica, annotation, from, to);
+      if (resolved !== null) pendingAnnotationRanges.set(annotation.id, resolved);
       return queueAuthoringMutation(command, (current, actionId) => dispatchNow(current, actionId));
-     },
-      applyAnnotationAction(actionHandle, { mutationId, from, to, values }) {
+    },
+    applyAnnotationAction(actionHandle, { mutationId, from, to, values }) {
         if (!actionHandle || (actionHandle.kind !== 'annotationEntityAction' && actionHandle.kind !== 'annotationAction') || typeof actionHandle.actionName !== 'string') {
           throw new TypeError('annotated text action handle is invalid');
         }
@@ -4165,6 +4228,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
      },
     removeAnnotation({ mutationId, annotationId }) {
       flushOpenInsertBurst();
+      pendingAnnotationRanges.delete(annotationId);
       const command = { kind: 'annotation.remove', mutationId, annotationId };
       return queueAuthoringMutation(command, (current, actionId) => dispatchNow(current, actionId));
     },

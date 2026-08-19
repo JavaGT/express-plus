@@ -186,6 +186,75 @@ export function projectEndpointToOffset(family, endpoint) {
   return visibleOffsets[endpointVirtualPosition(family, endpoint)];
 }
 
+/** The first visible element after a traversal index, or null when none follow. */
+function nextVisibleAnchorAfter(order, index) {
+  for (let cursor = index + 1; cursor < order.length; cursor += 1) {
+    const [, element] = order[cursor];
+    if (element.deletedBy.length === 0) {
+      return ['element', [[...element.op], element.ordinal]];
+    }
+  }
+  return null;
+}
+
+function endpointAfterLastVisible(_family, order, basisFrontier) {
+  for (let i = order.length - 1; i >= 0; i -= 1) {
+    const [, element] = order[i];
+    if (element.deletedBy.length === 0) {
+      return Object.freeze({ point: ['point', ['element', [[...element.op], element.ordinal]], 'right'], basisFrontier });
+    }
+  }
+  return Object.freeze({ point: ['point', ['root'], 'left'], basisFrontier });
+}
+
+/**
+ * Resolve an absolute UTF-16 offset to a structural endpoint against the
+ * current family. Mirror of the server primitive so the browser pending
+ * projector can anchor authoring positions without shipping offsets across
+ * the recipient boundary. The endpoint keeps the family's current frontier as
+ * its historical basis; once constructed it never rebases across later edits.
+ */
+export function resolveOffsetToEndpoint(family, utf16Offset, basisFrontier, affinity) {
+  const trusted = assertTrustedFamily(family);
+  if (JSON.stringify(trusted.checkpoint.frontier) !== JSON.stringify(basisFrontier)) {
+    fail('resolveOffsetToEndpoint requires basisFrontier equal to family checkpoint frontier');
+  }
+  const { order, text, visibleOffsets } = derivedIndex(trusted);
+  assertUtf16Offset(text, utf16Offset);
+  if (affinity !== 'left' && affinity !== 'right') fail('resolveOffsetToEndpoint requires an explicit affinity');
+
+  if (utf16Offset === 0) {
+    return Object.freeze({ point: ['point', ['root'], 'left'], basisFrontier });
+  }
+  if (utf16Offset === text.length) {
+    return endpointAfterLastVisible(trusted, order, basisFrontier);
+  }
+
+  // First traversal position whose cumulative visible offset reaches the
+  // request. `visibleOffsets[i]` is the visible offset after element i.
+  let lo = 1;
+  let hi = visibleOffsets.length - 1;
+  while (lo < hi) {
+    const mid = lo + ((hi - lo) >> 1);
+    if (visibleOffsets[mid] >= utf16Offset) hi = mid;
+    else lo = mid + 1;
+  }
+
+  const elementIndex = lo - 1;
+  const element = order[elementIndex][1];
+  const anchor = ['element', [[...element.op], element.ordinal]];
+  if (utf16Offset === visibleOffsets[lo]) {
+    if (affinity === 'left') {
+      const nextAnchor = nextVisibleAnchorAfter(order, elementIndex);
+      if (nextAnchor) {
+        return Object.freeze({ point: ['point', nextAnchor, 'left'], basisFrontier });
+      }
+    }
+    return Object.freeze({ point: ['point', anchor, 'right'], basisFrontier });
+  }
+  return Object.freeze({ point: ['point', anchor, 'left'], basisFrontier });
+}
+
 /**
  * The RGA anchor element for an insert AT an absolute offset: the last visible
  * element whose scalar ends at or contains the offset.
