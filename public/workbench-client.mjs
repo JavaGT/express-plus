@@ -3476,6 +3476,9 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
   // instead of re-anchoring the offsets against a shifted basis. Retired when
   // the operation settles (echo/settlement consumed) or on remove/close.
   const pendingAnnotationRanges = new Map();
+  // Related-entity annotation actions retain their envelope identity by
+  // mutation id so an uncertain retry reuses the same durable receipt.
+  const pendingAnnotationActionIds = new Map();
   let queuedDocumentText = null;
   let queuedAuthoringMutations = 0;
   let resolutionFailedOnce = false;
@@ -3708,6 +3711,21 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       // captured at apply time (see pendingAnnotationRanges) so the placeholder
       // stays positional across a concurrent foreign edit.
       const edit = action?.payload?.version === 9 ? action.payload.edit : null;
+      const relatedAction = pendingAnnotationRanges.get(action?.actionId);
+      if (!edit && relatedAction?.kind === 'annotationEntityAction' && action?.payload?.version === 1) {
+        return projectPendingAnnotatedTextDocument(document, {
+          payload: {
+            version: 9,
+            edit: {
+              kind: 'annotation.apply',
+              mutationId: action.payload.mutationId,
+              annotation: relatedAction.annotation,
+              from: { offset: action.payload.from, affinity: 'left' },
+              to: { offset: action.payload.to, affinity: 'right' },
+            },
+          },
+        }, { range: relatedAction.range });
+      }
       if (edit?.kind === 'annotation.apply') {
         // Keyed by the operation's action identity so a reconciled/re-applied op
         // drops its own captured range instead of leaking it.
@@ -4237,15 +4255,20 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
         const expectedNames = actionHandle.kind === 'annotationAction' ? actionHandle.inputNames : Object.keys(actionHandle.input ?? {});
         const valueNames = Object.keys(values);
         if (valueNames.length !== expectedNames.length || valueNames.some((key) => !expectedNames.includes(key))) throw new TypeError('annotated text action values contain unknown or missing fields');
-        const command = { mutationId, from, to, values };
-       return queueAuthoringMutation(command, async (current) => {
+      const actionId = pendingAnnotationActionIds.get(mutationId) ?? mintActionId();
+      const annotation = Object.freeze({ id: actionId, family: actionHandle.family, fields: { [actionHandle.relation]: actionId } });
+      pendingAnnotationActionIds.set(mutationId, actionId);
+      const command = { kind: 'annotation.apply', mutationId, annotation, from, to, values };
+      const resolvedRange = resolvePendingAnnotationRange(displayFamily ?? familyReplica, annotation, from, to);
+      if (resolvedRange !== null) pendingAnnotationRanges.set(actionId, { kind: 'annotationEntityAction', annotation, range: resolvedRange });
+      return queueAuthoringMutation(command, async (current) => {
          if (!session.snapshot || !snapshotBinding.authoring) throw new ClientClosedError('Annotated text document is unavailable');
          const action = {
             type: `${entity.name}.${field.fieldName}.${actionHandle.family}.${actionHandle.actionName}`,
            payload: Object.freeze({ version: 1, id: documentId, basis: snapshotBinding.authoring.documentPositionToken, mutationId: current.mutationId, from: current.from?.offset, to: current.to?.offset, values: Object.freeze({ ...(current.values ?? {}) }) }),
          };
          translatedActions += 1;
-         try { return await session.dispatch(action.type, action.payload); }
+          try { return await session.dispatch(action.type, action.payload, { actionId }); }
          finally { translatedActions -= 1; flushAuthoringAcknowledgements(); }
        });
      },
