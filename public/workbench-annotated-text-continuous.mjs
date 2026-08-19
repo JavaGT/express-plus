@@ -17,6 +17,7 @@ import {
   assertUtf16Offset,
   canonicalTextOp,
   compareOpId,
+  compareOpIdValidated,
   createTextState,
   frontierDominates,
   restoreTextCheckpoint,
@@ -110,7 +111,7 @@ function rgaTraversal(checkpoint) {
     children.set(element.parent, list);
   }
   for (const list of children.values()) {
-    list.sort(([, left], [, right]) => right.lamport - left.lamport || -compareOpId(left.op, right.op));
+    list.sort(([, left], [, right]) => right.lamport - left.lamport || -compareOpIdValidated(left.op, right.op));
   }
   const order = [];
   const stack = [...(children.get(ROOT_ID) ?? [])].reverse();

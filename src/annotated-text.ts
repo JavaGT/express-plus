@@ -113,8 +113,20 @@ export function assertOpId(value: unknown): OpId {
 }
 
 export function compareOpId(left: OpId, right: OpId): number {
-  const [leftActor, leftCounter] = assertOpId(left);
-  const [rightActor, rightCounter] = assertOpId(right);
+  assertOpId(left);
+  assertOpId(right);
+  return compareOpIdValidated(left, right);
+}
+
+/**
+ * Compare two operation IDs that were already validated at their trust boundary
+ * (admission / checkpoint). Used by hot full-document traversal sorts so they
+ * do not re-run assertOpId -> assertClosedArray + assertActor regex for every
+ * comparison, which is the dominant per-keystroke cost in large transcripts.
+ */
+export function compareOpIdValidated(left: OpId, right: OpId): number {
+  const [leftActor, leftCounter] = left;
+  const [rightActor, rightCounter] = right;
   return leftActor === rightActor ? leftCounter - rightCounter : leftActor < rightActor ? -1 : 1;
 }
 
@@ -147,6 +159,11 @@ function frontierCounterValidated(frontier: Frontier, actor: string): number {
 export function frontierDominates(left: Frontier, right: Frontier): boolean {
   assertFrontier(left);
   assertFrontier(right);
+  return frontierDominatesValidated(left, right);
+}
+
+/** Like frontierDominates, for frontiers already validated at their boundary. */
+export function frontierDominatesValidated(left: Frontier, right: Frontier): boolean {
   return right.every(([actor, counter]) => frontierCounterValidated(left, actor) >= counter);
 }
 
@@ -511,7 +528,7 @@ export function materializeText(state: TextState): string {
     children.set(element.parent, list);
   }
   for (const list of children.values()) {
-    list.sort(([, left], [, right]) => right.lamport - left.lamport || -compareOpId(left.op, right.op));
+    list.sort(([, left], [, right]) => right.lamport - left.lamport || -compareOpIdValidated(left.op, right.op));
   }
   let text = '';
   const stack: Array<[string, TextElement]> = [...(children.get(ROOT_ID) ?? [])].reverse();

@@ -3,7 +3,7 @@
 import {
   assertUtf16Offset, assertUtf16Range, assertWellFormedText,
   assertFrontier, assertTextOp, canonicalTextOp,
-  compareOpId, frontierCounter, materializeText,
+  compareOpId, compareOpIdValidated, frontierCounter, materializeText,
 } from './workbench-annotated-text.mjs';
 
 const ACTOR_RE = /^[0-9a-f]{32}$/;
@@ -33,7 +33,7 @@ function* visibleElements(state) {
     else children.set(element.parent, [[key, element]]);
   }
   for (const list of children.values()) {
-    list.sort(([, a], [, b]) => b.lamport - a.lamport || -compareOpId(a.op, b.op));
+    list.sort(([, a], [, b]) => b.lamport - a.lamport || -compareOpIdValidated(a.op, b.op));
   }
   function* visit(parent) {
     for (const [key, element] of children.get(parent) ?? []) {
