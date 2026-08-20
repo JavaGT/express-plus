@@ -291,16 +291,35 @@ function makeState({ maxPending = DEFAULT_MAX_PENDING }                   = {}) 
   };
 }
 
+/**
+ * Create a deeply-immutable element so states can SHARE element objects without
+ * aliasing: delete ops replace rather than mutate a shared element, and the
+ * derived caches can rely on nested state never changing. Freezing the nested
+ * `op`/`deletedBy` arrays is what makes shallow registry sharing sound.
+ */
+function frozenElement(op      , ordinal        , scalar        , parent        , lamport        , deletedBy                   )              {
+  return Object.freeze({
+    op: Object.freeze([...op]                   ),
+    ordinal,
+    scalar,
+    parent,
+    lamport,
+    deletedBy: Object.freeze([...deletedBy])            ,
+  });
+}
+
 function cloneState(state           )            {
+  // Shallow-copy the registries and SHARE their (now immutable) element/entry
+  // values. The prior deep copy allocated a fresh element (with fresh op +
+  // deletedBy arrays) per document element on every apply — O(document) per key.
+  // Sharing immutable values keeps apply O(registry keys) instead of O(elements
+  // × fields), while copy-on-write preserves prior states.
   return {
     version: 1,
-    frontier: canonicalFrontier(state.frontier),
-    elements: Object.fromEntries(Object.entries(state.elements).map(([key, element]) => [key, {
-      op: [...element.op]        , ordinal: element.ordinal, scalar: element.scalar,
-      parent: element.parent, lamport: element.lamport, deletedBy: [...element.deletedBy],
-    }])),
-    operations: Object.fromEntries(Object.entries(state.operations).map(([key, value]) => [key, { digest: value.digest, op: value.op }])),
-    pending: Object.fromEntries(Object.entries(state.pending).map(([key, value]) => [key, { digest: value.digest, op: value.op }])),
+    frontier: [...state.frontier],
+    elements: { ...state.elements },
+    operations: { ...state.operations },
+    pending: { ...state.pending },
     maxPending: state.maxPending,
     rebootstrapRequired: state.rebootstrapRequired,
   };
@@ -350,9 +369,7 @@ function applyReadyOperation(state           , op        , digest        ) {
     let ordinal = 0;
     for (const scalar of body[2]) {
       const key = elementKey(op[2], ordinal);
-      state.elements[key] = {
-        op: [...op[2]], ordinal, scalar, parent: previous, lamport: op[3], deletedBy: [],
-      };
+      state.elements[key] = frozenElement(op[2], ordinal, scalar, previous, op[3], []);
       previous = key;
       ordinal += 1;
     }
@@ -360,12 +377,17 @@ function applyReadyOperation(state           , op        , digest        ) {
     const deleteTag = opKey(op[2]);
     for (const [target, first, count] of body[1]) {
       for (let ordinal = first; ordinal < first + count; ordinal += 1) {
-        const element = state.elements[elementKey(target, ordinal)];
-        if (!element.deletedBy.includes(deleteTag)) element.deletedBy.push(deleteTag);
+        const key = elementKey(target, ordinal);
+        const element = state.elements[key];
+        // Copy-on-write: never push into a SHARED (immutable) deletedBy array.
+        // Read the draft's current element so stacked deletes accumulate.
+        if (!element.deletedBy.includes(deleteTag)) {
+          state.elements[key] = frozenElement(element.op, element.ordinal, element.scalar, element.parent, element.lamport, [...element.deletedBy, deleteTag]);
+        }
       }
     }
   }
-  state.operations[opKey(op[2])] = { digest, op };
+  state.operations[opKey(op[2])] = Object.freeze({ digest, op });
   advanceFrontier(state, op);
 }
 
@@ -394,14 +416,14 @@ function assertCheckpoint(value         )            {
   for (const [key, element] of Object.entries((raw.elements ?? {})                       )) {
     if (!element || typeof element.scalar !== 'string' || scalarCount(element.scalar) !== 1 || typeof element.parent !== 'string' || !Array.isArray(element.op) || !Number.isSafeInteger(element.ordinal) || element.ordinal < 0 || !SAFE_POSITIVE(element.lamport) || !Array.isArray(element.deletedBy)) throw new TypeError('invalid annotated-text checkpoint element');
     if (key !== elementKey(element.op, element.ordinal)) throw new TypeError('invalid annotated-text checkpoint element identity');
-    state.elements[key] = { op: [...assertOpId(element.op)], ordinal: element.ordinal, scalar: element.scalar, parent: element.parent, lamport: element.lamport, deletedBy: [...element.deletedBy].sort() };
+    state.elements[key] = frozenElement(assertOpId(element.op), element.ordinal, element.scalar, element.parent, element.lamport, [...element.deletedBy].sort());
   }
   for (const registryName of ['operations', 'pending']         ) {
     for (const [key, entry] of Object.entries((raw[registryName] ?? {})                       )) {
       const op = canonicalTextOp(entry?.op);
       const digest = canonicalDigest(op);
       if (key !== opKey(op[2]) || entry.digest !== digest) throw new TypeError('invalid annotated-text checkpoint operation registry');
-      state[registryName][key] = { digest, op };
+      state[registryName][key] = Object.freeze({ digest, op });
     }
   }
   return state;
