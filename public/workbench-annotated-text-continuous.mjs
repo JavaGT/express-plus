@@ -19,7 +19,7 @@ import {
   compareOpId,
   compareOpIdValidated,
   createTextState,
-  frontierDominates,
+  frontierDominatesValidated,
   restoreTextCheckpoint,
   textCheckpoint,
 } from './workbench-annotated-text.mjs';
@@ -172,7 +172,7 @@ function endpointVirtualPosition(family, endpoint) {
     if (affinity === 'left') return 0;
     for (let i = 0; i < order.length; i += 1) {
       const [, element] = order[i];
-      if (element.parent === ROOT_ID && frontierDominates(basis, [[...element.op]])) return i;
+      if (element.parent === ROOT_ID && frontierDominatesValidated(basis, [[...element.op]])) return i;
     }
     return order.length;
   }
@@ -182,7 +182,7 @@ function endpointVirtualPosition(family, endpoint) {
 }
 
 function assertDominatingBasis(family, endpoint, label) {
-  if (!frontierDominates(family.checkpoint.frontier, endpoint.basisFrontier)) {
+  if (!frontierDominatesValidated(family.checkpoint.frontier, endpoint.basisFrontier)) {
     fail(`${label}: current frontier does not dominate endpoint basis — anchor is lost`);
   }
   const anchorKey = anchorKeyStr(endpoint.point[1]);
