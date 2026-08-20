@@ -117,7 +117,7 @@ function isTextRevision(value         )                        {
     Array.isArray(record.frontier);
 }
 
-function initializeAnnotatedText({ name, fields, event, db, row }                                                                      ) {
+function initializeAnnotatedText({ name, fields, event, db, row, asyncSeed = false }                                                                                           )                       {
   const metadata = event.data?.__workbench?.annotatedText;
   for (const [fieldName, descriptor] of Object.entries(fields)) {
     if (descriptor.kind !== 'annotatedText') continue;
@@ -180,7 +180,11 @@ function initializeAnnotatedText({ name, fields, event, db, row }               
       db.prepare(`INSERT INTO ${prefix}_measurement (id, document_id, family, format_version, payload) VALUES (?, ?, ?, ?, ?)`).run(measurement.id, row.id, measurementFamily, config.formatVersion, JSON.stringify(payload));
     }
     if (imported.ranges !== undefined) {
-      seedImportedAnnotationRanges({ name, fieldName, prefix, descriptor, db, row, family, fullText, ranges: imported.ranges });
+      const ranges = imported.ranges;
+      if (asyncSeed) {
+        return seedImportedAnnotationRangesAsync({ name, fieldName, prefix, descriptor, db, row, family, fullText, ranges });
+      }
+      seedImportedAnnotationRanges({ name, fieldName, prefix, descriptor, db, row, family, fullText, ranges });
     }
   }
 }
@@ -190,7 +194,17 @@ function initializeAnnotatedText({ name, fields, event, db, row }               
 // field row, and one `_membership` row. Endpoints use the membership-valid
 // affinity — END = right, START = right (the document-root start resolves to
 // left automatically) — matching the runtime range-apply semantics.
-function seedImportedAnnotationRanges({ name, fieldName, prefix, descriptor, db, row, family, fullText, ranges }
+//
+// A long diarised import can carry thousands of ranges. The projection runs
+// synchronously inside the dispatch transaction, so the synchronous seeding
+// would otherwise block the event loop for the whole import (health checks /
+// worker heartbeats / lease extensions all freeze). `seedImportedAnnotationRangesAsync`
+// (used by the projection's `applyAsync`) yields to the event loop every few
+// ranges so the server stays responsive; the synchronous path is unchanged.
+const ANNOTATED_SEED_YIELD_EVERY = 250;
+function yieldToEventLoop()                {
+  return new Promise((resolve) => setImmediate(resolve));
+}
 
 
 
@@ -200,64 +214,87 @@ function seedImportedAnnotationRanges({ name, fieldName, prefix, descriptor, db,
 
 
 
- ) {
+
+
+
+// One imported range: validate it, resolve its endpoint anchors, and write the
+// annotation row, its family field row, and its range membership — all within
+// the enclosing create transaction. Shared by the synchronous and the yielding
+// seeding loops so the per-range behaviour stays identical in both paths.
+function projectImportedRange(args                             , index        , range                         )       {
+  const { name, fieldName, prefix, descriptor, db, row, family, fullText } = args;
   const frontier = family.checkpoint.frontier;
-  for (const [index, range] of ranges.entries()) {
-    if (!range || typeof range !== 'object' || Array.isArray(range)) {
-      throw new Error(`${name}.${fieldName} created event imported range ${index} is invalid`);
+  if (!range || typeof range !== 'object' || Array.isArray(range)) {
+    throw new Error(`${name}.${fieldName} created event imported range ${index} is invalid`);
+  }
+  const allowedRange = new Set(['annotationId', 'family', 'start', 'end', 'fields']);
+  for (const key of Object.keys(range)) {
+    if (!allowedRange.has(key)) throw new Error(`${name}.${fieldName} created event imported range ${index} has unknown key '${key}'`);
+  }
+  const { annotationId, family: rangeFamily, start, end } = range;
+  if (typeof annotationId !== 'string' || annotationId.length === 0) {
+    throw new Error(`${name}.${fieldName} created event imported range ${index} annotationId must be a non-empty string`);
+  }
+  if (typeof rangeFamily !== 'string' || rangeFamily.length === 0) {
+    throw new Error(`${name}.${fieldName} created event imported range ${index} family must be a non-empty string`);
+  }
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || (start          ) < 0 || (end          ) <= (start          ) || (end          ) > fullText.length) {
+    throw new Error(`${name}.${fieldName} created event imported range ${index} offsets are invalid`);
+  }
+  const declared = descriptor.annotations?.find((entry) => entry.annotationName === rangeFamily);
+  if (!declared) throw new Error(`${name}.${fieldName} created event imported range ${index} family '${rangeFamily}' is not declared`);
+  const fieldEntries = Object.entries(declared.fields);
+  const supplied = (range.fields ?? {})                           ;
+  if (!supplied || typeof supplied !== 'object' || Array.isArray(supplied)) {
+    throw new Error(`${name}.${fieldName} created event imported range ${index} fields must be a non-array object`);
+  }
+  const suppliedNames = Object.keys(supplied).sort();
+  const declaredNames = fieldEntries.map(([fieldName]) => fieldName).sort();
+  if (JSON.stringify(suppliedNames) !== JSON.stringify(declaredNames)) {
+    throw new Error(`${name}.${fieldName} created event imported range ${index} fields disagree with declaration`);
+  }
+  const storedFields = fieldEntries.map(([declaredName, field]) => {
+    const value = supplied[declaredName];
+    if (value === null && field.nullable === true) return null;
+    const strategy = resolveStrategy(field.kind);
+    const validation = strategy.validate(value, field);
+    if (validation !== true || (typeof field.validate === 'function' && field.validate(value) !== true)) {
+      throw new Error(`${name}.${fieldName} created event imported range ${index} field '${declaredName}' failed validation`);
     }
-    const allowedRange = new Set(['annotationId', 'family', 'start', 'end', 'fields']);
-    for (const key of Object.keys(range)) {
-      if (!allowedRange.has(key)) throw new Error(`${name}.${fieldName} created event imported range ${index} has unknown key '${key}'`);
+    return serializeField(field, value);
+  });
+  let startEndpoint;
+  let endEndpoint;
+  try {
+    startEndpoint = resolveOffsetToEndpoint(family, start          , frontier, 'right');
+    endEndpoint = resolveOffsetToEndpoint(family, end          , frontier, 'right');
+  } catch (error) {
+    throw new Error(`${name}.${fieldName} created event imported range ${index} offsets cannot be resolved: ${(error         ).message}`);
+  }
+  db.prepare(`INSERT INTO ${prefix}_annotation (id, document_id, project_id, owner_id, family) VALUES (?, ?, ?, ?, ?)`)
+    .run(annotationId, row.id, row[descriptor.project ], row[descriptor.owner ], rangeFamily);
+  if (fieldEntries.length) {
+    const names = fieldEntries.map(([declaredName]) => declaredName);
+    db.prepare(`INSERT INTO ${prefix}_annotation_${rangeFamily} (annotation_id, ${names.join(', ')}) VALUES (?, ${names.map(() => '?').join(', ')})`)
+      .run(annotationId, ...storedFields);
+  }
+  attachAnnotationRange(db, prefix, row.id          , annotationId          , startEndpoint, endEndpoint, 0);
+}
+
+function seedImportedAnnotationRanges(args                                                                          )       {
+  for (const [index, range] of args.ranges.entries()) {
+    projectImportedRange(args, index, range);
+  }
+}
+
+async function seedImportedAnnotationRangesAsync(args                                                                          )                {
+  for (const [index, range] of args.ranges.entries()) {
+    projectImportedRange(args, index, range);
+    // Release the event loop every ANNOTATED_SEED_YIELD_EVERY ranges so a long
+    // import never freezes health checks / heartbeats in one unbounded block.
+    if (index % ANNOTATED_SEED_YIELD_EVERY === ANNOTATED_SEED_YIELD_EVERY - 1) {
+      await yieldToEventLoop();
     }
-    const { annotationId, family: rangeFamily, start, end } = range;
-    if (typeof annotationId !== 'string' || annotationId.length === 0) {
-      throw new Error(`${name}.${fieldName} created event imported range ${index} annotationId must be a non-empty string`);
-    }
-    if (typeof rangeFamily !== 'string' || rangeFamily.length === 0) {
-      throw new Error(`${name}.${fieldName} created event imported range ${index} family must be a non-empty string`);
-    }
-    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || (start          ) < 0 || (end          ) <= (start          ) || (end          ) > fullText.length) {
-      throw new Error(`${name}.${fieldName} created event imported range ${index} offsets are invalid`);
-    }
-    const declared = descriptor.annotations?.find((entry) => entry.annotationName === rangeFamily);
-    if (!declared) throw new Error(`${name}.${fieldName} created event imported range ${index} family '${rangeFamily}' is not declared`);
-    const fieldEntries = Object.entries(declared.fields);
-    const supplied = (range.fields ?? {})                           ;
-    if (!supplied || typeof supplied !== 'object' || Array.isArray(supplied)) {
-      throw new Error(`${name}.${fieldName} created event imported range ${index} fields must be a non-array object`);
-    }
-    const suppliedNames = Object.keys(supplied).sort();
-    const declaredNames = fieldEntries.map(([fieldName]) => fieldName).sort();
-    if (JSON.stringify(suppliedNames) !== JSON.stringify(declaredNames)) {
-      throw new Error(`${name}.${fieldName} created event imported range ${index} fields disagree with declaration`);
-    }
-    const storedFields = fieldEntries.map(([declaredName, field]) => {
-      const value = supplied[declaredName];
-      if (value === null && field.nullable === true) return null;
-      const strategy = resolveStrategy(field.kind);
-      const validation = strategy.validate(value, field);
-      if (validation !== true || (typeof field.validate === 'function' && field.validate(value) !== true)) {
-        throw new Error(`${name}.${fieldName} created event imported range ${index} field '${declaredName}' failed validation`);
-      }
-      return serializeField(field, value);
-    });
-    let startEndpoint;
-    let endEndpoint;
-    try {
-      startEndpoint = resolveOffsetToEndpoint(family, start          , frontier, 'right');
-      endEndpoint = resolveOffsetToEndpoint(family, end          , frontier, 'right');
-    } catch (error) {
-      throw new Error(`${name}.${fieldName} created event imported range ${index} offsets cannot be resolved: ${(error         ).message}`);
-    }
-    db.prepare(`INSERT INTO ${prefix}_annotation (id, document_id, project_id, owner_id, family) VALUES (?, ?, ?, ?, ?)`)
-      .run(annotationId, row.id, row[descriptor.project ], row[descriptor.owner ], rangeFamily);
-    if (fieldEntries.length) {
-      const names = fieldEntries.map(([declaredName]) => declaredName);
-      db.prepare(`INSERT INTO ${prefix}_annotation_${rangeFamily} (annotation_id, ${names.join(', ')}) VALUES (?, ${names.map(() => '?').join(', ')})`)
-        .run(annotationId, ...storedFields);
-    }
-    attachAnnotationRange(db, prefix, row.id          , annotationId          , startEndpoint, endEndpoint, 0);
   }
 }
 
@@ -634,9 +671,8 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
 
 
  ) {
-  const projection = {
-    eventTypes: [
-      verbs.created.type,
+  const eventTypes = [
+    verbs.created.type,
       verbs.updated.type,
       verbs.removed.type,
       ...Object.entries(fields)
@@ -647,9 +683,17 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
         .flatMap(([fieldName]) => [eventHandle.native(name, fieldName, 'operated').type, eventHandle.native(name, fieldName, 'retired').type]),
       ...sideTableStrategyEntries.flatMap(({ strategy, fields: strategyFields }) =>
         strategy.eventTypes(name, strategyFields)),
-    ],
-    apply: (event           , db    ) => {
-      const table = name;
+  ];
+
+  // Annotated-text bulk materialization (esp. a large create with thousands of
+  // imported ranges) would otherwise run synchronously inside the dispatch
+  // transaction, freezing the event loop for the whole import. `asyncSeed`
+  // selects a yielding seeding loop that periodically releases the event loop;
+  // `applyAsync` is the async surface the dispatch awaits, while `apply` keeps
+  // its synchronous, non-yielding behaviour for hot edits and private-fact
+  // replay (no behavioural change there).
+  function applyProjection(event           , db    , asyncSeed         )                       {
+    const table = name;
       const handle = event.handle;
       if (handle?.brand !== 'event-handle' || handle.entity !== name) return;
       for (const { strategy, fields: strategyFields } of sideTableStrategyEntries) {
@@ -720,7 +764,8 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
           db.prepare(
             `INSERT INTO ${table} (${cols.join(', ')}) VALUES (${cols.map((c) => `:${c}`).join(', ')})`,
           ).run(row);
-          initializeAnnotatedText({ name, fields, event, db, row });
+          const init = initializeAnnotatedText({ name, fields, event, db, row, asyncSeed });
+          if (init instanceof Promise) return init;
           getLog().debug('dispatch', `${name}.created`, { id: row.id ?? event.data?.id });
         }
       } else if (handle.kind === eventHandle.EventKind.updated) {
@@ -797,7 +842,12 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
         db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(id);
         getLog().debug('dispatch', `${name}.removed`, { id });
       }
-    },
+  }
+
+  const projection = {
+    eventTypes,
+    apply: (event           , db    )       => { applyProjection(event, db, false); },
+    applyAsync: async (event           , db    )                => { await applyProjection(event, db, true); },
   };
   if (Object.values(fields).some((field) => field.kind === 'annotatedText')) markAnnotatedEntityProjection(projection);
   return Object.freeze(projection);

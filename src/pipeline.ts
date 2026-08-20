@@ -227,11 +227,11 @@ export function durableMutationVariant({
               && !(batchActionTypes?.has(consumer.actionType))) continue;
             if (consumer.privateFact === true) {
               if (privateFact === undefined) throw new TypeError('private-fact projection requires a canonical private fact');
-              consumer.apply(ev, db, Object.freeze({ privateFact, ...(claimedBlobs ? { claimedBlobs } : {}) }));
+              await (consumer.applyAsync ?? consumer.apply)(ev, db, Object.freeze({ privateFact, ...(claimedBlobs ? { claimedBlobs } : {}) }));
             } else if (claimedBlobs) {
-              consumer.apply(ev, db, Object.freeze({ claimedBlobs }));
+              await (consumer.applyAsync ?? consumer.apply)(ev, db, Object.freeze({ claimedBlobs }));
             } else {
-              consumer.apply(ev, db);
+              await (consumer.applyAsync ?? consumer.apply)(ev, db);
             }
           }
         }
@@ -455,11 +455,11 @@ export function liveMutationVariant({
               && !(batchActionTypes?.has(consumer.actionType))) continue;
             if (consumer.privateFact === true) {
               if (privateFact === undefined) throw new TypeError('private-fact projection requires a canonical private fact');
-              consumer.apply(ev, db, Object.freeze({ privateFact, ...(claimedBlobs ? { claimedBlobs } : {}) }));
+              await (consumer.applyAsync ?? consumer.apply)(ev, db, Object.freeze({ privateFact, ...(claimedBlobs ? { claimedBlobs } : {}) }));
             } else if (claimedBlobs) {
-              consumer.apply(ev, db, Object.freeze({ claimedBlobs }));
+              await (consumer.applyAsync ?? consumer.apply)(ev, db, Object.freeze({ claimedBlobs }));
             } else {
-              consumer.apply(ev, db);
+              await (consumer.applyAsync ?? consumer.apply)(ev, db);
             }
           }
         }

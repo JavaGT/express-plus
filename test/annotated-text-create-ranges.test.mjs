@@ -253,3 +253,38 @@ test('a transcript-sized import creates ordinary timing/confidence records in on
   assert.deepEqual(db.serialize(), before);
   await app.close?.();
 });
+
+// The create projection's async surface must actually release the event loop
+// while seeding a large imported range batch (the production "crashed after
+// diarizing" hang): during the dispatch a 0ms timer must fire, which a fully
+// synchronous block would prevent. All ranges still commit atomically.
+test('large annotated-text create yields to the event loop during range seeding', async () => {
+  const { app, db, Document, Project } = await appFor();
+  const text = 'a'.repeat(10_000);
+  const ranges = [];
+  for (let i = 0; i < 2000; i += 1) {
+    ranges.push({ annotationId: `t-${i}`, family: 'timing', start: i * 5, end: i * 5 + 3, fields: { startMs: i, durationMs: 1 } });
+  }
+  let turns = 0;
+  const ticker = setInterval(() => { turns += 1; }, 0);
+  let created;
+  try {
+    created = await createWithRanges(app, 'big', ranges, [{ text }]);
+    assert.equal(created.ok, true, created.failure?.message);
+  } finally {
+    clearInterval(ticker);
+  }
+  // The seeding loop yields (await setImmediate) every ANNOTATED_SEED_YIELD_EVERY
+  // ranges, so a 0ms interval must interleave with the dispatch instead of being
+  // starved for its whole duration.
+  assert.ok(turns > 0, 'expected the large create dispatch to yield to the event loop');
+  // The async path commits every range exactly like the synchronous one.
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM RangeDoc_body_annotation WHERE document_id = 'big'").get().count, 2000);
+  assert.equal(committedMemberships(db, 'big').length, 2000);
+  // And the canonical export still round-trips a sample of the ranges.
+  const exported = await exportAnnotatedText({ app, entity: Document, field: Document.body, documentId: 'big', expectedOwningScope: { entity: Project, id: 'p1' }, principal: { id: 'u1' } });
+  assert.equal(exported.kind, 'workbench.annotatedText.canonical');
+  assert.equal(exported.text, text);
+  assert.equal(exported.ranges.length, 2000);
+  await app.close?.();
+});
