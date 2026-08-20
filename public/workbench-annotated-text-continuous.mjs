@@ -39,6 +39,22 @@ function trustFamily(family) {
   return trusted;
 }
 
+/** Max op lamport across a checkpoint — computed once per restore/import (cold path). */
+function maxLamportOf(checkpoint) {
+  let max = 0;
+  for (const element of Object.values(checkpoint.elements)) {
+    if (element.lamport > max) max = element.lamport;
+  }
+  return max;
+}
+
+// Family shell carries `maxLamport` so per-keystroke offsets don't rescan every
+// element to find the next lamport (the editor's optimistic projection runs
+// once per key and that scan was ~20% of its cost).
+function familyOf(id, checkpoint, maxLamport) {
+  return trustFamily({ id, checkpoint, maxLamport: maxLamport !== undefined ? maxLamport : maxLamportOf(checkpoint) });
+}
+
 function assertTrustedFamily(family) {
   if (!family || typeof family !== 'object' || !trustedFamilies.has(family)) {
     fail('family must be created or restored by this module');
@@ -59,13 +75,13 @@ export function restoreTextFamily(familyCheckpoint) {
     fail('family checkpoint id must be a non-empty string');
   }
   const checkpoint = restoreTextCheckpoint(familyCheckpoint.checkpoint);
-  return trustFamily({ id: familyCheckpoint.id, checkpoint });
+  return familyOf(familyCheckpoint.id, checkpoint);
 }
 
 export function createTextFamily(id, checkpoint) {
   if (typeof id !== 'string' || id.length === 0) fail('document id must be a non-empty string');
   const restored = restoreTextCheckpoint(checkpoint);
-  return trustFamily({ id, checkpoint: restored });
+  return familyOf(id, restored);
 }
 
 /**
@@ -86,7 +102,7 @@ export function importTextToFamily(documentId, actor, text) {
 
 export function textFamilyCheckpoint(family) {
   assertTrustedFamily(family);
-  return trustFamily({ id: family.id, checkpoint: family.checkpoint });
+  return trustFamily({ id: family.id, checkpoint: family.checkpoint, maxLamport: family.maxLamport });
 }
 
 export function materializeText(family) {
@@ -337,11 +353,9 @@ function nextOffsetEditActor() {
 }
 
 function nextOffsetEditLamport(family) {
-  let max = 0;
-  for (const element of Object.values(family.checkpoint.elements)) {
-    if (element.lamport > max) max = element.lamport;
-  }
-  return max + 1;
+  // Max lamport is folded onto the family at apply/restore time, so this is
+  // O(1) instead of scanning every element on the per-keystroke hot path.
+  return (family.maxLamport ?? 0) + 1;
 }
 
 /** Apply one absolute-offset splice [from, to) → `text` to a family copy. */
@@ -376,5 +390,10 @@ function deepFreeze(value) {
 export function applyTextOperation(family, operation) {
   assertTrustedFamily(family);
   const nextState = applyTextOp(family.checkpoint, operation);
-  return trustFamily({ id: family.id, checkpoint: nextState });
+  // Lamport clocks are monotonic; the newest op's lamport extends the max.
+  return trustFamily({
+    id: family.id,
+    checkpoint: nextState,
+    maxLamport: Math.max(family.maxLamport ?? 1, operation[3]),
+  });
 }
