@@ -19,7 +19,7 @@ import {
   canonicalTextOp,
   compareOpId,
   createTextState,
-  frontierDominates,
+  frontierDominatesValidated,
   restoreTextCheckpoint,
   textCheckpoint,
   applyTextOp,
@@ -230,7 +230,7 @@ function endpointVirtualPosition(family: ContinuousTextFamily, endpoint: Structu
     if (affinity === 'left') return 0;
     for (let i = 0; i < order.length; i += 1) {
       const [, element] = order[i];
-      if (element.parent === ROOT_ID && frontierDominates(basis, [[...element.op]])) return i;
+      if (element.parent === ROOT_ID && frontierDominatesValidated(basis, [[...element.op]])) return i;
     }
     return order.length;
   }
@@ -251,7 +251,13 @@ function endpointVirtualPosition(family: ContinuousTextFamily, endpoint: Structu
 }
 
 function assertDominatingBasis(family: ContinuousTextFamily, endpoint: StructuralEndpoint, label: string): void {
-  if (!frontierDominates(family.checkpoint.frontier, endpoint.basisFrontier)) {
+  // The checkpoint frontier and endpoint basis are both validated at their
+  // trust boundaries (admission / assertStructuralEndpoint), so use the
+  // validated comparison here: `assertDominatingBasis` runs once per projected
+  // endpoint on every render/typing flush, and re-running assertFrontier (regex
+  // per actor + Object.freeze per entry) is the dominant per-keystroke cost in
+  // large transcripts.
+  if (!frontierDominatesValidated(family.checkpoint.frontier, endpoint.basisFrontier)) {
     fail(`${label}: current frontier does not dominate endpoint basis — anchor is lost`);
   }
   const anchorKey = anchorKeyStr(endpoint.point[1]);
