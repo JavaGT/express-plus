@@ -111,7 +111,7 @@ type UnionToIntersection<U> = (U extends unknown ? (intersection: U) => void : n
 type SelectedShape<Handles extends readonly unknown[]> = UnionToIntersection<
 	{ [Index in keyof Handles]: Handles[Index] extends SnapshotFieldHandle<infer Value, infer Key, infer Mode>
 		? string extends Key
-			? unknown
+			? {}
 			: Mode extends 'optional'
 				? { [Field in Key & string]?: Value }
 				: { [Field in Key & string]: Value }
@@ -160,7 +160,9 @@ type EntryValue<Entry> = Entry extends SnapshotRelation<infer Kind, infer Child>
  * one property per relation/user branch.
  */
 type SnapshotRowOf<Shape extends Record<string, unknown>> = { readonly id: string }
-	& UnionToIntersection<{ [Key in keyof Shape]: Shape[Key] extends SnapshotSelect<infer Flattened> ? Flattened : unknown }[keyof Shape]>
+	// Non-select branches contribute {} (never `unknown`: one unknown arm would
+	// collapse the whole union and erase every flattened field).
+	& UnionToIntersection<{ [Key in keyof Shape]: Shape[Key] extends SnapshotSelect<infer Flattened> ? Flattened : {} }[keyof Shape]>
 	& { [Key in keyof Shape as Shape[Key] extends SnapshotSelect ? never : Key & string]: EntryValue<Shape[Key]> };
 
 /**

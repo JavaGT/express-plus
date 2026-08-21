@@ -163,6 +163,8 @@ export function snapshotFieldHandle                    (fieldName     )         
 
 
 
+
+
 /**
  * The data shape a snapshot declaration projects. Accepts a full declaration
  * or a bare output object; unknown/loose declarations degrade to `unknown`.
