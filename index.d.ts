@@ -1544,28 +1544,114 @@ export interface ListenOptions {
   authorization?: AuthorizationAdapter;
 }
 
-export interface SnapshotSelect { readonly kind: 'select'; }
+/**
+ * A field handle as the snapshot grammar reads it. `Key` carries the field NAME
+ * as a literal type (real entity handles satisfy this structurally), and the
+ * phantoms carry value/mode knowledge for projection-shape inference.
+ */
+export interface SnapshotFieldHandle<Value = unknown, Key extends string = string, Mode extends FieldMode = 'required'> {
+  readonly fieldName: Key;
+  readonly entityName?: string;
+  readonly __value?: Value;
+  readonly __mode?: Mode;
+}
+
+export interface SnapshotSelect<Shape = unknown> { readonly kind: 'select'; readonly __shape?: Shape; }
 export interface SnapshotOrder { readonly kind: 'orderBy'; }
-export interface SnapshotOutput { readonly kind: 'object'; }
-export interface SnapshotRelation { readonly kind: 'one' | 'many' | 'keyed' | 'count'; }
+export interface SnapshotOutput<Shape extends Record<string, unknown> = Record<string, unknown>> { readonly kind: 'object'; readonly shape: Shape; }
+export interface SnapshotRelation<Kind extends 'one' | 'many' | 'keyed' | 'count' = 'one' | 'many' | 'keyed' | 'count', Child = unknown> { readonly kind: Kind; readonly __child?: Child; }
 export interface SnapshotRelated { readonly kind: 'related'; }
 export interface SnapshotUser { readonly kind: 'user'; }
 export interface SnapshotTombstones { readonly kind: 'tombstones'; }
-export interface SnapshotDeclaration { readonly kind: 'snapshot'; readonly anchor: WorkbenchEntity; readonly output: SnapshotOutput; }
-export interface SnapshotGrammar {
-  <Row extends object>(anchor: WorkbenchEntity<Row>, options: { output: SnapshotOutput; tombstones?: SnapshotTombstones }): SnapshotDeclaration;
-  object(shape: Readonly<Record<string, SnapshotSelect | SnapshotRelation | SnapshotUser>>): SnapshotOutput;
-  select(...fields: readonly FieldHandle[]): SnapshotSelect;
-  one<Row extends object>(entity: WorkbenchEntity<Row>, options: { via: FieldHandle; select?: SnapshotSelect; include?: SnapshotOutput; output?: SnapshotSelect | SnapshotOutput; orderBy?: SnapshotOrder }): SnapshotRelation;
-  many<Row extends object>(entity: WorkbenchEntity<Row>, options: { via: FieldHandle; require?: SnapshotRelated; select?: SnapshotSelect; include?: SnapshotOutput; output?: SnapshotSelect | SnapshotOutput; orderBy?: SnapshotOrder }): SnapshotRelation;
-  keyed<Row extends object>(entity: WorkbenchEntity<Row>, options: { via: FieldHandle; require?: SnapshotRelated; select?: SnapshotSelect; include?: SnapshotOutput; output?: SnapshotSelect | SnapshotOutput; orderBy?: SnapshotOrder }): SnapshotRelation;
-  count<Row extends object>(entity: WorkbenchEntity<Row>, options: { via: FieldHandle; require?: SnapshotRelated }): SnapshotRelation;
-  related(childRef: FieldHandle, options: { via: FieldHandle }): SnapshotRelated;
-  user(options: { via: FieldHandle }): SnapshotUser;
-  tombstones<Row extends object>(target: WorkbenchEntity<Row>, options: { entity: WorkbenchEntity; entityId: FieldHandle; scopeId?: FieldHandle; targetScopeId?: FieldHandle; targetScope?: WorkbenchEntity; terminalScope?: WorkbenchEntity; kind: FieldHandle; state: FieldHandle; kindValue: string; hidden: readonly string[] }): SnapshotTombstones;
-  include(shape: Readonly<Record<string, SnapshotSelect | SnapshotRelation>>): SnapshotOutput;
-  orderBy(field: FieldHandle, direction?: 'asc' | 'desc'): SnapshotOrder;
+/** A complete snapshot declaration over an anchor entity. */
+export interface SnapshotDeclaration<Output extends SnapshotOutput = SnapshotOutput> {
+  readonly kind: 'snapshot';
+  readonly anchor: unknown;
+  readonly output: Output;
+  readonly tombstones?: SnapshotTombstones;
 }
+
+type UnionToIntersection<U> = (U extends unknown ? (intersection: U) => void : never) extends (intersection: infer I) => void ? I : never;
+
+/** The row shape a select contributes: one entry per selected field, keyed by the handle's literal name. */
+type SelectedShape<Handles extends readonly unknown[]> = UnionToIntersection<
+  { [Index in keyof Handles]: Handles[Index] extends SnapshotFieldHandle<infer Value, infer Key, infer Mode>
+    ? string extends Key
+      ? unknown
+      : Mode extends 'optional'
+        ? { [Field in Key & string]?: Value }
+        : { [Field in Key & string]: Value }
+    : unknown }[number]
+>;
+
+/** The child projection a relation carries: its include object, else its select, else nothing (count). */
+type SnapshotChildProjection<Options> = Options extends { include: infer Included } ? Included
+  : Options extends { select: infer Selected } ? Selected
+  : Options extends { output: infer Output } ? Output
+  : undefined;
+
+/** The projected value of one relation entry, by kind. */
+type SnapshotRelationValue<Kind extends 'one' | 'many' | 'keyed' | 'count', Child> = Kind extends 'count'
+  ? number
+  : Kind extends 'one'
+    ? SnapshotChildValue<Child> | null
+    : Kind extends 'keyed'
+      ? { readonly [id: string]: SnapshotChildValue<Child> }
+      : readonly SnapshotChildValue<Child>[];
+
+/** A relation child row: nested include objects recurse; selects flatten onto the id. */
+type SnapshotChildValue<Child> = Child extends SnapshotOutput<infer Shape>
+  ? SnapshotRowOf<Shape>
+  : Child extends SnapshotSelect<infer Shape>
+    ? { readonly id: string } & Shape
+    : { readonly id: string };
+
+/** The recipient User projection shape. */
+export interface SnapshotUserValue {
+  readonly id: string;
+  readonly name: string | null;
+  readonly image: string | null;
+}
+
+/** One output branch value: relations by kind, users as the fixed identity shape. Selects flatten (never a key). */
+type SnapshotEntryValue<Entry> = Entry extends SnapshotRelation<infer Kind, infer Child>
+  ? SnapshotRelationValue<Kind, Child>
+  : Entry extends SnapshotUser
+    ? SnapshotUserValue | null
+    : unknown;
+
+/** The projected row for an output shape: id, selects flattened, plus one property per relation/user branch. */
+type SnapshotRowOf<Shape extends Record<string, unknown>> = { readonly id: string }
+  & UnionToIntersection<{ [Key in keyof Shape]: Shape[Key] extends SnapshotSelect<infer Flattened> ? Flattened : unknown }[keyof Shape]>
+  & { [Key in keyof Shape as Shape[Key] extends SnapshotSelect ? never : Key & string]: SnapshotEntryValue<Shape[Key]> };
+
+/**
+ * The data shape a snapshot declaration projects. Accepts a full declaration or
+ * a bare output object; loose declarations degrade to `unknown`. Hosts derive
+ * their snapshot types from this — write the declaration once.
+ */
+export type SnapshotValue<Declaration> = Declaration extends SnapshotDeclaration<infer Output>
+  ? SnapshotRowOf<Output['shape']>
+  : Declaration extends SnapshotOutput<infer Shape>
+    ? SnapshotRowOf<Shape>
+    : unknown;
+
+export interface SnapshotGrammar {
+  <const Options extends { output: SnapshotOutput; tombstones?: SnapshotTombstones }>(anchor: unknown, options?: Options): SnapshotDeclaration<Options['output']>;
+  object<const Shape extends Readonly<Record<string, SnapshotSelect | SnapshotRelation | SnapshotUser>>>(shape: Shape): SnapshotOutput<Shape>;
+  select<const Handles extends readonly SnapshotFieldHandle[]>(...handles: Handles): SnapshotSelect<SelectedShape<Handles>>;
+  one<const Options extends { via: SnapshotFieldHandle; select?: SnapshotNode; include?: SnapshotNode; output?: SnapshotNode; orderBy?: SnapshotOrder }>(entity: unknown, options?: Options): SnapshotRelation<'one', SnapshotChildProjection<Options>>;
+  many<const Options extends { via: SnapshotFieldHandle; require?: SnapshotRelated; select?: SnapshotNode; include?: SnapshotNode; output?: SnapshotNode; orderBy?: SnapshotOrder }>(entity: unknown, options?: Options): SnapshotRelation<'many', SnapshotChildProjection<Options>>;
+  keyed<const Options extends { via: SnapshotFieldHandle; require?: SnapshotRelated; select?: SnapshotNode; include?: SnapshotNode; output?: SnapshotNode; orderBy?: SnapshotOrder }>(entity: unknown, options?: Options): SnapshotRelation<'keyed', SnapshotChildProjection<Options>>;
+  count<const Options extends { via: SnapshotFieldHandle; require?: SnapshotRelated }>(entity: unknown, options?: Options): SnapshotRelation<'count'>;
+  related(childRef: SnapshotFieldHandle, options: { via: SnapshotFieldHandle }): SnapshotRelated;
+  user(options: { via: SnapshotFieldHandle }): SnapshotUser;
+  tombstones(target: unknown, options: { entity: unknown; entityId: SnapshotFieldHandle; scopeId?: SnapshotFieldHandle; targetScopeId?: SnapshotFieldHandle; targetScope?: unknown; terminalScope?: unknown; kind: SnapshotFieldHandle; state: SnapshotFieldHandle; kindValue: string; hidden: readonly string[] }): SnapshotTombstones;
+  include<const Shape extends Readonly<Record<string, SnapshotSelect | SnapshotRelation>>>(shape: Shape): SnapshotOutput<Shape>;
+  orderBy(field: SnapshotFieldHandle, direction?: 'asc' | 'desc'): SnapshotOrder;
+}
+/** Any declaration grammar node. */
+export type SnapshotNode = SnapshotSelect | SnapshotOutput | SnapshotRelation | SnapshotUser;
 export const snapshot: SnapshotGrammar;
 export const object: SnapshotGrammar['object'];
 export const one: SnapshotGrammar['one'];
