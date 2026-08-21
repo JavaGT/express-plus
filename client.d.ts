@@ -7,6 +7,7 @@ import type {
   AnnotatedTextAnnotationActionValues,
   AnnotatedTextAnnotationEntityActionHandle,
   AnnotatedTextFieldHandle,
+  AnyWorkbenchEntity,
   WorkbenchEntity,
 } from './index.js';
 import type { AnnotatedTextRange, AnnotatedTextRedactionMarker } from './annotated-text-coords.js';
@@ -799,7 +800,7 @@ export interface AnnotatedTextPosition {
 }
 
 export interface AnnotatedTextAuthoringContext {
-  readonly entity: WorkbenchEntity;
+  readonly entity: AnyWorkbenchEntity;
   readonly field: AnnotatedTextFieldHandle;
   readonly documentId: string;
   /** Optional recipient override included in server authoring requests. */

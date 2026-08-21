@@ -988,7 +988,7 @@ export interface AnnotatedTextRecipientDocument {
   readonly restricted?: boolean;
 }
 export interface AnnotatedTextExpectedOwningScope {
-  readonly entity: WorkbenchEntity;
+  readonly entity: AnyWorkbenchEntity;
   readonly id: string;
 }
 export type AnnotatedTextRecipientReadResult =
@@ -997,7 +997,7 @@ export type AnnotatedTextRecipientReadResult =
   | { readonly kind: 'retry' };
 export function readAnnotatedTextForRecipient(input: {
   readonly app: WorkbenchApp;
-  readonly entity: WorkbenchEntity;
+  readonly entity: AnyWorkbenchEntity;
   readonly field: AnnotatedTextFieldHandle;
   readonly documentId: string;
   readonly expectedOwningScope: AnnotatedTextExpectedOwningScope;
@@ -1005,7 +1005,7 @@ export function readAnnotatedTextForRecipient(input: {
 }): Promise<AnnotatedTextRecipientReadResult>;
 export function exportAnnotatedText(input: {
   readonly app: WorkbenchApp;
-  readonly entity: WorkbenchEntity;
+  readonly entity: AnyWorkbenchEntity;
   readonly field: AnnotatedTextFieldHandle;
   readonly documentId: string;
   readonly expectedOwningScope: AnnotatedTextExpectedOwningScope;
@@ -1013,7 +1013,13 @@ export function exportAnnotatedText(input: {
 }): Promise<AnnotatedTextCanonicalDocument>;
 
 export function boolean<const Options extends FieldOptions<boolean>>(options?: Options): FieldDescriptor<DeclaredValue<Options, boolean>, DeclaredMode<Options>>;
-export function date<const Options extends FieldOptions<string>>(options?: Options): FieldDescriptor<DeclaredValue<Options, string>, DeclaredMode<Options>>;
+/** Date columns project ISO strings; declaration-level defaults and checks may use runtime Date values. */
+export type DateFieldOptions = Omit<FieldOptions<string>, 'default' | 'validate' | 'canonicalize'> & {
+  default?: string | Date | (() => string | Date);
+  validate?: (value: string | Date) => true | string;
+  canonicalize?: (value: string | Date) => string | Date;
+};
+export function date<const Options extends DateFieldOptions>(options?: Options): FieldDescriptor<DeclaredValue<Options, string>, DeclaredMode<Options>>;
 export function number<const Options extends FieldOptions<number>>(options?: Options): FieldDescriptor<DeclaredValue<Options, number>, DeclaredMode<Options>>;
 export function json<Value = unknown>(shape?: unknown, options?: FieldOptions<Value>): FieldDescriptor<Value>;
 export function ref<const Options extends FieldOptions<string> & { role?: string | readonly string[] }>(
@@ -1639,16 +1645,16 @@ export type SnapshotValue<Declaration> = Declaration extends SnapshotDeclaration
 export interface SnapshotGrammar {
   <const Options extends { output: SnapshotOutput; tombstones?: SnapshotTombstones }>(anchor: unknown, options?: Options): SnapshotDeclaration<Options['output']>;
   object<const Shape extends Readonly<Record<string, SnapshotSelect | SnapshotRelation | SnapshotUser>>>(shape: Shape): SnapshotOutput<Shape>;
-  select<const Handles extends readonly SnapshotFieldHandle[]>(...handles: Handles): SnapshotSelect<SelectedShape<Handles>>;
-  one<const Options extends { via: SnapshotFieldHandle; select?: SnapshotNode; include?: SnapshotNode; output?: SnapshotNode; orderBy?: SnapshotOrder }>(entity: unknown, options?: Options): SnapshotRelation<'one', SnapshotChildProjection<Options>>;
-  many<const Options extends { via: SnapshotFieldHandle; require?: SnapshotRelated; select?: SnapshotNode; include?: SnapshotNode; output?: SnapshotNode; orderBy?: SnapshotOrder }>(entity: unknown, options?: Options): SnapshotRelation<'many', SnapshotChildProjection<Options>>;
-  keyed<const Options extends { via: SnapshotFieldHandle; require?: SnapshotRelated; select?: SnapshotNode; include?: SnapshotNode; output?: SnapshotNode; orderBy?: SnapshotOrder }>(entity: unknown, options?: Options): SnapshotRelation<'keyed', SnapshotChildProjection<Options>>;
-  count<const Options extends { via: SnapshotFieldHandle; require?: SnapshotRelated }>(entity: unknown, options?: Options): SnapshotRelation<'count'>;
-  related(childRef: SnapshotFieldHandle, options: { via: SnapshotFieldHandle }): SnapshotRelated;
+  select<const Handles extends readonly SnapshotFieldHandle<unknown, string, FieldMode>[]>(...handles: Handles): SnapshotSelect<SelectedShape<Handles>>;
+  one<const Options extends { via: SnapshotFieldHandle<unknown, string, FieldMode>; select?: SnapshotNode; include?: SnapshotNode; output?: SnapshotNode; orderBy?: SnapshotOrder }>(entity: unknown, options?: Options): SnapshotRelation<'one', SnapshotChildProjection<Options>>;
+  many<const Options extends { via: SnapshotFieldHandle<unknown, string, FieldMode>; require?: SnapshotRelated; select?: SnapshotNode; include?: SnapshotNode; output?: SnapshotNode; orderBy?: SnapshotOrder }>(entity: unknown, options?: Options): SnapshotRelation<'many', SnapshotChildProjection<Options>>;
+  keyed<const Options extends { via: SnapshotFieldHandle<unknown, string, FieldMode>; require?: SnapshotRelated; select?: SnapshotNode; include?: SnapshotNode; output?: SnapshotNode; orderBy?: SnapshotOrder }>(entity: unknown, options?: Options): SnapshotRelation<'keyed', SnapshotChildProjection<Options>>;
+  count<const Options extends { via: SnapshotFieldHandle<unknown, string, FieldMode>; require?: SnapshotRelated }>(entity: unknown, options?: Options): SnapshotRelation<'count'>;
+  related(childRef: SnapshotFieldHandle<unknown, string, FieldMode>, options: { via: SnapshotFieldHandle }): SnapshotRelated;
   user(options: { via: SnapshotFieldHandle }): SnapshotUser;
-  tombstones(target: unknown, options: { entity: unknown; entityId: SnapshotFieldHandle; scopeId?: SnapshotFieldHandle; targetScopeId?: SnapshotFieldHandle; targetScope?: unknown; terminalScope?: unknown; kind: SnapshotFieldHandle; state: SnapshotFieldHandle; kindValue: string; hidden: readonly string[] }): SnapshotTombstones;
+  tombstones(target: unknown, options: { entity: unknown; entityId: SnapshotFieldHandle<unknown, string, FieldMode>; scopeId?: SnapshotFieldHandle<unknown, string, FieldMode>; targetScopeId?: SnapshotFieldHandle<unknown, string, FieldMode>; targetScope?: unknown; terminalScope?: unknown; kind: SnapshotFieldHandle<unknown, string, FieldMode>; state: SnapshotFieldHandle<unknown, string, FieldMode>; kindValue: string; hidden: readonly string[] }): SnapshotTombstones;
   include<const Shape extends Readonly<Record<string, SnapshotSelect | SnapshotRelation>>>(shape: Shape): SnapshotOutput<Shape>;
-  orderBy(field: SnapshotFieldHandle, direction?: 'asc' | 'desc'): SnapshotOrder;
+  orderBy(field: SnapshotFieldHandle<unknown, string, FieldMode>, direction?: 'asc' | 'desc'): SnapshotOrder;
 }
 /** Any declaration grammar node. */
 export type SnapshotNode = SnapshotSelect | SnapshotOutput | SnapshotRelation | SnapshotUser;
