@@ -43,7 +43,7 @@ export { operationalConsumerAdmin } from './operational-consumer.ts';
 // auto-created at `app.postCommitEffects` when a database is configured; this
 // export is for custom wiring only.
 export { createPostCommitEffectRunner } from './post-commit-effects.ts';
-export { pendingBlobStager, declaredBlobField, readClaimedBlob, claimedBlobLifecycle } from './pending-blob.ts';
+export { pendingBlobStager, declaredBlobField, readClaimedBlob, claimedBlobLifecycle, stagedBlobReader } from './pending-blob.ts';
 export { readBlob, BlobReadDeniedError, type ReadBlobArgs } from './authorized-blob-read.ts';
 export { BlobSlotNotFoundError } from './fs-blobs.ts';
 export { createHistoryReader } from './history-read.ts';

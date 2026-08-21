@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import workbench, { principal } from '../build/index.mjs';
-import { pendingBlobStager, declaredBlobField, readClaimedBlob, claimedBlobLifecycle } from '../build/server.mjs';
+import { pendingBlobStager, declaredBlobField, readClaimedBlob, claimedBlobLifecycle, stagedBlobReader } from '../build/server.mjs';
 import { BlobSlotNotFoundError } from '../build/fs-blobs.mjs';
 import { memoryBlobs } from '../build/memory-blobs.mjs';
 
@@ -740,4 +740,50 @@ test('a deleted generation emits the derived-store deletion signal through the s
   assert.equal(signal.priority, 'high');
   assert.ok(typeof signal.committedAt === 'string' && signal.committedAt.length > 0, 'the signal carries post-commit proof');
   assert.equal(db.prepare('SELECT * FROM _PendingBlob WHERE blobId = ?').get(blobId), undefined, 'the deletion completed only after the signal');
+});
+
+// --- staged-claim reads (#691): the stage claim is the only credential
+
+test('stagedBlobReader serves the stager exact staged ranges pre-commit, bounded per call', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const root = mkdtempSync(path.join(tmpdir(), 'workbench-pending-'));
+  const app = workbench({
+    db,
+    blobs: { root },
+    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 1 },
+  });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
+  const actor = principal({ type: 'user', id: 'u1' });
+  const bytes = Buffer.from([1, 2, 3, 4, 5]);
+  const staged = await pendingBlobStager(app, actor).stage({ scopeId: 'project:p1', resourceId: 'f1', bytes });
+  // Pre-commit the row is 'pending' — dark to readClaimed, served through the claim.
+  const read = stagedBlobReader(app, actor, staged.claim);
+  assert.equal(read.byteLength, 5);
+  assert.equal(read.sha256, staged.contentDigest);
+  assert.deepEqual(read.readRange(), bytes);
+  assert.deepEqual(read.readRange([1, 3]), Buffer.from([2, 3]));
+});
+
+test('staged reads fail generic without a valid claim token or for another principal', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const root = mkdtempSync(path.join(tmpdir(), 'workbench-pending-'));
+  const app = workbench({
+    db,
+    blobs: { root },
+    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', owningResource: 'File', erasureCategory: 'deletable' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 1 },
+  });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
+  const actor = principal({ type: 'user', id: 'u1' });
+  const other = principal({ type: 'user', id: 'u2' });
+  const staged = await pendingBlobStager(app, actor).stage({ scopeId: 'project:p1', resourceId: 'f1', bytes: new Uint8Array([9, 9]) });
+
+  // malformed claim
+  assert.throws(() => stagedBlobReader(app, actor, {}), /BLOB_UNAVAILABLE/);
+  assert.throws(() => stagedBlobReader(app, actor, null), /BLOB_UNAVAILABLE/);
+  // wrong token on the right pendingKey
+  assert.throws(() => stagedBlobReader(app, actor, { pendingKey: staged.pendingKey, claimToken: 'nope' }), /BLOB_UNAVAILABLE/);
+  // correct token, different principal
+  assert.throws(() => stagedBlobReader(app, other, staged.claim), /BLOB_UNAVAILABLE/);
 });

@@ -5,7 +5,9 @@
 //   - ONE schema (AuditEvent): id, time, actor (the REAL type/id/status),
 //     operation, resourceCategory, resourceId?, outcome, reasonCode,
 //     classification. An event is a decision LABEL — no payload, body, secret,
-//     alias, filename, or excerpt can ride it.
+//     alias, filename, or excerpt can ride it. The ONE structured exception is
+//     the closed AuditEventDetail vocabulary (membership subject + role
+//     delta), whose string fields are opaque-canonicalized like every id.
 //   - TWO classes: `security` (administrative/security decisions — retained)
 //     and `diagnostic` (operational — rotatable). Ordinary no-history
 //     collaboration mutations are NOT audit events — they are the committed-log
@@ -86,6 +88,35 @@ export interface AuditActor {
 // never a domain noun. `resourceId` is an opaque id when known; `reasonCode` is
 // a closed admission code, null when the event records an allow. id/operation/
 // resourceId are sanitized to the opaque form at the emitter boundary.
+// Membership privilege accounting (S5/A4 extension): the one structured
+// detail a security event may carry. A membership transition must record WHO
+// acted, WHOSE access changed, and the before→after role IN THE SAME record —
+// without opening a free-form payload channel. Every string field is an
+// opaque id/token canonicalized at the emitter boundary exactly like actor.id;
+// absent ends are null (a grant has no roleBefore, a removal no roleAfter).
+export interface AuditMembershipDetail {
+  readonly kind: 'membership';
+  /** The affected member (subject), never the acting principal (that is actor). */
+  readonly subjectId: string | null;
+  readonly roleBefore: string | null;
+  readonly roleAfter: string | null;
+}
+
+/** The closed set of structured details an event may carry. Extending this union is the only way new detail shapes enter the schema. */
+export type AuditEventDetail = AuditMembershipDetail;
+
+const DETAIL_KINDS: readonly string[] = Object.freeze(['membership']);
+
+function sanitizeDetail(detail: AuditEventDetail | null | undefined): AuditEventDetail | null {
+  if (!detail || !DETAIL_KINDS.includes(detail.kind)) return null;
+  return Object.freeze({
+    kind: detail.kind,
+    subjectId: sanitizeOpaqueId((detail as AuditMembershipDetail).subjectId),
+    roleBefore: sanitizeOpaqueId((detail as AuditMembershipDetail).roleBefore),
+    roleAfter: sanitizeOpaqueId((detail as AuditMembershipDetail).roleAfter)
+  });
+}
+
 export interface AuditEvent {
   readonly id: string;
   readonly time: number;
@@ -96,6 +127,8 @@ export interface AuditEvent {
   readonly outcome: AuditOutcome;
   readonly reasonCode: AdmissionReasonCode | null;
   readonly classification: AuditClassification;
+  /** Structured, closed-vocabulary detail; sanitized and frozen by the emitter. */
+  readonly detail?: AuditEventDetail | null;
 }
 
 // Retention is ADAPTER policy, not package policy. Values are opaque duration
@@ -119,6 +152,8 @@ export interface AuditInput {
   readonly resourceId?: string | null;
   readonly outcome: AuditOutcome;
   readonly reasonCode?: AdmissionReasonCode | null;
+  /** Optional closed-vocabulary detail (e.g. membership subject + role delta). */
+  readonly detail?: AuditEventDetail | null;
 }
 
 // The injectable audit sink. The default is a no-op; the app adapter chooses
@@ -184,6 +219,7 @@ export function createAuditor({
       outcome: input.outcome,
       reasonCode: input.reasonCode ?? null,
       classification,
+      ...(input.detail ? { detail: sanitizeDetail(input.detail) } : {})
     });
     target.write(event, config[classification]);
     return event;

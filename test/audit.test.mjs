@@ -360,3 +360,42 @@ test('sanitizeOpaqueId is exposed and matches the emitter contract', () => {
   assert.equal(sanitizeOpaqueId('https://example.com/token'), sanitizeOpaqueId('https://example.com/token'));
   assert.ok(!sanitizeOpaqueId('https://example.com/token').includes('example.com'));
 });
+
+// --- membership detail (#691): subject + role delta ride the SAME record
+
+test('a membership detail carries the affected member and role delta, frozen and opaque', () => {
+  const events = [];
+  const auditor = createAuditor({
+    sink: { write: (event) => events.push(event) },
+    retentionConfig: { security: '12m', diagnostic: '30d' },
+  });
+  const event = auditor.auditSecurity({
+    ...input({ outcome: 'allow', reasonCode: null }),
+    resourceId: 'p1',
+    detail: { kind: 'membership', subjectId: 'user-7', roleBefore: null, roleAfter: 'editor' },
+  });
+  assert.deepEqual(event.detail, { kind: 'membership', subjectId: 'user-7', roleBefore: null, roleAfter: 'editor' });
+  assert.ok(Object.isFrozen(event.detail));
+  // events without a detail keep the exact enumerated shape — no null filler
+  const plain = auditor.auditDiagnostic(input({}));
+  assert.equal(plain.detail, undefined);
+});
+
+test('detail strings are canonicalized to opaque tokens and unknown kinds never ride', () => {
+  const auditor = createAuditor({ retentionConfig: { security: '12m', diagnostic: '30d' } });
+  const event = auditor.auditSecurity({
+    ...input({ outcome: 'allow', reasonCode: null }),
+    detail: { kind: 'membership', subjectId: 'member@example.com', roleBefore: 'owner', roleAfter: 'editor' },
+  });
+  assert.ok(isOpaqueId(event.detail.subjectId));
+  assert.equal(event.detail.subjectId, sanitizeOpaqueId('member@example.com'));
+  assert.ok(!JSON.stringify(event).includes('member@example.com'));
+  assert.equal(event.detail.roleBefore, 'owner');
+  assert.equal(event.detail.roleAfter, 'editor');
+
+  const dropped = auditor.auditSecurity({
+    ...input({ outcome: 'allow', reasonCode: null }),
+    detail: { kind: 'spoofed-kind', subjectId: 'x', roleBefore: null, roleAfter: null },
+  });
+  assert.equal(dropped.detail, null);
+});

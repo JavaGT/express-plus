@@ -5,7 +5,9 @@
 //   - ONE schema (AuditEvent): id, time, actor (the REAL type/id/status),
 //     operation, resourceCategory, resourceId?, outcome, reasonCode,
 //     classification. An event is a decision LABEL — no payload, body, secret,
-//     alias, filename, or excerpt can ride it.
+//     alias, filename, or excerpt can ride it. The ONE structured exception is
+//     the closed AuditEventDetail vocabulary (membership subject + role
+//     delta), whose string fields are opaque-canonicalized like every id.
 //   - TWO classes: `security` (administrative/security decisions — retained)
 //     and `diagnostic` (operational — rotatable). Ordinary no-history
 //     collaboration mutations are NOT audit events — they are the committed-log
@@ -86,6 +88,37 @@ export function sanitizeOpaqueId(value                           )              
 // never a domain noun. `resourceId` is an opaque id when known; `reasonCode` is
 // a closed admission code, null when the event records an allow. id/operation/
 // resourceId are sanitized to the opaque form at the emitter boundary.
+// Membership privilege accounting (S5/A4 extension): the one structured
+// detail a security event may carry. A membership transition must record WHO
+// acted, WHOSE access changed, and the before→after role IN THE SAME record —
+// without opening a free-form payload channel. Every string field is an
+// opaque id/token canonicalized at the emitter boundary exactly like actor.id;
+// absent ends are null (a grant has no roleBefore, a removal no roleAfter).
+
+
+
+
+
+
+
+
+/** The closed set of structured details an event may carry. Extending this union is the only way new detail shapes enter the schema. */
+
+
+const DETAIL_KINDS                    = Object.freeze(['membership']);
+
+function sanitizeDetail(detail                                     )                          {
+  if (!detail || !DETAIL_KINDS.includes(detail.kind)) return null;
+  return Object.freeze({
+    kind: detail.kind,
+    subjectId: sanitizeOpaqueId((detail                         ).subjectId),
+    roleBefore: sanitizeOpaqueId((detail                         ).roleBefore),
+    roleAfter: sanitizeOpaqueId((detail                         ).roleAfter)
+  });
+}
+
+
+
 
 
 
@@ -112,6 +145,8 @@ export function sanitizeOpaqueId(value                           )              
 // The raw decision record an emitter classifies. `principal` is the REAL
 // (pre-collapse) principal — the emitter records its true type/id/status via
 // statusOf, exactly the "status is an audit input" rule.
+
+
 
 
 
@@ -184,6 +219,7 @@ export function createAuditor({
       outcome: input.outcome,
       reasonCode: input.reasonCode ?? null,
       classification,
+      ...(input.detail ? { detail: sanitizeDetail(input.detail) } : {})
     });
     target.write(event, config[classification]);
     return event;

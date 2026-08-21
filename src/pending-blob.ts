@@ -142,6 +142,23 @@ export interface ClaimedBlob {
   mediaType: string | null;
 }
 
+/**
+ * A bounded read view over ONE staged generation, served only to the claim
+ * that staged it (#691). Between staging and dispatch-commit the durable row
+ * is 'pending' — unreadable through {@link PendingBlobLifecycle.readClaimed} —
+ * yet the stager may need the exact staged bytes BEFORE committing (probing
+ * media to decide a transcode). The stage claim IS the capability: every read
+ * re-proves the stager principal AND the claim token, size/digest come from
+ * the durable attested row (never a fresh whole-generation read), and ranges
+ * bound each call's memory instead of materializing the full blob.
+ */
+export interface StagedBlobRead {
+  readonly byteLength: number;
+  readonly sha256: string;
+  /** Read exactly `[start, end)` of the staged bytes (store-clamped bounds). */
+  readRange(range?: [start?: number, end?: number]): Buffer;
+}
+
 export interface ValidateClaimArgs {
   claim: unknown;
   field: string;
@@ -186,6 +203,7 @@ export interface PendingBlobLifecycle {
   validateClaim(args: ValidateClaimArgs): Promise<ClaimedBlob>;
   requestDeletion(args: RequestDeletionArgs): Promise<boolean>;
   readClaimed(blobId: string, range?: [start?: number, end?: number]): Buffer;
+  readStagedClaim(principal: Principal, claim: unknown): StagedBlobRead;
   status(blobId: string): string | null;
   reconcile(): Promise<void>;
   reap(): Promise<void>;
@@ -429,6 +447,44 @@ export function createPendingBlobLifecycle(app: PendingBlobApp, options: Pending
     }
     return range === undefined ? bytes : readGeneration(blobId, range);
   }
+  // The staged-claim byte read (#691): between staging and dispatch-commit the
+  // generation's row is 'pending' — correctly unreachable through readClaimed —
+  // yet its own stager may need the exact staged bytes before the committing
+  // action exists (probe media to decide a transcode). The stage claim IS the
+  // capability: every call re-proves the stager principal AND the claim token
+  // (timing-safe), serves only that generation's slot through the same typed
+  // missing-slot fallback as readClaimed, and fails with the SAME generic
+  // BLOB_UNAVAILABLE — never a derived storage path, never another principal's
+  // staged bytes, never a distinguishable existence signal. Only live rows
+  // serve ('pending'/'claimed'/'finalized'); delete-requested, deleted, and
+  // recovery-failed rows are dark.
+  function readStagedClaim(authenticatedPrincipal: Principal, claim: unknown): StagedBlobRead {
+    const candidate = claim as { pendingKey?: unknown; claimToken?: unknown } | undefined;
+    if (!candidate || typeof candidate.pendingKey !== 'string' || typeof candidate.claimToken !== 'string') failure('BLOB_UNAVAILABLE');
+    const row = app.db.prepare('SELECT * FROM _PendingBlob WHERE pendingKey = ?').get(candidate.pendingKey) as PendingBlobRow | undefined;
+    if (!row || row.status === 'delete-requested' || row.status === 'deleted' || row.status === 'recovery-failed') failure('BLOB_UNAVAILABLE');
+    let claimProven = false;
+    try {
+      claimProven = row.claimTokenHash.length > 0
+        && timingSafeEqual(Buffer.from(hash(candidate.claimToken)), Buffer.from(row.claimTokenHash));
+    } catch {
+      claimProven = false;
+    }
+    if (!claimProven || row.principalKey !== principalKey(authenticatedPrincipal)) failure('BLOB_UNAVAILABLE');
+    // Size/digest come from the durable row (attested at stage time), never
+    // from a fresh whole-generation read.
+    return Object.freeze({
+      byteLength: row.byteLength,
+      sha256: row.contentDigest,
+      readRange: (range?: [start?: number, end?: number]): Buffer => {
+        try {
+          return readGeneration(row.blobId, range);
+        } catch {
+          failure('BLOB_UNAVAILABLE');
+        }
+      }
+    });
+  }
   function status(blobId: string): string | null {
     const row = app.db.prepare('SELECT status FROM _PendingBlob WHERE blobId = ?').get(blobId) as { status: string } | undefined;
     return row?.status ?? null;
@@ -438,6 +494,7 @@ export function createPendingBlobLifecycle(app: PendingBlobApp, options: Pending
     validateClaim,
     requestDeletion,
     readClaimed,
+    readStagedClaim,
     status,
     reconcile,
     reap,
@@ -469,6 +526,20 @@ export function readClaimedBlob(workbench: PendingBlobWorkbench, blobId: string)
   const lifecycle = workbench.pendingBlobLifecycle;
   if (!lifecycle) throw new Error('blobLifecycle is not configured');
   return lifecycle.readClaimed(blobId);
+}
+
+// Capability-gated staged-bytes reader for the stager's own pre-commit probe
+// (#691): the claim returned by pendingBlobStager().stage() is the only
+// credential, so an application never derives a storage path and never reads
+// an unclaimed pending blob it did not stage.
+export function stagedBlobReader(
+  workbench: PendingBlobWorkbench,
+  authenticatedPrincipal: Principal,
+  claim: { pendingKey: string; claimToken: string }
+): StagedBlobRead {
+  const lifecycle = workbench.pendingBlobLifecycle;
+  if (!lifecycle) throw new Error('blobLifecycle is not configured');
+  return lifecycle.readStagedClaim(authenticatedPrincipal, claim);
 }
 
 export type ClaimedBlobLifecycleState =

@@ -309,6 +309,14 @@ export interface AuditActor {
   readonly id: string | null;
   readonly status: PrincipalStatus;
 }
+/** Membership privilege accounting detail: subject + role delta, opaque-canonicalized like every id (#691). */
+export interface AuditMembershipDetail {
+  readonly kind: 'membership';
+  readonly subjectId: string | null;
+  readonly roleBefore: string | null;
+  readonly roleAfter: string | null;
+}
+export type AuditEventDetail = AuditMembershipDetail;
 export interface AuditEvent {
   readonly id: string;
   readonly time: number;
@@ -319,6 +327,7 @@ export interface AuditEvent {
   readonly outcome: AuditOutcome;
   readonly reasonCode: AdmissionReasonCode | null;
   readonly classification: AuditClassification;
+  readonly detail?: AuditEventDetail | null;
 }
 export type AuditRetention = string;
 export interface RetentionConfig {
@@ -332,6 +341,7 @@ export interface AuditInput {
   readonly resourceId?: string | null;
   readonly outcome: AuditOutcome;
   readonly reasonCode?: AdmissionReasonCode | null;
+  readonly detail?: AuditEventDetail | null;
 }
 export interface AuditSink {
   write(event: AuditEvent, retention: AuditRetention): void;

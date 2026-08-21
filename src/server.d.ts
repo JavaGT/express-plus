@@ -266,6 +266,8 @@ export interface ClaimedBlobLifecycle {
   reconcile(): Promise<void>;
 }
 export function claimedBlobLifecycle(workbench: import('../index.d.ts').WorkbenchApp): ClaimedBlobLifecycle;
+export type StagedBlobRead = Readonly<{ byteLength: number; sha256: string; readRange(range?: readonly [number, number]): Buffer }>;
+export function stagedBlobReader(workbench: import('../index.d.ts').WorkbenchApp, authenticatedPrincipal: Principal, claim: PendingBlobClaim): StagedBlobRead;
 export type DeclaredBlobField = import('../index.d.ts').DeclaredBlobField;
 export function declaredBlobField(field: DeclaredBlobField): DeclaredBlobField;
 

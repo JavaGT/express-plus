@@ -43,7 +43,7 @@ export { operationalConsumerAdmin } from './operational-consumer.mjs';
 // auto-created at `app.postCommitEffects` when a database is configured; this
 // export is for custom wiring only.
 export { createPostCommitEffectRunner } from './post-commit-effects.mjs';
-export { pendingBlobStager, declaredBlobField, readClaimedBlob, claimedBlobLifecycle } from './pending-blob.mjs';
+export { pendingBlobStager, declaredBlobField, readClaimedBlob, claimedBlobLifecycle, stagedBlobReader } from './pending-blob.mjs';
 export { readBlob, BlobReadDeniedError,                   } from './authorized-blob-read.mjs';
 export { BlobSlotNotFoundError } from './fs-blobs.mjs';
 export { createHistoryReader } from './history-read.mjs';
