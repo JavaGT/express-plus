@@ -24,19 +24,36 @@ export type FieldAccessFn = (context: Record<string, unknown>, defaults?: unknow
 // A declared `validate` option: returns `true` or a human-readable reason.
 type FieldValidator = (value: unknown) => string | true;
 
+// Absence mode a declaration utility reads off a descriptor: required fields
+// always project; optional ones may be missing/null on a delivered row.
+export type FieldMode = 'required' | 'optional';
+
 // A field descriptor is frozen so no later layer can mutate a declared field.
 // `.can(fn)` returns a NEW frozen descriptor carrying the access function — it
-// never mutates the original (declarations are immutable).
-export interface FieldDescriptor {
+// never mutates the original (declarations are immutable). The `__value`/
+// `__mode` phantoms are type-level only (never set at runtime): they carry the
+// field's value type and absence mode so entity rows and snapshot projections
+// are DERIVED from the declaration instead of hand-written beside it.
+export interface FieldDescriptor<Value = unknown, Mode extends FieldMode = 'required'> {
   readonly kind: string;
   readonly type?: string;
   readonly validate?: FieldValidator | undefined;
   readonly access?: FieldAccessFn | undefined;
-  readonly can: (fn: FieldAccessFn) => FieldDescriptor;
+  readonly can: (fn: FieldAccessFn) => FieldDescriptor<Value, Mode>;
+  readonly __value?: Value;
+  readonly __mode?: Mode;
   readonly [property: string]: unknown;
 }
 
 type FieldOptions = Record<string, unknown>;
+
+// The absence mode a descriptor carries for an options literal: `optional`
+// makes the projected key omittable; everything else projects always.
+type DeclaredMode<Options> = Options extends { optional: true } ? 'optional' : 'required';
+
+// The value a descriptor carries for an options literal: `nullable` widens the
+// base value with null (a column that stores NULL projects null).
+type DeclaredValue<Options, Base> = Options extends { nullable: true } ? Base | null : Base;
 
 function makeDescriptor(props: FieldOptions): FieldDescriptor {
   const descriptor: Record<string, unknown> = { access: undefined, ...props };
@@ -49,7 +66,7 @@ function makeDescriptor(props: FieldOptions): FieldDescriptor {
 
 // `value` kind — a single stored value with whole-value diff. The default
 // mechanism (the bare kind is the sensible default per the naming rule).
-export function text(options: FieldOptions = {}): FieldDescriptor {
+export function text<const Options extends FieldOptions>(options: Options = {} as Options): FieldDescriptor<DeclaredValue<Options, string>, DeclaredMode<Options>> {
   const { oneOf, validate, canonicalize, indexed, ...rest } = options;
   if (canonicalize !== undefined && typeof canonicalize !== 'function') {
     throw new Error('text({ canonicalize }) requires a function');
@@ -74,9 +91,9 @@ export function text(options: FieldOptions = {}): FieldDescriptor {
       ...(canonicalize ? { canonicalize } : {}),
       ...(indexed ? { indexed } : {}),
       ...rest,
-    });
+    }) as FieldDescriptor<DeclaredValue<Options, string>, DeclaredMode<Options>>;
   }
-  return makeDescriptor({ kind: 'value', type: 'text', validate, ...(canonicalize ? { canonicalize } : {}), ...(indexed ? { indexed } : {}), ...rest });
+  return makeDescriptor({ kind: 'value', type: 'text', validate, ...(canonicalize ? { canonicalize } : {}), ...(indexed ? { indexed } : {}), ...rest }) as FieldDescriptor<DeclaredValue<Options, string>, DeclaredMode<Options>>;
 }
 
 export function annotatedText(options: FieldOptions = {}): FieldDescriptor {
@@ -139,25 +156,25 @@ export const polyline = {
     makeDescriptor({ kind: 'crdt', type: 'polyline', ...options }),
 };
 
-export function boolean(options: FieldOptions = {}): FieldDescriptor {
-  return makeDescriptor({ kind: 'value', type: 'boolean', ...options });
+export function boolean<const Options extends FieldOptions>(options: Options = {} as Options): FieldDescriptor<DeclaredValue<Options, boolean>, DeclaredMode<Options>> {
+  return makeDescriptor({ kind: 'value', type: 'boolean', ...options }) as FieldDescriptor<DeclaredValue<Options, boolean>, DeclaredMode<Options>>;
 }
 
-export function date(options: FieldOptions = {}): FieldDescriptor {
-  return makeDescriptor({ kind: 'value', type: 'date', ...options });
+export function date<const Options extends FieldOptions>(options: Options = {} as Options): FieldDescriptor<DeclaredValue<Options, string>, DeclaredMode<Options>> {
+  return makeDescriptor({ kind: 'value', type: 'date', ...options }) as FieldDescriptor<DeclaredValue<Options, string>, DeclaredMode<Options>>;
 }
 
 // `number()` — a value-kind scalar (integer or float), stored as-is (SQLite
 // binds JS numbers directly).
-export function number(options: FieldOptions = {}): FieldDescriptor {
-  return makeDescriptor({ kind: 'value', type: 'number', ...options });
+export function number<const Options extends FieldOptions>(options: Options = {} as Options): FieldDescriptor<DeclaredValue<Options, number>, DeclaredMode<Options>> {
+  return makeDescriptor({ kind: 'value', type: 'number', ...options }) as FieldDescriptor<DeclaredValue<Options, number>, DeclaredMode<Options>>;
 }
 
 // `json(shape)` — a value-kind structured JSON cell stored as TEXT. `shape` is
 // declared config retained for future path/index support; app-specific runtime
 // validation still belongs in the ordinary `validate` option.
-export function json(shape: unknown = null, options: FieldOptions = {}): FieldDescriptor {
-  return makeDescriptor({ kind: 'value', type: 'json', shape, ...options });
+export function json<const Options extends FieldOptions>(shape: unknown = null, options: Options = {} as Options): FieldDescriptor<DeclaredValue<Options, unknown>, DeclaredMode<Options>> {
+  return makeDescriptor({ kind: 'value', type: 'json', shape, ...options }) as FieldDescriptor<DeclaredValue<Options, unknown>, DeclaredMode<Options>>;
 }
 
 // `hash()` — a one-way salted password digest. Its own KIND (not `value`): a
@@ -170,11 +187,11 @@ export function json(shape: unknown = null, options: FieldOptions = {}): FieldDe
 // vector of length 1536). Cosine similarity search is brute-force (pure JS,
 // zero runtime dependencies) — loads all rows, computes similarity, returns
 // top-K. Same pattern as Scope's `Json` Prisma type.
-export function vector(dimensions: number, options: FieldOptions = {}): FieldDescriptor {
+export function vector<const Options extends FieldOptions>(dimensions: number, options: Options = {} as Options): FieldDescriptor<DeclaredValue<Options, number[]>, DeclaredMode<Options>> {
   if (typeof dimensions !== 'number' || dimensions <= 0 || !Number.isInteger(dimensions)) {
     throw new Error('vector(dimensions) requires a positive integer dimension count');
   }
-  return makeDescriptor({ kind: 'value', type: 'vector', dimensions, ...options });
+  return makeDescriptor({ kind: 'value', type: 'vector', dimensions, ...options }) as FieldDescriptor<DeclaredValue<Options, number[]>, DeclaredMode<Options>>;
 }
 
 export function hash(options: FieldOptions = {}): FieldDescriptor {
@@ -183,9 +200,10 @@ export function hash(options: FieldOptions = {}): FieldDescriptor {
 
 // `ref(Target)` — a typed foreign key. `target` is explicit (no opaque sugar).
 // `role` lets the entity compiler derive `is.<role>()` from the FK (the only
-// thing the FK derives — no zero-to-one default grant, ADR #7).
-export function ref(target: unknown, options: FieldOptions = {}): FieldDescriptor {
-  return makeDescriptor({ kind: 'value', type: 'ref', target, ...options });
+// thing the FK derives — no zero-to-one default grant, ADR #7). A ref projects
+// (and queries by) the target row's TEXT id.
+export function ref<const Options extends FieldOptions>(target: unknown, options: Options = {} as Options): FieldDescriptor<DeclaredValue<Options, string>, DeclaredMode<Options>> {
+  return makeDescriptor({ kind: 'value', type: 'ref', target, ...options }) as FieldDescriptor<DeclaredValue<Options, string>, DeclaredMode<Options>>;
 }
 
 // `blob()` — a value-kind TEXT holding a blob id (a reference into the
@@ -194,8 +212,8 @@ export function ref(target: unknown, options: FieldOptions = {}): FieldDescripto
 // create/update carrying a blob id adopts that blob IN the dispatch commit
 // (spec #2). The marker rides the descriptor; one declared field feeds the
 // read/write/grant paths AND the adopter, not a parallel registration.
-export function blob(options: FieldOptions = {}): FieldDescriptor {
-  return makeDescriptor({ kind: 'value', type: 'text', blob: true, ...options });
+export function blob<const Options extends FieldOptions>(options: Options = {} as Options): FieldDescriptor<DeclaredValue<Options, string>, DeclaredMode<Options>> {
+  return makeDescriptor({ kind: 'value', type: 'text', blob: true, ...options }) as FieldDescriptor<DeclaredValue<Options, string>, DeclaredMode<Options>>;
 }
 
 // `link({ tiers, tier, token })` — the framework's first STRUCTURED field: one
@@ -396,12 +414,8 @@ export function ephemeral(cells: Record<string, unknown> = {}): FieldDescriptor 
 //
 // Import-surface scope: this constructor delivers the descriptor the entity
 // compiler accepts. The compiler owns transition enforcement and auto lowering.
-export function state({ values, transitions, effects, auto }: {
-  values?: readonly unknown[];
-  transitions?: Record<string, unknown>;
-  effects?: Record<string, unknown>;
-  auto?: unknown;
-} = {}): FieldDescriptor {
+export function state<const Options extends { values?: readonly unknown[]; transitions?: Record<string, unknown>; effects?: Record<string, unknown>; auto?: unknown }>(options: Options = {} as Options): FieldDescriptor<StateValueOf<Options>, 'required'> {
+  const { values, transitions, effects, auto } = options;
   return makeDescriptor({
     kind: 'state',
     type: 'state',
@@ -409,8 +423,12 @@ export function state({ values, transitions, effects, auto }: {
     transitions: Object.freeze({ ...(transitions ?? {}) }),
     effects: Object.freeze({ ...(effects ?? {}) }),
     auto,
-  });
+  }) as FieldDescriptor<StateValueOf<Options>, 'required'>;
 }
+
+// A state field's row value: the closed declared domain when it is a literal
+// tuple of names, else plain string.
+type StateValueOf<Options> = Options extends { values: readonly (infer Value)[] } ? (Value extends string ? Value : string) : string;
 // A typed transition handle. It stringifies to a stable identifier encoding the
 // from→to pair, so the same pair always yields the same computed-object key in
 // an `effects` map — a derived identifier, never a magic string literal.

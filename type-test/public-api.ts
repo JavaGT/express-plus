@@ -250,14 +250,14 @@ projectedAnnotatedText.memberships;
 projectedAnnotatedText.blockId;
 void [projectedKind, projectedText, materializedRanges, projectedCapabilities, grantedOnlyCapabilities];
 
-type ProjectRow = { id: string; name: string; ownerId: string };
+type ProjectRow = { id: string; name: string; owner: string; summary: string };
 const category: FailureCategory = FAILURE_CATEGORIES[0];
 const expectedFailure: WorkbenchFailure = failure(category, 'Invalid project.', { field: 'name' });
 const expectedOutcome: FailureOutcome = failureOutcome(expectedFailure);
 const unexpectedFailure: WorkbenchFailure = sanitizeUnexpectedFailure(new Error('secret'));
 const recognizedFailure: boolean = isWorkbenchFailure(expectedFailure);
 void [expectedOutcome, unexpectedFailure, recognizedFailure];
-const Project: WorkbenchEntity<ProjectRow> = entity('Project', {
+const Project = entity('Project', {
   name: text(),
   owner: ref('User'),
   summary: projected.async({
@@ -267,12 +267,12 @@ const Project: WorkbenchEntity<ProjectRow> = entity('Project', {
   grant: grant(read, write),
   routes: (routes) => routes.resource(),
 });
-entity<ProjectRow>('ProjectIndex', {
+entity('ProjectIndex', {
   name: text(),
   ownerId: ref('User'),
   indexes: [{ fields: ['ownerId', 'name'], unique: true }],
 });
-entity<ProjectRow>('ProjectIndexInvalid', {
+entity('ProjectIndexInvalid', {
   name: text(),
   ownerId: ref('User'),
   indexes: [
@@ -496,7 +496,7 @@ app.listen({ blobReapTtlMs: 1000 });
 // @ts-expect-error resource expansion belongs only to an entity routes callback
 app.resource();
 const maybeServer: import('node:http').Server | undefined = app.httpServer;
-const registeredEntities: ReadonlyMap<string, import('workbench').BoundWorkbenchEntity> = app.entities;
+const registeredEntities: ReadonlyMap<string, import('workbench').AnyWorkbenchEntity> = app.entities;
 void [startedApp, stoppedApp, dispatchResult, batchResult, plannedBatchResult, maybeServer, registeredEntities];
 
 const inherited: InheritDirective = inherit(Project, { via: 'projectId' });
@@ -504,8 +504,8 @@ const Child = entity('Child', { projectId: ref(Project), grant: inherited });
 void Child;
 const AuditedChild = entity('AuditedChild', {
   projectId: ref(Project, { immutable: true }),
-  createdAt: date({ readonly: true, default: () => new Date() }),
-  updatedAt: date({ touch: true, default: () => new Date() }),
+  createdAt: date({ readonly: true, default: () => new Date().toISOString() }),
+  updatedAt: date({ touch: true, default: () => new Date().toISOString() }),
   grant: inherited,
 });
 void AuditedChild;

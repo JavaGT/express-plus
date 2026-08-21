@@ -429,13 +429,17 @@ export interface EntityRouteBuilder extends RouteBuilder {
   resource(): this;
 }
 
-export interface FieldDescriptor<Value = unknown> {
+/** How a declared field treats absence: required columns always project; optional ones may be missing/null. */
+export type FieldMode = 'required' | 'optional';
+
+export interface FieldDescriptor<Value = unknown, Mode extends FieldMode = 'required'> {
   readonly kind: string;
   readonly type?: string;
   readonly target?: string | WorkbenchEntity;
   readonly access?: (context: unknown) => unknown;
-  can(check: (context: unknown) => unknown): FieldDescriptor<Value>;
+  can(check: (context: unknown) => unknown): FieldDescriptor<Value, Mode>;
   readonly __value?: Value;
+  readonly __mode?: Mode;
   readonly [property: string]: unknown;
 }
 
@@ -444,8 +448,11 @@ export interface QueryPredicate {
   readonly [queryPredicateBrand]: true;
 }
 
-export interface FieldHandle<Value = unknown, Key extends PropertyKey = string> {
+export interface FieldHandle<Value = unknown, Key extends PropertyKey = string, Mode extends FieldMode = 'required'> {
   readonly fieldName: Key;
+  /** Type-level only (never set at runtime): carries the projected value/absence mode for declaration-derived shapes. */
+  readonly __value?: Value;
+  readonly __mode?: Mode;
   is(value: Value): QueryPredicate;
   in(values: readonly Value[]): QueryPredicate;
   isNull(): QueryPredicate;
@@ -455,7 +462,7 @@ export interface FieldHandle<Value = unknown, Key extends PropertyKey = string> 
 }
 
 export type EntityFields<Row extends object> = Readonly<{
-  [Key in keyof Row]-?: FieldHandle<Row[Key], Key>;
+  [Key in keyof Row]-?: FieldHandle<Row[Key], Key, undefined extends Row[Key] ? 'optional' : 'required'>;
 }> & Readonly<{ id: FieldHandle<string, 'id'> }>;
 
 export type FieldOptions<Value = unknown> = Readonly<{
@@ -474,9 +481,16 @@ export type FieldOptions<Value = unknown> = Readonly<{
   role?: string | readonly string[];
 }> & Readonly<Record<string, unknown>>;
 
+// The absence mode a declaration utility reads off an options literal: `optional`
+// makes the projected key omittable; everything else projects always.
+type DeclaredMode<Options> = Options extends { optional: true } ? 'optional' : 'required';
+// The value a descriptor carries for an options literal: `nullable` widens the
+// base value with null (a column that stores NULL projects null).
+type DeclaredValue<Options, Base> = Options extends { nullable: true } ? Base | null : Base;
+
 export interface TextFieldFactory {
-  (options?: FieldOptions<string>): FieldDescriptor<string>;
-  crdt(options?: FieldOptions<string>): FieldDescriptor<string>;
+  <const Options extends FieldOptions<string>>(options?: Options): FieldDescriptor<DeclaredValue<Options, string>, DeclaredMode<Options>>;
+  crdt<const Options extends FieldOptions<string>>(options?: Options): FieldDescriptor<DeclaredValue<Options, string>, DeclaredMode<Options>>;
 }
 
 export const text: TextFieldFactory;
@@ -998,16 +1012,16 @@ export function exportAnnotatedText(input: {
   readonly principal: Principal;
 }): Promise<AnnotatedTextCanonicalDocument>;
 
-export function boolean(options?: FieldOptions<boolean>): FieldDescriptor<boolean>;
-export function date(options?: FieldOptions<Date | number | string>): FieldDescriptor<Date>;
-export function number(options?: FieldOptions<number>): FieldDescriptor<number>;
+export function boolean<const Options extends FieldOptions<boolean>>(options?: Options): FieldDescriptor<DeclaredValue<Options, boolean>, DeclaredMode<Options>>;
+export function date<const Options extends FieldOptions<string>>(options?: Options): FieldDescriptor<DeclaredValue<Options, string>, DeclaredMode<Options>>;
+export function number<const Options extends FieldOptions<number>>(options?: Options): FieldDescriptor<DeclaredValue<Options, number>, DeclaredMode<Options>>;
 export function json<Value = unknown>(shape?: unknown, options?: FieldOptions<Value>): FieldDescriptor<Value>;
-export function ref(
-  target: string | WorkbenchEntity<any>,
-  options?: FieldOptions<string> & { role?: string | readonly string[] },
-): FieldDescriptor<string>;
+export function ref<const Options extends FieldOptions<string> & { role?: string | readonly string[] }>(
+  target: string | AnyWorkbenchEntity,
+  options?: Options,
+): FieldDescriptor<DeclaredValue<Options, string>, DeclaredMode<Options>>;
 export function hash(options?: FieldOptions<string>): FieldDescriptor<string>;
-export function blob(options?: FieldOptions<string>): FieldDescriptor<string>;
+export function blob<const Options extends FieldOptions<string>>(options?: Options): FieldDescriptor<DeclaredValue<Options, string>, DeclaredMode<Options>>;
 export function link(options?: Readonly<Record<string, unknown>>): FieldDescriptor<Record<string, unknown>>;
 export function map<Value = unknown>(
   value: FieldDescriptor<Value>,
@@ -1024,7 +1038,7 @@ export function ephemeral<Cells extends Record<string, FieldDescriptor | boolean
   cells?: Cells,
 ): FieldDescriptor<unknown>;
 export interface StateFieldFactory {
-  (options?: Readonly<Record<string, unknown>>): FieldDescriptor<string>;
+  <const Options extends { values?: readonly unknown[]; transitions?: Record<string, unknown>; effects?: Record<string, unknown>; auto?: unknown }>(options?: Options): FieldDescriptor<StateValueOf<Options>, 'required'>;
   transition<From extends string, To extends string>(
     from: From,
     to: To,
@@ -1037,6 +1051,10 @@ export interface StateFieldFactory {
   }>;
 }
 export const state: StateFieldFactory;
+
+// A state field's row value: the closed declared domain when it is a literal
+// tuple of names, else plain string.
+type StateValueOf<Options> = Options extends { values: readonly (infer Value)[] } ? (Value extends string ? Value : string) : string;
 export interface ComputedFieldFactory {
   <Value = unknown>(
     options: { compute: (row: Readonly<Record<string, unknown>>) => Value },
@@ -1058,7 +1076,7 @@ export interface ProjectedFieldFactory {
 export const projected: ProjectedFieldFactory;
 export const raster: { crdt(options?: Readonly<Record<string, unknown>>): FieldDescriptor<unknown> };
 export const polyline: { crdt(options?: Readonly<Record<string, unknown>>): FieldDescriptor<unknown> };
-export function vector(dimensions: number, options?: FieldOptions<number[]>): FieldDescriptor<number[]>;
+export function vector<const Options extends FieldOptions<number[]>>(dimensions: number, options?: Options): FieldDescriptor<DeclaredValue<Options, number[]>, DeclaredMode<Options>>;
 
 declare class CapabilityToken<Name extends string> {
   readonly capability: Name;
@@ -1092,11 +1110,11 @@ export const everyone: ScopePredicate;
 export const never: ScopePredicate;
 export function anyOf(...clauses: ScopePredicate[]): ScopePredicate;
 export interface InheritDirective {
-  readonly inherit: WorkbenchEntity<any>;
+  readonly inherit: AnyWorkbenchEntity;
   readonly via: string;
 }
 export function inherit(
-  parent: WorkbenchEntity<any>,
+  parent: AnyWorkbenchEntity,
   options: { via: string },
 ): InheritDirective;
 
@@ -1136,8 +1154,15 @@ export interface AtomicOperationContext {
   readonly scope: string;
   readonly actionId: string;
 }
+/** Opaque compiled-entity handle for runtime-loose slots; any entity fits. */
+export interface AnyWorkbenchEntity {
+  readonly name: string;
+  readonly [member: string]: unknown;
+}
+
 export interface AtomicOperationRegistration {
-  readonly entity: WorkbenchEntity;
+  /** Any compiled entity handle; the atomic pipeline reads it opaquely. */
+  readonly entity: AnyWorkbenchEntity;
   readonly read: (context: AtomicOperationContext) => Readonly<Record<string, unknown>> | Promise<Readonly<Record<string, unknown>>>;
 }
 export type AtomicOperationHandler = ((context: AtomicOperationContext & { readonly atomic: AtomicExecution }) => unknown) & {
@@ -1290,10 +1315,29 @@ export type EntityDeclaration<Row extends object> = Readonly<Record<string, unkn
   /** Explicit allowlist of generated CRUD verbs admitted on POST /workbench/actions. */
   applicationHttpActions?: readonly ApplicationHttpCrudVerb[];
 };
-export function entity<Row extends object = Record<string, unknown>>(
-  name: string,
-  declaration?: EntityDeclaration<Row>,
-): WorkbenchEntity<Row>;
+/** Top-level declaration slots the compiler owns; never row fields. */
+export type ReservedDeclarationSlot =
+  | 'fields' | 'grant' | 'checks' | 'routes' | 'create' | 'effects' | 'admitsEffects'
+  | 'schedule' | 'simulation' | 'gate' | 'on' | 'membership' | 'field' | 'history'
+  | 'indexes' | 'applicationHttpActions' | 'live' | 'tier';
+
+/** The row value one declared field descriptor projects: optional descriptors may be absent/null. */
+type DescriptorRowValue<Descriptor> = Descriptor extends { readonly __value?: infer Value; readonly __mode?: infer Mode }
+  ? Mode extends 'optional' ? Value | null | undefined : Value
+  : unknown;
+
+/** The hydrated row shape derived from an entity declaration record. */
+export type EntityRowOf<Declaration> = {
+  /** Every row carries the primary key, declared or not. */
+  readonly id: string;
+} & {
+  [Key in keyof Declaration as Key extends ReservedDeclarationSlot ? never : Key & string]: DescriptorRowValue<Declaration[Key]>;
+};
+
+export function entity<const Name extends string, const Declaration extends EntityDeclaration<Record<string, unknown>>>(
+  name: Name,
+  declaration?: Declaration,
+): WorkbenchEntity<EntityRowOf<Declaration>>;
 
 export function membership<Row extends object>(
   entity: BoundWorkbenchEntity<Row>,
@@ -1553,7 +1597,7 @@ export interface WorkbenchOptions {
   db?: string | WorkbenchDatabase;
   /** Declares physical SQLite tables. Named entity main tables are never generated. */
   schema?: import('./src/server.js').SqliteSchemaResult;
-  entities?: readonly WorkbenchEntity<any>[];
+  entities?: readonly AnyWorkbenchEntity[];
   actions?: readonly RegisteredAction<any, RegisteredProjection>[];
   port?: number;
   env?: string;
@@ -1784,7 +1828,7 @@ export interface PostCommitEffectDeclaration {
 }
 export function postCommitEffect(input: PostCommitEffectDeclaration): Readonly<PostCommitEffectDeclaration>;
 export interface AuthorizedRowRequirement {
-  readonly entity: string | WorkbenchEntity<any>;
+  readonly entity: string | AnyWorkbenchEntity;
   readonly id: string;
   readonly capability: typeof read | typeof write | typeof subscribe | typeof admin;
 }
@@ -1929,7 +1973,7 @@ export interface WorkbenchApp extends RouteBuilder {
   readonly db?: WorkbenchDatabase;
   readonly routes: readonly unknown[];
   readonly config: Readonly<Record<string, unknown>>;
-  readonly entities: ReadonlyMap<string, BoundWorkbenchEntity<any>>;
+  readonly entities: ReadonlyMap<string, AnyWorkbenchEntity>;
   readonly actions: readonly RegisteredAction<any, RegisteredProjection>[];
   readonly log: WorkbenchLog;
   readonly clock: WorkbenchClock;

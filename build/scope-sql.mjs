@@ -47,9 +47,12 @@ export const PRINCIPAL_ID_TOKEN = Symbol('principalId');
 // rebindable principalAttrToken param" from a literal value. Mirror of
 // PRINCIPAL_ID_TOKEN for the link-identity axis.
 export const PRINCIPAL_ATTR_TOKEN = Symbol('principalAttrToken');
-// Module-private provenance for closed declaration grammar handles.
-const SNAPSHOT_FIELD_HANDLES = new WeakSet        ();
-export const isSnapshotFieldHandle = (handle         )          => SNAPSHOT_FIELD_HANDLES.has(handle          );
+// Module-private provenance for closed declaration grammar handles lives in
+// snapshot.ts (the grammar must stay dependency-free), which also owns the
+// predicate. Real handles register here at creation so `related(...)` and any
+// other brand check accept them.
+export { isSnapshotFieldHandle } from './snapshot.mjs';
+import { registerSnapshotFieldHandle } from './snapshot.mjs';
 
 // A typed load-time failure, sibling to UnawaitedCheckError. Raised when a scope
 // predicate cannot be lowered to SQL.
@@ -157,7 +160,11 @@ function makeIsProxy(registry                         , where        )          
 // The typed handle one compilable field exposes: the value ops (is/in/isNull/
 // gte/lte) plus the special forms the field's kind adds (has for a map,
 // matches for FTS text, nearest for a vector, native event handles for a
-// membership/list/log field). Ops on a non-compilable kind throw.
+// membership/list/log field). The `__value`/`__mode` phantoms are type-level
+// only (never set at runtime): they let declaration utilities read a handle's
+// value type and absence mode, mirroring FieldDescriptor.
+
+
 
 
 
@@ -183,7 +190,19 @@ function makeIsProxy(registry                         , where        )          
 // hand-written handler can write `User.username.is(name)`. The handle also
 // carries its own `fieldName`, so it doubles as a `.select(...)` projection
 // handle. Ops on a non-compilable field kind (crdt/ordered/store) throw.
+// Every produced handle registers as a closed snapshot-grammar handle.
 export function fieldHandle(
+  name        ,
+  descriptor                             ,
+  entityName         ,
+  resolveEntity                               ,
+)              {
+  const handle = buildFieldHandle(name, descriptor, entityName, resolveEntity);
+  registerSnapshotFieldHandle(handle);
+  return handle;
+}
+
+function buildFieldHandle(
   name        ,
   descriptor                             ,
   entityName         ,
@@ -459,7 +478,7 @@ export function fieldHandle(
     };
   }
 
-  SNAPSHOT_FIELD_HANDLES.add(handle);
+  registerSnapshotFieldHandle(handle);
   if (descriptor.type !== 'ref' || descriptor.role || typeof resolveEntity !== 'function') {
     return handle;
   }

@@ -315,7 +315,7 @@ export function readBlob(args: ReadBlobArgs): Promise<Buffer>;
 export const frameworkTableNames: readonly string[];
 
 export function declaredTableNames(
-  entities: readonly WorkbenchEntity<any>[],
+  entities: readonly { name: string }[],
 ): readonly string[];
 
 /** Reject SQL that references a framework-owned table (FROM/JOIN/INTO/UPDATE/TABLE/USING). */

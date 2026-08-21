@@ -24,9 +24,16 @@
 // A declared `validate` option: returns `true` or a human-readable reason.
 
 
+// Absence mode a declaration utility reads off a descriptor: required fields
+// always project; optional ones may be missing/null on a delivered row.
+
+
 // A field descriptor is frozen so no later layer can mutate a declared field.
 // `.can(fn)` returns a NEW frozen descriptor carrying the access function — it
-// never mutates the original (declarations are immutable).
+// never mutates the original (declarations are immutable). The `__value`/
+// `__mode` phantoms are type-level only (never set at runtime): they carry the
+// field's value type and absence mode so entity rows and snapshot projections
+// are DERIVED from the declaration instead of hand-written beside it.
 
 
 
@@ -36,6 +43,16 @@
 
 
 
+
+
+
+
+// The absence mode a descriptor carries for an options literal: `optional`
+// makes the projected key omittable; everything else projects always.
+
+
+// The value a descriptor carries for an options literal: `nullable` widens the
+// base value with null (a column that stores NULL projects null).
 
 
 function makeDescriptor(props              )                  {
@@ -49,7 +66,7 @@ function makeDescriptor(props              )                  {
 
 // `value` kind — a single stored value with whole-value diff. The default
 // mechanism (the bare kind is the sensible default per the naming rule).
-export function text(options               = {})                  {
+export function text                                    (options          = {}           )                                                                         {
   const { oneOf, validate, canonicalize, indexed, ...rest } = options;
   if (canonicalize !== undefined && typeof canonicalize !== 'function') {
     throw new Error('text({ canonicalize }) requires a function');
@@ -74,9 +91,9 @@ export function text(options               = {})                  {
       ...(canonicalize ? { canonicalize } : {}),
       ...(indexed ? { indexed } : {}),
       ...rest,
-    });
+    })                                                                          ;
   }
-  return makeDescriptor({ kind: 'value', type: 'text', validate, ...(canonicalize ? { canonicalize } : {}), ...(indexed ? { indexed } : {}), ...rest });
+  return makeDescriptor({ kind: 'value', type: 'text', validate, ...(canonicalize ? { canonicalize } : {}), ...(indexed ? { indexed } : {}), ...rest })                                                                          ;
 }
 
 export function annotatedText(options               = {})                  {
@@ -139,25 +156,25 @@ export const polyline = {
     makeDescriptor({ kind: 'crdt', type: 'polyline', ...options }),
 };
 
-export function boolean(options               = {})                  {
-  return makeDescriptor({ kind: 'value', type: 'boolean', ...options });
+export function boolean                                    (options          = {}           )                                                                          {
+  return makeDescriptor({ kind: 'value', type: 'boolean', ...options })                                                                           ;
 }
 
-export function date(options               = {})                  {
-  return makeDescriptor({ kind: 'value', type: 'date', ...options });
+export function date                                    (options          = {}           )                                                                         {
+  return makeDescriptor({ kind: 'value', type: 'date', ...options })                                                                          ;
 }
 
 // `number()` — a value-kind scalar (integer or float), stored as-is (SQLite
 // binds JS numbers directly).
-export function number(options               = {})                  {
-  return makeDescriptor({ kind: 'value', type: 'number', ...options });
+export function number                                    (options          = {}           )                                                                         {
+  return makeDescriptor({ kind: 'value', type: 'number', ...options })                                                                          ;
 }
 
 // `json(shape)` — a value-kind structured JSON cell stored as TEXT. `shape` is
 // declared config retained for future path/index support; app-specific runtime
 // validation still belongs in the ordinary `validate` option.
-export function json(shape          = null, options               = {})                  {
-  return makeDescriptor({ kind: 'value', type: 'json', shape, ...options });
+export function json                                    (shape          = null, options          = {}           )                                                                          {
+  return makeDescriptor({ kind: 'value', type: 'json', shape, ...options })                                                                           ;
 }
 
 // `hash()` — a one-way salted password digest. Its own KIND (not `value`): a
@@ -170,11 +187,11 @@ export function json(shape          = null, options               = {})         
 // vector of length 1536). Cosine similarity search is brute-force (pure JS,
 // zero runtime dependencies) — loads all rows, computes similarity, returns
 // top-K. Same pattern as Scope's `Json` Prisma type.
-export function vector(dimensions        , options               = {})                  {
+export function vector                                    (dimensions        , options          = {}           )                                                                           {
   if (typeof dimensions !== 'number' || dimensions <= 0 || !Number.isInteger(dimensions)) {
     throw new Error('vector(dimensions) requires a positive integer dimension count');
   }
-  return makeDescriptor({ kind: 'value', type: 'vector', dimensions, ...options });
+  return makeDescriptor({ kind: 'value', type: 'vector', dimensions, ...options })                                                                            ;
 }
 
 export function hash(options               = {})                  {
@@ -183,9 +200,10 @@ export function hash(options               = {})                  {
 
 // `ref(Target)` — a typed foreign key. `target` is explicit (no opaque sugar).
 // `role` lets the entity compiler derive `is.<role>()` from the FK (the only
-// thing the FK derives — no zero-to-one default grant, ADR #7).
-export function ref(target         , options               = {})                  {
-  return makeDescriptor({ kind: 'value', type: 'ref', target, ...options });
+// thing the FK derives — no zero-to-one default grant, ADR #7). A ref projects
+// (and queries by) the target row's TEXT id.
+export function ref                                    (target         , options          = {}           )                                                                         {
+  return makeDescriptor({ kind: 'value', type: 'ref', target, ...options })                                                                          ;
 }
 
 // `blob()` — a value-kind TEXT holding a blob id (a reference into the
@@ -194,8 +212,8 @@ export function ref(target         , options               = {})                
 // create/update carrying a blob id adopts that blob IN the dispatch commit
 // (spec #2). The marker rides the descriptor; one declared field feeds the
 // read/write/grant paths AND the adopter, not a parallel registration.
-export function blob(options               = {})                  {
-  return makeDescriptor({ kind: 'value', type: 'text', blob: true, ...options });
+export function blob                                    (options          = {}           )                                                                         {
+  return makeDescriptor({ kind: 'value', type: 'text', blob: true, ...options })                                                                          ;
 }
 
 // `link({ tiers, tier, token })` — the framework's first STRUCTURED field: one
@@ -396,12 +414,8 @@ export function ephemeral(cells                          = {})                  
 //
 // Import-surface scope: this constructor delivers the descriptor the entity
 // compiler accepts. The compiler owns transition enforcement and auto lowering.
-export function state({ values, transitions, effects, auto }
-
-
-
-
-  = {})                  {
+export function state                                                                                                                                                 (options          = {}           )                                                     {
+  const { values, transitions, effects, auto } = options;
   return makeDescriptor({
     kind: 'state',
     type: 'state',
@@ -409,12 +423,16 @@ export function state({ values, transitions, effects, auto }
     transitions: Object.freeze({ ...(transitions ?? {}) }),
     effects: Object.freeze({ ...(effects ?? {}) }),
     auto,
-  });
+  })                                                      ;
 }
+
+// A state field's row value: the closed declared domain when it is a literal
+// tuple of names, else plain string.
+                                                                                                                                    ;
 // A typed transition handle. It stringifies to a stable identifier encoding the
 // from→to pair, so the same pair always yields the same computed-object key in
 // an `effects` map — a derived identifier, never a magic string literal.
-;
+
 
 
 

@@ -62,17 +62,64 @@ function looksLikeFieldDescriptor(value: any) {
   return value !== null && typeof value === 'object' && typeof value.kind === 'string';
 }
 
-export function entity(name: any, declaration: any = {}) {
-  if (Object.hasOwn(declaration, 'fields')) {
+// ---- declaration typing ----
+//
+// The compiler is untyped at runtime (declarations arrive as arbitrary
+// records), but the SIGNATURE carries the declaration's shape: the returned
+// entity's Row is derived from the declared field descriptors, so field
+// handles (`Entity.field.name`) carry literal names and value types. Snapshot
+// declarations and projection types flow from that — never hand-written.
+
+/** Top-level declaration slots the compiler owns; never row fields. Mirrors RESERVED_DECLARATION_SLOTS below. */
+export type ReservedDeclarationSlot =
+  | 'fields' | 'grant' | 'checks' | 'routes' | 'create' | 'effects' | 'admitsEffects'
+  | 'schedule' | 'simulation' | 'gate' | 'on' | 'membership' | 'field' | 'history'
+  | 'indexes' | 'applicationHttpActions' | 'live' | 'tier';
+
+/** The row value one declared field descriptor projects: optional descriptors may be absent/null. */
+type DescriptorRowValue<Descriptor> = Descriptor extends { readonly __value?: infer Value; readonly __mode?: infer Mode }
+  ? Mode extends 'optional' ? Value | null | undefined : Value
+  : unknown;
+
+/** The hydrated row shape derived from an entity declaration record. */
+export type EntityRowOf<Declaration> = {
+  [Key in keyof Declaration as Key extends ReservedDeclarationSlot ? never : Key & string]: DescriptorRowValue<Declaration[Key]>;
+};
+
+/** The typed field namespace of a derived row: literal names carrying value/mode phantoms. */
+export type EntityFieldsOf<Row extends object> = { readonly id: { readonly fieldName: 'id' } } & {
+  [Key in keyof Row & string]-?: {
+    readonly fieldName: Key;
+    readonly __value?: Row[Key];
+    readonly __mode?: undefined extends Row[Key] ? 'optional' : 'required';
+  };
+};
+
+/** The compiled entity handle as the runtime consumes it — loose beyond the typed name/field surface. */
+export interface CompiledEntity<Row extends object = Record<string, unknown>> {
+  readonly name: string;
+  readonly fields: Readonly<Record<string, any>>;
+  readonly field: EntityFieldsOf<Row>;
+  readonly [member: string]: any;
+}
+
+export function entity<const Name extends string, const Declaration extends Record<string, unknown>>(
+  name: Name,
+  declaration: Declaration = {} as Declaration,
+): CompiledEntity<EntityRowOf<Declaration>> {
+  // The compiler body stays untyped (declarations arrive as arbitrary records);
+  // only the SIGNATURE above carries the derived row shape.
+  const decl = declaration as Record<string, any>;
+  if (Object.hasOwn(decl, 'fields')) {
     throw new Error(
       `entity('${name}') uses the retired fields wrapper. Declare fields directly on ` +
         `the entity object; 'fields' is a reserved declaration slot.`,
     );
   }
   for (const key of RESERVED_DECLARATION_SLOTS) {
-    const value = declaration[key];
+    const value = decl[key];
     const isDeclaredSimulation = key === 'simulation' && value?.kind === 'simulate';
-    if (Object.hasOwn(declaration, key) && looksLikeFieldDescriptor(value) && !isDeclaredSimulation) {
+    if (Object.hasOwn(decl, key) && looksLikeFieldDescriptor(value) && !isDeclaredSimulation) {
       throw new Error(
         `entity('${name}') field '${key}' collides with a reserved declaration slot. ` +
           `Rename the field.`,
@@ -80,7 +127,7 @@ export function entity(name: any, declaration: any = {}) {
     }
   }
 
-  const { grant, checks: declaredChecksIn = {}, membership: membershipDecl, routes, create: createPolicy, effects = null, admitsEffects = null, schedule = {}, simulation = null, gate: declaredGate = {}, history: historyDecl, live: liveDecl, tier: tierDecl, indexes: indexesDecl, applicationHttpActions: declaredApplicationHttpActions } = declaration;
+  const { grant, checks: declaredChecksIn = {}, membership: membershipDecl, routes, create: createPolicy, effects = null, admitsEffects = null, schedule = {}, simulation = null, gate: declaredGate = {}, history: historyDecl, live: liveDecl, tier: tierDecl, indexes: indexesDecl, applicationHttpActions: declaredApplicationHttpActions } = decl;
   // S3/A1 — the tier declaration: `history`/`live`/`tier` normalize into a
   // resolved live-data tier (default `history`/full — zero behavior change for
   // existing declarations). Validation fails HERE at declaration compile, never
@@ -127,7 +174,7 @@ export function entity(name: any, declaration: any = {}) {
   // developer intended a field, the compiler owns the slot — fail closed rather
   // than silently drop the field).
   const fields: Record<string, any> = {};
-  for (const [key, value] of Object.entries(declaration)) {
+  for (const [key, value] of Object.entries(decl)) {
     if (RESERVED_DECLARATION_SLOTS.has(key)) continue;
     fields[key] = value;
   }
