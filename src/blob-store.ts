@@ -148,6 +148,17 @@ export interface BlobStore {
    */
   readRangeStream(id: string, range?: [start?: number, end?: number], options?: { signal?: AbortSignal }): Readable;
   /**
+   * Stream a PENDING-slot write WITHOUT materializing the bytes (#738 W2):
+   * chunks flow to the byte store under natural backpressure while md5/sha256
+   * are computed on the way past. Resolves with the attested byteLength +
+   * digests of EXACTLY what landed; `maxBytes` aborts MID-STREAM (the typed
+   * `BlobTooLargeError`) and no readable pending slot survives a failed or
+   * aborted write. Like upload, records the generation's 'pending' metadata
+   * row (mime defaults to null) — the ONLY production caller is the
+   * pending-blob stager, which supplies the id and reads the attestation.
+   */
+  writePendingStream(id: string, bytes: AsyncIterable<Uint8Array>, options?: { maxBytes?: number; mime?: string }): Promise<{ byteLength: number; sha256: string; md5: string }>;
+  /**
    * Stream a PENDING-slot range as a Node Readable (large media), cancellable
    * via an AbortSignal (#738 W1). Same strict bounds and missing-slot signal
    * (BlobSlotNotFoundError) as readPending; the ONLY caller is the pending-blob
@@ -263,7 +274,7 @@ export function createBlobStore({ root, stagingRoot, db, bytes, lowDiskHeadroomB
   // be passed directly as `root`'s replacement once a caller hands a store in.
   const store: ByteStore = bytes
     ?? fsBlobs(stagingRoot ? { root: root as string, stagingRoot } : { root: root as string });
-  const { writePending, finalizePending, readRange, readPending, readRangeStream, readPendingStream, remove, exists } = store;
+  const { writePending, writePendingStream, finalizePending, readRange, readPending, readRangeStream, readPendingStream, remove, exists } = store;
 
   // The low-disk guard (#27): before accepting a NEW upload, a durable byte
   // store must declare free space at or above the configured headroom — else
@@ -278,6 +289,14 @@ export function createBlobStore({ root, stagingRoot, db, bytes, lowDiskHeadroomB
       ? (store as { freeBytes: () => number | null }).freeBytes()
       : null;
     if (freeBytes === null || freeBytes < lowDiskHeadroomBytes) throw lowDiskError();
+  }
+
+  // The metadata half shared by both upload paths: one 'pending' BlobStore row
+  // for bytes that already landed (or, for upload, were just written).
+  function recordPendingRow(blobId: string, attested: { byteLength: number; md5: string; sha256: string }, mime: string | null): void {
+    db.prepare(
+      'INSERT INTO BlobStore (id, status, md5, sha256, size, mime, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    ).run(blobId, 'pending', attested.md5, attested.sha256, attested.byteLength, mime, new Date().toISOString());
   }
 
   function upload({ bytes: uploadBytes, mime, id }: BlobUploadOptions = { bytes: undefined as never }) {
@@ -297,14 +316,9 @@ export function createBlobStore({ root, stagingRoot, db, bytes, lowDiskHeadroomB
     const sha256 = sha256Hash.digest('hex');
 
     writePending(blobId, uploadBytes);
+    recordPendingRow(blobId, { byteLength: uploadBytes.length, md5, sha256 }, mime ?? null);
 
-    const now = new Date().toISOString();
-    const mimeValue = mime ?? null;
-    db.prepare(
-      'INSERT INTO BlobStore (id, status, md5, sha256, size, mime, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    ).run(blobId, 'pending', md5, sha256, uploadBytes.length, mimeValue, now);
-
-    return { id: blobId, md5, sha256, size: uploadBytes.length, mime: mimeValue };
+    return { id: blobId, md5, sha256, size: uploadBytes.length, mime: mime ?? null };
   }
 
   // adopt runs the metadata UPDATE in the CALLER'S transaction. It touches NO
@@ -353,6 +367,20 @@ export function createBlobStore({ root, stagingRoot, db, bytes, lowDiskHeadroomB
   function readPendingStreamBytes(id: string, range?: [start?: number, end?: number], options?: { signal?: AbortSignal }): Readable {
     safeId(id);
     return readPendingStream(id, range, options);
+  }
+
+  // Pending-slot stream write (#738 W2): id validation + the same low-disk
+  // guard as upload (a streamed payload lands on disk too), then straight to
+  // the byte store — hash-while-write, mid-stream maxBytes abort. On success
+  // it records the generation's 'pending' metadata row from the ATTESTED
+  // values (the same row upload writes), so validateClaim's stat() check sees
+  // identical metadata whichever path staged the bytes.
+  async function writePendingStreamBytes(id: string, bytes: AsyncIterable<Uint8Array>, { mime, ...limits }: { maxBytes?: number; mime?: string } = {}) {
+    safeId(id);
+    assertDiskHeadroom();
+    const attested = await writePendingStream(id, bytes, limits);
+    recordPendingRow(id, attested, mime ?? null);
+    return attested;
   }
 
   // Pending-blob lifecycle owns removal of staged generations. This is not an
@@ -651,6 +679,7 @@ export function createBlobStore({ root, stagingRoot, db, bytes, lowDiskHeadroomB
     readRange: readRangeBytes,
     readPending: readPendingBytes,
     readRangeStream: readRangeStreamBytes,
+    writePendingStream: writePendingStreamBytes,
     readPendingStream: readPendingStreamBytes,
     discardPending,
     discard,

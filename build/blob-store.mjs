@@ -154,6 +154,17 @@ function safeId(id         )       {
 
 
 
+                                  
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -263,7 +274,7 @@ export function createBlobStore({ root, stagingRoot, db, bytes, lowDiskHeadroomB
   // be passed directly as `root`'s replacement once a caller hands a store in.
   const store            = bytes
     ?? fsBlobs(stagingRoot ? { root: root          , stagingRoot } : { root: root           });
-  const { writePending, finalizePending, readRange, readPending, readRangeStream, readPendingStream, remove, exists } = store;
+  const { writePending, writePendingStream, finalizePending, readRange, readPending, readRangeStream, readPendingStream, remove, exists } = store;
 
   // The low-disk guard (#27): before accepting a NEW upload, a durable byte
   // store must declare free space at or above the configured headroom — else
@@ -278,6 +289,14 @@ export function createBlobStore({ root, stagingRoot, db, bytes, lowDiskHeadroomB
       ? (store                                      ).freeBytes()
       : null;
     if (freeBytes === null || freeBytes < lowDiskHeadroomBytes) throw lowDiskError();
+  }
+
+  // The metadata half shared by both upload paths: one 'pending' BlobStore row
+  // for bytes that already landed (or, for upload, were just written).
+  function recordPendingRow(blobId        , attested                                                     , mime               )       {
+    db.prepare(
+      'INSERT INTO BlobStore (id, status, md5, sha256, size, mime, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    ).run(blobId, 'pending', attested.md5, attested.sha256, attested.byteLength, mime, new Date().toISOString());
   }
 
   function upload({ bytes: uploadBytes, mime, id }                    = { bytes: undefined          }) {
@@ -297,14 +316,9 @@ export function createBlobStore({ root, stagingRoot, db, bytes, lowDiskHeadroomB
     const sha256 = sha256Hash.digest('hex');
 
     writePending(blobId, uploadBytes);
+    recordPendingRow(blobId, { byteLength: uploadBytes.length, md5, sha256 }, mime ?? null);
 
-    const now = new Date().toISOString();
-    const mimeValue = mime ?? null;
-    db.prepare(
-      'INSERT INTO BlobStore (id, status, md5, sha256, size, mime, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    ).run(blobId, 'pending', md5, sha256, uploadBytes.length, mimeValue, now);
-
-    return { id: blobId, md5, sha256, size: uploadBytes.length, mime: mimeValue };
+    return { id: blobId, md5, sha256, size: uploadBytes.length, mime: mime ?? null };
   }
 
   // adopt runs the metadata UPDATE in the CALLER'S transaction. It touches NO
@@ -353,6 +367,20 @@ export function createBlobStore({ root, stagingRoot, db, bytes, lowDiskHeadroomB
   function readPendingStreamBytes(id        , range                                 , options                           )           {
     safeId(id);
     return readPendingStream(id, range, options);
+  }
+
+  // Pending-slot stream write (#738 W2): id validation + the same low-disk
+  // guard as upload (a streamed payload lands on disk too), then straight to
+  // the byte store — hash-while-write, mid-stream maxBytes abort. On success
+  // it records the generation's 'pending' metadata row from the ATTESTED
+  // values (the same row upload writes), so validateClaim's stat() check sees
+  // identical metadata whichever path staged the bytes.
+  async function writePendingStreamBytes(id        , bytes                           , { mime, ...limits }                                       = {}) {
+    safeId(id);
+    assertDiskHeadroom();
+    const attested = await writePendingStream(id, bytes, limits);
+    recordPendingRow(id, attested, mime ?? null);
+    return attested;
   }
 
   // Pending-blob lifecycle owns removal of staged generations. This is not an
@@ -651,6 +679,7 @@ export function createBlobStore({ root, stagingRoot, db, bytes, lowDiskHeadroomB
     readRange: readRangeBytes,
     readPending: readPendingBytes,
     readRangeStream: readRangeStreamBytes,
+    writePendingStream: writePendingStreamBytes,
     readPendingStream: readPendingStreamBytes,
     discardPending,
     discard,

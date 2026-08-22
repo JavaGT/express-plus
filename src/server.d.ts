@@ -268,6 +268,43 @@ export interface ClaimedBlobLifecycle {
 export function claimedBlobLifecycle(workbench: import('../index.d.ts').WorkbenchApp): ClaimedBlobLifecycle;
 export type StagedBlobRead = Readonly<{ byteLength: number; sha256: string; readRange(range?: readonly [number, number]): Buffer }>;
 export function stagedBlobReader(workbench: import('../index.d.ts').WorkbenchApp, authenticatedPrincipal: Principal, claim: PendingBlobClaim): StagedBlobRead;
+
+/**
+ * The pending-blob claim machinery mounted on a started app
+ * (`app.pendingBlobLifecycle`): stages uploads as claims, admits reads only
+ * through admitted claims, and owns finalization/deletion recovery.
+ */
+export interface PendingBlobLifecycle {
+  stage(principal: Principal, request: StagePendingBlobRequest): Promise<StagedPendingBlob>;
+  validateClaim(args: {
+    claim: unknown;
+    field: string;
+    resourceId: string;
+    actionName: string;
+    actionId: string;
+    authenticatedPrincipal: Principal;
+    scopeId: string;
+    committedEventId: string;
+  }): Promise<import('../index.d.ts').DeclaredClaimedBlob>;
+  requestDeletion(args: { blobId: unknown; resourceId: string; actionName: string; actionId: string; scopeId: string }): Promise<boolean>;
+  /** Claim-gated byte read (S6/A4) — admitted claims ('claimed'/'finalized' rows) only. */
+  readClaimed(blobId: string, range?: [start?: number, end?: number]): Buffer;
+  /**
+   * The streaming claimed read (#738 W1): the same claim admission and slot
+   * fallback as {@link PendingBlobLifecycle.readClaimed}, served as a Node
+   * Readable. Cancellable via an AbortSignal; no digest attestation — the
+   * claim row IS the gate. A missing slot in BOTH slots throws the typed
+   * `BlobSlotNotFoundError`.
+   */
+  readClaimedStream(blobId: string, range?: [start?: number, end?: number], options?: { signal?: AbortSignal }): Readable;
+  /** Capability-gated staged-bytes reader (#691) — usable BEFORE the committing action exists. */
+  readStagedClaim(authenticatedPrincipal: Principal, claim: unknown): StagedBlobRead;
+  status(blobId: string): string | null;
+  reconcile(): Promise<void>;
+  reap(): Promise<void>;
+  consumer(): Promise<void>;
+}
+
 export type DeclaredBlobField = import('../index.d.ts').DeclaredBlobField;
 export function declaredBlobField(field: DeclaredBlobField): DeclaredBlobField;
 
@@ -309,6 +346,26 @@ export class BlobReadDeniedError extends Error {
  * collapses into one generic BlobReadDeniedError.
  */
 export function readBlob(args: ReadBlobArgs): Promise<Buffer>;
+
+/** Streaming variant of {@link ReadBlobArgs} (#738 W1): the claim-gated reader returns a Node Readable instead of a Buffer. */
+export interface ReadBlobStreamArgs extends Omit<ReadBlobArgs, 'read'> {
+  /**
+   * The claim-gated byte STREAM reader the app wires to the byte store /
+   * pending-blob claim machinery. It runs only AFTER admission; a synchronous
+   * failure constructing the stream (missing bytes → the typed missing-slot
+   * error) surfaces as the same generic denial.
+   */
+  readonly read: (range?: [start?: number, end?: number]) => Readable;
+}
+
+/**
+ * The authorized blob read, streaming variant (#738 W1): the SAME
+ * admit-then-serve ordering as {@link readBlob} — admission completes before
+ * `read` is called, so no chunk can flow through a denied or unadmitted read —
+ * and the SAME generic-denial collapse. A synchronously throwing stream
+ * construction denies BEFORE any streaming starts.
+ */
+export function readBlobStream(args: ReadBlobStreamArgs): Promise<Readable>;
 
 // ---------------------------------------------------------------------------
 // Framework table names (derived from DDL generators)
@@ -407,6 +464,16 @@ export interface ByteStoreCapabilities {
 export class BlobSlotNotFoundError extends Error {}
 
 /**
+ * The typed signal writePendingStream throws when a streamed payload exceeds
+ * its `maxBytes` — raised MID-STREAM (the write aborts as soon as the bound is
+ * crossed, never after buffering the whole payload). Consumers branch on this
+ * TYPE, never on a message string, exactly like BlobSlotNotFoundError.
+ */
+export class BlobTooLargeError extends Error {
+  readonly limit: number;
+}
+
+/**
  * The byte-store contract — what `createBlobStore`'s `bytes` option must
  * provide, and what any conforming backend (fs, memory, or a future S3
  * adapter) guarantees. Each method's guarantee is PART OF THE TYPE: the blob
@@ -472,6 +539,37 @@ export interface ByteStore {
     range?: [start?: number, end?: number],
     options?: { signal?: AbortSignal },
   ): Readable;
+
+  /**
+   * Stream the PENDING-slot range `[start, end)` as a Node Readable — the
+   * streaming counterpart of readPending for large-media downloads in the
+   * claimed window (#738 W1). Its only caller is the pending-blob claim
+   * machinery after its durable state transition selected a claimed generation;
+   * there is no generic pending stream. Same strict bounds as readPending; a
+   * missing pending slot throws the typed `BlobSlotNotFoundError` BEFORE any
+   * stream exists. Cancellable via an AbortSignal exactly like readRangeStream.
+   */
+  readPendingStream(
+    id: string,
+    range?: [start?: number, end?: number],
+    options?: { signal?: AbortSignal },
+  ): Readable;
+
+  /**
+   * Stream `bytes` into the pending slot WITHOUT materializing the whole
+   * payload (#738 W2): chunks flow to storage under natural backpressure while
+   * md5/sha256 are computed on the way past. Resolves with the attested
+   * byteLength + digests of EXACTLY what landed. `maxBytes`, when given,
+   * aborts MID-STREAM once exceeded (the typed `BlobTooLargeError`); every
+   * chunk must be a Uint8Array (TypeError). A failed or aborted write removes
+   * the torn pending slot (best-effort; residue is reaper-benign) — only a
+   * COMPLETED write leaves a pending slot behind.
+   */
+  writePendingStream(
+    id: string,
+    bytes: AsyncIterable<Uint8Array>,
+    options?: { maxBytes?: number },
+  ): Promise<{ byteLength: number; sha256: string; md5: string }>;
 
   /**
    * Delete the pending (`pending: true`) or final (`pending: false`) slot.
@@ -557,6 +655,15 @@ export interface BlobStore {
   readRange(id: string, range?: [start?: number, end?: number]): Buffer;
   readPending(id: string, range?: [start?: number, end?: number]): Buffer;
   readRangeStream(id: string, range?: [start?: number, end?: number], options?: { signal?: AbortSignal }): Readable;
+  /**
+   * Stream a PENDING-slot write WITHOUT materializing the bytes (#738 W2):
+   * hash-while-write, mid-stream `maxBytes` abort (typed BlobTooLargeError),
+   * no readable pending slot after a failed or aborted write. Records the
+   * generation's 'pending' metadata row from the ATTESTED values — the same
+   * row upload writes. The ONLY production caller is the pending-blob stager.
+   */
+  writePendingStream(id: string, bytes: AsyncIterable<Uint8Array>, options?: { maxBytes?: number; mime?: string }): Promise<{ byteLength: number; sha256: string; md5: string }>;
+  readPendingStream(id: string, range?: [start?: number, end?: number], options?: { signal?: AbortSignal }): Readable;
   discardPending(id: string): void;
   discard(id: string): void;
   /**
@@ -1180,7 +1287,7 @@ export type LiveDeliveryCursor = number | Readonly<{ anchor: number; aggregate: 
 export type LiveDeliveryBootstrap<Snapshot = unknown> =
   | { readonly kind: 'snapshot'; readonly snapshot: Snapshot; readonly cursor: LiveDeliveryCursor }
   | { readonly kind: 'revoked'; readonly reason?: unknown }
-  | { readonly kind: 'retry' };
+  | { readonly kind: 'retry'; readonly reason?: LiveRetryReason };
 
 export type LiveDeliveryCatchup =
   | {
@@ -1190,7 +1297,13 @@ export type LiveDeliveryCatchup =
   }
   | { readonly kind: 'snapshot'; readonly snapshot: unknown; readonly cursor: LiveDeliveryCursor }
   | { readonly kind: 'revoked'; readonly reason?: unknown }
-  | { readonly kind: 'retry' };
+  | { readonly kind: 'retry'; readonly reason?: LiveRetryReason };
+
+/**
+ * Additive machine-readable diagnostics on bootstrap-path retries (#815).
+ * Clients treat it as opaque; retry semantics are unchanged.
+ */
+export type LiveRetryReason = 'cursor-moved' | 'fence-mismatch' | 'lease-budget-exhausted' | 'snapshot-contention';
 
 export interface LiveDeliveryEntity {
   readonly name: string;

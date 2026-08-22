@@ -21,10 +21,11 @@
 // in-process restart) or start a fresh backing (a process boundary). NOT a
 // production store: bytes never survive a process exit.
 
+import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 
 import type { ByteStore, ByteStoreCapabilities, ByteStoreTestDebugHandle } from './fs-blobs.ts';
-import { abortError, BlobSlotNotFoundError, validateBlobRange } from './fs-blobs.ts';
+import { abortError, BlobSlotNotFoundError, BlobTooLargeError, validateBlobRange } from './fs-blobs.ts';
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -71,6 +72,37 @@ export function memoryBlobs({ backing }: MemoryBlobsOptions = {}): ByteStore & B
     safeId(id);
     // Copy: mutating the caller's buffer afterwards must not corrupt the store.
     pending.set(id, Buffer.from(bytes));
+  }
+
+  // The streaming pending-slot write (#738 W2): same contract as fsBlobs —
+  // hash-while-write, mid-stream maxBytes abort (typed BlobTooLargeError),
+  // torn slot never left behind. As an EPHEMERAL backend it may concatenate
+  // chunks into one buffer; that materialization is the declared price of
+  // ephemeral storage, not the production media path.
+  async function writePendingStream(
+    id: string,
+    bytes: AsyncIterable<Uint8Array>,
+    { maxBytes }: { maxBytes?: number } = {},
+  ): Promise<{ byteLength: number; sha256: string; md5: string }> {
+    safeId(id);
+    if (maxBytes !== undefined && (!Number.isFinite(maxBytes) || maxBytes < 0)) {
+      throw new Error('invalid maxBytes');
+    }
+    const md5Hash = createHash('md5');
+    const sha256Hash = createHash('sha256');
+    const chunks: Buffer[] = [];
+    let byteLength = 0;
+    for await (const chunk of bytes) {
+      if (!(chunk instanceof Uint8Array)) throw new TypeError('streamed blob chunk must be Uint8Array');
+      const size = byteLength + chunk.length;
+      if (maxBytes !== undefined && size > maxBytes) throw new BlobTooLargeError(maxBytes);
+      byteLength = size;
+      md5Hash.update(chunk);
+      sha256Hash.update(chunk);
+      chunks.push(Buffer.from(chunk));
+    }
+    pending.set(id, Buffer.concat(chunks));
+    return { byteLength, sha256: sha256Hash.digest('hex'), md5: md5Hash.digest('hex') };
   }
 
   function finalizePending(id: string): string {
@@ -163,6 +195,7 @@ export function memoryBlobs({ backing }: MemoryBlobsOptions = {}): ByteStore & B
   return {
     capabilities,
     writePending,
+    writePendingStream,
     finalizePending,
     readRange,
     readPending,

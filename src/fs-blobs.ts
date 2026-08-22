@@ -59,6 +59,17 @@
 //     backend may serve the whole range as one chunk (memory) or stream it
 //     from real storage (fs); the guarantee is the same bytes + cancellation.
 //
+//   writePendingStream(id, bytes, { maxBytes })
+//     Stream `bytes` (an AsyncIterable<Uint8Array>) into the pending slot
+//     WITHOUT materializing the whole payload (#738 W2): chunks flow to
+//     storage under natural backpressure while md5/sha256 are computed on the
+//     way past. Resolves with the attested byteLength + digests of EXACTLY
+//     what landed. `maxBytes` (when given) aborts MID-STREAM once exceeded. A
+//     failed/aborted write removes the torn pending slot (best-effort; residue
+//     is reaper-benign) — only a COMPLETED write leaves a pending slot, and
+//     only finalizePending ever creates a final slot, so a torn write can
+//     never become readable final bytes. Every chunk must be a Uint8Array.
+//
 //   remove(id, { pending })
 //     Delete the pending (`pending: true`) or final (`pending: false`) slot.
 //     Idempotent: a missing slot is a no-op (ENOENT swallowed) — the reaper
@@ -116,8 +127,11 @@ import {
   statSync,
   statfsSync,
   createReadStream,
+  createWriteStream,
 } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import path from 'node:path';
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
@@ -165,6 +179,19 @@ export class BlobSlotNotFoundError extends Error {
   }
 }
 
+// The typed signal writePendingStream throws when the streamed payload exceeds
+// `maxBytes` — raised MID-STREAM (the write aborts as soon as the bound is
+// crossed, never after buffering the whole payload). Consumers branch on this
+// TYPE, never on a message string, exactly like BlobSlotNotFoundError.
+export class BlobTooLargeError extends Error {
+  readonly limit: number;
+  constructor(limit: number) {
+    super(`blob exceeds ${limit} bytes`);
+    this.name = 'BlobTooLargeError';
+    this.limit = limit;
+  }
+}
+
 export interface ByteStore {
   /** Queryable, honest capability declaration. A backend must not overstate it. */
   readonly capabilities: ByteStoreCapabilities;
@@ -176,6 +203,23 @@ export interface ByteStore {
    * Buffers before calling.
    */
   writePending(id: string, bytes: Uint8Array): void;
+
+  /**
+   * Stream `bytes` into the pending slot WITHOUT materializing the whole
+   * payload (#738 W2): chunks flow to storage under natural backpressure while
+   * md5/sha256 are computed on the way past. Resolves with the attested
+   * byteLength + digests of EXACTLY what landed — the values a conforming
+   * caller records as its digest attestation. `maxBytes`, when given, aborts
+   * MID-STREAM once exceeded (the typed `BlobTooLargeError`); every chunk must
+   * be a Uint8Array (TypeError). A failed or aborted write removes the torn
+   * pending slot (best-effort; residue is reaper-benign) — only a COMPLETED
+   * write leaves a pending slot behind.
+   */
+  writePendingStream(
+    id: string,
+    bytes: AsyncIterable<Uint8Array>,
+    options?: { maxBytes?: number },
+  ): Promise<{ byteLength: number; sha256: string; md5: string }>;
 
   /**
    * Promote the pending slot to the final slot. The durability MUST is scoped
@@ -366,6 +410,51 @@ export function fsBlobs({ root, stagingRoot }: FsBlobsOptions): ByteStore & Byte
     writeFileSync(pathFor(id, { pending: true }), bytes);
   }
 
+  // The streaming pending-slot write (#738 W2). One shared pipeline: the
+  // source iterable feeds a metering Transform that (a) hashes each chunk on
+  // the way past and (b) aborts MID-STREAM once maxBytes is exceeded. fs
+  // backpressure bounds in-flight memory to the pipe buffer — the payload is
+  // never materialized as one whole buffer. On any failure the torn pending
+  // file is removed (best-effort; residue is reaper-benign), so only a
+  // COMPLETED write leaves a pending slot.
+  async function writePendingStream(
+    id: string,
+    bytes: AsyncIterable<Uint8Array>,
+    { maxBytes }: { maxBytes?: number } = {},
+  ): Promise<{ byteLength: number; sha256: string; md5: string }> {
+    safeId(id);
+    if (maxBytes !== undefined && (!Number.isFinite(maxBytes) || maxBytes < 0)) {
+      throw new Error('invalid maxBytes');
+    }
+    const md5Hash = createHash('md5');
+    const sha256Hash = createHash('sha256');
+    let byteLength = 0;
+    const filePath = pathFor(id, { pending: true });
+    try {
+      await pipeline(
+        Readable.from(bytes),
+        async function* meter(source) {
+          for await (const chunk of source) {
+            if (!(chunk instanceof Uint8Array)) throw new TypeError('streamed blob chunk must be Uint8Array');
+            const size = byteLength + chunk.length;
+            if (maxBytes !== undefined && size > maxBytes) throw new BlobTooLargeError(maxBytes);
+            byteLength = size;
+            md5Hash.update(chunk);
+            sha256Hash.update(chunk);
+            yield chunk;
+          }
+        },
+        createWriteStream(filePath),
+      );
+    } catch (error) {
+      // Torn pending slot: remove it so no readable partial slot survives the
+      // failure (the reaper treats residue as benign either way).
+      try { unlinkSync(filePath); } catch {}
+      throw error;
+    }
+    return { byteLength, sha256: sha256Hash.digest('hex'), md5: md5Hash.digest('hex') };
+  }
+
   function finalizePending(id: string): string {
     safeId(id);
     const pendingPath = pathFor(id, { pending: true });
@@ -489,6 +578,7 @@ export function fsBlobs({ root, stagingRoot }: FsBlobsOptions): ByteStore & Byte
   return {
     capabilities,
     writePending,
+    writePendingStream,
     finalizePending,
     readRange,
     readPending,

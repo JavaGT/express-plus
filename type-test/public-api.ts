@@ -525,10 +525,17 @@ const customByteStore: ByteStore = {
     deleteVerification: true, consistency: 'single-node-strong',
   },
   writePending: (id, bytes) => void [id, bytes],
+  writePendingStream: async (id, bytes) => {
+    let byteLength = 0;
+    for await (const chunk of bytes) byteLength += chunk.length;
+    void id;
+    return { byteLength, sha256: '', md5: '' };
+  },
   finalizePending: () => '',
   readRange: () => Buffer.alloc(0),
   readPending: () => Buffer.alloc(0),
   readRangeStream: () => new Readable(),
+  readPendingStream: () => new Readable(),
   remove: () => {},
   exists: () => false,
 };

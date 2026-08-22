@@ -1,4 +1,4 @@
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 
 import { txn,               } from './driver.mjs';
 import { principalKeyOf,                } from './principal.mjs';
@@ -10,22 +10,6 @@ import { BlobSlotNotFoundError } from './fs-blobs.mjs';
 function failure(code        )        { const error = new Error(code)                             ; error.code = code; throw error; }
 function token()         { return randomBytes(32).toString('base64url'); }
 function hash(value        )         { return createHash('sha256').update(value).digest('hex'); }
-
-async function bytesOf(bytes         )                      {
-  if (bytes instanceof Uint8Array) return bytes;
-  if (!bytes || typeof (bytes                                        )[Symbol.asyncIterator] !== 'function') throw new TypeError('bytes must be Uint8Array or AsyncIterable<Uint8Array>');
-  const iterable = bytes                             ;
-  const chunks               = [];
-  let size = 0;
-  for await (const chunk of iterable) {
-    if (!(chunk instanceof Uint8Array)) throw new TypeError('streamed blob chunk must be Uint8Array');
-    chunks.push(chunk); size += chunk.length;
-  }
-  const result = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.length; }
-  return result;
-}
 
 function principalKey(principal           )         {
   const key = principalKeyOf(principal);
@@ -242,20 +226,32 @@ export function createPendingBlobLifecycle(app                , options         
     const pendingKey = `${candidate.scopeId}/${candidate.resourceId}.${hash(authenticatedPrincipalKey)}.pending`;
     const existing = app.db.prepare('SELECT 1 FROM _PendingBlob WHERE pendingKey = ?').get(pendingKey);
     if (existing) failure('PENDING_KEY_EXISTS');
-    const bytes = await bytesOf(candidate.bytes);
-    const digest = createHash('sha256').update(bytes).digest('hex');
+    // The streamed write path (#738 W2): bytes NEVER materialize as one whole
+    // buffer here. A Uint8Array is wrapped as a single-chunk iterable so both
+    // request shapes share ONE write + attestation code path; digests come
+    // from the hash-while-write values, and the byte store guarantees no
+    // readable pending slot survives a failed or over-limit write. A failed
+    // staging throws BEFORE any durable row exists (the INSERT below is only
+    // reached on a completed write).
+    const blobId = randomUUID();
+    const direct = candidate.bytes instanceof Uint8Array ? candidate.bytes : undefined;
+    // Async wrapper: the uniform AsyncIterable shape both backends stream from.
+    const source = direct
+      ? (async function* one() { yield direct; })()
+      : candidate.bytes;
+    if (!source || typeof (source                             )[Symbol.asyncIterator] !== 'function') throw new TypeError('bytes must be Uint8Array or AsyncIterable<Uint8Array>');
+    const attested = await app.blobs.writePendingStream(blobId, source                             , { mime: candidate.mediaType });
     const claimToken = token();
-    const blob = app.blobs.upload({ bytes, mime: candidate.mediaType });
     try {
       app.db.prepare(`INSERT INTO _PendingBlob
         (pendingKey, blobId, claimTokenHash, principalKey, resourceId, contentDigest, byteLength, status, scopeId, createdAt)
         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`)
-        .run(pendingKey, blob.id, hash(claimToken), authenticatedPrincipalKey, candidate.resourceId, digest, bytes.length, candidate.scopeId, new Date().toISOString());
+        .run(pendingKey, blobId, hash(claimToken), authenticatedPrincipalKey, candidate.resourceId, attested.sha256, attested.byteLength, candidate.scopeId, new Date().toISOString());
     } catch (error) {
-      try { app.blobs.discardPending(blob.id); } catch {}
+      try { app.blobs.discardPending(blobId); } catch {}
       throw error;
     }
-    return Object.freeze({ claim: Object.freeze({ pendingKey, claimToken }), pendingKey, byteLength: bytes.length, contentDigest: digest });
+    return Object.freeze({ claim: Object.freeze({ pendingKey, claimToken }), pendingKey, byteLength: attested.byteLength, contentDigest: attested.sha256 });
   }
   async function validateClaim({ claim, field, resourceId, actionName, actionId, authenticatedPrincipal, scopeId, committedEventId }                   )                       {
     const candidate = claim                                                              ;
