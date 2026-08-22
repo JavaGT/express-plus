@@ -79,8 +79,11 @@ for (const { label, make } of backendSessions()) {
     try {
       await assert.rejects(
         store.writePendingStream('over', chunked(BYTES, 4), { maxBytes: BYTES.length - 1 }),
-        (error) => error instanceof BlobTooLargeError && error.limit === BYTES.length - 1,
-        'the abort is the typed over-limit signal carrying the bound',
+        (error) => error instanceof BlobTooLargeError
+          && error.limit === BYTES.length - 1
+          && error.received === BYTES.length
+          && error.message.includes(`(received ${BYTES.length})`),
+        'the abort is the typed over-limit signal carrying the bound AND the count at abort',
       );
       assert.equal(store.exists('over', { pending: true }), false, 'the torn pending slot is gone');
       assert.throws(() => store.readPending('over'), BlobSlotNotFoundError, 'no readable pending slot survives');

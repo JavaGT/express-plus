@@ -181,14 +181,17 @@ export class BlobSlotNotFoundError extends Error {
 
 // The typed signal writePendingStream throws when the streamed payload exceeds
 // `maxBytes` — raised MID-STREAM (the write aborts as soon as the bound is
-// crossed, never after buffering the whole payload). Consumers branch on this
+// crossed, never after buffering the whole payload). Carries both the limit
+// and the byte count received when the abort fired. Consumers branch on this
 // TYPE, never on a message string, exactly like BlobSlotNotFoundError.
 export class BlobTooLargeError extends Error {
   readonly limit: number;
-  constructor(limit: number) {
-    super(`blob exceeds ${limit} bytes`);
+  readonly received: number;
+  constructor(limit: number, received?: number) {
+    super(received === undefined ? `blob exceeds ${limit} bytes` : `blob exceeds ${limit} bytes (received ${received})`);
     this.name = 'BlobTooLargeError';
     this.limit = limit;
+    this.received = received ?? limit;
   }
 }
 
@@ -437,7 +440,7 @@ export function fsBlobs({ root, stagingRoot }: FsBlobsOptions): ByteStore & Byte
           for await (const chunk of source) {
             if (!(chunk instanceof Uint8Array)) throw new TypeError('streamed blob chunk must be Uint8Array');
             const size = byteLength + chunk.length;
-            if (maxBytes !== undefined && size > maxBytes) throw new BlobTooLargeError(maxBytes);
+            if (maxBytes !== undefined && size > maxBytes) throw new BlobTooLargeError(maxBytes, size);
             byteLength = size;
             md5Hash.update(chunk);
             sha256Hash.update(chunk);

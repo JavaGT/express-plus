@@ -95,7 +95,7 @@ export function memoryBlobs({ backing }                     = {})               
     for await (const chunk of bytes) {
       if (!(chunk instanceof Uint8Array)) throw new TypeError('streamed blob chunk must be Uint8Array');
       const size = byteLength + chunk.length;
-      if (maxBytes !== undefined && size > maxBytes) throw new BlobTooLargeError(maxBytes);
+      if (maxBytes !== undefined && size > maxBytes) throw new BlobTooLargeError(maxBytes, size);
       byteLength = size;
       md5Hash.update(chunk);
       sha256Hash.update(chunk);

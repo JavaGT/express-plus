@@ -303,6 +303,10 @@ export interface PendingBlobLifecycle {
   reconcile(): Promise<void>;
   reap(): Promise<void>;
   consumer(): Promise<void>;
+  /** The declared blob fields the lifecycle was constructed with. */
+  readonly fields: readonly DeclaredBlobField[];
+  /** The lifecycle's construction options, frozen (pending/adopted-recovery TTLs). */
+  readonly options: Readonly<{ pendingTtlMs: number; adoptedRecoveryTtlMs: number }>;
 }
 
 export type DeclaredBlobField = import('../index.d.ts').DeclaredBlobField;
@@ -471,6 +475,7 @@ export class BlobSlotNotFoundError extends Error {}
  */
 export class BlobTooLargeError extends Error {
   readonly limit: number;
+  readonly received: number;
 }
 
 /**
@@ -1287,7 +1292,7 @@ export type LiveDeliveryCursor = number | Readonly<{ anchor: number; aggregate: 
 export type LiveDeliveryBootstrap<Snapshot = unknown> =
   | { readonly kind: 'snapshot'; readonly snapshot: Snapshot; readonly cursor: LiveDeliveryCursor }
   | { readonly kind: 'revoked'; readonly reason?: unknown }
-  | { readonly kind: 'retry'; readonly reason?: LiveRetryReason };
+  | { readonly kind: 'retry'; readonly reason?: unknown };
 
 export type LiveDeliveryCatchup =
   | {
@@ -1297,13 +1302,7 @@ export type LiveDeliveryCatchup =
   }
   | { readonly kind: 'snapshot'; readonly snapshot: unknown; readonly cursor: LiveDeliveryCursor }
   | { readonly kind: 'revoked'; readonly reason?: unknown }
-  | { readonly kind: 'retry'; readonly reason?: LiveRetryReason };
-
-/**
- * Additive machine-readable diagnostics on bootstrap-path retries (#815).
- * Clients treat it as opaque; retry semantics are unchanged.
- */
-export type LiveRetryReason = 'cursor-moved' | 'fence-mismatch' | 'lease-budget-exhausted' | 'snapshot-contention';
+  | { readonly kind: 'retry'; readonly reason?: unknown };
 
 export interface LiveDeliveryEntity {
   readonly name: string;
