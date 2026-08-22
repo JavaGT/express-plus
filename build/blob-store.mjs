@@ -154,6 +154,14 @@ function safeId(id         )       {
 
 
 
+
+
+
+
+
+
+
+
                                                     
 
 
@@ -255,7 +263,7 @@ export function createBlobStore({ root, stagingRoot, db, bytes, lowDiskHeadroomB
   // be passed directly as `root`'s replacement once a caller hands a store in.
   const store            = bytes
     ?? fsBlobs(stagingRoot ? { root: root          , stagingRoot } : { root: root           });
-  const { writePending, finalizePending, readRange, readPending, readRangeStream, remove, exists } = store;
+  const { writePending, finalizePending, readRange, readPending, readRangeStream, readPendingStream, remove, exists } = store;
 
   // The low-disk guard (#27): before accepting a NEW upload, a durable byte
   // store must declare free space at or above the configured headroom — else
@@ -336,6 +344,15 @@ export function createBlobStore({ root, stagingRoot, db, bytes, lowDiskHeadroomB
   function readRangeStreamBytes(id        , range                                 , options                           )           {
     safeId(id);
     return readRangeStream(id, range, options);
+  }
+
+  // Pending-slot stream read (#738 W1): funnels to the byte store exactly like
+  // readPendingBytes — the ONLY production caller is the pending-blob claim
+  // machinery (its durable state transition has already selected a claimed
+  // generation). Not an application escape hatch.
+  function readPendingStreamBytes(id        , range                                 , options                           )           {
+    safeId(id);
+    return readPendingStream(id, range, options);
   }
 
   // Pending-blob lifecycle owns removal of staged generations. This is not an
@@ -634,6 +651,7 @@ export function createBlobStore({ root, stagingRoot, db, bytes, lowDiskHeadroomB
     readRange: readRangeBytes,
     readPending: readPendingBytes,
     readRangeStream: readRangeStreamBytes,
+    readPendingStream: readPendingStreamBytes,
     discardPending,
     discard,
     replace,

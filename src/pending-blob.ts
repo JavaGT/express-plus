@@ -1,4 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import type { Readable } from 'node:stream';
 import { txn, type DbHandle } from './driver.ts';
 import { principalKeyOf, type Principal } from './principal.ts';
 import type { BlobErasureCategory, BlobLifecycleKind, BlobOwnership } from './blob-census.ts';
@@ -203,6 +204,17 @@ export interface PendingBlobLifecycle {
   validateClaim(args: ValidateClaimArgs): Promise<ClaimedBlob>;
   requestDeletion(args: RequestDeletionArgs): Promise<boolean>;
   readClaimed(blobId: string, range?: [start?: number, end?: number]): Buffer;
+  /**
+   * The streaming claimed read (#738 W1): the same claim admission (a
+   * 'claimed'/'finalized' row) and the same pending→final slot fallback as
+   * {@link PendingBlobLifecycle.readClaimed}, serving the generation as a Node
+   * Readable for large-media downloads in the claimed window. Cancellable via
+   * an AbortSignal; a missing slot in BOTH slots throws the typed
+   * `BlobSlotNotFoundError`. Unlike readClaimed there is no whole-generation
+   * digest attestation — attesting would re-materialize the bytes the stream
+   * exists to avoid; the claim row IS the gate.
+   */
+  readClaimedStream(blobId: string, range?: [start?: number, end?: number], options?: { signal?: AbortSignal }): Readable;
   readStagedClaim(principal: Principal, claim: unknown): StagedBlobRead;
   status(blobId: string): string | null;
   reconcile(): Promise<void>;
@@ -305,6 +317,20 @@ export function createPendingBlobLifecycle(app: PendingBlobApp, options: Pending
     } catch (error) {
       if (!(error instanceof BlobSlotNotFoundError)) throw error;
       return app.blobs.readRange(blobId, range);
+    }
+  }
+  // The streaming twin of readGeneration's slot fallback (#738 W1): pending
+  // first (the common claimed-but-not-yet-finalized case), final when the
+  // typed missing-slot signal says the pending slot is gone. Both stream reads
+  // throw BlobSlotNotFoundError synchronously BEFORE any stream exists, so the
+  // fallback decision happens before streaming starts — identical semantics to
+  // the buffered fallback, never a message-string branch.
+  function streamGeneration(blobId: string, range?: [start?: number, end?: number], signal?: AbortSignal): Readable {
+    try {
+      return app.blobs.readPendingStream(blobId, range, { signal });
+    } catch (error) {
+      if (!(error instanceof BlobSlotNotFoundError)) throw error;
+      return app.blobs.readRangeStream(blobId, range, { signal });
     }
   }
   // Record a delete-path retry WITHOUT the status flip markRecoveryFailure
@@ -447,6 +473,24 @@ export function createPendingBlobLifecycle(app: PendingBlobApp, options: Pending
     }
     return range === undefined ? bytes : readGeneration(blobId, range);
   }
+  // The streaming claimed read (#738 W1): the SAME claim admission as
+  // readClaimed — bytes are served ONLY to a row already in
+  // 'claimed'/'finalized' (the durable state transition is the admission) —
+  // and the SAME slot fallback, via streamGeneration. A missing row fails with
+  // BLOB_UNAVAILABLE exactly like readClaimed; a byte-store failure on the
+  // selected generation records recovery failure and fails identically. No
+  // digest attestation: that would materialize the whole generation, defeating
+  // the stream; the claim row is the gate (see the interface doc).
+  function readClaimedStream(blobId: string, range?: [start?: number, end?: number], { signal }: { signal?: AbortSignal } = {}): Readable {
+    const row = app.db.prepare("SELECT * FROM _PendingBlob WHERE blobId = ? AND status IN ('claimed', 'finalized')").get(blobId) as PendingBlobRow | undefined;
+    if (!row) failure('BLOB_UNAVAILABLE');
+    try {
+      return streamGeneration(blobId, range, signal);
+    } catch (error) {
+      markRecoveryFailure(row, error);
+      failure('BLOB_UNAVAILABLE');
+    }
+  }
   // The staged-claim byte read (#691): between staging and dispatch-commit the
   // generation's row is 'pending' — correctly unreachable through readClaimed —
   // yet its own stager may need the exact staged bytes before the committing
@@ -494,6 +538,7 @@ export function createPendingBlobLifecycle(app: PendingBlobApp, options: Pending
     validateClaim,
     requestDeletion,
     readClaimed,
+    readClaimedStream,
     readStagedClaim,
     status,
     reconcile,

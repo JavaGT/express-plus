@@ -226,6 +226,22 @@ export class BlobSlotNotFoundError extends Error {
 
 
 
+                                                                      
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
                                
@@ -419,6 +435,29 @@ export function fsBlobs({ root, stagingRoot }                )                  
     return createReadStream(filePath, { start: startValue, end: endValue - 1, signal });
   }
 
+  // The streaming pending-slot read (#738 W1): identical shape to
+  // readRangeStream over the PENDING slot. The typed missing-slot check runs
+  // BEFORE any stream is created, so a claim-gated caller sees
+  // BlobSlotNotFoundError synchronously — never a stream that errors later.
+  function readPendingStream(
+    id        ,
+    range                                 ,
+    { signal }                           = {},
+  )           {
+    safeId(id);
+    const filePath = pathFor(id, { pending: true });
+    if (!existsSync(filePath)) throw new BlobSlotNotFoundError();
+    const fileSize = statSync(filePath).size;
+    const { start: startValue, end: endValue, length } = validateBlobRange(fileSize, range ?? []);
+    if (length === 0) return Readable.from([]);
+    if (signal?.aborted) {
+      const stream = Readable.from([]);
+      stream.destroy(abortError());
+      return stream;
+    }
+    return createReadStream(filePath, { start: startValue, end: endValue - 1, signal });
+  }
+
   function remove(id        , { pending }                       = { pending: false })       {
     safeId(id);
     const filePath = pathFor(id, { pending });
@@ -454,6 +493,7 @@ export function fsBlobs({ root, stagingRoot }                )                  
     readRange,
     readPending,
     readRangeStream,
+    readPendingStream,
     remove,
     exists,
     freeBytes,

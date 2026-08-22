@@ -125,6 +125,30 @@ export function memoryBlobs({ backing }: MemoryBlobsOptions = {}): ByteStore & B
     return stream;
   }
 
+  // Streaming pending-slot read (#738 W1): mirrors readRangeStream over the
+  // pending Map. The typed missing-slot error throws synchronously, before any
+  // stream exists — the shared collapse-before-streaming guarantee.
+  function readPendingStream(
+    id: string,
+    range?: [start?: number, end?: number],
+    { signal }: { signal?: AbortSignal } = {},
+  ): Readable {
+    safeId(id);
+    const buf = pending.get(id);
+    if (!buf) throw new BlobSlotNotFoundError();
+    const { start, end } = validateBlobRange(buf.length, range ?? []);
+    if (signal?.aborted) {
+      const stream = Readable.from([]);
+      stream.destroy(abortError());
+      return stream;
+    }
+    const stream = Readable.from([Buffer.from(buf.subarray(start, end))]);
+    if (signal) {
+      signal.addEventListener('abort', () => stream.destroy(abortError()), { once: true });
+    }
+    return stream;
+  }
+
   function remove(id: string, { pending: p }: { pending: boolean } = { pending: false }): void {
     safeId(id);
     if (p) pending.delete(id);
@@ -143,6 +167,7 @@ export function memoryBlobs({ backing }: MemoryBlobsOptions = {}): ByteStore & B
     readRange,
     readPending,
     readRangeStream,
+    readPendingStream,
     remove,
     exists,
     pathFor,

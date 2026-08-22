@@ -1,4 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+
 import { txn,               } from './driver.mjs';
 import { principalKeyOf,                } from './principal.mjs';
 
@@ -205,6 +206,17 @@ export function declaredBlobField(field         )                    {
 
 
 
+                                                     
+
+
+
+
+                         
+
+
+
+
+
 
 
 
@@ -305,6 +317,20 @@ export function createPendingBlobLifecycle(app                , options         
     } catch (error) {
       if (!(error instanceof BlobSlotNotFoundError)) throw error;
       return app.blobs.readRange(blobId, range);
+    }
+  }
+  // The streaming twin of readGeneration's slot fallback (#738 W1): pending
+  // first (the common claimed-but-not-yet-finalized case), final when the
+  // typed missing-slot signal says the pending slot is gone. Both stream reads
+  // throw BlobSlotNotFoundError synchronously BEFORE any stream exists, so the
+  // fallback decision happens before streaming starts — identical semantics to
+  // the buffered fallback, never a message-string branch.
+  function streamGeneration(blobId        , range                                 , signal              )           {
+    try {
+      return app.blobs.readPendingStream(blobId, range, { signal });
+    } catch (error) {
+      if (!(error instanceof BlobSlotNotFoundError)) throw error;
+      return app.blobs.readRangeStream(blobId, range, { signal });
     }
   }
   // Record a delete-path retry WITHOUT the status flip markRecoveryFailure
@@ -447,6 +473,24 @@ export function createPendingBlobLifecycle(app                , options         
     }
     return range === undefined ? bytes : readGeneration(blobId, range);
   }
+  // The streaming claimed read (#738 W1): the SAME claim admission as
+  // readClaimed — bytes are served ONLY to a row already in
+  // 'claimed'/'finalized' (the durable state transition is the admission) —
+  // and the SAME slot fallback, via streamGeneration. A missing row fails with
+  // BLOB_UNAVAILABLE exactly like readClaimed; a byte-store failure on the
+  // selected generation records recovery failure and fails identically. No
+  // digest attestation: that would materialize the whole generation, defeating
+  // the stream; the claim row is the gate (see the interface doc).
+  function readClaimedStream(blobId        , range                                 , { signal }                           = {})           {
+    const row = app.db.prepare("SELECT * FROM _PendingBlob WHERE blobId = ? AND status IN ('claimed', 'finalized')").get(blobId)                              ;
+    if (!row) failure('BLOB_UNAVAILABLE');
+    try {
+      return streamGeneration(blobId, range, signal);
+    } catch (error) {
+      markRecoveryFailure(row, error);
+      failure('BLOB_UNAVAILABLE');
+    }
+  }
   // The staged-claim byte read (#691): between staging and dispatch-commit the
   // generation's row is 'pending' — correctly unreachable through readClaimed —
   // yet its own stager may need the exact staged bytes before the committing
@@ -494,6 +538,7 @@ export function createPendingBlobLifecycle(app                , options         
     validateClaim,
     requestDeletion,
     readClaimed,
+    readClaimedStream,
     readStagedClaim,
     status,
     reconcile,

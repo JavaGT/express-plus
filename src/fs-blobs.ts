@@ -226,6 +226,22 @@ export interface ByteStore {
   ): Readable;
 
   /**
+   * Stream the PENDING-slot range `[start, end)` as a Node Readable — the
+   * streaming counterpart of readPending for large-media downloads in the
+   * claimed window (#738 W1). Its only caller is the pending-blob claim
+   * machinery after its durable state transition selected a claimed generation;
+   * there is no generic pending stream. Same strict bounds as readPending; a
+   * missing pending slot throws the typed `BlobSlotNotFoundError` BEFORE any
+   * stream exists (so a claim-gated caller can collapse it before piping).
+   * Cancellable via an AbortSignal exactly like readRangeStream.
+   */
+  readPendingStream(
+    id: string,
+    range?: [start?: number, end?: number],
+    options?: { signal?: AbortSignal },
+  ): Readable;
+
+  /**
    * Delete the pending (`pending: true`) or final (`pending: false`) slot.
    * Idempotent: a missing slot is a no-op (ENOENT-equivalent swallowed). Any
    * OTHER failure MUST throw — a delete-verification-capable backend never
@@ -419,6 +435,29 @@ export function fsBlobs({ root, stagingRoot }: FsBlobsOptions): ByteStore & Byte
     return createReadStream(filePath, { start: startValue, end: endValue - 1, signal });
   }
 
+  // The streaming pending-slot read (#738 W1): identical shape to
+  // readRangeStream over the PENDING slot. The typed missing-slot check runs
+  // BEFORE any stream is created, so a claim-gated caller sees
+  // BlobSlotNotFoundError synchronously — never a stream that errors later.
+  function readPendingStream(
+    id: string,
+    range?: [start?: number, end?: number],
+    { signal }: { signal?: AbortSignal } = {},
+  ): Readable {
+    safeId(id);
+    const filePath = pathFor(id, { pending: true });
+    if (!existsSync(filePath)) throw new BlobSlotNotFoundError();
+    const fileSize = statSync(filePath).size;
+    const { start: startValue, end: endValue, length } = validateBlobRange(fileSize, range ?? []);
+    if (length === 0) return Readable.from([]);
+    if (signal?.aborted) {
+      const stream = Readable.from([]);
+      stream.destroy(abortError());
+      return stream;
+    }
+    return createReadStream(filePath, { start: startValue, end: endValue - 1, signal });
+  }
+
   function remove(id: string, { pending }: { pending: boolean } = { pending: false }): void {
     safeId(id);
     const filePath = pathFor(id, { pending });
@@ -454,6 +493,7 @@ export function fsBlobs({ root, stagingRoot }: FsBlobsOptions): ByteStore & Byte
     readRange,
     readPending,
     readRangeStream,
+    readPendingStream,
     remove,
     exists,
     freeBytes,

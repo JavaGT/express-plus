@@ -21,6 +21,8 @@
 // The /blobs upload route remains the only framework write path; this seam
 // never writes.
 
+import type { Readable } from 'node:stream';
+
 import { getLog } from './log.ts';
 import { failure } from './outcome.ts';
 import type { AdmissionOperation, AuthorizationAdapter } from './authorization-adapter.ts';
@@ -130,6 +132,72 @@ export async function readBlob({ principal, resource, field, operation, range, a
 function resourceIdOf(resource: unknown): string | null {
   const id = (resource as { id?: unknown } | null | undefined)?.id;
   return typeof id === 'string' || typeof id === 'number' ? String(id) : null;
+}
+
+export interface ReadBlobStreamArgs extends Omit<ReadBlobArgs, 'read'> {
+  /**
+   * The claim-gated byte STREAM reader the app wires to the byte store /
+   * pending-blob claim machinery — the streaming counterpart of
+   * {@link ReadBlobArgs.read}. It runs only AFTER admission; a synchronous
+   * failure constructing the stream (missing bytes → the typed missing-slot
+   * error) surfaces as the same generic denial.
+   */
+  readonly read: (range?: [start?: number, end?: number]) => Readable;
+}
+
+// The authorized blob read, streaming variant (#738 W1): the SAME admit-then-
+// serve ordering as {@link readBlob} — admission completes before `read` is
+// called, so no chunk can flow through a denied or unadmitted read — and the
+// SAME generic-denial collapse. Because `read` constructs the stream
+// synchronously, every conforming backend's typed missing-slot error
+// (BlobSlotNotFoundError) is thrown HERE, inside the collapse boundary, before
+// any streaming starts: a caller sees only the generic 403, never an existence
+// signal. Attribution logs at stream construction (byte length is unknowable
+// until consumed); cancellation is the stream's own AbortSignal contract, wired
+// by the app into its `read` callback, not a seam concern.
+export async function readBlobStream({ principal, resource, field, operation, range, authorize, read }: ReadBlobStreamArgs): Promise<Readable> {
+  const resourceId = resourceIdOf(resource);
+  try {
+    const decision = await authorize.admit({
+      category: 'blob',
+      principal,
+      operation: operation ?? blobReadCategory,
+      resourceName: field,
+      row: resource,
+      resourceId,
+    });
+    if (!decision.admitted) {
+      getLog().debug('auth', 'blob read denied', {
+        principal: principalLabel(principal),
+        field,
+        resourceId,
+        reason: decision.reasonCode,
+      });
+      throw new BlobReadDeniedError(decision.reasonCode ?? 'no-blob-access');
+    }
+    const stream = read(range);
+    getLog().debug('auth', 'blob read attributed', {
+      principal: principalLabel(principal),
+      field,
+      resourceId,
+      operation: decision.operation?.operation ?? blobReadCategory.operation,
+    });
+    return stream;
+  } catch (error) {
+    // Every failure — a denied read, a throwing/malformed admission, missing
+    // or erased bytes — collapses into ONE generic denial (#11), identical to
+    // the buffered variant: an admission denial rethrows as-is (its internal
+    // reason survives for the server log); anything else becomes the
+    // byte-unavailability denial. This catches a synchronously throwing stream
+    // construction too, so a missing slot denies BEFORE any streaming starts.
+    if (error instanceof BlobReadDeniedError) throw error;
+    getLog().debug('auth', 'blob read unavailable', {
+      principal: principalLabel(principal),
+      field,
+      resourceId,
+    });
+    throw new BlobReadDeniedError('blob-unavailable');
+  }
 }
 
 function principalLabel(principal: Principal): string {
