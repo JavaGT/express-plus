@@ -28,7 +28,7 @@ test('relational snapshot retries boundedly and never advances an unstable curso
     db.prepare("UPDATE _CommittedRevision SET revision = revision + 1 WHERE name = 'actions'").run();
     return true;
   });
-  assert.deepEqual(await live.bootstrap({ principal: {}, scope: 'Project:p1' }), { kind: 'retry' });
+  assert.deepEqual(await live.bootstrap({ principal: {}, scope: 'Project:p1' }), { kind: 'retry', reason: 'snapshot-contention' });
   assert.equal(calls, 6, 'anchor and member are checked on each of three attempts');
   assert.equal(db.prepare("SELECT revision FROM _CommittedRevision WHERE name = 'actions'").get().revision, 6);
   db.close();

@@ -166,6 +166,15 @@ export const AUTHORING_STREAM_LIMITS = Object.freeze({
   maxRetainedPerStream: MAX_RETAINED_PER_STREAM,
 });
 
+// Live (unexpired) leases held on one stream. The bootstrap seam pairs this
+// with AUTHORING_STREAM_LIMITS.maxLeasesPerStream to label a refused lease as
+// `lease-budget-exhausted` instead of an unexplained retry (#815) — ensureLease
+// itself keeps its `null` refusal contract, so existing direct callers (host
+// apps included) are unaffected.
+export function countLiveLeases(db    , prefix        , streamId        )         {
+  return db.prepare(`SELECT COUNT(*) AS cnt FROM ${prefix}_authoring_lease WHERE stream_id = ? AND expires_at > ?`).get(streamId, now()).cnt          ;
+}
+
 function clearLeaseChildren(db    , prefix        , leaseId        )       {
   db.prepare(`DELETE FROM ${prefix}_authoring_position WHERE lease_id = ?`).run(leaseId);
   db.prepare(`DELETE FROM ${prefix}_authoring_snapshot WHERE lease_id = ?`).run(leaseId);

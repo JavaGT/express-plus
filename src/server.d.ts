@@ -1292,7 +1292,7 @@ export type LiveDeliveryCursor = number | Readonly<{ anchor: number; aggregate: 
 export type LiveDeliveryBootstrap<Snapshot = unknown> =
   | { readonly kind: 'snapshot'; readonly snapshot: Snapshot; readonly cursor: LiveDeliveryCursor }
   | { readonly kind: 'revoked'; readonly reason?: unknown }
-  | { readonly kind: 'retry'; readonly reason?: unknown };
+  | { readonly kind: 'retry'; readonly reason?: LiveRetryReason };
 
 export type LiveDeliveryCatchup =
   | {
@@ -1302,7 +1302,13 @@ export type LiveDeliveryCatchup =
   }
   | { readonly kind: 'snapshot'; readonly snapshot: unknown; readonly cursor: LiveDeliveryCursor }
   | { readonly kind: 'revoked'; readonly reason?: unknown }
-  | { readonly kind: 'retry'; readonly reason?: unknown };
+  | { readonly kind: 'retry'; readonly reason?: LiveRetryReason };
+
+/**
+ * Additive machine-readable diagnostics on bootstrap-path retries (#815).
+ * Clients treat it as opaque; retry semantics are unchanged.
+ */
+export type LiveRetryReason = 'cursor-moved' | 'fence-mismatch' | 'lease-budget-exhausted' | 'snapshot-contention';
 
 export interface LiveDeliveryEntity {
   readonly name: string;

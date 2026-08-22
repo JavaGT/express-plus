@@ -482,7 +482,13 @@ export type LiveDeliveryBootstrap<Snapshot> =
   | { kind: 'snapshot'; snapshot: Snapshot; cursor: LiveDeliveryCursor }
   | { kind: 'catchup'; envelopes: readonly LiveDeliveryEnvelope[]; cursor: LiveDeliveryCursor }
   | { kind: 'revoked'; reason?: unknown }
-  | { kind: 'retry' };
+  | { kind: 'retry'; reason?: LiveRetryReason };
+
+/**
+ * Additive machine-readable diagnostics on bootstrap-path retries (#815).
+ * Opaque to the session runtime: retry behavior is unchanged.
+ */
+export type LiveRetryReason = 'cursor-moved' | 'fence-mismatch' | 'lease-budget-exhausted' | 'snapshot-contention';
 
 export interface LiveDeliverySubscription {
   close?: () => void;

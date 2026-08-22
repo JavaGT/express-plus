@@ -19,7 +19,7 @@ import { projectRowForRecipient } from './entity/projection.mjs';
 import { mayReadField, readableFieldNames } from './field-admission.mjs';
 import { mayRow } from './row-grant.mjs';
 
-import { ensureStream, ensureLease, hashClientNonce, resolveStream, resolveLease, acknowledgeAndPruneSnapshot } from './annotated-text-authoring-stream.mjs';
+import { ensureStream, ensureLease, hashClientNonce, resolveStream, resolveLease, acknowledgeAndPruneSnapshot, countLiveLeases, AUTHORING_STREAM_LIMITS } from './annotated-text-authoring-stream.mjs';
 import { createPrincipalSnapshotDelivery, isPrincipalSnapshotScope, validatePrincipalSnapshotDeclarations } from './principal-snapshot-delivery.mjs';
 
 
@@ -117,6 +117,19 @@ function jsonSnapshot(value         , path = 'snapshot', ancestors = new Set    
 
 
 
+
+
+
+
+
+
+
+
+
+
+// Closed diagnostic vocabulary for bootstrap-path retry results (#815).
+// Additive and client-opaque: existing clients ignore it, new clients can
+// distinguish transient cursor churn from a wedged authoring stream.
 
 
 
@@ -243,7 +256,7 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, authorization, 
       await Promise.resolve();
     }
     // The caller receives only an opaque recovery result, never an unstable pair.
-    return { kind: 'retry' };
+    return { kind: 'retry', reason: 'snapshot-contention' };
   }
   async function authorizedAnnotatedTextRow(document                       , principal           )                                          {
     const project = tryParseScopeKey(document.scope);
@@ -419,14 +432,37 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, authorization, 
         const row = await this.authorizeAnnotatedTextDocument(document, principal);
         if (!row) return { kind: 'revoked' };
         const before = readSeq(db, scope);
-        const authoring = document.descriptor?.kind === 'annotatedText' && typeof document.clientNonce === 'string' && /^[A-Za-z0-9_-]{43}$/.test(document.clientNonce)
-          ? (() => { const prefix = `${document.entity.name}_${document.fieldName}`; const stream = ensureStream({ db: db         , prefix, documentId: document.documentId, principalType: principal.type ?? 'principal', principalId: principal.id ?? '' }); const lease = ensureLease({ db: db         , prefix, streamId: stream.id, clientNonceHash: hashClientNonce(document.clientNonce) }); return lease ? { streamToken: stream.id, leaseToken: lease.id, leaseId: lease.id, fence: before } : null; })()
-          : null;
-        const snapshot = await projectEntitySnapshot({ db: db         , entity: document.entity         , row, principal, authoring, authorization });
-        if (readSeq(db, scope) !== before) return { kind: 'retry' };
+        // A refused lease is distinguishable from an absent one (#815): when the
+        // stream already holds its full budget of LIVE leases, surface that
+        // distinctly so clients stop retrying a bootstrap that cannot succeed
+        // until a lease expires. The snapshot itself is unaffected — only the
+        // authoring envelope is withheld.
+        const leaseAttempt = document.descriptor?.kind === 'annotatedText' && typeof document.clientNonce === 'string' && /^[A-Za-z0-9_-]{43}$/.test(document.clientNonce)
+          ? (() => {
+            const prefix = `${document.entity.name}_${document.fieldName}`;
+            const stream = ensureStream({ db: db         , prefix, documentId: document.documentId, principalType: principal.type ?? 'principal', principalId: principal.id ?? '' });
+            const lease = ensureLease({ db: db         , prefix, streamId: stream.id, clientNonceHash: hashClientNonce(document.clientNonce) });
+            // ensureLease refuses only when the cap is reached with nothing
+            // evictable; recounting live leases confirms the refusal cause.
+            const exhausted = !lease && countLiveLeases(db         , prefix, stream.id) >= AUTHORING_STREAM_LIMITS.maxLeasesPerStream;
+            return {
+              attempted: true,
+              exhausted,
+              authoring: lease ? { streamToken: stream.id, leaseToken: lease.id, leaseId: lease.id, fence: before } : null,
+            };
+          })()
+          : { attempted: false, exhausted: false, authoring: null };
+        const snapshot = await projectEntitySnapshot({ db: db         , entity: document.entity         , row, principal, authoring: leaseAttempt.authoring, authorization });
+        if (readSeq(db, scope) !== before) return Object.freeze({ kind: 'retry', reason: 'cursor-moved' });
         const annotated = (snapshot                       )[document.fieldName];
         const envelope = annotated?.authoring;
-        if (!envelope || envelope.acknowledgementFence !== before) return { kind: 'retry' };
+        if (!envelope) {
+          // No lease was sought (no usable client nonce): unchanged historical
+          // behavior — a bare retry with no diagnostic added (#815 additive).
+          if (!leaseAttempt.attempted) return Object.freeze({ kind: 'retry' });
+          return Object.freeze({ kind: 'retry', reason: leaseAttempt.exhausted ? 'lease-budget-exhausted' : 'fence-mismatch' });
+        }
+        if (envelope.acknowledgementFence !== before) return Object.freeze({ kind: 'retry', reason: 'fence-mismatch' });
         const publicSnapshot = Object.freeze({ ...snapshot, [document.fieldName]: Object.freeze(Object.fromEntries(Object.entries(annotated).filter(([key]) => key !== 'authoring'))) });
         return Object.freeze({ kind: 'snapshot', snapshot: publicSnapshot, cursor: before, authoring: envelope });
       }
