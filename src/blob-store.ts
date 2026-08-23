@@ -316,7 +316,13 @@ export function createBlobStore({ root, stagingRoot, db, bytes, lowDiskHeadroomB
     const sha256 = sha256Hash.digest('hex');
 
     writePending(blobId, uploadBytes);
-    recordPendingRow(blobId, { byteLength: uploadBytes.length, md5, sha256 }, mime ?? null);
+    try {
+      recordPendingRow(blobId, { byteLength: uploadBytes.length, md5, sha256 }, mime ?? null);
+    } catch (error) {
+      // This invocation created the slot, so remove only its uncommitted bytes.
+      try { if (exists(blobId, { pending: true })) remove(blobId, { pending: true }); } catch {}
+      throw error;
+    }
 
     return { id: blobId, md5, sha256, size: uploadBytes.length, mime: mime ?? null };
   }
@@ -379,7 +385,12 @@ export function createBlobStore({ root, stagingRoot, db, bytes, lowDiskHeadroomB
     safeId(id);
     assertDiskHeadroom();
     const attested = await writePendingStream(id, bytes, limits);
-    recordPendingRow(id, attested, mime ?? null);
+    try {
+      recordPendingRow(id, attested, mime ?? null);
+    } catch (error) {
+      try { if (exists(id, { pending: true })) remove(id, { pending: true }); } catch {}
+      throw error;
+    }
     return attested;
   }
 

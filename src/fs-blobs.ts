@@ -118,9 +118,9 @@
 import {
   mkdirSync,
   writeFileSync,
-  renameSync,
   unlinkSync,
   openSync,
+  linkSync,
   readSync,
   closeSync,
   existsSync,
@@ -410,7 +410,7 @@ export function fsBlobs({ root, stagingRoot }: FsBlobsOptions): ByteStore & Byte
 
   function writePending(id: string, bytes: Uint8Array): void {
     safeId(id);
-    writeFileSync(pathFor(id, { pending: true }), bytes);
+    writeFileSync(pathFor(id, { pending: true }), bytes, { flag: 'wx' });
   }
 
   // The streaming pending-slot write (#738 W2). One shared pipeline: the
@@ -447,7 +447,7 @@ export function fsBlobs({ root, stagingRoot }: FsBlobsOptions): ByteStore & Byte
             yield chunk;
           }
         },
-        createWriteStream(filePath),
+        createWriteStream(filePath, { flags: 'wx' }),
       );
     } catch (error) {
       // Torn pending slot: remove it so no readable partial slot survives the
@@ -462,14 +462,15 @@ export function fsBlobs({ root, stagingRoot }: FsBlobsOptions): ByteStore & Byte
     safeId(id);
     const pendingPath = pathFor(id, { pending: true });
     const finalPath = pathFor(id);
-    try {
-      renameSync(pendingPath, finalPath);
-    } catch (err) {
-      // Idempotent: no pending slot (already finalized / never uploaded) is a
-      // no-op, not an error. Anything else surfaces — a permission or disk
-      // failure must not be swallowed.
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    if (existsSync(finalPath)) {
+      if (existsSync(pendingPath)) throw new Error(`blob id '${id}' has conflicting pending and final slots`);
+      return finalPath;
     }
+    if (!existsSync(pendingPath)) return finalPath;
+    // link+unlink promotes without rename's overwrite semantics. A final slot
+    // can never be replaced by a later upload generation.
+    linkSync(pendingPath, finalPath);
+    unlinkSync(pendingPath);
     return finalPath;
   }
 

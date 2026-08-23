@@ -70,6 +70,7 @@ export function memoryBlobs({ backing }                     = {})               
 
   function writePending(id        , bytes            )       {
     safeId(id);
+    if (pending.has(id) || final.has(id)) throw new Error(`blob id '${id}' already exists`);
     // Copy: mutating the caller's buffer afterwards must not corrupt the store.
     pending.set(id, Buffer.from(bytes));
   }
@@ -101,6 +102,7 @@ export function memoryBlobs({ backing }                     = {})               
       sha256Hash.update(chunk);
       chunks.push(Buffer.from(chunk));
     }
+    if (pending.has(id) || final.has(id)) throw new Error(`blob id '${id}' already exists`);
     pending.set(id, Buffer.concat(chunks));
     return { byteLength, sha256: sha256Hash.digest('hex'), md5: md5Hash.digest('hex') };
   }
@@ -109,6 +111,7 @@ export function memoryBlobs({ backing }                     = {})               
     safeId(id);
     const staged = pending.get(id);
     if (staged !== undefined) {
+      if (final.has(id)) throw new Error(`blob id '${id}' has conflicting pending and final slots`);
       final.set(id, staged);
       pending.delete(id);
     }
