@@ -10,9 +10,11 @@ export {
   buildAuthoringEnvelope,
   hashClientNonce,
   acknowledgeAndPruneSnapshot,
+  readAnnotatedTextFamilyCheckpoint,
 } from './annotated-text-authoring-stream.ts';
 export {
   restoreTextFamilySerialized,
   textFamilyBasis,
   projectEndpointToOffset,
 } from './annotated-text-continuous.ts';
+export { readProjectedCursorFence } from './projected-async.ts';

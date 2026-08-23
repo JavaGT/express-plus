@@ -17,6 +17,18 @@ const MAX_RETAINED_PER_STREAM = 64 * 1024 * 1024;
 
 
 
+/** Read the durable continuous-family checkpoint for one document. */
+export function readAnnotatedTextFamilyCheckpoint(db    , prefix        , documentId        )                     {
+  const row = db.prepare(`SELECT family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(documentId)
+
+               ;
+  if (!row) return undefined;
+  if (typeof row.family_checkpoint !== 'string') {
+    throw new Error('annotated-text authoring: family checkpoint row is malformed');
+  }
+  return row.family_checkpoint;
+}
+
 
 
 

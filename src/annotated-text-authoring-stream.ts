@@ -17,6 +17,18 @@ interface Db {
   exec(sql: string): unknown;
 }
 
+/** Read the durable continuous-family checkpoint for one document. */
+export function readAnnotatedTextFamilyCheckpoint(db: Db, prefix: string, documentId: string): string | undefined {
+  const row = db.prepare(`SELECT family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(documentId) as
+    | { family_checkpoint?: unknown }
+    | undefined;
+  if (!row) return undefined;
+  if (typeof row.family_checkpoint !== 'string') {
+    throw new Error('annotated-text authoring: family checkpoint row is malformed');
+  }
+  return row.family_checkpoint;
+}
+
 interface StreamRow {
   id: string;
   document_id: string;

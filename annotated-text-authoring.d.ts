@@ -77,6 +77,18 @@ export function acknowledgeAndPruneSnapshot(options: {
   readonly leaseId: string;
 }): { fence: number; alreadyAcknowledged: boolean } | null;
 
+export function readAnnotatedTextFamilyCheckpoint(
+  db: AuthoringDatabase,
+  prefix: string,
+  documentId: string,
+): string | undefined;
+
+export function readProjectedCursorFence(
+  db: AuthoringDatabase,
+  entity: string,
+  field: string,
+): number | undefined;
+
 // The blockless continuous-family primitives (issue #33). A family is an
 // opaque document checkpoint: consumers obtain one from
 // `restoreTextFamilySerialized` and hand it straight back to the other two

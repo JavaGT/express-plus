@@ -139,6 +139,18 @@ export function readProjectedCursors(db: DbHandle, entity: ProjectedAsyncEntityR
     .map(([fieldName]) => ({ field: fieldName, lastSeq: cursors.get(fieldName) as number }));
 }
 
+/** Read one projected-field fence; absent rows remain distinguishable from zero. */
+export function readProjectedCursorFence(db: DbHandle, entity: string, field: string): number | undefined {
+  const row = db.prepare(
+    'SELECT lastSeq FROM _ProjectedCursor WHERE entity = :e AND field = :f',
+  ).get({ e: entity, f: field }) as { lastSeq?: unknown } | undefined;
+  if (!row) return undefined;
+  if (typeof row.lastSeq !== 'number' || !Number.isSafeInteger(row.lastSeq) || row.lastSeq < 0) {
+    throw new Error('projected async: cursor fence row is malformed');
+  }
+  return row.lastSeq;
+}
+
 export async function reconcileProjectedRecovery(db: DbHandle, entities: ReadonlyMap<string, ProjectedAsyncEntityRecord> | undefined): Promise<{ recomputed: number; cleaned: number }> {
   const CONSUMER = 'projected.async';
   // Only entities that declare projected.async fields have anything to recover.
