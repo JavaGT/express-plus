@@ -73,6 +73,7 @@ export interface LiveDeliveryCoreOptions {
   mayVerb: MayVerb | null;
   authorization?: AuthorizationAdapter | null;
   projectRecipient: (ctx: CoreProjectContext) => unknown | Promise<unknown>;
+  createProjectRecipient?: () => (ctx: CoreProjectContext) => unknown | Promise<unknown>;
   scopeVisible?: (ctx: { entity: LiveEntityRecord; principal: Principal; scope: ScopeHandle }) => boolean;
   log?: FrameworkLog | null;
 }
@@ -90,6 +91,7 @@ interface CoreSub {
   scope: string;
   active: boolean;
   document: unknown;
+  projectRecipient: (ctx: CoreProjectContext) => unknown | Promise<unknown>;
   activation?: Promise<number>;
   resyncEnvelope?: unknown;
   collection?: CollectionSubscription;
@@ -182,7 +184,7 @@ export function classifyLiveScope(
   return entity?.tier === 'live' ? Object.freeze({ kind: 'collection', entity }) : null;
 }
 
-export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, projectRecipient, scopeVisible = () => true, log = null }: LiveDeliveryCoreOptions): LiveDeliveryCore {
+export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, projectRecipient, createProjectRecipient, scopeVisible = () => true, log = null }: LiveDeliveryCoreOptions): LiveDeliveryCore {
   if (!db) throw new Error('live-delivery-core: db is required');
   if (!entities) throw new Error('live-delivery-core: entities is required');
   if (!mayVerb) throw new Error('live-delivery-core: mayVerb is required');
@@ -523,7 +525,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
               committedAt: new Date().toISOString(),
             });
             try {
-              const projected = await projectRecipient(Object.freeze({
+              const projected = await sub.projectRecipient(Object.freeze({
                 entity: sub.entityRec,
                 event,
                 principal: sub.principal,
@@ -618,7 +620,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
           });
           let projected: unknown;
           try {
-            projected = await projectRecipient(ctx);
+            projected = await sub.projectRecipient(ctx);
           } catch (err) {
             log?.error?.('live', 'projectRecipient threw', { scope: sub.scope, seq: event.seq, err: String(err) });
             removeSub(subId);
@@ -736,7 +738,22 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
     // so a closed core never installs a stranded subscription.
     if (closed) throw new Error('live-delivery-core is closed');
     const subId = generateSubId();
-    const sub: CoreSub = { entityRec, principal, deliver, revoke, signal, cursor: after, pending: false, dirty: false, paused, scope, active: true, document, revokeWakes: new Set() };
+    const sub: CoreSub = {
+      entityRec,
+      principal,
+      deliver,
+      revoke,
+      signal,
+      cursor: after,
+      pending: false,
+      dirty: false,
+      paused,
+      scope,
+      active: true,
+      document,
+      projectRecipient: createProjectRecipient?.() ?? projectRecipient,
+      revokeWakes: new Set(),
+    };
     if (isCollection) {
       sub.collection = createCollectionSubscription({
         db,

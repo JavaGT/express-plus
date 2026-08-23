@@ -67,26 +67,32 @@ export function createWebSocketLiveDelivery(httpServer: Server, {
   ready?: () => Promise<unknown>;
   log?: FrameworkLog | null;
 } = {}) {
-  // Shared envelope builder — one delta projector for the whole delivery seam.
+  // Stateless fallback is retained for callers that do not subscribe through
+  // the core. Stateful builders are created per subscription below.
   const envelopeBuilder = createLiveEnvelopeBuilder();
 
+  const projectRecipient = async (ctx: CoreProjectContext, builder: ReturnType<typeof createLiveEnvelopeBuilder>) => {
+    let readableFields: ReadonlySet<string> | undefined;
+    let row = ctx.row;
+    if (row) {
+      readableFields = await readableFieldNames(ctx.entity as never, row, ctx.principal, authorization);
+      row = await projectRowForRecipient(ctx.entity as never, row, ctx.principal, { readable: readableFields, authorization });
+    }
+    return builder.buildEnvelope({ ...ctx, row, readableFields } as unknown as Parameters<typeof builder.buildEnvelope>[0]);
+  };
+
   // Committed-event delivery core — the single authority for committed events.
-  // The projectRecipient uses the shared envelope builder for delta/reducer
-  // parity with the fan-out path, after the recipient read projection (S5/A3)
-  // has confined the row and delta/reducer grammar to readable fields.
+  // Each subscription gets its own stateful builder for delta/reducer parity
+  // after recipient read projection has confined fields to readable data.
   const core: LiveDeliveryCore = createLiveDeliveryCore({
     db: db as LiveDatabase,
     entities: resolveEntity ? (name: string) => resolveEntity(name) as LiveEntityRecord | undefined : new Map(),
     mayVerb,
     authorization,
-    projectRecipient: async (ctx: CoreProjectContext) => {
-      let readableFields: ReadonlySet<string> | undefined;
-      let row = ctx.row;
-      if (row) {
-        readableFields = await readableFieldNames(ctx.entity as never, row, ctx.principal, authorization);
-        row = await projectRowForRecipient(ctx.entity as never, row, ctx.principal, { readable: readableFields, authorization });
-      }
-      return envelopeBuilder.buildEnvelope({ ...ctx, row, readableFields } as unknown as Parameters<typeof envelopeBuilder.buildEnvelope>[0]);
+    projectRecipient: (ctx) => projectRecipient(ctx, envelopeBuilder),
+    createProjectRecipient: () => {
+      const builder = createLiveEnvelopeBuilder();
+      return (ctx) => projectRecipient(ctx, builder);
     },
     log,
   });

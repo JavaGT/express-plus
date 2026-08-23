@@ -67,26 +67,32 @@ export function createWebSocketLiveDelivery(httpServer        , {
 
 
   = {}) {
-  // Shared envelope builder — one delta projector for the whole delivery seam.
+  // Stateless fallback is retained for callers that do not subscribe through
+  // the core. Stateful builders are created per subscription below.
   const envelopeBuilder = createLiveEnvelopeBuilder();
 
+  const projectRecipient = async (ctx                    , builder                                              ) => {
+    let readableFields                                 ;
+    let row = ctx.row;
+    if (row) {
+      readableFields = await readableFieldNames(ctx.entity         , row, ctx.principal, authorization);
+      row = await projectRowForRecipient(ctx.entity         , row, ctx.principal, { readable: readableFields, authorization });
+    }
+    return builder.buildEnvelope({ ...ctx, row, readableFields }                                                          );
+  };
+
   // Committed-event delivery core — the single authority for committed events.
-  // The projectRecipient uses the shared envelope builder for delta/reducer
-  // parity with the fan-out path, after the recipient read projection (S5/A3)
-  // has confined the row and delta/reducer grammar to readable fields.
+  // Each subscription gets its own stateful builder for delta/reducer parity
+  // after recipient read projection has confined fields to readable data.
   const core                   = createLiveDeliveryCore({
     db: db                ,
     entities: resolveEntity ? (name        ) => resolveEntity(name)                                 : new Map(),
     mayVerb,
     authorization,
-    projectRecipient: async (ctx                    ) => {
-      let readableFields                                 ;
-      let row = ctx.row;
-      if (row) {
-        readableFields = await readableFieldNames(ctx.entity         , row, ctx.principal, authorization);
-        row = await projectRowForRecipient(ctx.entity         , row, ctx.principal, { readable: readableFields, authorization });
-      }
-      return envelopeBuilder.buildEnvelope({ ...ctx, row, readableFields }                                                                  );
+    projectRecipient: (ctx) => projectRecipient(ctx, envelopeBuilder),
+    createProjectRecipient: () => {
+      const builder = createLiveEnvelopeBuilder();
+      return (ctx) => projectRecipient(ctx, builder);
     },
     log,
   });
