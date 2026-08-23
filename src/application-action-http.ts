@@ -10,6 +10,8 @@ import { scopeOf } from './scope-handle.ts';
 import { rawRow } from './entity/query.ts';
 import type { HttpResponseLike } from './http-response.ts';
 import type { Principal } from './principal.ts';
+import type { AuthorizationAdapter } from './authorization-adapter.ts';
+import type { Gate } from './route-gate.ts';
 
 const ACTION_PATH = '/workbench/actions';
 const BATCH_ACTION_PATH = '/workbench/actions/batch';
@@ -56,6 +58,7 @@ export interface ApplicationApp {
   history?: unknown;
   log?: { error?(channel: string, message: string, ctx?: Record<string, unknown>): void };
   _applicationLiveDelivery?: { wake(scope: string | undefined): unknown };
+  _authorization?: AuthorizationAdapter | null;
   [key: string]: unknown;
 }
 
@@ -341,14 +344,25 @@ export function admitsApplicationHttpAction(app: ApplicationApp, request: Admitt
   return admitsAnnotatedTextAction(app, request);
 }
 
-function routeGateDenies(app: ApplicationApp, request: AdmittableAction, principal: Principal): boolean {
+async function routeGateDenies(app: ApplicationApp, request: AdmittableAction, principal: Principal): Promise<boolean> {
   const parsed = parseGeneratedCrudType(request.type ?? '');
   if (!parsed) return false;
   const entity = app.entities?.get(parsed.entityName);
   if (!entity?.applicationHttpActions?.includes(parsed.verb)) return false;
   const gate = entity.gate?.[parsed.verb];
   if (typeof gate !== 'function') return true;
-  return !gate(principal);
+  if (!app._authorization) return !gate(principal);
+  try {
+    const decision = await app._authorization.admit({
+      category: 'principal',
+      operation: parsed.verb,
+      principal,
+      gate: gate as unknown as Gate,
+    });
+    return !decision.admitted;
+  } catch {
+    return true;
+  }
 }
 
 export interface PrincipalOf {
@@ -426,12 +440,12 @@ export async function handleApplicationActionHttp(
     return true;
   }
 
-  if (url.pathname === ACTION_PATH && routeGateDenies(app, request, principal)) {
+  if (url.pathname === ACTION_PATH && await routeGateDenies(app, request, principal)) {
     sendFailure(sendJson, res, failure('denied', 'forbidden'));
     return true;
   }
   if (url.pathname === BATCH_ACTION_PATH
-    && request.actions!.some((action) => routeGateDenies(app, { ...action, scope: request.scope }, principal))) {
+    && (await Promise.all(request.actions!.map((action) => routeGateDenies(app, { ...action, scope: request.scope }, principal)))).some(Boolean)) {
     sendFailure(sendJson, res, failure('denied', 'forbidden'));
     return true;
   }

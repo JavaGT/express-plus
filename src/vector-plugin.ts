@@ -6,6 +6,9 @@
 import { nearestVectorsInterruptibly } from './vector.ts';
 import { SUPPORTED_SEARCH_PLUGIN_CONTRACT_VERSION, type SearchChange, type SearchMaterializeResult, type SearchPlugin, type SearchPluginContext, type SearchPluginSearchResult, type SearchRequest } from './search-plugin.ts';
 import { censusOfRows, type SearchShadowCapabilities } from './search-reconcile.ts';
+import { admitSearchHits } from './search-auth.ts';
+import type { AuthorizationAdapter } from './authorization-adapter.ts';
+import type { EntityRecord } from './row-grant.ts';
 
 export type VectorPluginValidationCode =
   | 'dimension-mismatch'
@@ -43,6 +46,7 @@ export interface VectorPluginOptions {
   readonly version: string;
   readonly source: VectorPluginSource;
   readonly modelSpace: VectorModelSpace;
+  readonly admission: { readonly entity: EntityRecord; readonly adapter: AuthorizationAdapter };
 }
 
 export interface VectorSearchQuery {
@@ -110,6 +114,9 @@ function validateVector(
 export function createVectorPlugin(options: VectorPluginOptions): VectorPlugin {
   if (typeof options.source.owns !== 'function') {
     throw new TypeError('vector plugin source requires an ownership predicate');
+  }
+  if (options.admission === null || typeof options.admission !== 'object') {
+    throw new TypeError('vector plugin requires a search admission configuration');
   }
   let modelSpace = Object.freeze({ ...options.modelSpace });
   assertModelSpace(modelSpace);
@@ -186,15 +193,33 @@ export function createVectorPlugin(options: VectorPluginOptions): VectorPlugin {
     return { counts: { vectors: next.size } };
   }
 
-  async function search(_ctx: SearchPluginContext, request: SearchRequest): Promise<SearchPluginSearchResult> {
+  async function search(ctx: SearchPluginContext, request: SearchRequest): Promise<SearchPluginSearchResult> {
     if (request.signal?.aborted) return { hits: [] };
+    if (request.principal === undefined) throw new VectorPluginValidationError('unauthorized-source-ownership', 'vector search requires a principal for result admission');
     const query = request.query as VectorSearchQuery;
     const vector = validateVector(query?.vector, query?.model, modelSpace, 'query');
     const limit = request.limit ?? active.size;
     const hits: Readonly<Record<string, unknown>>[] = [];
     const entries = await nearestVectorsInterruptibly([...active.values()], vector, Math.max(1, limit), request.signal);
     if (request.signal?.aborted) return { hits: [] };
-    for (const entry of entries) hits.push(entry.source);
+    const candidates = entries.map((entry) => {
+      const row = ctx.reader.row(options.source.entity, entry.id) ?? null;
+      return {
+      // Return the current source row, never the potentially stale indexed copy.
+      hit: row ?? entry.source,
+      key: entry.id,
+      rank: 1,
+      row,
+      };
+    });
+    const admitted = await admitSearchHits(options.admission.adapter, {
+      pluginId: options.id,
+      generation: ctx.generation,
+      staleness: 'stale',
+      principal: request.principal,
+      candidates,
+    });
+    for (const result of admitted.hits) hits.push(result.hit);
     return { hits };
   }
 

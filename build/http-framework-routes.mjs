@@ -182,7 +182,7 @@ async function snapshotRoute(
   const storedRow = app.db .prepare(`SELECT * FROM ${entity.name} AS t0 WHERE ${where} AND t0.id = :id`)
     .get({ ...params, id });
   const lastSeq = readSeq(app.db , scopeKey);
-  const auth = await authorizeRow(app, entity, 'read', id, principal, row);
+  const auth = await authorizeRow(app, entity, 'read', id, principal, row, { authorization: routeAuthorization(app) ?? undefined });
   if (auth.status) {
     reject(res, auth.status, auth.status === 404 ? 'not found' : 'forbidden');
     return true;
@@ -367,7 +367,7 @@ async function authorizeScope(app              , scope        , principal       
   if (!entity) return { status: 404, direct: false };
 
   const row = readScopedRow(app, entity, String(anchor.id), principal);
-  const auth = await authorizeRow(app, entity, 'read', String(anchor.id), principal, row);
+  const auth = await authorizeRow(app, entity, 'read', String(anchor.id), principal, row, { authorization: routeAuthorization(app) ?? undefined });
   if (auth.status) return { status: auth.status, direct };
   return {
     anchor: { entity: anchor.entity, id: String(anchor.id), row: auth.row },
@@ -390,7 +390,7 @@ async function eventsSinceRoute(
   // the tail of that scope's history (its own `Note.removed` event included).
   // Fail closed either way: an out-of-scope or genuinely-nonexistent row, or
   // a deleted row the principal never held a grant on, yields 404.
-  const auth = await authorizeRow(app, entity, 'read', documentId, principal, null, { allowDeletedAnchor: true });
+  const auth = await authorizeRow(app, entity, 'read', documentId, principal, null, { allowDeletedAnchor: true, authorization: routeAuthorization(app) ?? undefined });
   if (auth.status) {
     reject(res, auth.status, auth.status === 404 ? 'not found' : 'forbidden');
     return true;

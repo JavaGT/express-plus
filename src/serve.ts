@@ -229,7 +229,7 @@ export function makeRequestHandler(source: any, { principalOf = anonymousPrincip
     // second auth path — the chain inherits the already-admitted principal and
     // never re-gates.
     if (route.handlers) {
-      await runChain(route.handlers, req, res, { principal, params, body, query: url.searchParams, autoLoad: route.autoLoad, app: source }, { env });
+      await runChain(route.handlers, req, res, { principal, params, body, query: url.searchParams, autoLoad: route.autoLoad, app: source, authorization: authorizationAdapter }, { env });
     } else {
       await dispatchCrud({ entity: route.entity, verb: route.verb, fieldName: route.fieldName, db, principal, params, body, actionId: req.headers['x-workbench-action-id'], app: isApp ? source : null, res, sendJson: sendJsonCompat, committedEventHeaders, authorization: authorizationAdapter } as any);
     }

@@ -5,6 +5,7 @@ import { config } from './config.ts';
 import { getLog } from './log.ts';
 import { renderError } from './middleware.ts';
 import { authorizeRow, type CrudAppLike, type CrudEntity } from './http-crud-dispatch.ts';
+import type { AuthorizationAdapter } from './authorization-adapter.ts';
 import { resolveTemplate } from './views.ts';
 import { createResponseFacade, type ResponseFacade } from './http-response-factory.ts';
 import type { Principal } from './principal.ts';
@@ -12,6 +13,7 @@ import type { AutoLoad, RouteHandler } from './router.ts';
 
 interface ChainApp extends CrudAppLike {
   config?: { viewsDir?: string | null };
+  _authorization?: AuthorizationAdapter | null;
 }
 
 interface ChainRequest {
@@ -44,6 +46,7 @@ export interface RunChainOptions {
   query: URLSearchParams;
   autoLoad?: AutoLoad;
   app?: CrudAppLike | null;
+  authorization?: AuthorizationAdapter | null;
 }
 
 export interface RunChainEnv {
@@ -54,7 +57,7 @@ export async function runChain(
   handlers: readonly RouteHandler[],
   nodeReq: IncomingMessage,
   nodeRes: ServerResponse,
-  { principal, params, body, query, autoLoad, app }: RunChainOptions,
+  { principal, params, body, query, autoLoad, app, authorization }: RunChainOptions,
   { env }: RunChainEnv,
 ): Promise<void> {
   const req: ChainRequest = {
@@ -69,7 +72,7 @@ export async function runChain(
   };
 
   if (autoLoad) {
-    const auth = await authorizeRow(app as CrudAppLike, autoLoad.entity as unknown as CrudEntity, 'read', params[autoLoad.param], principal);
+    const auth = await authorizeRow(app as CrudAppLike, autoLoad.entity as unknown as CrudEntity, 'read', params[autoLoad.param], principal, null, { authorization: authorization ?? (app as ChainApp | null | undefined)?._authorization ?? undefined });
     if (auth.status) {
       renderError(nodeRes, { status: auth.status, message: auth.status === 404 ? 'not found' : 'forbidden' }, { env });
       return;

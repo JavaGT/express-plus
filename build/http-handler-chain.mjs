@@ -5,8 +5,11 @@ import { config } from './config.mjs';
 import { getLog } from './log.mjs';
 import { renderError } from './middleware.mjs';
 import { authorizeRow,                                   } from './http-crud-dispatch.mjs';
+
 import { resolveTemplate } from './views.mjs';
 import { createResponseFacade,                     } from './http-response-factory.mjs';
+
+
 
 
 
@@ -54,7 +57,7 @@ export async function runChain(
   handlers                         ,
   nodeReq                 ,
   nodeRes                ,
-  { principal, params, body, query, autoLoad, app }                 ,
+  { principal, params, body, query, autoLoad, app, authorization }                 ,
   { env }             ,
 )                {
   const req               = {
@@ -69,7 +72,7 @@ export async function runChain(
   };
 
   if (autoLoad) {
-    const auth = await authorizeRow(app               , autoLoad.entity                         , 'read', params[autoLoad.param], principal);
+    const auth = await authorizeRow(app               , autoLoad.entity                         , 'read', params[autoLoad.param], principal, null, { authorization: authorization ?? (app                               )?._authorization ?? undefined });
     if (auth.status) {
       renderError(nodeRes, { status: auth.status, message: auth.status === 404 ? 'not found' : 'forbidden' }, { env });
       return;

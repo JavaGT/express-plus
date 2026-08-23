@@ -162,7 +162,7 @@ export interface ResourceAdmitInput {
   readonly category: PluginResourceCategory;
   readonly principal: Principal;
   readonly operation?: AdmissionOperation;
-  readonly resourceName?: string;
+  readonly resourceName: string;
   readonly row?: unknown;
   readonly resourceId?: string | null;
 }
@@ -311,7 +311,7 @@ export function createAuthorizationAdapter(options: AuthorizationAdapterOptions 
   }
 
   function admitResource(input: ResourceAdmitInput, collapsed: Principal, trace: DecisionTrace, operation: OperationCategory | null): AdmissionDecision {
-    if (input.resourceName != null) {
+    if (typeof input.resourceName === 'string' && input.resourceName.length > 0) {
       const registered = resources.get(resourceKey(input.category, input.resourceName));
       trace.record('resource.registered', registered !== undefined);
       if (!registered) return settle(input, trace, false, 'no-resource', [], input.resourceId ?? null, operation);
@@ -329,9 +329,7 @@ export function createAuthorizationAdapter(options: AuthorizationAdapterOptions 
       if (!inScope) return settle(input, trace, false, 'no-row-scope', [], input.resourceId ?? null, operation);
       return settle(input, trace, true, null, [], input.resourceId ?? null, operation);
     }
-    trace.record('resource.row', input.row != null);
-    if (input.row == null) return settle(input, trace, false, 'no-row-scope', [], input.resourceId ?? null, operation);
-    return settle(input, trace, true, null, [], input.resourceId ?? null, operation);
+    return settle(input, trace, false, 'no-resource', [], input.resourceId ?? null, operation);
   }
 
   async function admit(input: AdmitInput): Promise<AdmissionDecision> {

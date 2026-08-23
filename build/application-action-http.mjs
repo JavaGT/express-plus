@@ -11,6 +11,8 @@ import { rawRow } from './entity/query.mjs';
 
 
 
+
+
 const ACTION_PATH = '/workbench/actions';
 const BATCH_ACTION_PATH = '/workbench/actions/batch';
 const HISTORY_PATH = '/workbench/history';
@@ -22,6 +24,7 @@ const APPLICATION_HTTP_CRUD_VERBS = new Set        (['create', 'update', 'remove
 // The loose application surface this transport reads: the entity registry, the
 // db for owner-scope resolution, and the kernel dispatch path. The app module
 // owns the full shape; only these seams are consumed here.
+
 
 
 
@@ -341,14 +344,25 @@ export function admitsApplicationHttpAction(app                , request        
   return admitsAnnotatedTextAction(app, request);
 }
 
-function routeGateDenies(app                , request                  , principal           )          {
+async function routeGateDenies(app                , request                  , principal           )                   {
   const parsed = parseGeneratedCrudType(request.type ?? '');
   if (!parsed) return false;
   const entity = app.entities?.get(parsed.entityName);
   if (!entity?.applicationHttpActions?.includes(parsed.verb)) return false;
   const gate = entity.gate?.[parsed.verb];
   if (typeof gate !== 'function') return true;
-  return !gate(principal);
+  if (!app._authorization) return !gate(principal);
+  try {
+    const decision = await app._authorization.admit({
+      category: 'principal',
+      operation: parsed.verb,
+      principal,
+      gate: gate                   ,
+    });
+    return !decision.admitted;
+  } catch {
+    return true;
+  }
 }
 
 
@@ -426,12 +440,12 @@ export async function handleApplicationActionHttp(
     return true;
   }
 
-  if (url.pathname === ACTION_PATH && routeGateDenies(app, request, principal)) {
+  if (url.pathname === ACTION_PATH && await routeGateDenies(app, request, principal)) {
     sendFailure(sendJson, res, failure('denied', 'forbidden'));
     return true;
   }
   if (url.pathname === BATCH_ACTION_PATH
-    && request.actions .some((action) => routeGateDenies(app, { ...action, scope: request.scope }, principal))) {
+    && (await Promise.all(request.actions .map((action) => routeGateDenies(app, { ...action, scope: request.scope }, principal)))).some(Boolean)) {
     sendFailure(sendJson, res, failure('denied', 'forbidden'));
     return true;
   }

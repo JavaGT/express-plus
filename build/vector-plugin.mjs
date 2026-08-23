@@ -6,6 +6,9 @@
 import { nearestVectorsInterruptibly } from './vector.mjs';
 import { SUPPORTED_SEARCH_PLUGIN_CONTRACT_VERSION,                                                                                                                                                 } from './search-plugin.mjs';
 import { censusOfRows,                               } from './search-reconcile.mjs';
+import { admitSearchHits } from './search-auth.mjs';
+
+
 
 
 
@@ -23,6 +26,7 @@ export class VectorPluginValidationError extends Error {
     this.code = code;
   }
 }
+
 
 
 
@@ -111,6 +115,9 @@ export function createVectorPlugin(options                     )               {
   if (typeof options.source.owns !== 'function') {
     throw new TypeError('vector plugin source requires an ownership predicate');
   }
+  if (options.admission === null || typeof options.admission !== 'object') {
+    throw new TypeError('vector plugin requires a search admission configuration');
+  }
   let modelSpace = Object.freeze({ ...options.modelSpace });
   assertModelSpace(modelSpace);
   let sequence = 0;
@@ -186,15 +193,33 @@ export function createVectorPlugin(options                     )               {
     return { counts: { vectors: next.size } };
   }
 
-  async function search(_ctx                     , request               )                                    {
+  async function search(ctx                     , request               )                                    {
     if (request.signal?.aborted) return { hits: [] };
+    if (request.principal === undefined) throw new VectorPluginValidationError('unauthorized-source-ownership', 'vector search requires a principal for result admission');
     const query = request.query                     ;
     const vector = validateVector(query?.vector, query?.model, modelSpace, 'query');
     const limit = request.limit ?? active.size;
     const hits                                      = [];
     const entries = await nearestVectorsInterruptibly([...active.values()], vector, Math.max(1, limit), request.signal);
     if (request.signal?.aborted) return { hits: [] };
-    for (const entry of entries) hits.push(entry.source);
+    const candidates = entries.map((entry) => {
+      const row = ctx.reader.row(options.source.entity, entry.id) ?? null;
+      return {
+      // Return the current source row, never the potentially stale indexed copy.
+      hit: row ?? entry.source,
+      key: entry.id,
+      rank: 1,
+      row,
+      };
+    });
+    const admitted = await admitSearchHits(options.admission.adapter, {
+      pluginId: options.id,
+      generation: ctx.generation,
+      staleness: 'stale',
+      principal: request.principal,
+      candidates,
+    });
+    for (const result of admitted.hits) hits.push(result.hit);
     return { hits };
   }
 
