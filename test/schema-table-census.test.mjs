@@ -29,6 +29,7 @@ test('frameworkTableNames is a frozen, sorted, duplicate-free array of persisten
     '_PostCommitEffect',
     '_PrincipalSnapshotRevision',
     '_PrivateActionFact',
+    '_PrivateActionFactDependency',
     '_ProjectedCursor',
     '_ScheduleReceipt',
     '_SchemaMaintenance',

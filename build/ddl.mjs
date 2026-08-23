@@ -440,6 +440,22 @@ export function generateFrameworkDDL()           {
   effects TEXT NOT NULL,
   UNIQUE (scope, actionId)
 );`,
+    // Erasure prerequisite index (#134, delete-undo design §5): identities-only
+    // links from a stored private fact to the entities its restoration depends
+    // on (validated v3 annotation prerequisites). Populated only from fully
+    // validated facts; no historical backfill. Rows die with their fact (FK
+    // cascade) and are additionally swept explicitly at every fact-deletion
+    // site so behavior is deterministic even where the pragma is off.
+    `CREATE TABLE IF NOT EXISTS _PrivateActionFactDependency (
+  scope TEXT NOT NULL,
+  actionId TEXT NOT NULL,
+  entity TEXT NOT NULL,
+  entityId TEXT NOT NULL,
+  originOrder INTEGER NOT NULL,
+  PRIMARY KEY (originOrder, entity, entityId),
+  FOREIGN KEY (originOrder) REFERENCES _PrivateActionFact(originOrder) ON DELETE CASCADE
+);`,
+    'CREATE INDEX IF NOT EXISTS idx__private_action_fact_dependency_entity ON _PrivateActionFactDependency (entity, entityId);',
     `CREATE TABLE IF NOT EXISTS _PostCommitEffect (
   declarationOrder INTEGER PRIMARY KEY AUTOINCREMENT,
   scope TEXT NOT NULL,

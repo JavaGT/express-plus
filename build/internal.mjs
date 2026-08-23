@@ -24,6 +24,7 @@ export * as operations from './operation.mjs';
 export { action, event, createServer, createClient, durableMutationVariant, liveMutationVariant, noAdmission, noBlobAdapter, NOW } from './pipeline.mjs';
 export { durableHistory, createDurableHistoryRuntime } from './durable-history.mjs';
 export { erasureDirective, erasureDirectivePreparation, prepareErasureDirective, applyErasureDirective, isErasureDirective, isErasureDirectivePreparation } from './erasure-directive.mjs';
+export { factDependencies, recordFactDependencies, invalidateDependencies, sweepFactDependencies } from './private-action-fact-dependency.mjs';
 export { buildKernel, POST_COMMIT_CONSUMER_KINDS } from './kernel.mjs';
 export { createClock } from './clock.mjs';
 export { createProjectedAsyncConsumer, resolveProjectedAsyncTriggerTypes, reconcileProjectedRecovery } from './projected-async.mjs';

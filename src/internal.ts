@@ -24,6 +24,7 @@ export * as operations from './operation.ts';
 export { action, event, createServer, createClient, durableMutationVariant, liveMutationVariant, noAdmission, noBlobAdapter, NOW } from './pipeline.ts';
 export { durableHistory, createDurableHistoryRuntime } from './durable-history.ts';
 export { erasureDirective, erasureDirectivePreparation, prepareErasureDirective, applyErasureDirective, isErasureDirective, isErasureDirectivePreparation } from './erasure-directive.ts';
+export { factDependencies, recordFactDependencies, invalidateDependencies, sweepFactDependencies } from './private-action-fact-dependency.ts';
 export { buildKernel, POST_COMMIT_CONSUMER_KINDS } from './kernel.ts';
 export { createClock } from './clock.ts';
 export { createProjectedAsyncConsumer, resolveProjectedAsyncTriggerTypes, reconcileProjectedRecovery } from './projected-async.ts';

@@ -14,6 +14,7 @@ import { prepareCached, txn, type DbHandle } from './driver.ts';
 import { noHistoryReceiptTableDDL } from './no-history-receipt.ts';
 import { liveRevisionTableDDL } from './live-revision.ts';
 import { invalidationLedgerTableDDL } from './invalidation-ledger.ts';
+import { sweepFactDependencies } from './private-action-fact-dependency.ts';
 
 // The no-history lane (S3/A2) surfaces through this module alongside the
 // durable _Log/_ActionReceipt surfaces, so the boot DDL and the kernel have one
@@ -305,6 +306,9 @@ export function retentionPrune(db: DbHandle, cutoffIso: string) {
     }
     db.prepare('UPDATE _ActionReceipt SET actionData = NULL WHERE committedAt < :cutoff').run({ cutoff: cutoffIso });
     db.prepare('DELETE FROM _PrivateActionFact WHERE committedAt < :cutoff').run({ cutoff: cutoffIso });
+    // Keep the erasure prerequisite index exactly aligned with the surviving
+    // facts — this sweep runs outside any cascade guarantee (design §5).
+    sweepFactDependencies(db);
     db.prepare('DELETE FROM _Log WHERE committedAt < :cutoff').run({ cutoff: cutoffIso });
   });
 }

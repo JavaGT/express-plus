@@ -3,6 +3,8 @@
 // application-owned runner claims immutable descriptors after commit.
 
 import type { DbHandle } from './driver.ts';
+import { recordFactDependencies } from './private-action-fact-dependency.ts';
+import { isDeleteFact } from './annotated-text-delete-history.ts';
 
 const STATUS_PENDING = 'pending';
 const STATUS_CLAIMED = 'claimed';
@@ -79,6 +81,11 @@ function annotatedPrivateFact(fact: PrivateFactLike): boolean {
     return exactKeys(fact, ['version', 'kind', 'documentId', 'contribution']) && annotatedContribution(fact.contribution);
   }
   if (fact.kind === 'annotated-text.barrier') return exactKeys(fact, ['version', 'kind', 'documentId']);
+  // Phase B (#134): validated v3 delete-contribution facts are durable
+  // storage input — they carry the erasure prerequisite index and (Phase D)
+  // the undo payload. Canonicality is delegated to the exact-key parser so
+  // this gate can never drift from the algebra module.
+  if (fact.kind === 'annotated-text.delete-contribution') return isDeleteFact(fact);
   if (fact.kind !== 'annotated-text.compensation' || !fact.linkage || typeof fact.linkage !== 'object' || Array.isArray(fact.linkage)) return false;
   const keys = fact.linkage.outcome === 'applied'
     ? ['version', 'kind', 'documentId', 'linkage', 'contribution', ...(fact.linkage.direction === 'undo' ? ['redo'] : [])]
@@ -151,6 +158,11 @@ export function declarePostCommitEffectsInTxn(db: DbHandle, { scope, actionId, c
      VALUES (?, ?, ?, ?, ?)
      RETURNING originOrder`,
   ).get(scope, actionId, committedAt, factJson, effectsJson) as { originOrder: number };
+  // Erasure prerequisite index (design §5): derive identities-only dependency
+  // rows from the validated canonical fact in the same transaction. Facts
+  // that depend on nothing record nothing; a malformed fact can never reach
+  // this line because canonicalization already failed closed.
+  recordFactDependencies(db, { scope, actionId, canonicalFact });
   const insert = db.prepare(
     `INSERT INTO _PostCommitEffect
       (scope, actionId, file, operation, ordinal, originOrder, exclusionKey, verification, payload, declaredAt, status, fence)

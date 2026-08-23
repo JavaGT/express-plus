@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import {               } from './driver.mjs';
 import { applicationTable as resolveApplicationTable } from './application-table-guard.mjs';
+import { invalidateDependencies } from './private-action-fact-dependency.mjs';
 
 const TOMBSTONE_TYPE = '$workbench.erased';
 const TOMBSTONE_ACTION_ID = '$workbench.erased';
@@ -35,6 +36,14 @@ const TOMBSTONE_DATA = JSON.stringify({ version: 1 });
 
 
 
+
+
+
+
+
+
+
+                                       
 
 
 
@@ -218,9 +227,22 @@ function validateRule(rule         , name        )       {
   for (const path of value.identityPointers) text(path, `${name}.identityPointers[]`);
 }
 
+const ENTITY_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** Canonical shape of a typed erasure subject: `{ entity, id }`, identities only. */
+
+
+function validateErasureSubject(subject         , name        )                 {
+  keys(subject, new Set(['entity', 'id']), name);
+  const value = subject                                      ;
+  if (typeof value.entity !== 'string' || !ENTITY_NAME.test(value.entity)) fail(`${name}.entity must be an identifier`);
+  if (typeof value.id !== 'string' || value.id.length === 0) fail(`${name}.id must be a non-empty string`);
+  return freeze({ entity: value.entity, id: value.id });
+}
+
 /** Create a closed, inert declaration for a package-owned transaction erasure. */
 export function erasureDirective(input         )                             {
-  keys(input, new Set(['kind', 'version', 'owningScope', 'subject', 'actions', 'census']), 'directive');
+  keys(input, new Set(['kind', 'version', 'owningScope', 'subject', 'erased', 'actions', 'census']), 'directive');
   const directive = input
 
 
@@ -228,6 +250,9 @@ export function erasureDirective(input         )                             {
   if (directive.kind !== 'workbench.erasure' || directive.version !== 1) fail('kind/version must be workbench.erasure/1');
   text(directive.owningScope, 'owningScope');
   text(directive.subject, 'subject');
+  // v2 typed subject is optional for legacy v1 authors; when present it is
+  // validated exactly and re-frozen so downstream consumers see canonical shape.
+  const erased = directive.erased === undefined ? undefined : validateErasureSubject(directive.erased, 'erased');
   if (!Array.isArray(directive.actions) || directive.actions.length === 0) fail('actions must be a non-empty array');
   const census = directive.census                                          ;
   if (!directive.census || census.version !== 1 || !Array.isArray(census.rules)) fail('census must be version 1 with rules');
@@ -246,7 +271,7 @@ export function erasureDirective(input         )                             {
     }
   }
   for (const [index, rule] of (census.rules                                ).entries()) validateRule(rule, `census.rules[${index}]`);
-  return freeze(input)                              ;
+  return freeze({ ...(input                           ), ...(erased === undefined ? {} : { erased }) })                              ;
 }
 
 export function isErasureDirective(value         )                            {
@@ -256,13 +281,14 @@ export function isErasureDirective(value         )                            {
 
 /** Declare census inputs without exposing the prepared target manifest to the handler. */
 export function erasureDirectivePreparation(input         )                               {
-  keys(input, new Set(['owningScope', 'subject', 'census']), 'preparation');
+  keys(input, new Set(['owningScope', 'subject', 'erasureSubject', 'census']), 'preparation');
   const preparation = input                      ;
   text(preparation.owningScope, 'owningScope'); text(preparation.subject, 'subject');
+  const erasureSubject = preparation.erasureSubject === undefined ? undefined : validateErasureSubject(preparation.erasureSubject, 'erasureSubject');
   const census = preparation.census                                          ;
   if (preparation.census == null || census.version !== 1 || !Array.isArray(census.rules)) fail('census must be version 1 with rules');
   for (const [index, rule] of (census.rules                                ).entries()) validateRule(rule, `census.rules[${index}]`);
-  return freeze({ kind: 'workbench.erasure.preparation', version: 1, ...preparation })                                ;
+  return freeze({ kind: 'workbench.erasure.preparation', version: 1, ...preparation, ...(erasureSubject === undefined ? {} : { erasureSubject }) })                                ;
 }
 
 export function isErasureDirectivePreparation(value         )                              {
@@ -317,7 +343,7 @@ function censusTargets(db          , { owningScope, subject, census }           
 /** Prepare an exact package-owned manifest from the current transaction snapshot. */
 export function prepareErasureDirective(db          , input         , { excludeActionId = null }                                      = {})                             {
   const declared                     = isErasureDirectivePreparation(input)
-    ? { owningScope: input.owningScope, subject: input.subject, census: input.census }
+    ? { owningScope: input.owningScope, subject: input.subject, census: input.census, ...(input.erasureSubject === undefined ? {} : { erasureSubject: input.erasureSubject }) }
     : (input                      );
   erasureDirectivePreparation(declared);
   const { receipts, rows, targetIds } = censusTargets(db, declared, excludeActionId);
@@ -341,7 +367,12 @@ export function prepareErasureDirective(db          , input         , { excludeA
     };
   });
   if (actions.length !== targetIds.size) fail('structural census target has no owning receipt');
-  return erasureDirective({ kind: 'workbench.erasure', version: 1, ...declared, actions });
+  const { owningScope, subject, census, erasureSubject } = declared;
+  return erasureDirective({
+    kind: 'workbench.erasure', version: 1, owningScope, subject, census,
+    ...(erasureSubject === undefined ? {} : { erased: erasureSubject }),
+    actions,
+  });
 }
 
 /** Apply a validated directive inside an already-open durable transaction. */
@@ -426,19 +457,47 @@ export async function applyErasureDirective(db          , directive             
     deletePrivateFact.run(scope, id);
   }
 
+  // Directive-time prerequisite invalidation (design §5): when the directive
+  // carries a v2 typed subject, dependent private facts die BEFORE tombstoning
+  // completes so no resurrection capability outlives the erasure. Dependency
+  // rows cascade with their facts; the returned rows prune every cursor frame
+  // that would still reference an unrestorable contribution — including frames
+  // in other scopes whose sessions depended on the erased entity. A legacy
+  // directive without a typed subject cannot certify this invalidation and
+  // leaves the index alone.
+  const invalidated = directive.erased === undefined
+    ? []
+    : invalidateDependencies(db, { entity: directive.erased.entity, entityId: directive.erased.id });
+  const prunedInvalidated = new Set(invalidated.map((row) => `${row.scope}\u0000${row.actionId}`));
+
   const cursors = db.prepare('SELECT * FROM _HistoryCursor WHERE scope = ?').all(scope);
   const retired = new Set(ids);
+  // Invalidation can reach facts outside the erasure scope (the dependency
+  // index is global), so prune every affected scope's cursors too.
+  const cursorScopes = [...new Set([scope, ...invalidated.map((row) => row.scope)])];
   const updateCursor = db.prepare('UPDATE _HistoryCursor SET past = ?, future = ? WHERE principalKey = ? AND sessionId = ? AND scope = ?');
-  const retiredFrame = (frame         )          => {
+  const retiredFrame = (cursorScope        , frame         )          => {
     if (typeof frame === 'string') return retired.has(frame);
     if (!frame || typeof frame !== 'object' || Array.isArray(frame)) return false;
     const entry = frame                           ;
-    return (typeof entry.rootActionId === 'string' && retired.has(entry.rootActionId))
-      || (typeof entry.headActionId === 'string' && retired.has(entry.headActionId));
+    // A frame is pruned when its root OR head references a retired action or
+    // an invalidated (erasure-dependent) fact — otherwise reconstruction could
+    // still offer an Undo whose compensation fact no longer exists. Invalidation
+    // keys are scoped to the CURSOR's own scope, never the directive's.
+    const rootRetired = typeof entry.rootActionId === 'string'
+      && (retired.has(entry.rootActionId) || prunedInvalidated.has(`${cursorScope}\u0000${entry.rootActionId}`));
+    const headRetired = typeof entry.headActionId === 'string'
+      && (retired.has(entry.headActionId) || prunedInvalidated.has(`${cursorScope}\u0000${entry.headActionId}`));
+    return rootRetired || headRetired;
   };
-  for (const cursor of cursors) {
-    const past = (json(cursor.past, 'history cursor past')             ).filter((frame) => !retiredFrame(frame));
-    const future = (json(cursor.future, 'history cursor future')             ).filter((frame) => !retiredFrame(frame));
-    updateCursor.run(JSON.stringify(past), JSON.stringify(future), cursor.principalKey, cursor.sessionId, scope);
+  for (const cursorScope of cursorScopes) {
+    const cursorsInScope = cursorScope === scope
+      ? cursors
+      : db.prepare('SELECT * FROM _HistoryCursor WHERE scope = ?').all(cursorScope);
+    for (const cursor of cursorsInScope) {
+      const past = (json(cursor.past, 'history cursor past')             ).filter((frame) => !retiredFrame(cursorScope, frame));
+      const future = (json(cursor.future, 'history cursor future')             ).filter((frame) => !retiredFrame(cursorScope, frame));
+      updateCursor.run(JSON.stringify(past), JSON.stringify(future), cursor.principalKey, cursor.sessionId, cursorScope);
+    }
   }
 }
