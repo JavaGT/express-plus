@@ -176,6 +176,12 @@ export const STRATEGIES                                          = Object.freeze
           if (typeof value !== 'boolean') return 'expected a boolean';
           return true;
         case 'date':
+          if (value instanceof Date && !Number.isFinite(value.getTime())) {
+            return 'field.invalid-date';
+          }
+          if (typeof value === 'number' && !Number.isFinite(value)) {
+            return 'field.invalid-date';
+          }
           if (!(value instanceof Date) && typeof value !== 'number' && typeof value !== 'string') {
             return 'expected a date';
           }
@@ -584,7 +590,7 @@ function validateFieldValue(entityName        , key        , descriptor         
   const { validate } = resolveStrategy(descriptor.kind);
   const structural = validate(value, descriptor);
   if (structural !== true) {
-    throw new ValidationError(`${entityName}.${key}: ${structural}`);
+    throw new ValidationError(`${entityName}.${key}: ${structural}`, structural.includes('.') ? { code: structural } : undefined);
   }
   if (typeof descriptor.validate === 'function') {
     const declared = descriptor.validate(value);

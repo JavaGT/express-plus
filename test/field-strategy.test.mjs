@@ -61,6 +61,23 @@ test('value strategy diff is a whole-value set, null when unchanged', () => {
   assert.equal(diff('a', 'a'), null, 'an unchanged value produces no diff');
 });
 
+test('date values reject Invalid Date and non-finite epoch values at validation', () => {
+  const Article = entity('DatedArticle', {
+    publishedAt: date(),
+    grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
+  });
+  for (const value of [new Date('invalid'), Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.throws(
+      () => validateMutation(Article, { publishedAt: value }),
+      (error) => error instanceof ValidationError
+        && error.failure?.code === 'field.invalid-date'
+        && /field\.invalid-date/.test(error.message),
+    );
+  }
+  assert.ok(validateMutation(Article, { publishedAt: new Date(0) }).publishedAt instanceof Date);
+  assert.equal(validateMutation(Article, { publishedAt: 0 }).publishedAt, 0);
+});
+
 // --- crdt/store/ordered: known names and operation boundaries ---
 
 test('text crdt rejects whole values and whole-value diffs', () => {

@@ -151,6 +151,68 @@ function rebuildMembershipFamily(db: DbHandle, prefix: string) {
   db.exec(`ALTER TABLE ${tmp} RENAME TO ${prefix}_membership`);
 }
 
+// v6 repairs databases that successfully ran v4 after annotated-text's
+// membership schema had already moved on. v4's intermediate rows retain the
+// endpoints but have no document/range identity, so rebuild them through the
+// canonical range table and assign stable ordinals from their legacy rowid.
+function repairIntermediateMembershipFamily(db: DbHandle, prefix: string) {
+  if (!PREFIX_IDENTIFIER.test(prefix)) throw new Error(`invalid annotated-text membership table prefix: ${prefix}`);
+  const membership = `${prefix}_membership`;
+  const annotation = `${prefix}_annotation`;
+  if (!tableExists(db, membership) || !tableExists(db, annotation)) return;
+  const columns = new Set(db.prepare(`PRAGMA table_info(${membership})`).all().map((row) => row.name as string));
+  if (!columns.has('start_point') || !columns.has('end_point')) return;
+  if (columns.has('range_id') || columns.has('document_id') || columns.has('ordinal')) {
+    throw new Error(`partially repaired annotated-text membership table: ${prefix}`);
+  }
+
+  const documentForeignKey = db.prepare(`PRAGMA foreign_key_list(${annotation})`).all()
+    .find((row) => row.from === 'document_id') as { table?: string } | undefined;
+  const documentTable = documentForeignKey?.table;
+  if (!documentTable || !PREFIX_IDENTIFIER.test(documentTable)) {
+    throw new Error(`annotated-text annotation document foreign key unavailable: ${prefix}`);
+  }
+  const range = `${prefix}_range`;
+  if (!tableExists(db, range)) {
+    db.exec(`CREATE TABLE ${range} (
+      id INTEGER PRIMARY KEY,
+      document_id TEXT NOT NULL,
+      start_point TEXT NOT NULL CHECK (json_valid(start_point)),
+      end_point TEXT NOT NULL CHECK (json_valid(end_point)),
+      UNIQUE (document_id, start_point, end_point),
+      UNIQUE (id, document_id),
+      FOREIGN KEY (document_id) REFERENCES ${documentTable}(id) ON DELETE CASCADE
+    )`);
+  }
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_${prefix}_annotation_document ON ${annotation} (id, document_id)`);
+  db.exec(`INSERT OR IGNORE INTO ${range} (document_id, start_point, end_point)
+    SELECT annotation.document_id, membership.start_point, membership.end_point
+    FROM ${membership} AS membership
+    JOIN ${annotation} AS annotation ON annotation.id = membership.annotation_id`);
+
+  const tmp = `${membership}_v6`;
+  db.exec(`DROP TABLE IF EXISTS ${tmp}`);
+  db.exec(`CREATE TABLE ${tmp} (
+    annotation_id TEXT NOT NULL,
+    range_id INTEGER NOT NULL,
+    document_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    PRIMARY KEY (annotation_id, range_id),
+    UNIQUE (annotation_id, ordinal),
+    FOREIGN KEY (annotation_id, document_id) REFERENCES ${annotation}(id, document_id) ON DELETE CASCADE,
+    FOREIGN KEY (range_id, document_id) REFERENCES ${range}(id, document_id) ON DELETE CASCADE
+  )`);
+  db.exec(`INSERT INTO ${tmp} (annotation_id, range_id, document_id, ordinal)
+    SELECT membership.annotation_id, range.id, annotation.document_id,
+      ROW_NUMBER() OVER (PARTITION BY membership.annotation_id ORDER BY membership.rowid) - 1
+    FROM ${membership} AS membership
+    JOIN ${annotation} AS annotation ON annotation.id = membership.annotation_id
+    JOIN ${range} AS range ON range.document_id = annotation.document_id
+      AND range.start_point = membership.start_point
+      AND range.end_point = membership.end_point`);
+  db.exec(`DROP TABLE ${membership}; ALTER TABLE ${tmp} RENAME TO ${membership}`);
+}
+
 export const WORKBENCH_MIGRATIONS: readonly Migration[] = Object.freeze([
   {
     namespace: 'workbench',
@@ -262,6 +324,20 @@ export const WORKBENCH_MIGRATIONS: readonly Migration[] = Object.freeze([
           if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.hasOwn(raw, 'blocks')) continue;
           update.run(serializeCompactTextFamilyCheckpoint(restoreTextFamily(raw)), state.document_id);
         }
+      }
+    },
+  },
+  {
+    // v6: repair the intermediate v4 membership shape produced before the
+    // canonical range/document/ordinal schema landed. v4 is immutable because
+    // applied migration checksums are part of the ledger contract.
+    namespace: 'workbench',
+    name: 'membership-range-schema-repair',
+    version: 6,
+    up(db) {
+      for (const row of db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB '*_membership'").all()) {
+        const name = row.name as string;
+        if (name.endsWith('_membership')) repairIntermediateMembershipFamily(db, name.slice(0, -'_membership'.length));
       }
     },
   },

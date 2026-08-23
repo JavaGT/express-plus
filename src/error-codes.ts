@@ -19,6 +19,7 @@ export const ERROR_CODES = Object.freeze({
   'position-no-longer-visible':   Object.freeze({ code: 'position-no-longer-visible',   status: 409, message: 'Position is no longer visible.' }),
   'position-invalid':            Object.freeze({ code: 'position-invalid',            status: 400, message: 'Position is invalid.' }),
   'authoring-stream-capacity':   Object.freeze({ code: 'authoring-stream-capacity',   status: 409, message: 'Authoring stream capacity exceeded.' }),
+  'field.invalid-date':          Object.freeze({ code: 'field.invalid-date',          status: 400, message: 'Field date must be finite.' }),
 } as const);
 
 type ErrorCodeKey = keyof typeof ERROR_CODES;

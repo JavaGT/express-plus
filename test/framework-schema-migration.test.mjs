@@ -60,20 +60,20 @@ test('generateFrameworkDDL still includes cursor tables (backwards compatible)',
   assert.equal(pcCount, 1, '_ProjectedCursor must appear exactly once in generateFrameworkDDL');
 });
 
-test('the 5 package migrations run under the reserved workbench namespace on a fresh DB (S2/A4 re-home)', async () => {
+test('the package migrations run under the reserved workbench namespace on a fresh DB (S2/A4 re-home)', async () => {
   const { runWorkbenchMigrations, appliedWorkbenchVersion, WORKBENCH_SUPPLIED_BY } = await import('../build/workbench-migrations.mjs');
   const { ledgerRows, MIGRATION_LEDGER_TABLE } = await import('../build/migrations.mjs');
   const db = new DatabaseSync(':memory:');
   try {
     runWorkbenchMigrations(db);
-    assert.equal(appliedWorkbenchVersion(db), 5);
+    assert.equal(appliedWorkbenchVersion(db), 6);
 
     const rows = ledgerRows(db);
-    assert.equal(rows.length, 5, 'all five package migrations recorded');
+    assert.equal(rows.length, 6, 'all package migrations recorded');
     assert.ok(rows.every((row) => row.namespace === 'workbench'), 'every package migration lives in the workbench namespace');
     assert.deepEqual(
       rows.map((row) => row.version).sort((a, b) => a - b),
-      [1, 2, 3, 4, 5],
+      [1, 2, 3, 4, 5, 6],
     );
     assert.ok(rows.every((row) => row.name.length > 0), 'every package migration records a name');
     assert.ok(rows.every((row) => /^[0-9a-f]{64}$/.test(row.checksum)), 'every package migration records a checksum');
@@ -82,8 +82,8 @@ test('the 5 package migrations run under the reserved workbench namespace on a f
     // Re-running is a no-op (idempotent) and the reserved namespace is the only
     // lane the package owns — no other namespace was touched.
     runWorkbenchMigrations(db);
-    assert.equal(appliedWorkbenchVersion(db), 5);
-    assert.equal(db.prepare(`SELECT COUNT(*) AS c FROM ${MIGRATION_LEDGER_TABLE}`).get().c, 5);
+    assert.equal(appliedWorkbenchVersion(db), 6);
+    assert.equal(db.prepare(`SELECT COUNT(*) AS c FROM ${MIGRATION_LEDGER_TABLE}`).get().c, 6);
 
     // The framework census derives the single namespaced ledger table.
     const { frameworkTableNames } = await import('../build/schema-table-census.mjs');
@@ -93,6 +93,41 @@ test('the 5 package migrations run under the reserved workbench namespace on a f
     );
     assert.ok(!frameworkTableNames.includes('_Migration'), 'the legacy app ledger table is gone from the census');
     assert.ok(!frameworkTableNames.includes('_WorkbenchMigration'), 'the legacy workbench ledger table is gone from the census');
+  } finally {
+    db.close();
+  }
+});
+
+test('v6 repairs a v4 intermediate annotated-text membership family', async () => {
+  const { runWorkbenchMigrations } = await import('../build/workbench-migrations.mjs');
+  const { annotationRangeRows, attachAnnotationRange } = await import('../build/annotated-text-storage.mjs');
+  const db = new DatabaseSync(':memory:');
+  try {
+    db.exec(`CREATE TABLE Document (id TEXT PRIMARY KEY);
+      CREATE TABLE doc_field_annotation (
+        id TEXT PRIMARY KEY, document_id TEXT NOT NULL,
+        FOREIGN KEY (document_id) REFERENCES Document(id)
+      );
+      CREATE TABLE doc_field_membership (
+        annotation_id TEXT NOT NULL,
+        start_point TEXT NOT NULL CHECK (json_valid(start_point)),
+        end_point TEXT NOT NULL CHECK (json_valid(end_point)),
+        PRIMARY KEY (annotation_id, start_point),
+        FOREIGN KEY (annotation_id) REFERENCES doc_field_annotation(id) ON DELETE CASCADE
+      );
+      INSERT INTO Document VALUES ('d1');
+      INSERT INTO doc_field_annotation VALUES ('a1', 'd1');
+      INSERT INTO doc_field_membership VALUES ('a1', '{"point":1}', '{"point":2}');`);
+
+    runWorkbenchMigrations(db);
+    const columns = db.prepare('PRAGMA table_info(doc_field_membership)').all().map((row) => row.name);
+    assert.deepEqual(columns, ['annotation_id', 'range_id', 'document_id', 'ordinal']);
+    assert.deepEqual([...annotationRangeRows(db, 'doc_field', 'd1')].map((row) => ({ ...row })), [{
+      annotation_id: 'a1', ordinal: 0, range_id: 1,
+      start_point: '{"point":1}', end_point: '{"point":2}',
+    }]);
+    attachAnnotationRange(db, 'doc_field', 'd1', 'a1', { point: 2 }, { point: 3 }, 1);
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM doc_field_membership').get().count, 2);
   } finally {
     db.close();
   }
