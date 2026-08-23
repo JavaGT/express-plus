@@ -40,6 +40,14 @@ import {
 
 } from './sqlite-adapter.mjs';
 
+
+
+
+
+
+
+
+
 import { executeFrameworkDDL, generateDDL, generateSideTableDDL, generatedIndexNames } from './ddl.mjs';
 import { runMigrations, validateMigrations } from './migrations.mjs';
 import { runWorkbenchMigrations } from './workbench-migrations.mjs';
@@ -75,6 +83,40 @@ import { createSchemaReport } from './schema-report.mjs';
 import path from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { makeMountable } from './router.mjs';
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function isByteStore(value                               )                     {
+  return typeof (value                              ).writePending === 'function';
+}
 
 function observedSchemaObjects(db                                                                     ) {
   return db.prepare("SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND type IN ('table', 'index', 'trigger')").all()
@@ -260,7 +302,7 @@ export default function workbench({
   operationalConsumers = [],
   blobLifecycle,
   blobRecycle,
-}      = {}) {
+}                   = {}) {
   // envGate (cso #15): fail-closed at app construction — required env vars must be set.
   for (const v of requireEnv) {
     const val = process.env[v];
@@ -281,8 +323,8 @@ export default function workbench({
   // for a memory database with no explicit blobs config: those get the
   // in-memory fake byte store (S6/A1).
   const explicitBlobRoot = blobOpts
-    && typeof blobOpts.writePending !== 'function'
-    && blobOpts?.root
+    && !isByteStore(blobOpts)
+    && blobOpts.root
     ? blobOpts.root
     : null;
   let blobRoot                = explicitBlobRoot;
@@ -374,14 +416,14 @@ export default function workbench({
         blobStagingRoot = managedStagingRoot(openedDb.root, explicitBlobRoot);
       }
       db = db.handle;
-    } else if (db && typeof (db                          ).location === 'function') {
+    } else if (db && typeof (db                                     ).location === 'function') {
       // A raw DatabaseSync handle: classify memory vs file by its location()
       // (:memory: → null). A raw FILE handle has no adapter-owned directory, so
       // the default root sits beside the db file (a relative location makes that
       // dirname cwd-relative). A raw MEMORY handle keeps only an explicit
       // blobs.root (blobRoot is already null otherwise) — the in-memory fake
       // byte store (S6/A1).
-      const location = (db                                 ).location();
+      const location = (db                                            ).location();
       if (location != null) {
         const owned = path.dirname(location);
         blobRoot = resolveBlobRoot(owned, explicitBlobRoot);
@@ -553,7 +595,7 @@ export default function workbench({
       blobReapTtlMs,
       logRetentionDays,
       logRetentionIntervalMs,
-      blobRetention,
+      blobRetention: blobRetention                                            ,
       blobLowDiskHeadroomBytes,
     });
     // The shared clock is the single timer for all framework reapers (schedule,
@@ -640,7 +682,7 @@ export default function workbench({
       // /blobs upload route and the pending-blob stage both refuse new uploads
       // below the threshold (fail closed on an undeclaring durable backend).
       const blobStoreOptions = { lowDiskHeadroomBytes: app._maintenance.blobLowDiskHeadroomBytes };
-      if (blobOpts && typeof blobOpts.writePending === 'function') {
+      if (blobOpts && isByteStore(blobOpts)) {
         app.blobs = createBlobStore({ db: handle, bytes: blobOpts, ...blobStoreOptions });
       } else if (blobRoot) {
         // `blobRoot` was already refused (explicit) or resolved to the owned

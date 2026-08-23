@@ -40,6 +40,14 @@ import {
   type OpenedSqliteDatabase,
 } from './sqlite-adapter.ts';
 import type { DbAdapterConfig, OpenedDatabase, ReadMirrorDescription } from './db-adapter.ts';
+import type { DbHandle } from './driver.ts';
+import type { ByteStore } from './fs-blobs.ts';
+import type { JobQueueOptions } from './job-queue.ts';
+import type { CreateLogOptions } from './log.ts';
+import type { SchemaMaintenanceStep } from './schema-maintenance.ts';
+import type { DerivedResource } from './derived-resource.ts';
+import type { SqliteSchemaDescription } from './sqlite-schema.ts';
+import type { Migration } from './migrations.ts';
 import { executeFrameworkDDL, generateDDL, generateSideTableDDL, generatedIndexNames } from './ddl.ts';
 import { runMigrations, validateMigrations } from './migrations.ts';
 import { runWorkbenchMigrations } from './workbench-migrations.ts';
@@ -75,6 +83,40 @@ import { createSchemaReport } from './schema-report.ts';
 import path from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { makeMountable } from './router.ts';
+
+interface WorkbenchOptions {
+  db?: string | DbHandle | DbAdapterConfig | BoundDbAdapter | OpenedSqliteDatabase | null;
+  schema?: SqliteSchemaDescription;
+  entities?: readonly unknown[];
+  actions?: readonly unknown[];
+  blobs?: ByteStore | { root?: string };
+  requireEnv?: readonly string[];
+  migrations?: readonly Migration[];
+  maintenanceSteps?: readonly SchemaMaintenanceStep[];
+  derivedResources?: readonly DerivedResource[];
+  jobs?: Omit<Partial<JobQueueOptions>, 'db'> & Pick<JobQueueOptions, 'sharedSecret'>;
+  log?: CreateLogOptions;
+  port?: number;
+  env?: string;
+  session?: { durationMs?: number };
+  viewsDir?: string;
+  resolveScope?: (scope: string) => { entity: string; id: string | number } | null | Promise<{ entity: string; id: string | number } | null>;
+  scopeSnapshot?: (scope: string, principal: unknown, anchor: { entity: string; id: string; row: Record<string, unknown> }) => unknown | Promise<unknown>;
+  history?: unknown;
+  blobReapIntervalMs?: number;
+  blobReapTtlMs?: number;
+  logRetentionDays?: number;
+  logRetentionIntervalMs?: number;
+  blobRetention?: Partial<typeof maintenanceDefaults.blobRetention>;
+  blobLowDiskHeadroomBytes?: number;
+  operationalConsumers?: readonly unknown[];
+  blobLifecycle?: unknown;
+  blobRecycle?: { root: string };
+}
+
+function isByteStore(value: ByteStore | { root?: string }): value is ByteStore {
+  return typeof (value as { writePending?: unknown }).writePending === 'function';
+}
 
 function observedSchemaObjects(db: { prepare(sql: string): { all(): Array<Record<string, unknown>> } }) {
   return db.prepare("SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND type IN ('table', 'index', 'trigger')").all()
@@ -260,7 +302,7 @@ export default function workbench({
   operationalConsumers = [],
   blobLifecycle,
   blobRecycle,
-}: any = {}) {
+}: WorkbenchOptions = {}) {
   // envGate (cso #15): fail-closed at app construction — required env vars must be set.
   for (const v of requireEnv) {
     const val = process.env[v];
@@ -281,8 +323,8 @@ export default function workbench({
   // for a memory database with no explicit blobs config: those get the
   // in-memory fake byte store (S6/A1).
   const explicitBlobRoot = blobOpts
-    && typeof blobOpts.writePending !== 'function'
-    && blobOpts?.root
+    && !isByteStore(blobOpts)
+    && blobOpts.root
     ? blobOpts.root as string
     : null;
   let blobRoot: string | null = explicitBlobRoot;
@@ -374,14 +416,14 @@ export default function workbench({
         blobStagingRoot = managedStagingRoot(openedDb.root, explicitBlobRoot);
       }
       db = db.handle;
-    } else if (db && typeof (db as { location?: unknown }).location === 'function') {
+    } else if (db && typeof (db as unknown as { location?: unknown }).location === 'function') {
       // A raw DatabaseSync handle: classify memory vs file by its location()
       // (:memory: → null). A raw FILE handle has no adapter-owned directory, so
       // the default root sits beside the db file (a relative location makes that
       // dirname cwd-relative). A raw MEMORY handle keeps only an explicit
       // blobs.root (blobRoot is already null otherwise) — the in-memory fake
       // byte store (S6/A1).
-      const location = (db as { location(): string | null }).location();
+      const location = (db as unknown as { location(): string | null }).location();
       if (location != null) {
         const owned = path.dirname(location);
         blobRoot = resolveBlobRoot(owned, explicitBlobRoot);
@@ -553,7 +595,7 @@ export default function workbench({
       blobReapTtlMs,
       logRetentionDays,
       logRetentionIntervalMs,
-      blobRetention,
+      blobRetention: blobRetention as typeof maintenanceDefaults.blobRetention,
       blobLowDiskHeadroomBytes,
     });
     // The shared clock is the single timer for all framework reapers (schedule,
@@ -640,7 +682,7 @@ export default function workbench({
       // /blobs upload route and the pending-blob stage both refuse new uploads
       // below the threshold (fail closed on an undeclaring durable backend).
       const blobStoreOptions = { lowDiskHeadroomBytes: app._maintenance.blobLowDiskHeadroomBytes };
-      if (blobOpts && typeof blobOpts.writePending === 'function') {
+      if (blobOpts && isByteStore(blobOpts)) {
         app.blobs = createBlobStore({ db: handle, bytes: blobOpts, ...blobStoreOptions });
       } else if (blobRoot) {
         // `blobRoot` was already refused (explicit) or resolved to the owned

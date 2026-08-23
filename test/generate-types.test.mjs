@@ -1,6 +1,10 @@
 import { text, boolean, ref, map, scope, grant, read, write, entity, computed, generateTypes, link } from '../build/internal.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 test('generateTypes: flat entity emits row interface and entity handle', () => {
   const Doc = entity('Doc', {
@@ -17,15 +21,26 @@ test('generateTypes: flat entity emits row interface and entity handle', () => {
   assert.ok(types.includes('body: string'));
   assert.ok(types.includes('published: boolean'));
   assert.ok(types.includes('owner: string'));
-  assert.ok(types.includes('export const Doc'));
+  assert.ok(types.includes('export declare const Doc'));
 
   assert.ok(types.includes('owner(): Promise<boolean>'));
-  assert.ok(types.includes('create(payload:'));
+  assert.ok(types.includes('create: { (payload:'));
   assert.ok(types.includes('created:'));
   assert.ok(types.includes('update:'));
   assert.ok(types.includes('updated:'));
   assert.ok(types.includes('remove:'));
   assert.ok(types.includes('removed:'));
+
+  const directory = mkdtempSync(join(tmpdir(), 'workbench-generated-types-'));
+  const output = join(directory, 'generated.ts');
+  const config = join(directory, 'tsconfig.json');
+  try {
+    writeFileSync(output, types);
+    writeFileSync(config, JSON.stringify({ compilerOptions: { strict: true, skipLibCheck: true }, files: [output] }));
+    execFileSync(process.execPath, ['node_modules/typescript/bin/tsc', '--project', config], { stdio: 'pipe' });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('generateTypes: map field emits MapFieldHandle', () => {

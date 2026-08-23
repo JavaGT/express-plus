@@ -158,10 +158,9 @@ export function generateTypes(entities: readonly GeneratedEntity[]): string {
     parts.push(`}`);
     parts.push(``);
 
-    parts.push(`export const ${name}: {`);
+    parts.push(`export declare const ${name}: {`);
     parts.push(`  readonly name: '${name}';`);
-    parts.push(`  create(payload: Partial<${name}Row>): ${name}Row;`);
-    parts.push(`  create: { payload: ${name}Row };`);
+    parts.push(`  create: { (payload: Partial<${name}Row>): ${name}Row; payload: ${name}Row };`);
     parts.push(`  created: { data: Partial<${name}Row> };`);
     parts.push(`  update: { id: string; payload: Partial<${name}Row> };`);
     parts.push(`  updated: { id: string; data: Partial<${name}Row> };`);
