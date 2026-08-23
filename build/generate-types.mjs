@@ -167,9 +167,11 @@ export function generateTypes(entities                            )         {
     parts.push(`  remove: { id: string };`);
     parts.push(`  removed: { id: string };`);
 
+    parts.push(`  fields: {`);
     for (const line of entityHandleType(name, fields)) {
       parts.push(`  ${line};`);
     }
+    parts.push(`  };`);
 
     parts.push(`}`);
     parts.push(``);

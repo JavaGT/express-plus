@@ -48,6 +48,7 @@ import {
 
 
 
+
 import { executeFrameworkDDL, generateDDL, generateSideTableDDL, generatedIndexNames } from './ddl.mjs';
 import { runMigrations, validateMigrations } from './migrations.mjs';
 import { runWorkbenchMigrations } from './workbench-migrations.mjs';
@@ -113,6 +114,10 @@ import { makeMountable } from './router.mjs';
 
 
 
+
+
+const publicWorkbenchOptionsAreCovered                                   = true;
+void publicWorkbenchOptionsAreCovered;
 
 function isByteStore(value                               )                     {
   return typeof (value                              ).writePending === 'function';

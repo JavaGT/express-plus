@@ -48,6 +48,7 @@ import type { SchemaMaintenanceStep } from './schema-maintenance.ts';
 import type { DerivedResource } from './derived-resource.ts';
 import type { SqliteSchemaDescription } from './sqlite-schema.ts';
 import type { Migration } from './migrations.ts';
+import type { WorkbenchOptions as PublicWorkbenchOptions } from '../index.d.ts';
 import { executeFrameworkDDL, generateDDL, generateSideTableDDL, generatedIndexNames } from './ddl.ts';
 import { runMigrations, validateMigrations } from './migrations.ts';
 import { runWorkbenchMigrations } from './workbench-migrations.ts';
@@ -113,6 +114,10 @@ interface WorkbenchOptions {
   blobLifecycle?: unknown;
   blobRecycle?: { root: string };
 }
+
+type PublicWorkbenchOptionsAreCovered = Exclude<keyof PublicWorkbenchOptions, keyof WorkbenchOptions> extends never ? true : false;
+const publicWorkbenchOptionsAreCovered: PublicWorkbenchOptionsAreCovered = true;
+void publicWorkbenchOptionsAreCovered;
 
 function isByteStore(value: ByteStore | { root?: string }): value is ByteStore {
   return typeof (value as { writePending?: unknown }).writePending === 'function';
