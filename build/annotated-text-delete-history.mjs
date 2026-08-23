@@ -166,6 +166,19 @@ function declarationTargetName(descriptor         )                {
   return null;
 }
 
+/**
+ * Project-field column on the ref target that guards generated triggers
+ * (src/annotated-text-field.ts) — two refs can name the same entity but bind
+ * different project columns, producing incompatible storage shapes.
+ */
+function declarationTargetProjectField(descriptor         )                {
+  const target = (descriptor                                                                                                         )?.target;
+  if (!target || typeof target !== 'object') return null;
+  if (typeof (target                                         ).project?.fieldName === 'string') return (target                                      ).project.fieldName;
+  if ((target                                      ).fields && typeof (target                                    ).fields.project === 'object') return 'project';
+  return null;
+}
+
 /** SHA-256 identity of the extension-row shape used by affected annotation families. */
 export function annotationDeclarationFingerprint(declarations                                      , relevantFamilies                  )         {
   const byName = new Map([...declarations].map((declaration) => [declaration.annotationName, declaration]));
@@ -187,6 +200,7 @@ export function annotationDeclarationFingerprint(declarations                   
           optional: descriptor?.optional === true,
           nullable: descriptor?.nullable === true,
           target: descriptor?.type === 'ref' ? declarationTargetName(descriptor) : null,
+          targetProjectField: descriptor?.type === 'ref' ? declarationTargetProjectField(descriptor) : null,
         };
       }),
     };

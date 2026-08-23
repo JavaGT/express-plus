@@ -514,6 +514,38 @@ test('declaration drift is an explicit not-applicable undo verdict', () => {
   assert.match(verdict.reason, /declaration drift/);
 });
 
+test('ref fingerprints distinguish target project fields and drift on mismatch', () => {
+  // Same target ENTITY name, different project column — the generated project
+  // guard trigger (src/annotated-text-field.ts) differs, so the fingerprint
+  // must differ too.
+  const refField = (projectField) => ({
+    annotationName: 'codes', fields: {
+      related_id: { kind: 'value', type: 'ref', target: { name: 'Related', project: { fieldName: projectField } } },
+    },
+  });
+  const underProjectA = refField('project_a');
+  const underProjectB = refField('project_b');
+  assert.notEqual(annotationDeclarationFingerprint([underProjectA], ['codes']), annotationDeclarationFingerprint([underProjectB], ['codes']), 'same entity, different project column → different fingerprints');
+
+  // A fact captured under one project binding fails declaration-drift when
+  // validated against the other.
+  let family = importTextToFamily('d', A, 'x');
+  const endpoint = (affinity) => ({ point: ['point', ['element', [[A, 1], 0]], affinity], basisFrontier: family.checkpoint.frontier });
+  const fact = captureDeleteContribution({
+    documentId: 'd', family, fromUtf16: 0, toUtf16: 1, declarations: [underProjectA],
+    annotations: [{
+      id: 'code-1', family: 'codes', fields: { related_id: 'r1' }, protectedTargetIds: [],
+      prerequisites: [{ entity: 'Related', id: 'r1' }],
+      memberships: [{ ordinal: 0, start: endpoint('left'), end: endpoint('right') }],
+    }],
+  });
+  const post = applyTextOperation(family, deleteOp(B, 1, fact.contribution.deletedSpans, family.checkpoint.frontier));
+  const verdict = planDeleteUndo({ fact, family: post, declarations: [underProjectB] });
+  assert.equal(verdict.outcome, 'noop');
+  assert.equal(verdict.code, 'declaration-drift');
+  assert.match(verdict.reason, /declaration drift/);
+});
+
 test('nullable ref cells add no fake prerequisite and remain applicable', () => {
   const db = storageDb();
   db.prepare('INSERT INTO doc_annotation VALUES (?, ?, ?, ?, ?)').run('ref-1', 'd', 'p', 'o', 'refFamily');
