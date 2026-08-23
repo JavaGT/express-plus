@@ -46,7 +46,7 @@ export interface VectorPluginOptions {
   readonly version: string;
   readonly source: VectorPluginSource;
   readonly modelSpace: VectorModelSpace;
-  readonly admission: { readonly entity: EntityRecord; readonly adapter: AuthorizationAdapter };
+  readonly admission?: { readonly entity: EntityRecord; readonly adapter: AuthorizationAdapter };
 }
 
 export interface VectorSearchQuery {
@@ -115,7 +115,10 @@ export function createVectorPlugin(options: VectorPluginOptions): VectorPlugin {
   if (typeof options.source.owns !== 'function') {
     throw new TypeError('vector plugin source requires an ownership predicate');
   }
-  if (options.admission === null || typeof options.admission !== 'object') {
+  if (options.admission !== undefined && (
+    options.admission === null || typeof options.admission !== 'object' ||
+    typeof options.admission.adapter?.admit !== 'function'
+  )) {
     throw new TypeError('vector plugin requires a search admission configuration');
   }
   let modelSpace = Object.freeze({ ...options.modelSpace });
@@ -205,21 +208,26 @@ export function createVectorPlugin(options: VectorPluginOptions): VectorPlugin {
     const candidates = entries.map((entry) => {
       const row = ctx.reader.row(options.source.entity, entry.id) ?? null;
       return {
-      // Return the current source row, never the potentially stale indexed copy.
-      hit: row ?? entry.source,
-      key: entry.id,
-      rank: 1,
-      row,
+        // Search returns an identity only; callers hydrate through their current read path.
+        hit: { id: entry.id },
+        key: entry.id,
+        rank: 1,
+        row,
       };
     });
-    const admitted = await admitSearchHits(options.admission.adapter, {
-      pluginId: options.id,
-      generation: ctx.generation,
-      staleness: 'stale',
-      principal: request.principal,
-      candidates,
-    });
-    for (const result of admitted.hits) hits.push(result.hit);
+    if (options.admission) {
+      const admitted = await admitSearchHits(options.admission.adapter, {
+        pluginId: options.id,
+        generation: ctx.generation,
+        staleness: 'stale',
+        principal: request.principal,
+        candidates,
+      });
+      for (const result of admitted.hits) hits.push(result.hit);
+    } else {
+      // The source reader is the framework's default grant-filtered reader.
+      for (const candidate of candidates) if (candidate.row !== null) hits.push(candidate.hit);
+    }
     return { hits };
   }
 

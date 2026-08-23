@@ -8,7 +8,9 @@ import { createSearchStalenessBridge } from '../build/search-staleness.mjs';
 import { createSearchReconcileEngine } from '../build/search-reconcile.mjs';
 import { createWriteQueue } from '../build/write-queue.mjs';
 
-function setup({ dimensions = 2, owns = () => true } = {}) {
+const PRINCIPAL = Object.freeze({ type: 'user', id: 'alice' });
+
+function setup({ dimensions = 2, owns = () => true, admitted = true } = {}) {
   const db = new DatabaseSync(':memory:');
   db.exec('CREATE TABLE Note (id TEXT PRIMARY KEY, embedding TEXT, embedding_model TEXT, owner TEXT);');
   const registry = createSearchPluginRegistry();
@@ -22,6 +24,13 @@ function setup({ dimensions = 2, owns = () => true } = {}) {
       owns,
     },
     modelSpace: { model: 'embed-v1', dimensions },
+    admission: {
+      entity: {},
+      adapter: {
+        admit: async () => ({ admitted, reasonCode: admitted ? null : 'no-capability' }),
+        registerResource() {},
+      },
+    },
   });
   registry.register(plugin);
   registry.bindSource(db);
@@ -141,7 +150,7 @@ test('model or dimension changes create a new generation and refuse cross-space 
   assert.equal(changed.state, 'building');
   assert.ok(changed.generation > 1);
   assert.deepEqual(changed.counts, {});
-  const outcome = await kit.registry.search('note-vectors', { query: { model: 'embed-v1', vector: [1, 0] } });
+  const outcome = await kit.registry.search('note-vectors', { principal: PRINCIPAL, query: { model: 'embed-v1', vector: [1, 0] } });
   assert.equal(outcome.ok, false);
   assert.match(outcome.lastError.message, /requires 'embed-v2'/);
 });
@@ -154,6 +163,7 @@ test('nearest-neighbour search has bounded deterministic ties and removes delete
   kit.insert('c', [0, 1]);
   await rebuild(kit);
   const found = await kit.registry.search('note-vectors', {
+    principal: PRINCIPAL,
     query: { model: 'embed-v1', vector: [1, 0] },
     limit: 2,
   });
@@ -163,8 +173,36 @@ test('nearest-neighbour search has bounded deterministic ties and removes delete
   kit.db.prepare('DELETE FROM Note WHERE id = ?').run('a');
   const deleted = await kit.registry.reconcile('note-vectors', [{ entity: 'Note', rowId: 'a', kind: 'removed' }]);
   assert.equal(deleted.ok, true);
-  const after = await kit.registry.search('note-vectors', { query: { model: 'embed-v1', vector: [1, 0] } });
+  const after = await kit.registry.search('note-vectors', { principal: PRINCIPAL, query: { model: 'embed-v1', vector: [1, 0] } });
   assert.deepEqual(after.result.hits.map((hit) => hit.id), ['b', 'c']);
+});
+
+test('vector search applies query-time admission and requires a principal', async (t) => {
+  const denied = setup({ admitted: false });
+  t.after(() => denied.db.close());
+  denied.insert('n1', [1, 0]);
+  await rebuild(denied);
+  const deniedResult = await denied.registry.search('note-vectors', {
+    principal: PRINCIPAL,
+    query: { model: 'embed-v1', vector: [1, 0] },
+  });
+  assert.deepEqual(deniedResult.result?.hits, []);
+
+  const missingPrincipal = await denied.registry.search('note-vectors', {
+    query: { model: 'embed-v1', vector: [1, 0] },
+  });
+  assert.equal(missingPrincipal.ok, false);
+  assert.match(missingPrincipal.lastError?.message ?? '', /requires a principal/);
+});
+
+test('vector admission configuration must expose callable admit', () => {
+  assert.throws(() => createVectorPlugin({
+    id: 'invalid-admission',
+    version: '1.0.0',
+    source: { entity: 'Note', vector: 'embedding', model: 'embedding_model', owns: () => true },
+    modelSpace: { model: 'embed-v1', dimensions: 2 },
+    admission: {},
+  }), /requires a search admission configuration/);
 });
 
 test('vector search honors an already-cancelled request', async (t) => {
@@ -175,6 +213,7 @@ test('vector search honors an already-cancelled request', async (t) => {
   const controller = new AbortController();
   controller.abort();
   const result = await kit.registry.search('note-vectors', {
+    principal: PRINCIPAL,
     query: { model: 'embed-v1', vector: [1, 0] },
     signal: controller.signal,
   });
@@ -190,6 +229,7 @@ test('vector search yields so an abort stops a large scoring pass', async (t) =>
   const controller = new AbortController();
   setTimeout(() => controller.abort(), 0);
   const result = await kit.registry.search('note-vectors', {
+    principal: PRINCIPAL,
     query: { model: 'embed-v1', vector: Array(64).fill(1) },
     signal: controller.signal,
   });

@@ -445,6 +445,15 @@ test('a compilable resource registers and admits through the same seam', async (
   assert.equal(admitted.operation.operation, 'search');
 });
 
+test('a non-null row without a resource name fails closed', async () => {
+  const adapter = createAuthorizationAdapter();
+  const decision = await adapter.admit({
+    category: 'search', operation: 'search', principal: alice, row: { id: 'a1' },
+  });
+  assert.equal(decision.admitted, false);
+  assert.equal(decision.reasonCode, 'no-resource');
+});
+
 test('blob/policy resources admit through the same generic seam', async () => {
   const adapter = createAuthorizationAdapter();
   adapter.registerResource({

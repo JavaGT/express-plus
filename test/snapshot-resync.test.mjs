@@ -38,12 +38,12 @@ function ownedTextNote() {
   });
 }
 
-async function harness(t, principalId = 'u1') {
+async function harness(t, principalId = 'u1', authorization) {
   const db = new DatabaseSync(':memory:');
   const app = workbench({ db });
   app.mount('/notes', ownedNote());
   await app.ddl();
-  app.listen(0, { principalOf: () => ({ id: principalId }) });
+  app.listen(0, { principalOf: () => ({ id: principalId }), ...(authorization ? { authorization } : {}) });
   await app.ready;
   const port = app.httpServer.address().port;
   const base = `http://127.0.0.1:${port}`;
@@ -51,7 +51,25 @@ async function harness(t, principalId = 'u1') {
   return { app, db, base };
 }
 
+function denyEntityRowsAdapter() {
+  return {
+    async admit(input) {
+      return { admitted: input.category !== 'entity', reasonCode: input.category === 'entity' ? 'no-capability' : null };
+    },
+    registerResource() {},
+  };
+}
+
 const json = (r) => r.json();
+
+test('injected adapter denial applies to snapshot and events-since', async (t) => {
+  const { app, db, base } = await harness(t, 'u1', denyEntityRowsAdapter());
+  app.entities.get('Note').insert({ id: 'n1', body: 'hello', owner: 'u1' });
+  const snapshot = await fetch(`${base}/snapshot/Note/n1`);
+  assert.equal(snapshot.status, 403);
+  const events = await fetch(`${base}/events-since/Note/n1?cursor=0`);
+  assert.equal(events.status, 403);
+});
 
 test('snapshot endpoint returns the materialized row + the per-scope seq, authorized', async (t) => {
   const { app, db, base } = await harness(t);
