@@ -76,16 +76,17 @@ function annotatedContribution(value         )          {
 
 
 function annotatedPrivateFact(fact                 )          {
+  // Phase B (#134): validated v3 delete-contribution facts are durable
+  // storage input — they carry the erasure prerequisite index and (Phase D)
+  // the undo payload. Canonicality is delegated to the exact-key parser so
+  // this gate can never drift from the algebra module. Checked BEFORE the v2
+  // gate because v3 facts carry their own version contract.
+  if (fact.kind === 'annotated-text.delete-contribution') return isDeleteFact(fact           );
   if (fact.version !== 2 || typeof fact.documentId !== 'string' || fact.documentId.length === 0) return false;
   if (fact.kind === 'annotated-text.contribution') {
     return exactKeys(fact, ['version', 'kind', 'documentId', 'contribution']) && annotatedContribution(fact.contribution);
   }
   if (fact.kind === 'annotated-text.barrier') return exactKeys(fact, ['version', 'kind', 'documentId']);
-  // Phase B (#134): validated v3 delete-contribution facts are durable
-  // storage input — they carry the erasure prerequisite index and (Phase D)
-  // the undo payload. Canonicality is delegated to the exact-key parser so
-  // this gate can never drift from the algebra module.
-  if (fact.kind === 'annotated-text.delete-contribution') return isDeleteFact(fact);
   if (fact.kind !== 'annotated-text.compensation' || !fact.linkage || typeof fact.linkage !== 'object' || Array.isArray(fact.linkage)) return false;
   const keys = fact.linkage.outcome === 'applied'
     ? ['version', 'kind', 'documentId', 'linkage', 'contribution', ...(fact.linkage.direction === 'undo' ? ['redo'] : [])]

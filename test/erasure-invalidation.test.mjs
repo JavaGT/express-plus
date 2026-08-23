@@ -320,3 +320,96 @@ test('typed subject validation: malformed subjects fail closed', () => {
     owningScope: 'Project:p1', subject: 'x', erasureSubject: { nope: 1 }, census: { version: 1, rules: [] },
   }), /not allowed/);
 });
+
+// ---------------------------------------------------------------------------
+// End-to-end through the pipeline: population hook + erasure-action dispatch
+// ---------------------------------------------------------------------------
+
+test('pipeline stores dependency rows for a v3 privateFact and an erasure action invalidates them', async () => {
+  const { default: workbench } = await import('../build/index.mjs');
+  const { defineSqliteSchema } = await import('../build/server.mjs');
+  const fixtureSchema = defineSqliteSchema({ name: 'erasure-invalidation-fixtures', tables: [], externalTables: [] });
+  const db = fixture();
+  // A real erasure target: the retiring profile-erasure action's own receipt/log.
+  const committedAt = '2026-08-24T00:00:00.000Z';
+  db.prepare('INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('Project:p1', 1, 'profile.erased', '{"id":"c9"}', 'purge-me', committedAt);
+  db.prepare(`INSERT INTO _ActionReceipt
+    (scope, actionId, committedAt, eventRefs, historyOrder, actionType, actionData, principalKey, sessionId, operation)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run('Project:p1', 'purge-me', committedAt, JSON.stringify([{ scope: 'Project:p1', seq: 1 }]), 1,
+      'profile.erase', '{"id":"c9"}', 'user:u1', 's1', 'action');
+  db.prepare('INSERT INTO _Cursor (scope, lastSeq) VALUES (?, ?)').run('Project:p1', 1);
+  // A history-session cursor frame referencing the soon-to-be-invalidated fact.
+  db.prepare('INSERT INTO _HistoryCursor (principalKey, sessionId, scope, past, future) VALUES (?, ?, ?, ?, ?)')
+    .run('user:u1', 's1', 'Project:p1',
+      JSON.stringify([
+        { rootActionId: 'doc-del-1', headActionId: 'doc-del-1' },
+        { rootActionId: 'unrelated', headActionId: 'unrelated' },
+      ]),
+      JSON.stringify([]));
+  const instance = workbench({
+    db,
+    schema: fixtureSchema,
+    actions: [
+      {
+        type: 'document.deleteText',
+        authorize: () => true,
+        history: { cursor: 'excluded' },
+        handler() {
+          return {
+            events: [{ type: 'document.textDeleted', scope: 'Project:p1', data: { id: 'd1' } }],
+            privateFact: deleteFact({ prerequisites: [{ entity: 'Comment', id: 'c9' }] }),
+          };
+        },
+      },
+      {
+        type: 'profile.purge',
+        authorize: () => true,
+        erasure: true,
+        history: { cursor: 'excluded' },
+        handler(context) {
+          void context;
+          return {
+            events: [{ type: 'lifecycle.purged', scope: 'Project:p1', data: { done: true } }],
+            directive: erasureDirectivePreparation({
+              owningScope: 'Project:p1', subject: 'c9', erasureSubject: { entity: 'Comment', id: 'c9' },
+              census: { version: 1, rules: [
+                { kind: 'action', type: 'profile.erase', disposition: 'target', identityPointers: ['/id'] },
+                { kind: 'event', type: 'profile.erased', disposition: 'target', identityPointers: ['/id'] },
+                // Closed-world census: unrelated history stays untouched.
+                { kind: 'action', type: 'document.deleteText', disposition: 'retain', identityPointers: [] },
+                { kind: 'event', type: 'document.textDeleted', disposition: 'retain', identityPointers: [] },
+              ] },
+            }),
+          };
+        },
+      },
+    ],
+  });
+  await instance.start();
+  const store = await instance.dispatch({
+    actionId: 'doc-del-1', type: 'document.deleteText', payload: {}, principal: { type: 'user', id: 'u1' }, scope: 'Project:p1',
+  });
+  assert.equal(store.ok, true, store.failure?.message);
+  // Population hook fired through declarePostCommitEffectsInTxn.
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM _PrivateActionFact WHERE actionId = 'doc-del-1'").get().n, 1);
+  const dependencies = db.prepare("SELECT entity, entityId FROM _PrivateActionFactDependency WHERE actionId = 'doc-del-1'").all().map((row) => ({ ...row }));
+  assert.deepEqual(dependencies, [
+    { entity: 'Comment', entityId: 'c9' },
+    { entity: 'document', entityId: 'd1' },
+  ]);
+  const purge = await instance.dispatch({
+    actionId: 'purge-run', type: 'profile.purge', payload: {}, principal: { type: 'user', id: 'u1' }, scope: 'Project:p1',
+  });
+  assert.equal(purge.ok, true, purge.failure?.message);
+  // Dependent fact + index rows are gone…
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM _PrivateActionFact').get().n, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM _PrivateActionFactDependency').get().n, 0);
+  // …invalidation is not census expansion: the deleted text's receipt and log stay…
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM _ActionReceipt WHERE actionId = 'doc-del-1'").get().n, 1);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM _Log WHERE eventType = 'document.textDeleted'").get().n, 1);
+  // …and the session cursor lost only the invalidated frame.
+  const [cursor] = cursorRows(db, 'Project:p1');
+  assert.deepEqual(JSON.parse(cursor.past), [{ rootActionId: 'unrelated', headActionId: 'unrelated' }]);
+});
