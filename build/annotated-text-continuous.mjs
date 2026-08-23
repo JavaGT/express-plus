@@ -177,6 +177,11 @@ export function materializeText(family                      )         {
   return derivedIndex(assertTrustedFamily(family)).text;
 }
 
+/** Return the cached visible UTF-16 length of a continuous family. */
+export function textFamilyVisibleLength(family                      )         {
+  return derivedIndex(assertTrustedFamily(family)).text.length;
+}
+
 /**
  * Build the immutable traversal data needed by endpoint projection once per
  * checkpoint. Range projection resolves two endpoints and compares offsets for

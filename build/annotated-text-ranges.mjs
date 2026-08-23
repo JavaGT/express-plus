@@ -17,8 +17,8 @@ import {
   materializeRange,
   projectEndpointToOffset,
   compareStructuralEndpoints,
+  textFamilyVisibleLength,
 } from './annotated-text-continuous.mjs';
-
 
 
 
@@ -153,38 +153,11 @@ export function emptyPolicy(annotation     )                      {
 export function protectorIsActive(family                      , protectorRange                 , targetRanges                   )          {
   assertAnnotationRange(family, protectorRange);
   const { start: pStart, end: pEnd } = projectRangeToOffsets(family, protectorRange);
-  const wholeDocument = pStart === 0 && pEnd === familyDocumentLength(family);
+  const wholeDocument = pStart === 0 && pEnd === textFamilyVisibleLength(family);
   for (const target of targetRanges) {
     assertAnnotationRange(family, target);
     const { start: tStart, end: tEnd } = projectRangeToOffsets(family, target);
     if (wholeDocument || (pStart < tEnd && tStart < pEnd)) return true;
   }
   return false;
-}
-
-function familyDocumentLength(family                      )         {
-  let length = 0;
-  for (const [, element] of orderOf(family)) {
-    if (element.deletedBy.length === 0) length += element.scalar.length;
-  }
-  return length;
-}
-
-function orderOf(family                      )                               {
-  const checkpoint = family.checkpoint;
-  const children = new Map                                      ();
-  for (const [key, element] of Object.entries(checkpoint.elements)) {
-    const parent = element.parent;
-    if (!children.has(parent)) children.set(parent, []);
-    children.get(parent) .push([key, element]);
-  }
-  const order                               = [];
-  const stack                               = [...(children.get('root') ?? [])].reverse();
-  while (stack.length > 0) {
-    const entry = stack.pop()                         ;
-    order.push(entry);
-    const descendants = children.get(entry[0]);
-    if (descendants) stack.push(...descendants.slice().reverse());
-  }
-  return order;
 }

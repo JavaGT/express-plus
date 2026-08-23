@@ -17,10 +17,10 @@ import {
   materializeRange,
   projectEndpointToOffset,
   compareStructuralEndpoints,
+  textFamilyVisibleLength,
 } from './annotated-text-continuous.ts';
 import type { ContinuousTextFamily } from './annotated-text-continuous.ts';
 import type { StructuralEndpoint } from './annotated-text-family.ts';
-import type { TextElement } from './annotated-text.ts';
 
 function fail(message: string): never {
   throw new Error(`annotated-text ranges: ${message}`);
@@ -153,38 +153,11 @@ export function emptyPolicy(annotation: any): 'delete' | 'orphan' {
 export function protectorIsActive(family: ContinuousTextFamily, protectorRange: AnnotationRange, targetRanges: AnnotationRange[]): boolean {
   assertAnnotationRange(family, protectorRange);
   const { start: pStart, end: pEnd } = projectRangeToOffsets(family, protectorRange);
-  const wholeDocument = pStart === 0 && pEnd === familyDocumentLength(family);
+  const wholeDocument = pStart === 0 && pEnd === textFamilyVisibleLength(family);
   for (const target of targetRanges) {
     assertAnnotationRange(family, target);
     const { start: tStart, end: tEnd } = projectRangeToOffsets(family, target);
     if (wholeDocument || (pStart < tEnd && tStart < pEnd)) return true;
   }
   return false;
-}
-
-function familyDocumentLength(family: ContinuousTextFamily): number {
-  let length = 0;
-  for (const [, element] of orderOf(family)) {
-    if (element.deletedBy.length === 0) length += element.scalar.length;
-  }
-  return length;
-}
-
-function orderOf(family: ContinuousTextFamily): Array<[string, TextElement]> {
-  const checkpoint = family.checkpoint;
-  const children = new Map<string, Array<[string, TextElement]>>();
-  for (const [key, element] of Object.entries(checkpoint.elements)) {
-    const parent = element.parent;
-    if (!children.has(parent)) children.set(parent, []);
-    children.get(parent)!.push([key, element]);
-  }
-  const order: Array<[string, TextElement]> = [];
-  const stack: Array<[string, TextElement]> = [...(children.get('root') ?? [])].reverse();
-  while (stack.length > 0) {
-    const entry = stack.pop() as [string, TextElement];
-    order.push(entry);
-    const descendants = children.get(entry[0]);
-    if (descendants) stack.push(...descendants.slice().reverse());
-  }
-  return order;
 }
