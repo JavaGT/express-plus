@@ -68,6 +68,17 @@ test('pathFor is synthetic and test/debug-only', () => {
   assert.equal(store.finalizePending('never-written'), 'mem://blobs/never-written');
 });
 
+test('finalizePending refuses conflicting pending and final slots', () => {
+  const backing = {
+    pending: new Map([['collision', Buffer.from('pending')]]),
+    final: new Map([['collision', Buffer.from('final')]]),
+  };
+  const store = memoryBlobs({ backing });
+  assert.throws(() => store.finalizePending('collision'), /conflicting pending and final slots/);
+  assert.deepEqual(store.readPending('collision'), Buffer.from('pending'));
+  assert.deepEqual(store.readRange('collision'), Buffer.from('final'));
+});
+
 test('memoryBlobs validates blob ids identically to fsBlobs', () => {
   const store = memoryBlobs();
   for (const id of ['../evil', '/abs/path', 'a/b', 'a\x00b', '..', '', 'has space']) {

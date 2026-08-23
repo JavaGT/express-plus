@@ -410,6 +410,9 @@ export function fsBlobs({ root, stagingRoot }                )                  
 
   function writePending(id        , bytes            )       {
     safeId(id);
+    if (existsSync(pathFor(id, { pending: true })) || existsSync(pathFor(id))) {
+      throw new Error(`blob id '${id}' already exists`);
+    }
     writeFileSync(pathFor(id, { pending: true }), bytes, { flag: 'wx' });
   }
 

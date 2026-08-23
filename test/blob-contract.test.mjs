@@ -143,6 +143,14 @@ export function blobContractSuite(session, { label }) {
     assert.deepStrictEqual(store.readRange('once'), Buffer.from('x'), 'bytes intact after double finalize');
   });
 
+  run('duplicate IDs are rejected for pending and final slots', (store) => {
+    store.writePending('duplicate', Buffer.from('first'));
+    assert.throws(() => store.writePending('duplicate', Buffer.from('second')), /already exists/);
+    store.finalizePending('duplicate');
+    assert.throws(() => store.writePending('duplicate', Buffer.from('third')), /already exists/);
+    assert.deepEqual(store.readRange('duplicate'), Buffer.from('first'));
+  });
+
   run('remove is idempotent — a missing slot is a no-op', (store) => {
     assert.doesNotThrow(() => store.remove('ghost', { pending: true }));
     assert.doesNotThrow(() => store.remove('ghost', { pending: false }));

@@ -74,6 +74,18 @@ for (const { label, make } of backendSessions()) {
     }
   });
 
+  test(`${label}: stream and buffered writes have identical bytes and attestations`, async () => {
+    const { store, dispose } = make();
+    try {
+      store.writePending('buffered', BYTES);
+      const streamed = await store.writePendingStream('streamed', chunked(BYTES, 5));
+      assert.deepEqual(store.readPending('buffered'), store.readPending('streamed'));
+      assert.deepEqual(streamed, { byteLength: BYTES.length, sha256: sha256(BYTES), md5: md5(BYTES) });
+    } finally {
+      dispose();
+    }
+  });
+
   test(`${label}: maxBytes aborts MID-STREAM with the typed error and leaves NO readable pending slot`, async () => {
     const { store, dispose } = make();
     try {

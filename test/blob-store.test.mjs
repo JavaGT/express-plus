@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { rmSync, existsSync, openSync, closeSync } from 'node:fs';
 import path from 'node:path';
+import { fsBlobs } from '../build/fs-blobs.mjs';
 
 import { generateFrameworkDDL } from '../build/ddl.mjs';
 import { EMPTY_BLOB_CENSUS, compileBlobCensus } from '../build/blob-census.mjs';
@@ -56,6 +57,17 @@ test('upload streams to .pending + computes md5+sha256 one-pass', async () => {
   const stat = store.stat(result.id);
   assert.equal(stat.status, 'pending', 'status is pending');
   
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('metadata failure removes only the upload-owned pending file', async () => {
+  const { root, db } = await setupBlobStore();
+  const bytes = fsBlobs({ root });
+  const { createBlobStore } = await import('../build/blob-store.mjs');
+  const store = createBlobStore({ root, db, bytes });
+  db.exec("CREATE TRIGGER reject_blob_metadata BEFORE INSERT ON BlobStore BEGIN SELECT RAISE(ABORT, 'metadata blocked'); END");
+  assert.throws(() => store.upload({ id: 'metadata-failure', bytes: Buffer.from('orphan') }), /metadata blocked/);
+  assert.equal(bytes.exists('metadata-failure', { pending: true }), false);
   rmSync(root, { recursive: true, force: true });
 });
 

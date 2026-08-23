@@ -15,7 +15,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -89,6 +89,17 @@ test('finalizePending is idempotent — a missing pending slot is a no-op', () =
   assert.doesNotThrow(() => store.finalizePending('once'));
   assert.deepStrictEqual(store.readRange('once'), Buffer.from('x'), 'bytes intact after double finalize');
 
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('finalizePending refuses conflicting pending and final slots', () => {
+  const root = freshRoot();
+  const store = fsBlobs({ root });
+  store.writePending('collision', Buffer.from('pending'));
+  writeFileSync(store.pathFor('collision'), Buffer.from('final'));
+  assert.throws(() => store.finalizePending('collision'), /conflicting pending and final slots/);
+  assert.deepEqual(store.readPending('collision'), Buffer.from('pending'));
+  assert.deepEqual(store.readRange('collision'), Buffer.from('final'));
   rmSync(root, { recursive: true, force: true });
 });
 

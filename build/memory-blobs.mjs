@@ -86,6 +86,7 @@ export function memoryBlobs({ backing }                     = {})               
     { maxBytes }                        = {},
   )                                                               {
     safeId(id);
+    if (pending.has(id) || final.has(id)) throw new Error(`blob id '${id}' already exists`);
     if (maxBytes !== undefined && (!Number.isFinite(maxBytes) || maxBytes < 0)) {
       throw new Error('invalid maxBytes');
     }
@@ -102,7 +103,6 @@ export function memoryBlobs({ backing }                     = {})               
       sha256Hash.update(chunk);
       chunks.push(Buffer.from(chunk));
     }
-    if (pending.has(id) || final.has(id)) throw new Error(`blob id '${id}' already exists`);
     pending.set(id, Buffer.concat(chunks));
     return { byteLength, sha256: sha256Hash.digest('hex'), md5: md5Hash.digest('hex') };
   }

@@ -410,6 +410,9 @@ export function fsBlobs({ root, stagingRoot }: FsBlobsOptions): ByteStore & Byte
 
   function writePending(id: string, bytes: Uint8Array): void {
     safeId(id);
+    if (existsSync(pathFor(id, { pending: true })) || existsSync(pathFor(id))) {
+      throw new Error(`blob id '${id}' already exists`);
+    }
     writeFileSync(pathFor(id, { pending: true }), bytes, { flag: 'wx' });
   }
 
