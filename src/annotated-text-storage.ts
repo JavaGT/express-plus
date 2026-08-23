@@ -1,5 +1,6 @@
 import type { DbHandle } from './driver.ts';
-import { membershipDigest } from './annotated-text-delete-history.ts';
+import { canonicalEndpointJSON, membershipDigest } from './annotated-text-delete-history-shared.ts';
+export { canonicalEndpointJSON } from './annotated-text-delete-history-shared.ts';
 // A stored annotation-to-range link joined with its immutable range record.
 // Ranges are DOCUMENT-scoped: the UNIQUE(document_id, start_point, end_point)
 // constraint interns only within one document, and the membership composite
@@ -11,14 +12,6 @@ type RangeMembershipRow = { annotation_id: string; ordinal: number; range_id: nu
 // is read BY KEY and re-serialized as the fixed `{ point, basisFrontier }`
 // shape, so a reordered-key copy of the same structural endpoint interns to
 // the identical range row. Non-object input fails closed.
-export function canonicalEndpointJSON(endpoint: unknown): string {
-  if (!endpoint || typeof endpoint !== 'object' || Array.isArray(endpoint)) {
-    throw new Error('annotated-text endpoint must be a structural endpoint object');
-  }
-  const record = endpoint as { point?: unknown; basisFrontier?: unknown };
-  return JSON.stringify({ point: record.point, basisFrontier: record.basisFrontier });
-}
-
 export function annotationRangeRows(db: DbHandle, prefix: string, documentId: string): RangeMembershipRow[] {
   return db.prepare(`SELECT membership.annotation_id, membership.ordinal, range.id AS range_id,
       range.start_point, range.end_point
@@ -65,9 +58,9 @@ export interface AnnotationMembershipEntry {
 /**
  * Load every annotation of one document with complete image material: family,
  * canonical serialized extension fields, protected-target links, memberships
- * (parsed endpoints), and declared ref prerequisites. Field rows are read per
- * declared family exactly like the snapshot loader; `deserializeFields` keeps
- * this module free of field-strategy imports.
+ * (parsed endpoints), and declared ref prerequisites. Field rows default to
+ * canonical stored cells; `deserializeFields: true` is only for callers that
+ * explicitly need projected values and must not feed those values to restore.
  */
 export function loadAnnotationImages(db: DbHandle, options: {
   prefix: string;
@@ -85,7 +78,7 @@ export function loadAnnotationImages(db: DbHandle, options: {
 }> {
   const { prefix, documentId } = options;
   const declarations = [...options.declarations];
-  const deserialize = options.deserializeFields !== false;
+  const deserialize = options.deserializeFields === true;
   const rows = db.prepare(`SELECT id, family, project_id, owner_id FROM ${prefix}_annotation WHERE document_id = ? ORDER BY id`).all(documentId) as unknown as StoredAnnotationRow[];
   const targets = db.prepare(
     `SELECT edge.annotation_id, edge.target_annotation_id FROM ${prefix}_annotation_protected_target AS edge
@@ -230,7 +223,8 @@ export function validateAnnotationImage(image: unknown, options: {
  *
  * `document` supplies the current document/project/owner identity; `rows`
  * come from `loadAnnotationImages`-shaped captures (Phase D passes the fact's
- * images mapped back onto these shapes).
+ * images mapped back onto these shapes). Returns false, without writing, when
+ * any original annotation ID is globally occupied.
  */
 export function restoreAnnotationImages(db: DbHandle, options: {
   prefix: string;
@@ -244,45 +238,76 @@ export function restoreAnnotationImages(db: DbHandle, options: {
     protectedTargetIds?: readonly string[];
     memberships?: ReadonlyArray<{ ordinal: number; start: unknown; end: unknown }>;
   }>;
-  /** Compiled declaration annotations, used to serialize typed field values back to their stored cells. */
-  declarations: Iterable<{ annotationName: string; fields: Record<string, unknown> }>;
-}): void {
+  /** Compiled declaration annotations; image fields are already canonical stored cells. */
+  declarations: Iterable<{ annotationName: string; fields: Record<string, unknown>; protects?: string | null }>;
+}): boolean {
   const { prefix, documentId, projectId, ownerId } = options;
   const declarations = [...options.declarations];
-  for (const image of options.images) {
+  const images = [...options.images];
+  const imageById = new Map(images.map((image) => [image.id, image]));
+  if (imageById.size !== images.length) throw new Error('cannot restore annotations: duplicate image IDs');
+
+  // Validate the complete graph before the first write. Annotation IDs are a
+  // global primary key, so a collision in another document blocks the move.
+  for (const image of images) {
     const declared = declarations.find((candidate) => candidate.annotationName === image.family);
     if (!declared) throw new Error(`cannot restore annotation '${image.id}': family '${image.family}' is not declared`);
-    const existing = db.prepare(`SELECT id FROM ${prefix}_annotation WHERE id = ? AND document_id = ?`).get(image.id, documentId);
-    if (existing) throw new Error(`cannot restore annotation '${image.id}': the ID already exists (same-ID collision is a whole-move no-op upstream)`);
+    const existing = db.prepare(`SELECT id FROM ${prefix}_annotation WHERE id = ?`).get(image.id);
+    if (existing) return false;
+    for (const targetId of image.protectedTargetIds ?? []) {
+      const restoredTarget = imageById.get(targetId);
+      const storedTarget = restoredTarget ? undefined : db.prepare(`SELECT family FROM ${prefix}_annotation WHERE id = ?`).get(targetId) as { family: string } | undefined;
+      const targetFamily = restoredTarget?.family ?? storedTarget?.family;
+      if (!targetFamily || declared.protects !== targetFamily) {
+        throw new Error(`cannot restore annotation '${image.id}': protected target '${targetId}' is missing or violates its declaration`);
+      }
+    }
+  }
 
+  const restoreOrder: typeof images = [];
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (image: typeof images[number]): void => {
+    if (visited.has(image.id)) return;
+    if (visiting.has(image.id)) throw new Error(`cannot restore annotation '${image.id}': protected-target graph contains a cycle`);
+    visiting.add(image.id);
+    for (const targetId of image.protectedTargetIds ?? []) {
+      const restoredTarget = imageById.get(targetId);
+      if (restoredTarget) visit(restoredTarget);
+    }
+    visiting.delete(image.id);
+    visited.add(image.id);
+    restoreOrder.push(image);
+  };
+  for (const image of images) visit(image);
+
+  // Bases are topologically target-first, then dependent rows follow in phases.
+  for (const image of restoreOrder) {
     db.prepare(`INSERT INTO ${prefix}_annotation (id, document_id, project_id, owner_id, family) VALUES (?, ?, ?, ?, ?)`)
       .run(image.id, documentId, projectId, ownerId, image.family);
+  }
 
+  for (const image of restoreOrder) {
+    const declared = declarations.find((candidate) => candidate.annotationName === image.family)!;
     const fieldNames = Object.keys(declared.fields).sort() as string[];
-    if (fieldNames.length) {
-      const values = fieldNames.map((name) => {
-        const descriptor = declared.fields[name] as { type?: unknown };
-        const value = Object.hasOwn(image.fields, name) ? image.fields[name] : null;
-        return serializeAnnotatedCellValue(descriptor, value);
-      });
-      db.prepare(`INSERT INTO ${prefix}_annotation_${image.family} (annotation_id, ${fieldNames.join(', ')}) VALUES (${['?'].concat(fieldNames.map(() => '?')).join(', ')})`)
-        .run(image.id, ...values);
-    }
+    const values = fieldNames.map((name) => Object.hasOwn(image.fields, name) ? image.fields[name] : null);
+    const columns = ['annotation_id', ...fieldNames];
+    db.prepare(`INSERT INTO ${prefix}_annotation_${image.family} (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`)
+      .run(image.id, ...values);
+  }
 
+  for (const image of restoreOrder) {
     for (const targetId of [...(image.protectedTargetIds ?? [])].sort()) {
       db.prepare(`INSERT INTO ${prefix}_annotation_protected_target (annotation_id, target_annotation_id) VALUES (?, ?)`).run(image.id, targetId);
     }
+  }
 
+  for (const image of restoreOrder) {
     for (const membership of [...(image.memberships ?? [])].sort((left, right) => left.ordinal - right.ordinal)) {
       attachAnnotationRange(db, prefix, documentId, image.id, membership.start, membership.end, membership.ordinal);
     }
   }
-}
-
-function serializeAnnotatedCellValue(descriptor: unknown, value: unknown): unknown {
-  const record = descriptor as { type?: unknown } | null | undefined;
-  if (record && record.type === 'json') return value === null ? null : JSON.stringify(value);
-  return value;
+  return true;
 }
 
 /**

@@ -16,7 +16,6 @@
 // `annotated-text-storage.ts` (one-way dependency: this module never imports
 // it at runtime).
 
-import { createHash } from 'node:crypto';
 import {
   assertAnchor,
   assertOpId,
@@ -35,9 +34,8 @@ import {
 import type { ContinuousTextFamily } from './annotated-text-continuous.ts';
 import { rgaTraversal } from './annotated-text-family.ts';
 import type { StructuralEndpoint } from './annotated-text-family.ts';
-import { canonicalEndpointJSON } from './annotated-text-storage.ts';
-
-const ROOT_ID = 'root';
+import { membershipDigest } from './annotated-text-delete-history-shared.ts';
+export { membershipDigest } from './annotated-text-delete-history-shared.ts';
 
 export const DELETE_FACT_VERSION = 3;
 export const DELETE_FACT_KIND = 'annotated-text.delete-contribution';
@@ -133,7 +131,7 @@ export interface LiveAnnotationView {
   memberships: readonly StoredMembershipEntry[];
 }
 
-export type DeleteUndoBlockerCode = 'missing-anchor' | 'annotation-id-collision' | 'annotation-changed' | 'prerequisite-missing';
+export type DeleteUndoBlockerCode = 'missing-anchor' | 'annotation-id-collision' | 'annotation-changed' | 'prerequisite-missing' | 'protected-target-invalid';
 
 export type DeleteUndoPlan =
   | Readonly<{ outcome: 'applied' }>
@@ -191,24 +189,6 @@ export function scalarIndexToUtf16Offset(text: string, scalarIndex: number): num
 /** Convert a UTF-16 window to scalar-index boundaries; both edges must land between scalars. */
 export function utf16RangeToScalarWindow(text: string, start: number, end: number): { startScalar: number; endScalar: number } {
   return { startScalar: utf16OffsetToScalarIndex(text, start), endScalar: utf16OffsetToScalarIndex(text, end) };
-}
-
-// ---------------------------------------------------------------------------
-// Membership digests
-// ---------------------------------------------------------------------------
-
-function membershipEntrySignature(entry: { ordinal: unknown; start: unknown; end: unknown }): string {
-  return JSON.stringify([entry.ordinal, canonicalEndpointJSON(entry.start), canonicalEndpointJSON(entry.end)]);
-}
-
-/**
- * Canonical digest of a COMPLETE membership set. Identity is
- * `(annotation_id, ordinal)`; endpoints enter via their canonical endpoint
- * JSON so object key order cannot change the digest.
- */
-export function membershipDigest(entries: ReadonlyArray<{ ordinal: unknown; start: unknown; end: unknown }>): string {
-  const signatures = entries.map(membershipEntrySignature).sort();
-  return createHash('sha256').update(JSON.stringify(signatures)).digest('hex');
 }
 
 // ---------------------------------------------------------------------------
@@ -327,14 +307,19 @@ export function captureDeleteContribution({ documentId, family, fromUtf16, toUtf
     images.push(deepFreeze({
       id: annotation.id,
       family: annotation.family,
-      fields: deepFreeze({ ...annotation.fields }),
-      protectedTargetIds: Object.freeze([...annotation.protectedTargetIds]),
+      fields: deepFreeze(canonicalFieldRecord(annotation.fields)),
+      protectedTargetIds: Object.freeze([...annotation.protectedTargetIds].sort()),
       ranges: Object.freeze(affected),
       expectedPostDelete: emptied ? null : membershipDigest(annotation.memberships),
       disposition: emptied ? 'deleted' : 'retained',
-      prerequisites: Object.freeze([...annotation.prerequisites]),
+      prerequisites: Object.freeze([...annotation.prerequisites].sort((left, right) => {
+        const leftKey = `${left.entity}\u0000${left.id}`;
+        const rightKey = `${right.entity}\u0000${right.id}`;
+        return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+      })),
     }));
   }
+  images.sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
 
   const fact: DeleteFact = deepFreeze({
     version: DELETE_FACT_VERSION,
@@ -373,7 +358,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 function isSafeNonNegativeInt(value: unknown): value is number {
-  return Number.isSafeInteger(value) && value >= 0;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
 function parseScalarSpan(value: unknown, where: string): ScalarSpan {
@@ -385,7 +370,7 @@ function parseScalarSpan(value: unknown, where: string): ScalarSpan {
   } catch (error) {
     throw new TypeError(`${where} has an invalid operation ID: ${(error as Error).message}`);
   }
-  if (!isSafeNonNegativeInt(first) || !Number.isSafeInteger(count) || count < 1) fail(`${where} must carry a non-negative first ordinal and a positive count`);
+  if (!isSafeNonNegativeInt(first) || !isSafeNonNegativeInt(count) || count < 1) fail(`${where} must carry a non-negative first ordinal and a positive count`);
   return Object.freeze([parsedOp, first, count]);
 }
 
@@ -436,6 +421,8 @@ function parseAnnotationImage(value: unknown, scalarCountLimit: number, where: s
   seenIds.add(id);
   if (typeof family !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(family)) fail(`${where}.family must be an identifier`);
   if (!isPlainObject(fields)) fail(`${where}.fields must be an object`);
+  const fieldNames = Object.keys(fields);
+  if (fieldNames.some((name, index) => index > 0 && fieldNames[index - 1] >= name)) fail(`${where}.fields keys must be canonically ordered`);
   for (const fieldValue of Object.values(fields)) jsonSerializable(fieldValue, `${where}.fields`);
   if (!Array.isArray(protectedTargetIds)) fail(`${where}.protectedTargetIds must be an array`);
   let previousTarget: string | null = null;
@@ -507,7 +494,7 @@ export function parseDeleteFact(raw: unknown, limits?: DeleteFactLimits): Delete
     if (previous) {
       const order = compareOpIdValidated(previous[0], parsed[0]);
       if (order > 0 || (order === 0 && parsed[1] <= previous[1])) fail('deletedSpans must be canonically ordered');
-      if (order === 0 && previous[1] + previous[2] > parsed[1]) fail('deletedSpans of one operation must not overlap');
+      if (order === 0 && previous[1] + previous[2] >= parsed[1]) fail('deletedSpans of one operation must not overlap or be mergeable');
     }
     previous = parsed;
     spans.push(parsed);
@@ -532,6 +519,7 @@ export function parseDeleteFact(raw: unknown, limits?: DeleteFactLimits): Delete
   if (!Array.isArray(contribution.annotations)) fail('annotations must be an array');
   const seenIds = new Set<string>();
   const images = contribution.annotations.map((entry, index) => parseAnnotationImage(entry, scalars, `annotations[${index}]`, seenIds));
+  if (images.some((image, index) => index > 0 && images[index - 1].id >= image.id)) fail('annotations must be canonically ordered by id');
 
   const fact: DeleteFact = deepFreeze({
     version: DELETE_FACT_VERSION,
@@ -587,12 +575,14 @@ function anchorExists(family: ContinuousTextFamily, anchor: Anchor): boolean {
  * Cardinality-one geometry is judged against the fresh insert at restore time
  * (Phase D), where the restored scalars exist.
  */
-export function planDeleteUndo({ fact, family, annotations, prerequisiteLiveness }: {
+export function planDeleteUndo({ fact, family, annotations, prerequisiteLiveness, protectedTargetValidation }: {
   fact: DeleteFact;
   family: ContinuousTextFamily;
   annotations?: readonly LiveAnnotationView[];
-  /** Optional liveness resolver; a false/absent verdict blocks restoration (erasure law). */
+  /** Required whenever the fact carries a ref prerequisite. */
   prerequisiteLiveness?: (prerequisite: AnnotationPrerequisite) => boolean;
+  /** Required whenever the fact carries protected links; validates declaration relationship and target liveness. */
+  protectedTargetValidation?: (protector: AnnotationImage, target: AnnotationImage | LiveAnnotationView) => boolean;
 }): DeleteUndoPlan {
   const { contribution } = fact;
   if (!anchorExists(family, contribution.gapAnchor)) {
@@ -620,12 +610,17 @@ export function planDeleteUndo({ fact, family, annotations, prerequisiteLiveness
       return Object.freeze({ outcome: 'noop', code: 'annotation-changed', reason: `retained annotation '${image.id}' membership set moved after the delete` });
     }
   }
-  if (prerequisiteLiveness) {
-    for (const image of contribution.annotations) {
-      for (const prerequisite of image.prerequisites) {
-        if (!prerequisiteLiveness(prerequisite)) {
-          return Object.freeze({ outcome: 'noop', code: 'prerequisite-missing', reason: `prerequisite ${prerequisite.entity}:${prerequisite.id} is missing or erased` });
-        }
+  const capturedById = new Map(contribution.annotations.map((image) => [image.id, image]));
+  for (const image of contribution.annotations) {
+    for (const prerequisite of image.prerequisites) {
+      if (!prerequisiteLiveness || !prerequisiteLiveness(prerequisite)) {
+        return Object.freeze({ outcome: 'noop', code: 'prerequisite-missing', reason: `prerequisite ${prerequisite.entity}:${prerequisite.id} could not be proven live` });
+      }
+    }
+    for (const targetId of image.protectedTargetIds) {
+      const target = capturedById.get(targetId) ?? currentById.get(targetId);
+      if (!target || !protectedTargetValidation || !protectedTargetValidation(image, target)) {
+        return Object.freeze({ outcome: 'noop', code: 'protected-target-invalid', reason: `protected target '${targetId}' could not be proven live and valid for '${image.id}'` });
       }
     }
   }

@@ -11,6 +11,7 @@
 //   - relative ranges binding only to a fresh insert contribution's scalars.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { DatabaseSync } from 'node:sqlite';
 
 import {
   applyTextOperation,
@@ -32,7 +33,11 @@ import {
   utf16OffsetToScalarIndex,
   utf16RangeToScalarWindow,
 } from '../build/annotated-text-delete-history.mjs';
-import { annotationMembershipDigest } from '../build/annotated-text-storage.mjs';
+import {
+  annotationMembershipDigest,
+  loadAnnotationImages,
+  restoreAnnotationImages,
+} from '../build/annotated-text-storage.mjs';
 
 const A = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const B = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
@@ -269,6 +274,10 @@ test('canonical ordering and malformed/oversized facts fail closed', () => {
     const [opId] = fact.contribution.deletedSpans[0];
     fact.contribution.deletedSpans = [[opId, 1, 2], [opId, 0, 1]];
   })), /ordered/);
+  assert.throws(() => parseDeleteFact(mutate((fact) => {
+    const [opId] = fact.contribution.deletedSpans[0];
+    fact.contribution.deletedSpans = [[opId, 0, 1], [opId, 1, 2]];
+  })), /mergeable/, 'adjacent same-operation spans must be represented by one canonical span');
   assert.throws(() => parseDeleteFact(mutate((fact) => { fact.contribution.deletedSpans[0] = [['zz', 1], 0, 1]; })), /operation ID/);
   assert.throws(() => parseDeleteFact(mutate((fact) => { fact.contribution.annotations.push({ ...fact.contribution.annotations[0] }); })), /duplicate|ordered|disposition/);
   assert.throws(() => parseDeleteFact(good, { maxBytes: 10 }), /byte limit/, 'oversized facts are rejected by limit');
@@ -314,6 +323,21 @@ test('applicability: same-ID collision, changed annotation, missing prerequisite
   assert.equal(blocked.outcome, 'noop');
   assert.equal(blocked.code, 'prerequisite-missing');
   assert.deepEqual(planDeleteUndo({ fact: refFact, family: post, prerequisiteLiveness: () => true }), { outcome: 'applied' });
+  const unchecked = planDeleteUndo({ fact: refFact, family: post });
+  assert.equal(unchecked.outcome, 'noop', 'facts with refs fail closed when no liveness resolver is supplied');
+  assert.equal(unchecked.code, 'prerequisite-missing');
+
+  const protectedFact = captureDeleteContribution({
+    documentId: 'd', family, fromUtf16: 0, toUtf16: 6,
+    annotations: [
+      { ...emptied, id: 'protector', protectedTargetIds: ['target'] },
+      { ...emptied, id: 'target' },
+    ],
+  });
+  const unvalidatedGraph = planDeleteUndo({ fact: protectedFact, family: post });
+  assert.equal(unvalidatedGraph.outcome, 'noop');
+  assert.equal(unvalidatedGraph.code, 'protected-target-invalid');
+  assert.deepEqual(planDeleteUndo({ fact: protectedFact, family: post, protectedTargetValidation: () => true }), { outcome: 'applied' });
 
   // Missing anchor: the recorded gap element no longer exists in ANY current
   // element record (e.g. erased by compaction). Checkpoints are derived and
@@ -325,6 +349,114 @@ test('applicability: same-ID collision, changed annotation, missing prerequisite
   const noAnchor = planDeleteUndo({ fact: midFact, family: anchorless });
   assert.equal(noAnchor.outcome, 'noop');
   assert.equal(noAnchor.code, 'missing-anchor');
+});
+
+test('fact parser rejects non-canonical annotation and field-key ordering while capture canonicalizes both', () => {
+  const endpoint = (ordinal, affinity) => ({ point: ['point', ['element', [[B, 1], ordinal]], affinity], basisFrontier: [] });
+  let family = importTextToFamily('d', A, '');
+  family = insert(family, B, 1, ['root'], 'xy');
+  const annotations = ['z', 'a'].map((id) => ({
+    id,
+    family: 'codes',
+    fields: { z: 1, a: 2 },
+    protectedTargetIds: [],
+    memberships: [{ ordinal: 0, start: endpoint(0, 'left'), end: endpoint(1, 'right') }],
+    prerequisites: [],
+  }));
+  const captured = captureDeleteContribution({ documentId: 'd', family, fromUtf16: 0, toUtf16: 2, annotations });
+  assert.deepEqual(captured.contribution.annotations.map(({ id }) => id), ['a', 'z']);
+  assert.deepEqual(Object.keys(captured.contribution.annotations[0].fields), ['a', 'z']);
+
+  const reversed = JSON.parse(JSON.stringify(captured));
+  reversed.contribution.annotations.reverse();
+  assert.throws(() => parseDeleteFact(reversed), /annotations must be canonically ordered/);
+  const reversedFields = JSON.parse(JSON.stringify(captured));
+  reversedFields.contribution.annotations[0].fields = { z: 1, a: 2 };
+  assert.throws(() => parseDeleteFact(reversedFields), /fields keys must be canonically ordered/);
+});
+
+function storageDb() {
+  const db = new DatabaseSync(':memory:');
+  db.exec(`
+    PRAGMA foreign_keys = ON;
+    CREATE TABLE doc_annotation (
+      id TEXT PRIMARY KEY,
+      document_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      owner_id TEXT NOT NULL,
+      family TEXT NOT NULL,
+      UNIQUE (id, document_id)
+    );
+    CREATE TABLE doc_annotation_target (annotation_id TEXT PRIMARY KEY REFERENCES doc_annotation(id) ON DELETE CASCADE);
+    CREATE TABLE doc_annotation_protector (annotation_id TEXT PRIMARY KEY REFERENCES doc_annotation(id) ON DELETE CASCADE);
+    CREATE TABLE doc_annotation_jsonFamily (annotation_id TEXT PRIMARY KEY REFERENCES doc_annotation(id) ON DELETE CASCADE, payload TEXT);
+    CREATE TABLE doc_annotation_protected_target (
+      annotation_id TEXT NOT NULL REFERENCES doc_annotation(id) ON DELETE CASCADE,
+      target_annotation_id TEXT NOT NULL REFERENCES doc_annotation(id) ON DELETE RESTRICT,
+      PRIMARY KEY (annotation_id, target_annotation_id)
+    );
+    CREATE TABLE doc_range (
+      id INTEGER PRIMARY KEY,
+      document_id TEXT NOT NULL,
+      start_point TEXT NOT NULL,
+      end_point TEXT NOT NULL,
+      UNIQUE (document_id, start_point, end_point)
+    );
+    CREATE TABLE doc_membership (
+      annotation_id TEXT NOT NULL,
+      range_id INTEGER NOT NULL,
+      document_id TEXT NOT NULL,
+      ordinal INTEGER NOT NULL,
+      PRIMARY KEY (annotation_id, ordinal),
+      FOREIGN KEY (annotation_id) REFERENCES doc_annotation(id) ON DELETE CASCADE,
+      FOREIGN KEY (range_id) REFERENCES doc_range(id)
+    );
+  `);
+  return db;
+}
+
+test('storage restores linked annotations graph-safely and creates fieldless extension rows', () => {
+  const db = storageDb();
+  restoreAnnotationImages(db, {
+    prefix: 'doc', documentId: 'd', projectId: 'p', ownerId: 'o',
+    declarations: [
+      { annotationName: 'target', fields: {} },
+      { annotationName: 'protector', fields: {}, protects: 'target' },
+    ],
+    // Protector sorts before its jointly restored target, pinning the old FK failure.
+    images: [
+      { id: 'a-protector', family: 'protector', fields: {}, protectedTargetIds: ['z-target'] },
+      { id: 'z-target', family: 'target', fields: {} },
+    ],
+  });
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM doc_annotation_protected_target').get().n, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM doc_annotation_protector').get().n, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM doc_annotation_target').get().n, 1);
+});
+
+test('storage capture keeps canonical serialized field-cell images by default', () => {
+  const db = storageDb();
+  db.prepare('INSERT INTO doc_annotation VALUES (?, ?, ?, ?, ?)').run('json-1', 'd', 'p', 'o', 'jsonFamily');
+  db.prepare('INSERT INTO doc_annotation_jsonFamily VALUES (?, ?)').run('json-1', '{"z":1,"a":[2]}');
+  const [image] = loadAnnotationImages(db, {
+    prefix: 'doc', documentId: 'd', declarations: [{ annotationName: 'jsonFamily', fields: { payload: { type: 'json' } } }],
+  });
+  assert.equal(image.fields.payload, '{"z":1,"a":[2]}');
+});
+
+test('storage detects cross-document same-ID collisions before any restore write', () => {
+  const db = storageDb();
+  db.prepare('INSERT INTO doc_annotation VALUES (?, ?, ?, ?, ?)').run('occupied', 'other-document', 'p', 'o', 'target');
+  const restored = restoreAnnotationImages(db, {
+    prefix: 'doc', documentId: 'd', projectId: 'p', ownerId: 'o',
+    declarations: [{ annotationName: 'target', fields: {} }],
+    images: [
+      { id: 'fresh', family: 'target', fields: {} },
+      { id: 'occupied', family: 'target', fields: {} },
+    ],
+  });
+  assert.equal(restored, false, 'global collision is planned as a whole-move no-op');
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM doc_annotation WHERE document_id = 'd'").get().n, 0, 'collision is a whole-move preflight no-op');
 });
 
 test('fact header constants pin the v3 private-fact contract', () => {
