@@ -38,6 +38,18 @@ function requestIdOf(msg                         )                              
 
 
 
+// Keep a stalled peer from turning the Node writable buffer into an
+// unbounded per-connection allocation. A peer that exceeds this budget is
+// disconnected and can recover through its normal cursor resubscribe.
+const MAX_QUEUED_BYTES = 1024 * 1024;
+const DRAIN_TIMEOUT_MS = 30_000;
+
+
+
+
+
+
+
 
 
 
@@ -73,6 +85,9 @@ export class LiveConnection {
   #coreAcs                              ;
   #coreActivations                             ;
   #coreGen                     ;
+  #writeQueue                = [];
+  #queuedBytes = 0;
+  #writing = false;
 
   constructor(socket        , id        , { fanout, core = null, resolveEntity, mayVerb, authorization = null, db, currentSeq, onClose, log = null, carets = null }                       ) {
     this.#socket = socket;
@@ -118,10 +133,82 @@ export class LiveConnection {
   send(data         )       {
     if (this.#closed || this.#closing) return;
     try {
-      this.#socket.write(this.#sender.text(JSON.stringify(data)));
+      void this.#enqueueFrame(this.#sender.text(JSON.stringify(data))).catch(() => {});
     } catch {
       this.#close();
     }
+  }
+
+  async #sendAndWait(data         )                {
+    if (this.#closed || this.#closing) throw new Error('live connection closed');
+    await this.#enqueueFrame(this.#sender.text(JSON.stringify(data)));
+  }
+
+  #enqueueFrame(frame        )                {
+    if (this.#closed) return Promise.reject(new Error('live connection closed'));
+    if (this.#queuedBytes + frame.length > MAX_QUEUED_BYTES) {
+      const error = new Error('live connection write queue exceeded its byte limit');
+      this.#rejectQueued(error);
+      void this.#close();
+      return Promise.reject(error);
+    }
+    const promise = new Promise      ((resolve, reject) => {
+      this.#writeQueue.push({ frame, resolve, reject });
+    });
+    this.#queuedBytes += frame.length;
+    void this.#processWriteQueue();
+    return promise;
+  }
+
+  async #processWriteQueue()                {
+    if (this.#writing) return;
+    this.#writing = true;
+    try {
+      while (this.#writeQueue.length > 0) {
+        const item = this.#writeQueue.shift() ;
+        this.#queuedBytes -= item.frame.length;
+        try {
+          const accepted = this.#socket.write(item.frame);
+          if (accepted === false) await this.#waitForDrain();
+          item.resolve();
+        } catch (error) {
+          item.reject(error);
+          this.#rejectQueued(error);
+          void this.#close();
+          return;
+        }
+      }
+    } finally {
+      this.#writing = false;
+    }
+  }
+
+  #rejectQueued(error         )       {
+    for (const item of this.#writeQueue) item.reject(error);
+    this.#writeQueue = [];
+    this.#queuedBytes = 0;
+  }
+
+  #waitForDrain()                {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (error          ) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        this.#socket.removeListener('drain', onDrain);
+        this.#socket.removeListener('error', onError);
+        this.#socket.removeListener('close', onClose);
+        if (error) reject(error); else resolve();
+      };
+      const onDrain = () => finish();
+      const onError = (error         ) => finish(error);
+      const onClose = () => finish(new Error('live connection closed while draining'));
+      const timeout = setTimeout(() => finish(new Error('live connection drain timed out')), DRAIN_TIMEOUT_MS);
+      this.#socket.once('drain', onDrain);
+      this.#socket.once('error', onError);
+      this.#socket.once('close', onClose);
+    });
   }
 
   error(workbenchFailure         , requestId                  )       {
@@ -146,7 +233,7 @@ export class LiveConnection {
         // Mark the connection closing before cleanup can fan out a presence
         // retraction, then acknowledge the peer's close frame.
         this.#closing = true;
-        try { this.#socket.write(this.#sender.close(code, msg.closeReason)); } catch { /* ignore */ }
+         void this.#enqueueFrame(this.#sender.close(code, msg.closeReason)).catch(() => {});
         this.#close();
         return;
       }
@@ -165,7 +252,7 @@ export class LiveConnection {
 
     const pongs = this.#parser.drainPongs();
     for (const payload of pongs) {
-      try { this.#socket.write(this.#sender.pong(payload)); } catch { this.#close(); }
+      void this.#enqueueFrame(this.#sender.pong(payload)).catch(() => {});
     }
   }
 
@@ -325,11 +412,11 @@ export class LiveConnection {
             // `resync`) is forwarded verbatim, one frame per envelope. No
             // kind-specific reshaping happens on this transport, so SSE and
             // WebSocket can never diverge on tier/admission/recovery/confirmation.
-            if (this.#closed) throw new Error('live connection closed');
-            for (const envelope of batch) {
               if (this.#closed) throw new Error('live connection closed');
-              this.send(envelope);
-            }
+              for (const envelope of batch) {
+                if (this.#closed) throw new Error('live connection closed');
+                await this.#sendAndWait(envelope);
+              }
           },
           revoke: () => {
             // A reauthorization failure after acknowledgement is terminal for
