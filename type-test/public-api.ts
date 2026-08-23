@@ -307,8 +307,9 @@ const searchReader: SearchSourceReader = createSearchSourceReader(null, {
 });
 const vectorPlugin: VectorPlugin = createVectorPlugin({
   id: 'notes-vector', version: '1',
-  source: { entity: 'Note', vector: 'embedding', model: 'embeddingModel', owns: () => true },
-  modelSpace: { model: 'text-embedding', dimensions: 3 },
+   source: { entity: 'Note', vector: 'embedding', model: 'embeddingModel', owns: () => true },
+   modelSpace: { model: 'text-embedding', dimensions: 3 },
+   admission: undefined,
 });
 const searchPlugin: SearchPlugin = vectorPlugin;
 nativeApp.registerSearchPlugin(searchPlugin);
