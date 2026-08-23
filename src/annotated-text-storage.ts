@@ -1,4 +1,5 @@
 import type { DbHandle } from './driver.ts';
+import { annotationDeclarationFingerprint } from './annotated-text-delete-history.ts';
 import { canonicalEndpointJSON, membershipDigest } from './annotated-text-delete-history-shared.ts';
 export { canonicalEndpointJSON } from './annotated-text-delete-history-shared.ts';
 // A stored annotation-to-range link joined with its immutable range record.
@@ -125,7 +126,7 @@ export function loadAnnotationImages(db: DbHandle, options: {
       if (deserialize && value !== null && value !== undefined) value = deserializeAnnotatedFieldValue(descriptor, value);
       fields[name] = value === undefined ? null : value;
     }
-    const refTargets = fieldNames.filter((name) => isRefField(declared.fields[name]));
+    const refTargets = fieldNames.filter((name) => isRefField(declared.fields[name]) && stored?.[name] !== null && stored?.[name] !== undefined);
     const prerequisites = refTargets.map((name) => ({
       entity: String(refTargetName(declared.fields[name])),
       id: String(stored?.[name]),
@@ -238,6 +239,8 @@ export function restoreAnnotationImages(db: DbHandle, options: {
     protectedTargetIds?: readonly string[];
     memberships?: ReadonlyArray<{ ordinal: number; start: unknown; end: unknown }>;
   }>;
+  /** Fingerprint captured in the delete fact; checked before the first write. */
+  declarationFingerprint: string;
   /** Compiled declaration annotations; image fields are already canonical stored cells. */
   declarations: Iterable<{ annotationName: string; fields: Record<string, unknown>; protects?: string | null }>;
 }): boolean {
@@ -246,12 +249,21 @@ export function restoreAnnotationImages(db: DbHandle, options: {
   const images = [...options.images];
   const imageById = new Map(images.map((image) => [image.id, image]));
   if (imageById.size !== images.length) throw new Error('cannot restore annotations: duplicate image IDs');
+  const currentDeclarationFingerprint = annotationDeclarationFingerprint(declarations, images.map((image) => image.family));
+  if (currentDeclarationFingerprint !== options.declarationFingerprint) {
+    throw new Error('cannot restore annotations: declaration drift changed the captured extension-row shape');
+  }
 
   // Validate the complete graph before the first write. Annotation IDs are a
   // global primary key, so a collision in another document blocks the move.
   for (const image of images) {
     const declared = declarations.find((candidate) => candidate.annotationName === image.family);
     if (!declared) throw new Error(`cannot restore annotation '${image.id}': family '${image.family}' is not declared`);
+    const declaredFields = Object.keys(declared.fields).sort();
+    const capturedFields = Object.keys(image.fields).sort();
+    if (declaredFields.join('\u0000') !== capturedFields.join('\u0000')) {
+      throw new Error(`cannot restore annotation '${image.id}': declaration drift changed its extension-row fields`);
+    }
     const existing = db.prepare(`SELECT id FROM ${prefix}_annotation WHERE id = ?`).get(image.id);
     if (existing) return false;
     for (const targetId of image.protectedTargetIds ?? []) {
@@ -264,24 +276,10 @@ export function restoreAnnotationImages(db: DbHandle, options: {
     }
   }
 
-  const restoreOrder: typeof images = [];
-  const visiting = new Set<string>();
-  const visited = new Set<string>();
-  const visit = (image: typeof images[number]): void => {
-    if (visited.has(image.id)) return;
-    if (visiting.has(image.id)) throw new Error(`cannot restore annotation '${image.id}': protected-target graph contains a cycle`);
-    visiting.add(image.id);
-    for (const targetId of image.protectedTargetIds ?? []) {
-      const restoredTarget = imageById.get(targetId);
-      if (restoredTarget) visit(restoredTarget);
-    }
-    visiting.delete(image.id);
-    visited.add(image.id);
-    restoreOrder.push(image);
-  };
-  for (const image of images) visit(image);
+  const restoreOrder = images.sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
 
-  // Bases are topologically target-first, then dependent rows follow in phases.
+  // Every base exists before any protected-target edge, so declaration-legal
+  // cycles are FK-safe without topologically ordering the protector graph.
   for (const image of restoreOrder) {
     db.prepare(`INSERT INTO ${prefix}_annotation (id, document_id, project_id, owner_id, family) VALUES (?, ?, ?, ?, ?)`)
       .run(image.id, documentId, projectId, ownerId, image.family);

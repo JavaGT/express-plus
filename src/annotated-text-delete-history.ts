@@ -16,6 +16,8 @@
 // `annotated-text-storage.ts` (one-way dependency: this module never imports
 // it at runtime).
 
+import { createHash } from 'node:crypto';
+
 import {
   assertAnchor,
   assertOpId,
@@ -69,6 +71,15 @@ export type AnnotationDisposition = 'deleted' | 'retained';
 
 export type AnnotationPrerequisite = Readonly<{ entity: string; id: string }>;
 
+export type AnnotationDeclarationShape = Readonly<{
+  annotationName: string;
+  fields: Readonly<Record<string, unknown>>;
+  kind?: string;
+  empty?: string;
+  cardinality?: string;
+  protects?: string | null;
+}>;
+
 /**
  * Immutable image of one annotation affected by the delete. `fields` carries
  * the declaration's canonical SERIALIZED field values (the stored cells), not
@@ -101,6 +112,7 @@ export type DeleteFact = Readonly<{
   version: typeof DELETE_FACT_VERSION;
   kind: typeof DELETE_FACT_KIND;
   documentId: string;
+  declarationFingerprint: string;
   contribution: DeleteContribution;
 }>;
 
@@ -131,7 +143,7 @@ export interface LiveAnnotationView {
   memberships: readonly StoredMembershipEntry[];
 }
 
-export type DeleteUndoBlockerCode = 'missing-anchor' | 'annotation-id-collision' | 'annotation-changed' | 'prerequisite-missing' | 'protected-target-invalid';
+export type DeleteUndoBlockerCode = 'missing-anchor' | 'declaration-drift' | 'annotation-id-collision' | 'annotation-changed' | 'prerequisite-missing' | 'protected-target-invalid';
 
 export type DeleteUndoPlan =
   | Readonly<{ outcome: 'applied' }>
@@ -145,6 +157,41 @@ function deepFreeze<T>(value: T): T {
   if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
   for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
   return Object.freeze(value) as T;
+}
+
+function declarationTargetName(descriptor: unknown): string | null {
+  const target = (descriptor as { target?: unknown } | null | undefined)?.target;
+  if (typeof target === 'string') return target;
+  if (target && typeof target === 'object' && typeof (target as { name?: unknown }).name === 'string') return (target as { name: string }).name;
+  return null;
+}
+
+/** SHA-256 identity of the extension-row shape used by affected annotation families. */
+export function annotationDeclarationFingerprint(declarations: Iterable<AnnotationDeclarationShape>, relevantFamilies: Iterable<string>): string {
+  const byName = new Map([...declarations].map((declaration) => [declaration.annotationName, declaration]));
+  const families = [...new Set(relevantFamilies)].sort().map((family) => {
+    const declaration = byName.get(family);
+    if (!declaration) fail(`declaration fingerprint cannot resolve annotation family '${family}'`);
+    return {
+      family,
+      kind: declaration.kind ?? null,
+      empty: declaration.empty ?? null,
+      cardinality: declaration.cardinality ?? null,
+      protects: declaration.protects ?? null,
+      fields: Object.keys(declaration.fields).sort().map((name) => {
+        const descriptor = declaration.fields[name] as Record<string, unknown> | null | undefined;
+        return {
+          name,
+          kind: descriptor?.kind ?? null,
+          type: descriptor?.type ?? null,
+          optional: descriptor?.optional === true,
+          nullable: descriptor?.nullable === true,
+          target: descriptor?.type === 'ref' ? declarationTargetName(descriptor) : null,
+        };
+      }),
+    };
+  });
+  return createHash('sha256').update(JSON.stringify(families)).digest('hex');
 }
 
 // ---------------------------------------------------------------------------
@@ -262,12 +309,13 @@ function relativeRangeForWindow(family: ContinuousTextFamily, text: string, from
  *
  * Pure: reads the family and the provided images only; emits no operations.
  */
-export function captureDeleteContribution({ documentId, family, fromUtf16, toUtf16, annotations = [], limits }: {
+export function captureDeleteContribution({ documentId, family, fromUtf16, toUtf16, annotations = [], declarations = [], limits }: {
   documentId: string;
   family: ContinuousTextFamily;
   fromUtf16: number;
   toUtf16: number;
   annotations?: readonly StoredAnnotationImage[];
+  declarations?: Iterable<AnnotationDeclarationShape>;
   limits?: DeleteFactLimits;
 }): DeleteFact {
   if (typeof documentId !== 'string' || documentId.length === 0) fail('documentId must be a non-empty string');
@@ -320,11 +368,13 @@ export function captureDeleteContribution({ documentId, family, fromUtf16, toUtf
     }));
   }
   images.sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
+  const declarationFingerprint = annotationDeclarationFingerprint(declarations, images.map((image) => image.family));
 
   const fact: DeleteFact = deepFreeze({
     version: DELETE_FACT_VERSION,
     kind: DELETE_FACT_KIND,
     documentId,
+    declarationFingerprint,
     contribution: deepFreeze({
       kind: 'text.delete',
       deletedSpans: Object.freeze(spans),
@@ -473,13 +523,14 @@ function jsonSerializable(value: unknown, where: string): void {
  * declaration is available (`annotated-text-storage.ts`).
  */
 export function parseDeleteFact(raw: unknown, limits?: DeleteFactLimits): DeleteFact {
-  if (!isPlainObject(raw) || !exactKeys(raw, ['version', 'kind', 'documentId', 'contribution'])) {
-    fail('fact must carry exactly { version, kind, documentId, contribution }');
+  if (!isPlainObject(raw) || !exactKeys(raw, ['version', 'kind', 'documentId', 'declarationFingerprint', 'contribution'])) {
+    fail('fact must carry exactly { version, kind, documentId, declarationFingerprint, contribution }');
   }
   const record = raw as Record<string, unknown>;
   if (record.version !== DELETE_FACT_VERSION) fail(`fact version must be ${DELETE_FACT_VERSION}`);
   if (record.kind !== DELETE_FACT_KIND) fail(`fact kind must be '${DELETE_FACT_KIND}'`);
   if (typeof record.documentId !== 'string' || record.documentId.length === 0) fail('documentId must be a non-empty string');
+  if (typeof record.declarationFingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(record.declarationFingerprint)) fail('declarationFingerprint must be a SHA-256 digest');
   const contributionRaw = record.contribution;
   if (!isPlainObject(contributionRaw) || !exactKeys(contributionRaw, ['kind', 'deletedSpans', 'gapAnchor', 'text', 'scalarCount', 'annotations'])) {
     fail('contribution must carry exactly { kind, deletedSpans, gapAnchor, text, scalarCount, annotations }');
@@ -525,6 +576,7 @@ export function parseDeleteFact(raw: unknown, limits?: DeleteFactLimits): Delete
     version: DELETE_FACT_VERSION,
     kind: DELETE_FACT_KIND,
     documentId: record.documentId,
+    declarationFingerprint: record.declarationFingerprint,
     contribution: deepFreeze({
       kind: 'text.delete',
       deletedSpans: Object.freeze(spans),
@@ -575,10 +627,11 @@ function anchorExists(family: ContinuousTextFamily, anchor: Anchor): boolean {
  * Cardinality-one geometry is judged against the fresh insert at restore time
  * (Phase D), where the restored scalars exist.
  */
-export function planDeleteUndo({ fact, family, annotations, prerequisiteLiveness, protectedTargetValidation }: {
+export function planDeleteUndo({ fact, family, annotations, declarations = [], prerequisiteLiveness, protectedTargetValidation }: {
   fact: DeleteFact;
   family: ContinuousTextFamily;
   annotations?: readonly LiveAnnotationView[];
+  declarations?: Iterable<AnnotationDeclarationShape>;
   /** Required whenever the fact carries a ref prerequisite. */
   prerequisiteLiveness?: (prerequisite: AnnotationPrerequisite) => boolean;
   /** Required whenever the fact carries protected links; validates declaration relationship and target liveness. */
@@ -587,6 +640,15 @@ export function planDeleteUndo({ fact, family, annotations, prerequisiteLiveness
   const { contribution } = fact;
   if (!anchorExists(family, contribution.gapAnchor)) {
     return Object.freeze({ outcome: 'noop', code: 'missing-anchor', reason: 'the recorded gap anchor no longer exists in the document' });
+  }
+  let currentDeclarationFingerprint: string;
+  try {
+    currentDeclarationFingerprint = annotationDeclarationFingerprint(declarations, contribution.annotations.map((image) => image.family));
+  } catch (error) {
+    return Object.freeze({ outcome: 'noop', code: 'declaration-drift', reason: `annotation declaration drift: ${(error as Error).message}` });
+  }
+  if (currentDeclarationFingerprint !== fact.declarationFingerprint) {
+    return Object.freeze({ outcome: 'noop', code: 'declaration-drift', reason: 'annotation declaration drift: current extension-row shape differs from the captured fact' });
   }
   const currentById = new Map((annotations ?? []).map((annotation) => [annotation.id, annotation]));
   for (const image of contribution.annotations) {

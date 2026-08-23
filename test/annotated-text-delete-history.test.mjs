@@ -22,6 +22,7 @@ import { canonicalTextOp } from '../build/annotated-text.mjs';
 import {
   DELETE_FACT_KIND,
   DELETE_FACT_VERSION,
+  annotationDeclarationFingerprint,
   captureDeleteContribution,
   isDeleteFact,
   membershipDigest,
@@ -41,6 +42,12 @@ import {
 
 const A = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const B = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+const BASE_DECLARATIONS = [
+  { annotationName: 'codes', fields: {} },
+  { annotationName: 'comments', fields: {} },
+  { annotationName: 'protector', fields: {}, protects: 'target' },
+  { annotationName: 'target', fields: {} },
+];
 
 function mulberry32(seed) {
   let s = seed >>> 0;
@@ -197,7 +204,7 @@ test('relative ranges bind only to the fresh insert contribution, never concurre
     ],
     prerequisites: [],
   }];
-  const fact = captureDeleteContribution({ documentId: 'd', family, fromUtf16: 0, toUtf16: 3, annotations: images });
+  const fact = captureDeleteContribution({ documentId: 'd', family, fromUtf16: 0, toUtf16: 3, annotations: images, declarations: BASE_DECLARATIONS });
   const image = fact.contribution.annotations[0];
   assert.equal(image.disposition, 'deleted');
   assert.deepEqual(image.ranges, [{ ordinal: 0, startScalar: 1, endScalar: 3 }]);
@@ -233,7 +240,7 @@ test('capture distinguishes deleted vs retained annotations and digests complete
   const fact = captureDeleteContribution({
     // Window covers scalars 2..6: 'kill-1' ([2,4)) is fully consumed while
     // 'keep-1' ([0,6)) only loses its middle — retained, not emptied.
-    documentId: 'd', family, fromUtf16: 2, toUtf16: 6, annotations: [retained, emptied],
+    documentId: 'd', family, fromUtf16: 2, toUtf16: 6, annotations: [retained, emptied], declarations: BASE_DECLARATIONS,
   });
   const keepImage = fact.contribution.annotations.find((entry) => entry.id === 'keep-1');
   const killImage = fact.contribution.annotations.find((entry) => entry.id === 'kill-1');
@@ -291,13 +298,13 @@ test('applicability: same-ID collision, changed annotation, missing prerequisite
     id: 'gone-1', family: 'codes', fields: {}, protectedTargetIds: [],
     memberships: [{ ordinal: 0, start: mkEndpoint(0), end: mkEndpoint(5, 'right') }], prerequisites: [],
   };
-  const fact = captureDeleteContribution({ documentId: 'd', family, fromUtf16: 0, toUtf16: 6, annotations: [emptied] });
+  const fact = captureDeleteContribution({ documentId: 'd', family, fromUtf16: 0, toUtf16: 6, annotations: [emptied], declarations: BASE_DECLARATIONS });
 
   const post = applyTextOperation(family, deleteOp(A, 1, fact.contribution.deletedSpans, family.checkpoint.frontier));
-  assert.deepEqual(planDeleteUndo({ fact, family: post }), { outcome: 'applied' });
+  assert.deepEqual(planDeleteUndo({ fact, family: post, declarations: BASE_DECLARATIONS }), { outcome: 'applied' });
 
   // Same-ID collision: someone recreated the annotation while absent.
-  const collision = planDeleteUndo({ fact, family: post, annotations: [{ id: 'gone-1', family: 'codes', fields: {}, memberships: [] }] });
+  const collision = planDeleteUndo({ fact, family: post, declarations: BASE_DECLARATIONS, annotations: [{ id: 'gone-1', family: 'codes', fields: {}, memberships: [] }] });
   assert.equal(collision.outcome, 'noop');
   assert.equal(collision.code, 'annotation-id-collision');
 
@@ -307,10 +314,10 @@ test('applicability: same-ID collision, changed annotation, missing prerequisite
       id: 'part-1', family: 'codes', fields: {}, protectedTargetIds: [],
       memberships: [{ ordinal: 0, start: mkEndpoint(0), end: mkEndpoint(3, 'right') }], prerequisites: [],
     };
-    return captureDeleteContribution({ documentId: 'd', family, fromUtf16: 3, toUtf16: 6, annotations: [partial] });
+    return captureDeleteContribution({ documentId: 'd', family, fromUtf16: 3, toUtf16: 6, annotations: [partial], declarations: BASE_DECLARATIONS });
   })();
   const moved = planDeleteUndo({
-    fact: retainedFact, family: post,
+    fact: retainedFact, family: post, declarations: BASE_DECLARATIONS,
     annotations: [{ id: 'part-1', family: 'codes', fields: {}, memberships: [{ ordinal: 0, start: mkEndpoint(0), end: mkEndpoint(2, 'right') }] }],
   });
   assert.equal(moved.outcome, 'noop');
@@ -318,26 +325,27 @@ test('applicability: same-ID collision, changed annotation, missing prerequisite
 
   // Erased prerequisite blocks under the erasure law.
   const withRef = { ...emptied, prerequisites: [{ entity: 'Comment', id: 'c1' }] };
-  const refFact = captureDeleteContribution({ documentId: 'd', family, fromUtf16: 0, toUtf16: 6, annotations: [withRef] });
-  const blocked = planDeleteUndo({ fact: refFact, family: post, prerequisiteLiveness: () => false });
+  const refFact = captureDeleteContribution({ documentId: 'd', family, fromUtf16: 0, toUtf16: 6, annotations: [withRef], declarations: BASE_DECLARATIONS });
+  const blocked = planDeleteUndo({ fact: refFact, family: post, declarations: BASE_DECLARATIONS, prerequisiteLiveness: () => false });
   assert.equal(blocked.outcome, 'noop');
   assert.equal(blocked.code, 'prerequisite-missing');
-  assert.deepEqual(planDeleteUndo({ fact: refFact, family: post, prerequisiteLiveness: () => true }), { outcome: 'applied' });
-  const unchecked = planDeleteUndo({ fact: refFact, family: post });
+  assert.deepEqual(planDeleteUndo({ fact: refFact, family: post, declarations: BASE_DECLARATIONS, prerequisiteLiveness: () => true }), { outcome: 'applied' });
+  const unchecked = planDeleteUndo({ fact: refFact, family: post, declarations: BASE_DECLARATIONS });
   assert.equal(unchecked.outcome, 'noop', 'facts with refs fail closed when no liveness resolver is supplied');
   assert.equal(unchecked.code, 'prerequisite-missing');
 
   const protectedFact = captureDeleteContribution({
     documentId: 'd', family, fromUtf16: 0, toUtf16: 6,
     annotations: [
-      { ...emptied, id: 'protector', protectedTargetIds: ['target'] },
-      { ...emptied, id: 'target' },
+      { ...emptied, id: 'protector', family: 'protector', protectedTargetIds: ['target'] },
+      { ...emptied, id: 'target', family: 'target' },
     ],
+    declarations: BASE_DECLARATIONS,
   });
-  const unvalidatedGraph = planDeleteUndo({ fact: protectedFact, family: post });
+  const unvalidatedGraph = planDeleteUndo({ fact: protectedFact, family: post, declarations: BASE_DECLARATIONS });
   assert.equal(unvalidatedGraph.outcome, 'noop');
   assert.equal(unvalidatedGraph.code, 'protected-target-invalid');
-  assert.deepEqual(planDeleteUndo({ fact: protectedFact, family: post, protectedTargetValidation: () => true }), { outcome: 'applied' });
+  assert.deepEqual(planDeleteUndo({ fact: protectedFact, family: post, declarations: BASE_DECLARATIONS, protectedTargetValidation: () => true }), { outcome: 'applied' });
 
   // Missing anchor: the recorded gap element no longer exists in ANY current
   // element record (e.g. erased by compaction). Checkpoints are derived and
@@ -363,7 +371,8 @@ test('fact parser rejects non-canonical annotation and field-key ordering while 
     memberships: [{ ordinal: 0, start: endpoint(0, 'left'), end: endpoint(1, 'right') }],
     prerequisites: [],
   }));
-  const captured = captureDeleteContribution({ documentId: 'd', family, fromUtf16: 0, toUtf16: 2, annotations });
+  const declarations = [{ annotationName: 'codes', fields: { a: { type: 'number' }, z: { type: 'number' } } }];
+  const captured = captureDeleteContribution({ documentId: 'd', family, fromUtf16: 0, toUtf16: 2, annotations, declarations });
   assert.deepEqual(captured.contribution.annotations.map(({ id }) => id), ['a', 'z']);
   assert.deepEqual(Object.keys(captured.contribution.annotations[0].fields), ['a', 'z']);
 
@@ -390,6 +399,7 @@ function storageDb() {
     CREATE TABLE doc_annotation_target (annotation_id TEXT PRIMARY KEY REFERENCES doc_annotation(id) ON DELETE CASCADE);
     CREATE TABLE doc_annotation_protector (annotation_id TEXT PRIMARY KEY REFERENCES doc_annotation(id) ON DELETE CASCADE);
     CREATE TABLE doc_annotation_jsonFamily (annotation_id TEXT PRIMARY KEY REFERENCES doc_annotation(id) ON DELETE CASCADE, payload TEXT);
+    CREATE TABLE doc_annotation_refFamily (annotation_id TEXT PRIMARY KEY REFERENCES doc_annotation(id) ON DELETE CASCADE, related_id TEXT);
     CREATE TABLE doc_annotation_protected_target (
       annotation_id TEXT NOT NULL REFERENCES doc_annotation(id) ON DELETE CASCADE,
       target_annotation_id TEXT NOT NULL REFERENCES doc_annotation(id) ON DELETE RESTRICT,
@@ -417,12 +427,14 @@ function storageDb() {
 
 test('storage restores linked annotations graph-safely and creates fieldless extension rows', () => {
   const db = storageDb();
+  const declarations = [
+    { annotationName: 'target', fields: {} },
+    { annotationName: 'protector', fields: {}, protects: 'target' },
+  ];
   restoreAnnotationImages(db, {
     prefix: 'doc', documentId: 'd', projectId: 'p', ownerId: 'o',
-    declarations: [
-      { annotationName: 'target', fields: {} },
-      { annotationName: 'protector', fields: {}, protects: 'target' },
-    ],
+    declarations,
+    declarationFingerprint: annotationDeclarationFingerprint(declarations, ['protector', 'target']),
     // Protector sorts before its jointly restored target, pinning the old FK failure.
     images: [
       { id: 'a-protector', family: 'protector', fields: {}, protectedTargetIds: ['z-target'] },
@@ -447,9 +459,11 @@ test('storage capture keeps canonical serialized field-cell images by default', 
 test('storage detects cross-document same-ID collisions before any restore write', () => {
   const db = storageDb();
   db.prepare('INSERT INTO doc_annotation VALUES (?, ?, ?, ?, ?)').run('occupied', 'other-document', 'p', 'o', 'target');
+  const declarations = [{ annotationName: 'target', fields: {} }];
   const restored = restoreAnnotationImages(db, {
     prefix: 'doc', documentId: 'd', projectId: 'p', ownerId: 'o',
-    declarations: [{ annotationName: 'target', fields: {} }],
+    declarations,
+    declarationFingerprint: annotationDeclarationFingerprint(declarations, ['target']),
     images: [
       { id: 'fresh', family: 'target', fields: {} },
       { id: 'occupied', family: 'target', fields: {} },
@@ -459,7 +473,70 @@ test('storage detects cross-document same-ID collisions before any restore write
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM doc_annotation WHERE document_id = 'd'").get().n, 0, 'collision is a whole-move preflight no-op');
 });
 
+test('storage restores declaration-legal cyclic protector graphs after all base rows exist', () => {
+  const db = storageDb();
+  const declarations = [
+    { annotationName: 'target', fields: {}, protects: 'protector' },
+    { annotationName: 'protector', fields: {}, protects: 'target' },
+  ];
+  restoreAnnotationImages(db, {
+    prefix: 'doc', documentId: 'd', projectId: 'p', ownerId: 'o',
+    declarations,
+    declarationFingerprint: annotationDeclarationFingerprint(declarations, ['target', 'protector']),
+    images: [
+      { id: 'a', family: 'target', fields: {}, protectedTargetIds: ['b'] },
+      { id: 'b', family: 'protector', fields: {}, protectedTargetIds: ['a'] },
+    ],
+  });
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM doc_annotation').get().n, 2);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM doc_annotation_protected_target').get().n, 2);
+});
+
+test('declaration drift is an explicit not-applicable undo verdict', () => {
+  let family = importTextToFamily('d', A, 'x');
+  const endpoint = (affinity) => ({ point: ['point', ['element', [[A, 1], 0]], affinity], basisFrontier: family.checkpoint.frontier });
+  const capturedDeclarations = [{ annotationName: 'codes', fields: { label: { kind: 'value', type: 'text' } } }];
+  const fact = captureDeleteContribution({
+    documentId: 'd', family, fromUtf16: 0, toUtf16: 1, declarations: capturedDeclarations,
+    annotations: [{
+      id: 'code-1', family: 'codes', fields: { label: 'old' }, protectedTargetIds: [], prerequisites: [],
+      memberships: [{ ordinal: 0, start: endpoint('left'), end: endpoint('right') }],
+    }],
+  });
+  const post = applyTextOperation(family, deleteOp(B, 1, fact.contribution.deletedSpans, family.checkpoint.frontier));
+  const driftedDeclarations = [{ annotationName: 'codes', fields: {
+    label: { kind: 'value', type: 'text' },
+    category: { kind: 'value', type: 'text', optional: true },
+  } }];
+  const verdict = planDeleteUndo({ fact, family: post, declarations: driftedDeclarations });
+  assert.equal(verdict.outcome, 'noop');
+  assert.equal(verdict.code, 'declaration-drift');
+  assert.match(verdict.reason, /declaration drift/);
+});
+
+test('nullable ref cells add no fake prerequisite and remain applicable', () => {
+  const db = storageDb();
+  db.prepare('INSERT INTO doc_annotation VALUES (?, ?, ?, ?, ?)').run('ref-1', 'd', 'p', 'o', 'refFamily');
+  db.prepare('INSERT INTO doc_annotation_refFamily VALUES (?, ?)').run('ref-1', null);
+  const declarations = [{ annotationName: 'refFamily', fields: {
+    related_id: { kind: 'value', type: 'ref', target: 'Related', optional: true, nullable: true },
+  } }];
+  const [loaded] = loadAnnotationImages(db, { prefix: 'doc', documentId: 'd', declarations });
+  assert.deepEqual(loaded.prerequisites, []);
+
+  let family = importTextToFamily('d', A, 'x');
+  const endpoint = (affinity) => ({ point: ['point', ['element', [[A, 1], 0]], affinity], basisFrontier: family.checkpoint.frontier });
+  const fact = captureDeleteContribution({
+    documentId: 'd', family, fromUtf16: 0, toUtf16: 1, declarations,
+    annotations: [{ ...loaded, memberships: [{ ordinal: 0, start: endpoint('left'), end: endpoint('right') }] }],
+  });
+  const post = applyTextOperation(family, deleteOp(B, 1, fact.contribution.deletedSpans, family.checkpoint.frontier));
+  assert.deepEqual(planDeleteUndo({ fact, family: post, declarations }), { outcome: 'applied' });
+});
+
 test('fact header constants pin the v3 private-fact contract', () => {
   assert.equal(DELETE_FACT_VERSION, 3);
   assert.equal(DELETE_FACT_KIND, 'annotated-text.delete-contribution');
+  const fact = captureDeleteContribution({ documentId: 'd', family: importTextToFamily('d', A, 'x'), fromUtf16: 0, toUtf16: 1 });
+  assert.match(fact.declarationFingerprint, /^[0-9a-f]{64}$/);
 });

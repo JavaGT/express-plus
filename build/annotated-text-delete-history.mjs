@@ -16,6 +16,8 @@
 // `annotated-text-storage.ts` (one-way dependency: this module never imports
 // it at runtime).
 
+import { createHash } from 'node:crypto';
+
 import {
   assertAnchor,
   assertOpId,
@@ -69,6 +71,15 @@ const DEFAULT_LIMITS                             = { maxBytes: 1024 * 1024, maxA
 
 
 
+
+
+
+
+
+
+
+
+
 /**
  * Immutable image of one annotation affected by the delete. `fields` carries
  * the declaration's canonical SERIALIZED field values (the stored cells), not
@@ -77,6 +88,7 @@ const DEFAULT_LIMITS                             = { maxBytes: 1024 * 1024, maxA
  * `retained` annotation it is the digest of the annotation's COMPLETE
  * post-delete membership set (compare-and-compensate expectation).
  */
+
 
 
 
@@ -145,6 +157,41 @@ function deepFreeze   (value   )    {
   if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
   for (const child of Object.values(value                           )) deepFreeze(child);
   return Object.freeze(value)     ;
+}
+
+function declarationTargetName(descriptor         )                {
+  const target = (descriptor                                           )?.target;
+  if (typeof target === 'string') return target;
+  if (target && typeof target === 'object' && typeof (target                      ).name === 'string') return (target                    ).name;
+  return null;
+}
+
+/** SHA-256 identity of the extension-row shape used by affected annotation families. */
+export function annotationDeclarationFingerprint(declarations                                      , relevantFamilies                  )         {
+  const byName = new Map([...declarations].map((declaration) => [declaration.annotationName, declaration]));
+  const families = [...new Set(relevantFamilies)].sort().map((family) => {
+    const declaration = byName.get(family);
+    if (!declaration) fail(`declaration fingerprint cannot resolve annotation family '${family}'`);
+    return {
+      family,
+      kind: declaration.kind ?? null,
+      empty: declaration.empty ?? null,
+      cardinality: declaration.cardinality ?? null,
+      protects: declaration.protects ?? null,
+      fields: Object.keys(declaration.fields).sort().map((name) => {
+        const descriptor = declaration.fields[name]                                              ;
+        return {
+          name,
+          kind: descriptor?.kind ?? null,
+          type: descriptor?.type ?? null,
+          optional: descriptor?.optional === true,
+          nullable: descriptor?.nullable === true,
+          target: descriptor?.type === 'ref' ? declarationTargetName(descriptor) : null,
+        };
+      }),
+    };
+  });
+  return createHash('sha256').update(JSON.stringify(families)).digest('hex');
 }
 
 // ---------------------------------------------------------------------------
@@ -262,7 +309,8 @@ function relativeRangeForWindow(family                      , text        , from
  *
  * Pure: reads the family and the provided images only; emits no operations.
  */
-export function captureDeleteContribution({ documentId, family, fromUtf16, toUtf16, annotations = [], limits }
+export function captureDeleteContribution({ documentId, family, fromUtf16, toUtf16, annotations = [], declarations = [], limits }
+
 
 
 
@@ -320,11 +368,13 @@ export function captureDeleteContribution({ documentId, family, fromUtf16, toUtf
     }));
   }
   images.sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
+  const declarationFingerprint = annotationDeclarationFingerprint(declarations, images.map((image) => image.family));
 
   const fact             = deepFreeze({
     version: DELETE_FACT_VERSION,
     kind: DELETE_FACT_KIND,
     documentId,
+    declarationFingerprint,
     contribution: deepFreeze({
       kind: 'text.delete',
       deletedSpans: Object.freeze(spans),
@@ -473,13 +523,14 @@ function jsonSerializable(value         , where        )       {
  * declaration is available (`annotated-text-storage.ts`).
  */
 export function parseDeleteFact(raw         , limits                   )             {
-  if (!isPlainObject(raw) || !exactKeys(raw, ['version', 'kind', 'documentId', 'contribution'])) {
-    fail('fact must carry exactly { version, kind, documentId, contribution }');
+  if (!isPlainObject(raw) || !exactKeys(raw, ['version', 'kind', 'documentId', 'declarationFingerprint', 'contribution'])) {
+    fail('fact must carry exactly { version, kind, documentId, declarationFingerprint, contribution }');
   }
   const record = raw                           ;
   if (record.version !== DELETE_FACT_VERSION) fail(`fact version must be ${DELETE_FACT_VERSION}`);
   if (record.kind !== DELETE_FACT_KIND) fail(`fact kind must be '${DELETE_FACT_KIND}'`);
   if (typeof record.documentId !== 'string' || record.documentId.length === 0) fail('documentId must be a non-empty string');
+  if (typeof record.declarationFingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(record.declarationFingerprint)) fail('declarationFingerprint must be a SHA-256 digest');
   const contributionRaw = record.contribution;
   if (!isPlainObject(contributionRaw) || !exactKeys(contributionRaw, ['kind', 'deletedSpans', 'gapAnchor', 'text', 'scalarCount', 'annotations'])) {
     fail('contribution must carry exactly { kind, deletedSpans, gapAnchor, text, scalarCount, annotations }');
@@ -525,6 +576,7 @@ export function parseDeleteFact(raw         , limits                   )        
     version: DELETE_FACT_VERSION,
     kind: DELETE_FACT_KIND,
     documentId: record.documentId,
+    declarationFingerprint: record.declarationFingerprint,
     contribution: deepFreeze({
       kind: 'text.delete',
       deletedSpans: Object.freeze(spans),
@@ -575,7 +627,8 @@ function anchorExists(family                      , anchor        )          {
  * Cardinality-one geometry is judged against the fresh insert at restore time
  * (Phase D), where the restored scalars exist.
  */
-export function planDeleteUndo({ fact, family, annotations, prerequisiteLiveness, protectedTargetValidation }
+export function planDeleteUndo({ fact, family, annotations, declarations = [], prerequisiteLiveness, protectedTargetValidation }
+
 
 
 
@@ -587,6 +640,15 @@ export function planDeleteUndo({ fact, family, annotations, prerequisiteLiveness
   const { contribution } = fact;
   if (!anchorExists(family, contribution.gapAnchor)) {
     return Object.freeze({ outcome: 'noop', code: 'missing-anchor', reason: 'the recorded gap anchor no longer exists in the document' });
+  }
+  let currentDeclarationFingerprint        ;
+  try {
+    currentDeclarationFingerprint = annotationDeclarationFingerprint(declarations, contribution.annotations.map((image) => image.family));
+  } catch (error) {
+    return Object.freeze({ outcome: 'noop', code: 'declaration-drift', reason: `annotation declaration drift: ${(error         ).message}` });
+  }
+  if (currentDeclarationFingerprint !== fact.declarationFingerprint) {
+    return Object.freeze({ outcome: 'noop', code: 'declaration-drift', reason: 'annotation declaration drift: current extension-row shape differs from the captured fact' });
   }
   const currentById = new Map((annotations ?? []).map((annotation) => [annotation.id, annotation]));
   for (const image of contribution.annotations) {
