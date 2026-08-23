@@ -433,7 +433,14 @@ export function fsBlobs({ root, stagingRoot }                )                  
     const sha256Hash = createHash('sha256');
     let byteLength = 0;
     const filePath = pathFor(id, { pending: true });
+    let openedByThisWrite = false;
+    let outputFd                    ;
     try {
+      // Reserve the slot synchronously so collision cleanup can never remove
+      // bytes owned by another invocation.
+      outputFd = openSync(filePath, 'wx');
+      openedByThisWrite = true;
+      const output = createWriteStream(filePath, { fd: outputFd, autoClose: true });
       await pipeline(
         Readable.from(bytes),
         async function* meter(source) {
@@ -447,12 +454,16 @@ export function fsBlobs({ root, stagingRoot }                )                  
             yield chunk;
           }
         },
-        createWriteStream(filePath, { flags: 'wx' }),
+        output,
       );
     } catch (error) {
       // Torn pending slot: remove it so no readable partial slot survives the
       // failure (the reaper treats residue as benign either way).
-      try { unlinkSync(filePath); } catch {}
+      if (openedByThisWrite) {
+        try { unlinkSync(filePath); } catch {}
+      } else if (outputFd !== undefined) {
+        try { closeSync(outputFd); } catch {}
+      }
       throw error;
     }
     return { byteLength, sha256: sha256Hash.digest('hex'), md5: md5Hash.digest('hex') };
