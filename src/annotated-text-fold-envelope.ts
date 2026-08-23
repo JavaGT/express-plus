@@ -27,6 +27,7 @@ import {
   hashClientNonce,
   issueAuthoringSnapshot,
   buildAuthoringEnvelope,
+  readAnnotatedTextFamilyCheckpoint,
 } from './annotated-text-authoring-stream.ts';
 import { authoringRedactionsForRecipient } from './annotated-text-recipient-projection.ts';
 import { getAnnotatedTextCompiledMetadata } from './annotated-text-field.ts';
@@ -313,9 +314,9 @@ export async function tryBuildAnnotatedTextFoldEnvelopes(ctx: FoldCtx, { db, doc
   const prefix = `${document.entity.name}_${document.fieldName}`;
   let committed;
   try {
-    const state = db.prepare(`SELECT family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(document.documentId);
-    if (!state) return recovery(ctx, entityName, id, 'annotated-text-snapshot-required');
-    committed = restoreTextFamilySerialized(state.family_checkpoint);
+    const familyCheckpoint = readAnnotatedTextFamilyCheckpoint(db, prefix, document.documentId);
+    if (familyCheckpoint === undefined) return recovery(ctx, entityName, id, 'annotated-text-snapshot-required');
+    committed = restoreTextFamilySerialized(familyCheckpoint);
   } catch {
     return recovery(ctx, entityName, id, 'annotated-text-snapshot-required');
   }

@@ -5,7 +5,8 @@ import { projectAnnotatedTextForRecipient, authoringRedactionsForRecipient } fro
 import { projectAnnotatedTextCaretForRecipient } from './annotated-text-caret-projection.mjs';
 import { mayFieldOp, mayRow, protectingAnnotationCapabilities } from './row-grant.mjs';
 import { read, write } from './grant.mjs';
-import { resolveStream, resolveLease, issueAuthoringSnapshot, buildAuthoringEnvelope } from './annotated-text-authoring-stream.mjs';
+import { resolveStream, resolveLease, issueAuthoringSnapshot, buildAuthoringEnvelope, readAnnotatedTextFamilyCheckpoint } from './annotated-text-authoring-stream.mjs';
+import { readProjectedCursorFence } from './projected-async.mjs';
 import { readSeq } from './cursor.mjs';
 import { rawRow } from './entity/query.mjs';
 import { scopeOf } from './scope-handle.mjs';
@@ -149,7 +150,8 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
   if (!meta) fail(`field '${fieldName}' is not compiled`);
   const prefix = `${entity.name}_${fieldName}`;
   if (db.prepare(`SELECT 1 FROM ${prefix}_retired WHERE document_id = ?`).get(row.id)) fail(`field '${fieldName}' document is retired`);
-  const state = db.prepare(`SELECT family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(row.id);
+  const familyCheckpoint = readAnnotatedTextFamilyCheckpoint(db, prefix, row.id);
+  const state = familyCheckpoint === undefined ? undefined : { family_checkpoint: familyCheckpoint };
   if (!state) fail(`field '${fieldName}' state is missing`);
   const family = restoreTextFamilySerialized(state.family_checkpoint);
   const text = materializeText(family);
@@ -244,7 +246,7 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
     : projectAnnotatedTextCaretForRecipient(canonical, descriptor, decisions, caret, presence);
   if (caret !== null || !mintBasis) return recipient;
 
-  const cursor = authoring?.fence ?? db.prepare(`SELECT lastSeq FROM _ProjectedCursor WHERE entity = ? AND field = ?`).get(entity.name, fieldName)?.lastSeq ?? 0;
+  const cursor = authoring?.fence ?? readProjectedCursorFence(db, entity.name, fieldName) ?? 0;
   if (!authoring) return recipient;
 
   const { streamToken, leaseToken } = authoring;
@@ -328,9 +330,9 @@ export async function exportAnnotatedText({ app, entity, field, documentId, expe
 function projectCanonicalExport({ db, entity, fieldName, descriptor, documentId }                                                                                  )      {
   const prefix = `${entity.name}_${fieldName}`;
   if (db.prepare(`SELECT 1 FROM ${prefix}_retired WHERE document_id = ?`).get(documentId)) fail('document is retired');
-  const state = db.prepare(`SELECT family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(documentId);
-  if (!state) fail('document state is missing');
-  const family = restoreTextFamilySerialized(state.family_checkpoint);
+  const familyCheckpoint = readAnnotatedTextFamilyCheckpoint(db, prefix, documentId);
+  if (familyCheckpoint === undefined) fail('document state is missing');
+  const family = restoreTextFamilySerialized(familyCheckpoint);
   const text = materializeText(family);
   const annotations = loadAnnotations({ db, prefix, descriptor, documentId });
   const rangeRows = annotationRangeRows(db, prefix, documentId);

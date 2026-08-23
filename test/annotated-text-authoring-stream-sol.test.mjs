@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   AUTHORING_STREAM_LIMITS, acknowledgeAndPruneSnapshot, ensureLease, ensureStream,
   issueAuthoringSnapshot, issuePositionFrame, resolveLease, resolveStream,
+  readAnnotatedTextFamilyCheckpoint,
 } from '../build/annotated-text-authoring-stream.mjs';
 
 const prefix = 'Doc_body';
@@ -18,9 +19,17 @@ function setup() {
     CREATE TABLE ${prefix}_authoring_position (token TEXT PRIMARY KEY, lease_id TEXT NOT NULL, issued_fence INTEGER NOT NULL, checkpoint_id TEXT NOT NULL, visible_at_issue INTEGER NOT NULL, redactions TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(redactions)), created_at TEXT NOT NULL);
     CREATE TABLE ${prefix}_authoring_snapshot (id TEXT PRIMARY KEY, lease_id TEXT NOT NULL, fence INTEGER NOT NULL, issued_at TEXT NOT NULL, acknowledged_at TEXT);
     CREATE TABLE ${prefix}_authoring_snapshot_position (snapshot_id TEXT NOT NULL, position_token TEXT NOT NULL, PRIMARY KEY (snapshot_id, position_token));
+    CREATE TABLE ${prefix}_state (document_id TEXT PRIMARY KEY, family_checkpoint TEXT NOT NULL);
   `);
   return db;
 }
+
+test('family checkpoint accessor returns undefined when the state row is absent', () => {
+  const db = setup();
+  assert.equal(readAnnotatedTextFamilyCheckpoint(db, prefix, 'missing'), undefined);
+  db.prepare(`INSERT INTO ${prefix}_state (document_id, family_checkpoint) VALUES (?, ?)`).run('d1', '{}');
+  assert.equal(readAnnotatedTextFamilyCheckpoint(db, prefix, 'd1'), '{}');
+});
 
 function fatCheckpoint(label) {
   // Large enough that a few retained frames exhaust maxRetainedPerLease when

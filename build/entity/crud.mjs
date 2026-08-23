@@ -20,7 +20,7 @@ import { CASCADE_DESCENDANT, CASCADE_PREAUTHORIZED } from './removal-cascade.mjs
 import { admitRow } from '../row-grant.mjs';
 import { admitRowTransition } from '../field-admission.mjs';
 import { admitsInvitationRemoval, admitInvitationAcceptance } from '../auth/invitation-acceptance-authority.mjs';
-import { clearAuthoringState, issueAuthoringSnapshot, buildAuthoringEnvelope } from '../annotated-text-authoring-stream.mjs';
+import { clearAuthoringState, issueAuthoringSnapshot, buildAuthoringEnvelope, readAnnotatedTextFamilyCheckpoint } from '../annotated-text-authoring-stream.mjs';
 import { admitV9AnnotatedTextEdit, assertV9AuthoringBinding as assertV9AuthoringBindingFromAdmit } from '../annotated-text-admit.mjs';
 import { packOperatedFacts } from '../annotated-text-operated-facts.mjs';
 import { applyTextOperation, compactTextFamilyCheckpoint, materializeText, projectEndpointToOffset, restoreTextFamilySerialized, textFamilyBasis } from '../annotated-text-continuous.mjs';
@@ -744,8 +744,9 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
             // Blockless (issue #33): issue ONE document-scoped position frame
             // bound to the post-commit family so the authoring client can keep
             // typing. The snapshot insert joins this origin transaction.
-            const postState = receiptDb.prepare(`SELECT family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(command.id);
-            const postFamily = restoreTextFamilySerialized(postState.family_checkpoint);
+            const postCheckpoint = readAnnotatedTextFamilyCheckpoint(receiptDb, prefix, command.id);
+            if (postCheckpoint === undefined) throw new Error('annotated-text authoring: post-commit family checkpoint is missing');
+            const postFamily = restoreTextFamilySerialized(postCheckpoint);
             // Project the post-commit state through the ACTING principal's own
             // view (the recipient projection + its redaction WeakMap): the
             // issued frame must carry THAT principal's CURRENT wire→canonical

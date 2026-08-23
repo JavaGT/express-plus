@@ -20,6 +20,7 @@ import {
   restoreTextFamilySerialized,
   serializeCompactTextFamilyCheckpoint,
   textFamilyCheckpoint,
+  textFamilyVisibleLength,
 } from '../build/annotated-text-continuous.mjs';
 
 function actorFor(index) {
@@ -86,6 +87,25 @@ test('absolute-offset insert and delete plan + apply against the whole document'
   const del = textOperationForOffsetEdit(family, { kind: 'text.delete', from: { offset: 5, affinity: 'left' }, to: { offset: 6, affinity: 'right' } }, editActor(), 2);
   family = applyTextOperation(family, del);
   assert.equal(materializeText(family), 'hello world');
+});
+
+test('cached visible length stays equal to materialized text across edits', () => {
+  let family = seedViaPlanner(createTextFamily('lengths', textCheckpoint(createTextState())), 'abcdef');
+  const assertLength = () => assert.equal(textFamilyVisibleLength(family), materializeText(family).length);
+  assertLength();
+
+  family = applyTextOperation(family, textOperationForOffsetEdit(
+    family, { kind: 'text.insert', at: { offset: 3, affinity: 'right' }, text: 'XYZ' }, editActor(), 2,
+  ));
+  assertLength();
+  family = applyTextOperation(family, textOperationForOffsetEdit(
+    family, { kind: 'text.delete', from: { offset: 1, affinity: 'left' }, to: { offset: 3, affinity: 'right' } }, editActor(), 2,
+  ));
+  assertLength();
+  family = applyTextOperation(family, textOperationForOffsetEdit(
+    family, { kind: 'text.insert', at: { offset: 2, affinity: 'right' }, text: 'splice' }, editActor(), 2,
+  ));
+  assertLength();
 });
 
 test('stored endpoint stays valid when the current frontier dominates its basis (historical-basis projection)', () => {

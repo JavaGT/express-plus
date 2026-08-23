@@ -8,6 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
   entity, resolveStrategy, validateMutation, ValidationError, createProjectedAsyncConsumer, resolveProjectedAsyncTriggerTypes, reconcileProjectedRecovery } from '../build/internal.mjs';
+import { readProjectedCursorFence } from '../build/projected-async.mjs';
 import { principal } from '../build/principal.mjs';
 import { defineSqliteSchema } from '../build/server.mjs';
 
@@ -23,6 +24,14 @@ const fixtureSchema = defineSqliteSchema({
     { name: 'Blog', columns: ['id', 'title', 'score', 'hotRank'] },
     { name: 'Plain', columns: ['id', 'title'] },
   ],
+});
+
+test('projected cursor accessor returns undefined when the fence row is absent', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE _ProjectedCursor (entity TEXT NOT NULL, field TEXT NOT NULL, lastSeq INTEGER NOT NULL, PRIMARY KEY (entity, field))');
+  assert.equal(readProjectedCursorFence(db, 'Transcript', 'annotatedText'), undefined);
+  db.prepare('INSERT INTO _ProjectedCursor (entity, field, lastSeq) VALUES (?, ?, ?)').run('Transcript', 'annotatedText', 7);
+  assert.equal(readProjectedCursorFence(db, 'Transcript', 'annotatedText'), 7);
 });
 
 // --- Slice 1: declaration + DDL ---

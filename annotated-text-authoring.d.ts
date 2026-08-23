@@ -15,6 +15,7 @@ export interface AuthoringStatement {
 }
 
 export interface AuthoringDatabase {
+  /** @deprecated Use Workbench-owned accessors instead of issuing schema SQL directly. */
   prepare(sql: string): AuthoringStatement;
   exec(sql: string): unknown;
 }
