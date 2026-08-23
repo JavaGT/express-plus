@@ -134,13 +134,18 @@ export function createDurableEffectsConsumer({ durableEffectsRegistry, jobs }: {
 }): ((events: readonly DurableEventLike[], context: { db: DbHandle }) => Promise<void>) | null {
   if (!jobs || !durableEffectsRegistry || durableEffectsRegistry.size === 0) return null;
   return async (events, { db }) => {
+    const blockedScopes = new Set<string>();
     for (const ev of events) {
       if (typeof ev.seq !== 'number') continue;
+      if (blockedScopes.has(ev.scope)) continue;
       const effects = durableEffectsRegistry.get(ev.type);
       if (!effects || effects.length === 0) continue;
       try {
         await enqueueDurableEffectsAndAdvance(db, ev, effects, jobs);
       } catch (err) {
+        // A later event must not advance this scope past a failed effect.
+        // Unrelated scopes can continue and reconciliation will retry this one.
+        blockedScopes.add(ev.scope);
         getLog().warn('system', 'durable effect enqueue failed', { err, scope: ev.scope, seq: ev.seq });
       }
     }
