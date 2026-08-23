@@ -401,7 +401,7 @@ export function makeRequestHandler(source     , { principalOf = anonymousPrincip
           match: () => isApp && source._handlers?.length,
           handle: async () => {
             for (const { prefix, fn } of source._handlers) {
-              if (!url.pathname.startsWith(prefix)) continue;
+              if (prefix !== '/' && url.pathname !== prefix && !url.pathname.startsWith(`${prefix}/`)) continue;
               const rest = url.pathname.slice(prefix.length) || '/';
               const ctxReq = {
                 body: undefined,

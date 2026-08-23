@@ -17,7 +17,12 @@ function matchPath(template        , actual        )                     {
   const params              = {};
   for (let i = 0; i < t.length; i += 1) {
     if (t[i].startsWith(':')) {
-      params[t[i].slice(1)] = decodeURIComponent(a[i]);
+      try {
+        params[t[i].slice(1)] = decodeURIComponent(a[i]);
+      } catch (error) {
+        if (error instanceof URIError) return null;
+        throw error;
+      }
     } else if (t[i] !== a[i]) {
       return null;
     }

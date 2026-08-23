@@ -58,6 +58,9 @@ export class FrameSender {
   // Build a pong frame (opcode 0xA) echoing the ping payload verbatim (§5.5.2).
   pong(payload: unknown): Buffer {
     const data = Buffer.isBuffer(payload) ? payload : Buffer.from(String(payload), 'utf-8');
+    if (data.length > 125) {
+      throw new Error(`WebSocket pong payload too large: ${data.length} bytes`);
+    }
     return buildFrame(0xa, data);
   }
 }
@@ -185,8 +188,24 @@ export class FrameParser {
         this.#payloadLen = b1 & 0x7f;
         this.#buffer = this.#buffer.slice(2);
 
+        if ((b0 & 0x70) !== 0) {
+          this.#messages.push({ opcode: -1, closeCode: 1002, error: 'reserved WebSocket frame bits are set' });
+          this.#reset();
+          continue;
+        }
+        if (![0, 1, 2, 8, 9, 0xa].includes(this.#opcode)) {
+          this.#messages.push({ opcode: -1, closeCode: 1002, error: `unsupported WebSocket opcode: ${this.#opcode}` });
+          this.#reset();
+          continue;
+        }
+        if (this.#opcode >= 8 && this.#fin === 0) {
+          this.#messages.push({ opcode: -1, closeCode: 1002, error: 'control frames must not be fragmented' });
+          this.#reset();
+          continue;
+        }
+
         if (!this.#masked) {
-          this.#messages.push({ opcode: -1, error: 'client frame must be masked (RFC 6455 §5.1)' });
+          this.#messages.push({ opcode: -1, closeCode: 1002, error: 'client frame must be masked (RFC 6455 §5.1)' });
           this.#skipBytes = this.#payloadLen;
           continue;
         }
@@ -205,6 +224,16 @@ export class FrameParser {
         if (this.#buffer.length < 2) return;
         this.#payloadLen = this.#buffer.readUInt16BE(0);
         this.#buffer = this.#buffer.slice(2);
+        if (this.#opcode >= 8 && this.#payloadLen > 125) {
+          this.#messages.push({ opcode: -1, closeCode: 1002, error: 'control frame payload exceeds 125 bytes' });
+          this.#reset();
+          continue;
+        }
+        if (this.#payloadLen > MAX_PAYLOAD) {
+          this.#messages.push({ opcode: -1, closeCode: 1002, error: `payload too large: ${this.#payloadLen} bytes` });
+          this.#reset();
+          continue;
+        }
         this.#state = STATE.MASK;
         continue;
       }
@@ -216,7 +245,12 @@ export class FrameParser {
         const low = this.#buffer.readUInt32BE(4);
         this.#buffer = this.#buffer.slice(8);
         if (high > 0 || low > MAX_PAYLOAD) {
-          this.#messages.push({ opcode: -1, error: `payload too large: ${high * 0x100000000 + low} bytes` });
+          this.#messages.push({ opcode: -1, closeCode: 1002, error: `payload too large: ${high * 0x100000000 + low} bytes` });
+          this.#reset();
+          continue;
+        }
+        if (this.#opcode >= 8) {
+          this.#messages.push({ opcode: -1, closeCode: 1002, error: 'control frame payload exceeds 125 bytes' });
           this.#reset();
           continue;
         }
@@ -269,6 +303,10 @@ export class FrameParser {
     // Control frames (opcode 8=close, 9=ping, 0xA=pong) may appear mid-stream
     // and must have FIN=1; they are never fragmented.
     if (opcode === 0x8) {
+      if (payload.length === 1) {
+        this.#messages.push({ opcode: -1, closeCode: 1002, error: 'close frame payload must be empty or at least 2 bytes' });
+        return;
+      }
       let closeCode = 1005; // no status code received
       let closeReason = '';
       if (payload.length >= 2) {
@@ -291,18 +329,41 @@ export class FrameParser {
 
     // Data frames (text=1, binary=2). Handle fragmentation.
     if (fin === 0) {
-      // Start or continuation of a fragmented message
+      if (opcode === 0 && !this.#fragmentedOpcode) {
+        this.#messages.push({ opcode: -1, closeCode: 1002, error: 'continuation frame without a fragmented message' });
+        return;
+      }
+      if (opcode !== 0 && this.#fragmentedOpcode) {
+        this.#messages.push({ opcode: -1, closeCode: 1002, error: 'new data frame while a fragmented message is open' });
+        return;
+      }
       if (opcode !== 0) {
         this.#fragmentedOpcode = opcode;
+      }
+      if (this.#fragmented.length + payload.length > MAX_PAYLOAD) {
+        this.#fragmentedOpcode = 0;
+        this.#fragmented = Buffer.alloc(0);
+        this.#messages.push({ opcode: -1, closeCode: 1002, error: `fragmented payload exceeds ${MAX_PAYLOAD} bytes` });
+        return;
       }
       this.#fragmented = Buffer.concat([this.#fragmented, payload]);
     } else {
       if (opcode === 0 && this.#fragmentedOpcode) {
         // Final fragment of a fragmented message
+        if (this.#fragmented.length + payload.length > MAX_PAYLOAD) {
+          this.#fragmentedOpcode = 0;
+          this.#fragmented = Buffer.alloc(0);
+          this.#messages.push({ opcode: -1, closeCode: 1002, error: `fragmented payload exceeds ${MAX_PAYLOAD} bytes` });
+          return;
+        }
         this.#fragmented = Buffer.concat([this.#fragmented, payload]);
         this.#messages.push({ opcode: this.#fragmentedOpcode, payload: this.#fragmented });
         this.#fragmentedOpcode = 0;
         this.#fragmented = Buffer.alloc(0);
+      } else if (opcode !== 0 && this.#fragmentedOpcode) {
+        this.#messages.push({ opcode: -1, closeCode: 1002, error: 'new data frame while a fragmented message is open' });
+      } else if (opcode === 0) {
+        this.#messages.push({ opcode: -1, closeCode: 1002, error: 'continuation frame without a fragmented message' });
       } else if (opcode !== 0) {
         // Complete unfragmented frame
         this.#messages.push({ opcode, payload });

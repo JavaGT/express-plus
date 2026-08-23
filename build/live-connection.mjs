@@ -246,6 +246,12 @@ export class LiveConnection {
         }
       }
       if (msg.opcode === -1) {
+        if (msg.closeCode === 1002) {
+          this.#closing = true;
+          void this.#enqueueFrame(this.#sender.close(1002, 'Protocol error')).catch(() => {});
+          void this.#close();
+          return;
+        }
         this.error(failure('invalid-input', String(msg.error || 'Invalid WebSocket frame.')));
       }
     }
