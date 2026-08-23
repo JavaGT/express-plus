@@ -103,6 +103,9 @@ test('v6 repairs a v4 intermediate annotated-text membership family', async () =
   const { annotationRangeRows, attachAnnotationRange } = await import('../build/annotated-text-storage.mjs');
   const db = new DatabaseSync(':memory:');
   try {
+    // Simulate a legacy database whose foreign-key enforcement allowed a
+    // dangling membership row; v6 must drop it rather than aborting boot.
+    db.exec('PRAGMA foreign_keys = OFF');
     db.exec(`CREATE TABLE Document (id TEXT PRIMARY KEY);
       CREATE TABLE doc_field_annotation (
         id TEXT PRIMARY KEY, document_id TEXT NOT NULL,
@@ -117,7 +120,8 @@ test('v6 repairs a v4 intermediate annotated-text membership family', async () =
       );
       INSERT INTO Document VALUES ('d1');
       INSERT INTO doc_field_annotation VALUES ('a1', 'd1');
-      INSERT INTO doc_field_membership VALUES ('a1', '{"point":1}', '{"point":2}');`);
+      INSERT INTO doc_field_membership VALUES ('a1', '{"point":1}', '{"point":2}');
+      INSERT INTO doc_field_membership VALUES ('orphan', '{"point":8}', '{"point":9}');`);
 
     runWorkbenchMigrations(db);
     const columns = db.prepare('PRAGMA table_info(doc_field_membership)').all().map((row) => row.name);
@@ -128,6 +132,46 @@ test('v6 repairs a v4 intermediate annotated-text membership family', async () =
     }]);
     attachAnnotationRange(db, 'doc_field', 'd1', 'a1', { point: 2 }, { point: 3 }, 1);
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM doc_field_membership').get().count, 2);
+    // Membership rows without an annotation are deliberately dropped: the
+    // repair preserves only relationships that can satisfy the canonical FK.
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM doc_field_membership WHERE annotation_id = 'orphan'").get().count, 0);
+    runWorkbenchMigrations(db);
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM doc_field_membership').get().count, 2, 're-run is a ledger skip');
+  } finally {
+    db.close();
+  }
+});
+
+test('v6 converts an empty intermediate family without rows', async () => {
+  const { runWorkbenchMigrations } = await import('../build/workbench-migrations.mjs');
+  const db = new DatabaseSync(':memory:');
+  try {
+    db.exec(`CREATE TABLE Document (id TEXT PRIMARY KEY);
+      CREATE TABLE empty_field_annotation (id TEXT PRIMARY KEY, document_id TEXT NOT NULL, FOREIGN KEY (document_id) REFERENCES Document(id));
+      CREATE TABLE empty_field_membership (annotation_id TEXT NOT NULL, start_point TEXT NOT NULL, end_point TEXT NOT NULL, PRIMARY KEY (annotation_id, start_point));`);
+    runWorkbenchMigrations(db);
+    assert.deepEqual(db.prepare('PRAGMA table_info(empty_field_membership)').all().map((row) => row.name), ['annotation_id', 'range_id', 'document_id', 'ordinal']);
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM empty_field_membership').get().count, 0);
+  } finally {
+    db.close();
+  }
+});
+
+test('v6 repairs a mixed partial membership schema without aborting boot', async () => {
+  const { runWorkbenchMigrations } = await import('../build/workbench-migrations.mjs');
+  const db = new DatabaseSync(':memory:');
+  try {
+    db.exec(`CREATE TABLE Document (id TEXT PRIMARY KEY);
+      CREATE TABLE partial_field_annotation (id TEXT PRIMARY KEY, document_id TEXT NOT NULL, FOREIGN KEY (document_id) REFERENCES Document(id));
+      CREATE TABLE partial_field_membership (
+        annotation_id TEXT NOT NULL, start_point TEXT NOT NULL, end_point TEXT NOT NULL,
+        range_id INTEGER, PRIMARY KEY (annotation_id, start_point));
+      INSERT INTO Document VALUES ('d1');
+      INSERT INTO partial_field_annotation VALUES ('a1', 'd1');
+      INSERT INTO partial_field_membership VALUES ('a1', '{"point":1}', '{"point":2}', 999);`);
+    runWorkbenchMigrations(db);
+    assert.deepEqual(db.prepare('PRAGMA table_info(partial_field_membership)').all().map((row) => row.name), ['annotation_id', 'range_id', 'document_id', 'ordinal']);
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM partial_field_membership').get().count, 1);
   } finally {
     db.close();
   }

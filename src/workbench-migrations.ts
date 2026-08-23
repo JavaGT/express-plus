@@ -161,10 +161,13 @@ function repairIntermediateMembershipFamily(db: DbHandle, prefix: string) {
   const annotation = `${prefix}_annotation`;
   if (!tableExists(db, membership) || !tableExists(db, annotation)) return;
   const columns = new Set(db.prepare(`PRAGMA table_info(${membership})`).all().map((row) => row.name as string));
+  const hasCanonicalColumns = ['range_id', 'document_id', 'ordinal'].every((column) => columns.has(column));
+  if (hasCanonicalColumns && !columns.has('start_point') && !columns.has('end_point')) return;
   if (!columns.has('start_point') || !columns.has('end_point')) return;
-  if (columns.has('range_id') || columns.has('document_id') || columns.has('ordinal')) {
-    throw new Error(`partially repaired annotated-text membership table: ${prefix}`);
-  }
+  // A mixed table is repaired from its endpoint columns. The range/document/
+  // ordinal columns may be stale or partial, so endpoints are the only
+  // deterministic source of truth; orphan rows are intentionally dropped by
+  // the annotation join below rather than creating unverifiable relationships.
 
   const documentForeignKey = db.prepare(`PRAGMA foreign_key_list(${annotation})`).all()
     .find((row) => row.from === 'document_id') as { table?: string } | undefined;
