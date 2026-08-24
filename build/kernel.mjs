@@ -44,6 +44,7 @@ function collectAppEntities(app     ) {
   const handlers                      = {};
   const projections        = [];
   const cursorPolicy = new Map();
+  const historyActions                      = {};
   const entities                   = new Map(app.entities ?? []);
   validateAnnotatedTextEntityActions(entities.values());
   for (const entity of entities.values()) {
@@ -272,10 +273,36 @@ function collectAppEntities(app     ) {
           throw new Error(`registered action '${declaration.type}' has invalid history.cursor '${policy}'`);
         }
         cursorPolicy.set(declaration.type, policy);
+        // A composed action's undo/redo is one outer re-dispatch with
+        // handler-only compound input (scope#992 rev 3 §1); the contribution
+        // policy plans the document compensation and the package validator
+        // gates the application transition. The translator registration is W2
+        // compile work; the contribution-policy move execution rolls out under
+        // W3 (#145).
+        if (compoundContributionPolicy != null && policy === 'eligible') {
+          historyActions[declaration.type] = {
+            inverse: (input     ) => compoundHistoryTranslation(declaration.type, input, 'undo'),
+            redo: (input     ) => compoundHistoryTranslation(declaration.type, input, 'redo'),
+          };
+        }
       }
     }
   }
-  return { handlers, projections, entities, cursorPolicy };
+  return { handlers, projections, entities, cursorPolicy, historyActions };
+}
+
+function compoundHistoryTranslation(type        , input     , direction                 ) {
+  // A composed action's undo/redo is ONE outer re-dispatch with handler-only
+  // compound input (scope#992 rev 3 §1). The outer payload is the origin's
+  // canonical payload; the handler input carries the expected/replacement
+  // application transition the package validator will check.
+  const fact = (input.fact ?? null)                                  ;
+  if (!fact) throw new Error(`compound history translation for '${type}' requires the origin application fact`);
+  void direction;
+  void input;
+  const origin = input.origin                                     ;
+  const payload = origin?.payload ?? {};
+  return { type, payload, input: { version: 1, expected: fact.after ?? null, replacement: fact.before ?? null } };
 }
 
 function buildEffects(entities                  ) {
@@ -506,12 +533,13 @@ function engagedPostCommitConsumerDescriptors(app     , entities     , { blobFin
 }
 
 export function buildKernel(app     ) {
-  const { handlers, projections, entities, cursorPolicy } = collectAppEntities(app);
+  const { handlers, projections, entities, cursorPolicy, historyActions: composedHistoryActions } = collectAppEntities(app);
   const generatedHistoryActions                      = {};
   for (const entity of entities.values()) {
     if (entity.historyActionRule) generatedHistoryActions[`${entity.name}.update`] = entity.historyActionRule;
     if (entity.createHistoryActionRule) generatedHistoryActions[`${entity.name}.create`] = entity.createHistoryActionRule;
   }
+  Object.assign(generatedHistoryActions, composedHistoryActions);
   const sessionEntity = entities.get(Session.name);
   if (sessionEntity && app._sessionSchedule) {
     Object.defineProperty(sessionEntity, 'schedule', {

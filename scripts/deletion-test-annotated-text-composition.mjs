@@ -61,6 +61,58 @@ const W1 = [
       writeFileSync(path, next);
     },
   },
+  {
+    name: 'remove-operation-declaration',
+    expected: 'undeclared annotated operation was admitted',
+    test: 'test/annotated-text-composite-deletion.test.mjs',
+    testNamePattern: 'undeclared operation remains undeclared',
+    mutate(copyRoot) {
+      const path = join(copyRoot, 'build/kernel.mjs');
+      const source = readFileSync(path, 'utf8');
+      const needle = 'const operations = declaration.operations === undefined ? [] : declaration.operations;';
+      if (!source.includes(needle)) throw new Error('operations declaration read is missing');
+      writeFileSync(path, source.replace(needle, 'const operations = [];'));
+    },
+  },
+  {
+    name: 'bypass-field-readmission',
+    expected: 'revoked field writer committed composite operation',
+    test: 'test/annotated-text-composite-deletion.test.mjs',
+    testNamePattern: 'revoked field writer is denied',
+    mutate(copyRoot) {
+      const path = join(copyRoot, 'build/annotated-text-region-operation.mjs');
+      const source = readFileSync(path, 'utf8');
+      const needle = /await authorizeFieldOp\(\{ name: handle\.entity, fields \}/;
+      if (!needle.test(source)) throw new Error('transaction-bound field admission call is missing');
+      writeFileSync(path, source.replace(needle, 'await (async () => {})(); void ({ name: handle.entity, fields }'));
+    },
+  },
+  {
+    name: 'trust-returned-application-transition',
+    expected: 'semantically divergent application fact was accepted',
+    test: 'test/annotated-text-composite-deletion.test.mjs',
+    testNamePattern: 'semantically divergent application fact is rejected',
+    mutate(copyRoot) {
+      const path = join(copyRoot, 'build/pipeline.mjs');
+      const source = readFileSync(path, 'utf8');
+      const needle = 'if (canonicalJsonEqual(before, after)) {';
+      if (!source.includes(needle)) throw new Error('origin transition differ gate is missing');
+      writeFileSync(path, source.replace(needle, 'if (false && canonicalJsonEqual(before, after)) {'));
+    },
+  },
+  {
+    name: 'remove-compound-private-fact-canonicalizer',
+    expected: 'valid compound envelope did not reach _PrivateActionFact',
+    test: 'test/annotated-text-composite-deletion.test.mjs',
+    testNamePattern: 'a valid compound envelope reaches',
+    mutate(copyRoot) {
+      const path = join(copyRoot, 'build/post-commit-effects.mjs');
+      const source = readFileSync(path, 'utf8');
+      const needle = 'if (compoundKindOf(fact) !== null) {';
+      if (!source.includes(needle)) throw new Error('compound canonicalPrivateFact branch is missing');
+      writeFileSync(path, source.replace(needle, 'if (false && compoundKindOf(fact) !== null) {'));
+    },
+  },
 ];
 
 function copyTree(copyRoot) {
@@ -72,6 +124,7 @@ function copyTree(copyRoot) {
     'test/annotated-text-snapshot-recovery-budget.test.mjs',
     'test/annotated-text-snapshot-cycle-budget-deletion.test.mjs',
     'test/annotated-text-authoring-fixture.mjs',
+    'test/annotated-text-composite-deletion.test.mjs',
     'test/fixtures/annotated-text-operated',
   ];
   for (const rel of tests) {

@@ -3,6 +3,7 @@ import { readSeq } from './cursor.mjs';
 import { parseEventType } from './event-handle.mjs';
 import { txn, upsert,               } from './driver.mjs';
 import { tryParseScopeKey } from './scope-handle.mjs';
+import { applicationPrivateFactView, parseCompoundContributionFact, compoundKindOf } from './compound-contribution-fact.mjs';
 
 const HISTORY_DESCRIPTOR                = Symbol('workbench.durable-history');
 
@@ -206,6 +207,14 @@ function privateFactFromReceipt(db          , receipt               )           
   try { fact = JSON.parse(row.fact          ); } catch { throw new TypeError('history action private fact is malformed'); }
   if (!fact || typeof fact !== 'object' || Array.isArray(fact)) {
     throw new TypeError('history action private fact is malformed');
+  }
+  // scope#992 rev 4: compound-envelope rows are parsed through the package
+  // compound parser before the contribution-policy runtime consumes them; the
+  // full deep-frozen canonical envelope is returned. Application translators
+  // receive only the application view.
+  if (compoundKindOf(fact) !== null) {
+    // The policy runtime receives the complete envelope.
+    return parseCompoundContributionFact(fact)                                                ;
   }
   return Object.freeze(structuredClone(fact                           ));
 }
@@ -580,8 +589,14 @@ export function createDurableHistoryRuntime({
         || !['applied', 'noop'].includes(linkage?.outcome          )) throw forbidden();
     }
     const translate = operation === 'undo' ? rule.inverse : rule.redo;
+    // scope#992 rev 3/4: application translators receive only the application
+    // half of a compound envelope. The contribution-policy runtime (W3) retains
+    // the full envelope for applicability/linkage; this seam unwraps for the
+    // translator boundary.
+    const translatorFact = applicationPrivateFactView(originFact                           );
+    const translatorTargetFact = applicationPrivateFactView(targetFact                           );
     const translated = translatedActions(
-      await translate({ operation, origin, target: action, targetFact, action: origin, fact: annotatedMove ? (operation === 'undo' ? originFact : targetFact) : originFact, principal: args.principal, session: args.session }), operation, key.scope,
+      await translate({ operation, origin, target: action, targetFact: translatorTargetFact, action: origin, fact: annotatedMove ? (operation === 'undo' ? translatorFact : translatorTargetFact) : translatorFact, principal: args.principal, session: args.session }), operation, key.scope,
     );
     if (translated.some((child) => annotatedActionTypes.has(child.type)) && !annotatedMove) throw forbidden();
     const receiptAction = translated.length === 1 ? translated[0] : null;

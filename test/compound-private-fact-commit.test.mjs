@@ -12,7 +12,7 @@ import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  annotatedText, annotation, entity, everyone, executeDDL, executeFrameworkDDL,
+  annotatedText, annotation, durableHistory, entity, everyone, executeDDL, executeFrameworkDDL,
   grant, read, ref, scope, text, write,
 } from '../build/internal.mjs';
 import { readCommittedCursor, defineSqliteSchema } from '../build/server.mjs';
@@ -32,6 +32,7 @@ import {
   digestAffectedClosure,
 } from '../build/annotated-text-region-reducer.mjs';
 import { annotatedTextOperation } from '../build/annotated-text-region-operation.mjs';
+import { annotatedTextHistorySession } from '../build/annotated-text-field.mjs';
 import { sha256Utf8 } from '../build/annotated-text-region-limits.mjs';
 
 const ACTOR = 'a'.repeat(32);
@@ -433,5 +434,56 @@ test('no-text-change region commits an envelope with zero contributions', async 
   const stored = JSON.parse(db.prepare('SELECT fact FROM _PrivateActionFact').get().fact);
   assert.equal(stored.kind, 'workbench.compound-origin');
   assert.equal(stored.contributions.length, 0, 'a no-text-change region contributes nothing');
+  db.close();
+});
+
+test('composed dispatch derives document-local history identity', async () => {
+  // The HTTP layer derives annotatedTextHistorySession for registered composed
+  // actions (application-action-http.ts). This asserts that when a request
+  // carries that document-local identity (the HTTP layer's output), the commit
+  // receipt's sessionId records it — proving the composed action participates
+  // in document-local cursor isolation, not a project-wide cursor stream.
+  const db = new DatabaseSync(':memory:');
+  installSchema(db);
+  installCorrectionLedger(db);
+  seedDocument(db, { text: 'hello world', annotations: [] });
+  const region = makeRegionHandle();
+  const app = workbench({
+    db,
+    schema: compoundSchema,
+    entities: [declaredEntity()],
+    history: durableHistory({ authorize: () => true, actions: {} }),
+    actions: [{
+      type: 'correction.apply',
+      authorize: () => true,
+      history: { cursor: 'eligible' },
+      operations: [region],
+      handler: ({ payload }) => {
+        void payload;
+        return {
+          events: [{ type: 'correction.recorded', scope: 'Project:p1', data: { id: 'correction-1' } }],
+          annotatedText: [region.region(currentDescriptor(db, { from: 0, to: 5, replacement: 'hallo', transitions: [] }))],
+          applicationTransition: { before: null, after: { correctionId: 'correction-1' } },
+        };
+      },
+    }],
+  });
+  await app.start();
+  const documentIdentity = annotatedTextHistorySession('session-1', { entity: 'Transcript', field: 'body', documentId: 'doc-1' });
+  const result = await app.dispatch({
+    actionId: 'composed-doc-identity', type: 'correction.apply', scope: 'Project:p1',
+    payload: { id: 'doc-1' }, principal: { type: 'user', id: 'u1', attributes: {} },
+    clientId: 'session-1',
+    history: { session: 'session-1', identity: documentIdentity },
+  });
+  assert.equal(result.ok, true, result.failure?.message);
+  const receipt = db.prepare('SELECT sessionId FROM _ActionReceipt WHERE actionId = ?').get('composed-doc-identity');
+  assert.equal(receipt.sessionId, documentIdentity);
+  // Cursor eligibility: a declared eligible composed action receives one cursor
+  // frame under its document-local identity, with the receipt as its one entry.
+  const cursor = db.prepare('SELECT past, future FROM _HistoryCursor').get();
+  const past = JSON.parse(cursor.past);
+  assert.equal(past.length, 1);
+  assert.equal(past[0].rootActionId, 'composed-doc-identity');
   db.close();
 });

@@ -968,6 +968,11 @@ async function commitEvents(db: any, events: any, {
             contributions: plan.contribution ? [plan.contribution] : [],
           }),
         };
+      } else if (Object.hasOwn(commit, 'annotatedText') || Object.hasOwn(commit, 'applicationTransition')) {
+        // scope#992 W2: a region descriptor is only lawful through a DECLARED
+        // annotated operation. Returning one from an undeclared handler would be
+        // ambient operation authority — fail closed, never silently drop it.
+        throw new TypeError(`undeclared annotated operation was admitted for action '${type}'`);
       }
 
       // S3/A2 tier routing — split the commit's events by resolved entity tier.
