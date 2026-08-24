@@ -114,6 +114,27 @@ test('res.stream opts out of X-Accel-Buffering with { buffering: false }', async
   }
 });
 
+test('mounted handlers can stream with buffering disabled without writing headers twice', async () => {
+  const app = workbench().use('/raw', (req, res) => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('mounted-ok'));
+        controller.close();
+      },
+    });
+    return res.stream(new Response(stream, { headers: { 'content-type': 'application/octet-stream' } }), { buffering: false });
+  });
+  const { origin, close } = await listen(app);
+  try {
+    const res = await fetch(`${origin}/raw`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('x-accel-buffering'), 'no');
+    assert.equal(await res.text(), 'mounted-ok');
+  } finally {
+    await close();
+  }
+});
+
 test('res.stream tears down the socket on a mid-stream pump error (no JSON junk appended)', async () => {
   let reads = 0;
   const r = router();

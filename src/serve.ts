@@ -64,10 +64,11 @@ function makeHandlerRes(nodeRes: any, onEnd: any) {
     const source = webResponse instanceof ReadableStream
       ? new Response(webResponse)
       : webResponse;
-    nodeRes.writeHead(source.status, Object.fromEntries(source.headers));
+    const headers = Object.fromEntries(source.headers);
     if (options.buffering === false) {
-      nodeRes.setHeader('X-Accel-Buffering', 'no');
+      headers['X-Accel-Buffering'] = 'no';
     }
+    nodeRes.writeHead(source.status, headers);
     if (source.body) {
       const reader = source.body.getReader();
       while (true) {
