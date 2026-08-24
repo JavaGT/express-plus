@@ -31,7 +31,7 @@ materialization, authorization, interval merging, fanout, or coordinator content
 ## Repair
 
 - `e6c823e` establishes `projectAnnotatedTextRecipient({ source, descriptor, decisions })` as the common policy and rejects a source carrying a generic database handle.
-- `6d1e510` supplies ordered capability iterators from `annotated-text-snapshot.ts`, uses SQLite array-returning iteration, projects each unique range once, avoids repeated endpoint retention for denied recipients, and allocates only policy/source backing plus recipient output.
+- `6d1e510` supplies ordered capability data from `annotated-text-snapshot.ts`, uses SQLite array-returning iteration, projects each unique range once, avoids repeated endpoint retention for denied recipients, and allocates only policy/source backing plus recipient output.
 - `02fbac6` records exact phase, serialization, peak-RSS, process-list, environment, recovery, and provenance instrumentation.
 
 Focused evidence covers byte-equivalent old/new policy output, denied/allowed and

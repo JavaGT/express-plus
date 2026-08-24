@@ -65,12 +65,12 @@ test('capability-shaped recipient source is the projection boundary and rejects 
   const value = canonical();
   const source = createAnnotatedTextRecipientSource({
     version: 1,
-    readText: () => value.text,
-    rangeFormat: () => 'offset',
-    annotations: () => value.annotations,
-    ranges: () => value.ranges,
-    measurements: () => value.measurements,
-    orphans: () => value.orphans,
+    text: value.text,
+    rangeFormat: 'offset',
+    annotations: value.annotations,
+    ranges: value.ranges,
+    measurements: value.measurements,
+    orphans: value.orphans,
   });
   const decisions = { version: 1, protectors: [{ protectorId: 'protect', outcome: 'deny' }], capabilityHints: [] };
   assert.equal(
@@ -87,7 +87,8 @@ test('capability-shaped recipient source is the projection boundary and rejects 
     /source was not created by the recipient source factory/,
   );
   const _db = {};
-  const closureSource = { ...source, readText: () => (void _db, value.text) };
+  const closureSource = { ...source, annotations: () => (void _db, value.annotations) };
+  assert.throws(() => createAnnotatedTextRecipientSource(closureSource), /source data is invalid/);
   assert.throws(
     () => projectAnnotatedTextRecipient({ source: closureSource, descriptor: descriptor(), decisions }),
     /source was not created by the recipient source factory/,
@@ -102,7 +103,7 @@ test('snapshot deletion mutation cannot bypass the common recipient policy', () 
   };
   assertCommonPolicy(snapshotSource);
   assert.throws(
-    () => assertCommonPolicy(snapshotSource.replace('projectAnnotatedTextRecipient({ source, descriptor, decisions })', 'source.readText()')),
+    () => assertCommonPolicy(snapshotSource.replace('projectAnnotatedTextRecipient({ source, descriptor, decisions })', 'source.text')),
     /snapshot bypassed projectAnnotatedTextRecipient/,
   );
 });

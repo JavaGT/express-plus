@@ -144,8 +144,11 @@ function rangeCollectionsIntersect(left                 , right                 
 
 /** Mint the only source capability accepted by the recipient policy. */
 export function createAnnotatedTextRecipientSource(source                              )                               {
-  exact(source, ['version', 'readText', 'rangeFormat', 'annotations', 'ranges', 'measurements', 'orphans'], 'source');
+  exact(source, ['version', 'text', 'rangeFormat', 'annotations', 'ranges', 'measurements', 'orphans'], 'source');
   if (Object.getPrototypeOf(source) !== Object.prototype) fail('source must be a plain capability object');
+  if (typeof source.text !== 'string' || !['offset', 'anchored'].includes(source.rangeFormat)
+      || !Array.isArray(source.annotations) || !Array.isArray(source.ranges)
+      || !Array.isArray(source.measurements) || !Array.isArray(source.orphans)) fail('source data is invalid');
   const capability = Object.freeze(source);
   recipientSources.add(capability);
   return capability;
@@ -162,20 +165,20 @@ export function projectAnnotatedTextRecipient({ source, descriptor, decisions }
  )      {
   const meta = getAnnotatedTextCompiledMetadata(descriptor);
   if (!meta) fail('descriptor must be compiled');
-  exact(source, ['version', 'readText', 'rangeFormat', 'annotations', 'ranges', 'measurements', 'orphans'], 'source');
+  exact(source, ['version', 'text', 'rangeFormat', 'annotations', 'ranges', 'measurements', 'orphans'], 'source');
   if (!recipientSources.has(source)) fail('source was not created by the recipient source factory');
   exact(decisions, ['version', 'protectors', 'capabilityHints'], 'decisions');
-  if (source.version !== 1 || decisions.version !== 1 || typeof source.readText !== 'function' ||
-      typeof source.rangeFormat !== 'function' || typeof source.annotations !== 'function' || typeof source.ranges !== 'function' ||
-      typeof source.measurements !== 'function' || typeof source.orphans !== 'function' ||
+  if (source.version !== 1 || decisions.version !== 1 || typeof source.text !== 'string' ||
+      !['offset', 'anchored'].includes(source.rangeFormat) || !Array.isArray(source.annotations) || !Array.isArray(source.ranges) ||
+      !Array.isArray(source.measurements) || !Array.isArray(source.orphans) ||
       !Array.isArray(decisions.protectors) || !Array.isArray(decisions.capabilityHints)) fail('invalid version or collection');
 
-  const canonicalText = source.readText();
-  const rangeFormat = source.rangeFormat();
+  const canonicalText = source.text;
+  const rangeFormat = source.rangeFormat;
   if (typeof canonicalText !== 'string' || !['offset', 'anchored'].includes(rangeFormat)) fail('source text or range format is invalid');
   const textLength = canonicalText.length;
   const annotations = new Map                                          ();
-  for (const annotation of source.annotations()) {
+  for (const annotation of source.annotations) {
     const keys = annotation?.protectedTargetIds === undefined
       ? (annotation?.owner === undefined ? ['id', 'family', 'fields'] : ['id', 'family', 'fields', 'owner'])
       : (annotation?.owner === undefined ? ['id', 'family', 'fields', 'protectedTargetIds'] : ['id', 'family', 'fields', 'owner', 'protectedTargetIds']);
@@ -198,7 +201,7 @@ export function projectAnnotatedTextRecipient({ source, descriptor, decisions }
   const rangeByAnnotation = new Map                         ();
   let anchoredRangeCount = 0;
   let rangeCount = 0;
-  for (const range of source.ranges()) {
+  for (const range of source.ranges) {
     const anchored = range?.anchoredStart !== undefined || range?.anchoredEnd !== undefined;
     exact(range, anchored ? ['annotationId', 'start', 'end', 'anchoredStart', 'anchoredEnd'] : ['annotationId', 'start', 'end'], 'range');
     if (anchored && (range.anchoredStart === undefined || range.anchoredEnd === undefined)) fail('range is invalid');
@@ -217,7 +220,7 @@ export function projectAnnotatedTextRecipient({ source, descriptor, decisions }
 
   const orphanIds = new Set        ();
   const disclosableOrphans                                 = [];
-  for (const orphan of source.orphans()) {
+  for (const orphan of source.orphans) {
     exact(orphan, orphan?.owner === undefined ? ['id', 'family', 'fields', 'savedQuote', 'savedRange'] : ['id', 'family', 'fields', 'owner', 'savedQuote', 'savedRange'], 'orphan');
     if (typeof orphan.id !== 'string' || orphanIds.has(orphan.id) || !Object.hasOwn(meta.annotationHandles, orphan.family) ||
         typeof orphan.savedQuote !== 'string' || !Array.isArray(orphan.savedRange) || orphan.savedRange.length !== 2 ||
@@ -229,7 +232,7 @@ export function projectAnnotatedTextRecipient({ source, descriptor, decisions }
 
   const measurementIds = new Set        ();
   const measurements                                      = [];
-  for (const measurement of source.measurements()) {
+  for (const measurement of source.measurements) {
     exact(measurement, ['id', 'family', 'formatVersion', 'payload'], 'measurement');
     if (typeof measurement.id !== 'string' || measurementIds.has(measurement.id) ||
         !Object.hasOwn(meta.measurementHandles, measurement.family) || !Number.isSafeInteger(measurement.formatVersion) || measurement.formatVersion < 1) fail('measurement is invalid');
@@ -365,7 +368,7 @@ export function projectAnnotatedTextRecipient({ source, descriptor, decisions }
       recipientRanges.push({ annotationId, start, end });
     }
   };
-  for (const range of source.ranges()) {
+  for (const range of source.ranges) {
     const annotationId = range.annotationId;
     const family = annotations.get(annotationId) .family;
     if (Object.hasOwn(meta.protectingFamilies, family)) continue;
@@ -409,12 +412,12 @@ export function projectAnnotatedTextForRecipient(canonical                      
   return projectAnnotatedTextRecipient({
     source: createAnnotatedTextRecipientSource({
       version: 1,
-      readText: () => canonical.text,
-      rangeFormat: () => 'offset',
-      annotations: () => canonical.annotations,
-      ranges: () => canonical.ranges,
-      measurements: () => canonical.measurements,
-      orphans: () => canonical.orphans ?? [],
+      text: canonical.text,
+      rangeFormat: 'offset',
+      annotations: canonical.annotations,
+      ranges: canonical.ranges,
+      measurements: canonical.measurements,
+      orphans: canonical.orphans ?? [],
     }),
     descriptor,
     decisions,

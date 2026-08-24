@@ -314,36 +314,35 @@ function loadRecipientProjectionSource({ db, prefix, descriptor, documentId, fam
     : loadedRanges.filter((range) => sourceAnnotationIds.has(range.annotationId));
   const sourceFor = (anchored         )                               => {
     const anchoredByRangeId = new Map                                                                ();
-    const ranges = function* ()                                        {
-      for (const link of sourceRangeLinks) {
-        const stored = projectedByRangeId.get(link.rangeId) ;
-        if (!stored.projected) continue;
-        if (!anchored) {
-          yield { annotationId: link.annotationId, start: stored.projected.start, end: stored.projected.end };
-          continue;
-        }
-        let endpoints = anchoredByRangeId.get(link.rangeId);
-        if (!endpoints) {
-          endpoints = { start: parseStoredEndpoint(stored.startText), end: parseStoredEndpoint(stored.endText) };
-          anchoredByRangeId.set(link.rangeId, endpoints);
-        }
-        yield {
-          annotationId: link.annotationId,
-          start: stored.projected.start,
-          end: stored.projected.end,
-          anchoredStart: endpoints.start,
-          anchoredEnd: endpoints.end,
-        };
+    const ranges                                = [];
+    for (const link of sourceRangeLinks) {
+      const stored = projectedByRangeId.get(link.rangeId) ;
+      if (!stored.projected) continue;
+      if (!anchored) {
+        ranges.push({ annotationId: link.annotationId, start: stored.projected.start, end: stored.projected.end });
+        continue;
       }
-    };
+      let endpoints = anchoredByRangeId.get(link.rangeId);
+      if (!endpoints) {
+        endpoints = { start: parseStoredEndpoint(stored.startText), end: parseStoredEndpoint(stored.endText) };
+        anchoredByRangeId.set(link.rangeId, endpoints);
+      }
+      ranges.push({
+        annotationId: link.annotationId,
+        start: stored.projected.start,
+        end: stored.projected.end,
+        anchoredStart: endpoints.start,
+        anchoredEnd: endpoints.end,
+      });
+    }
     return createAnnotatedTextRecipientSource({
       version: 1,
-      readText: () => text,
-      rangeFormat: () => anchored ? 'anchored' : 'offset',
-      annotations: () => sourceAnnotations,
+      text,
+      rangeFormat: anchored ? 'anchored' : 'offset',
+      annotations: sourceAnnotations,
       ranges,
-      measurements: () => measurements,
-      orphans: () => orphans,
+      measurements,
+      orphans,
     });
   };
 

@@ -232,7 +232,9 @@ async function measureSnapshot(db, BenchDoc, fixture, principal, visible) {
       throw new Error('visible recipient did not receive the complete timing/uncertainty state');
     }
   } else {
-    if (!Array.isArray(recipient.redactions) || recipient.redactions.length !== 1 || recipient.text.includes(fixture.protectedText)
+    const wholeDocumentProtected = WORDS <= PROTECTED_WORDS;
+    if ((wholeDocumentProtected ? recipient.restricted !== true : !Array.isArray(recipient.redactions) || recipient.redactions.length !== 1)
+      || recipient.text.includes(fixture.protectedText)
       || recipient.annotations.some((entry) => entry.id === 'uncertainty-00000')
       || recipient.annotations.some((entry) => entry.family === 'confidential')) {
       throw new Error('redacted recipient received protected text or canonical annotation facts');
