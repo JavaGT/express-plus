@@ -225,6 +225,11 @@ export function targetInsertFromEvent(event                     )               
  * in RGA order. Returns the UTF-16 [from, to) window they occupy, or null when
  * any of the target's elements were deleted/absent (collaborator interference)
  * — which makes the inverse unsafe and the whole move a noop.
+ *
+ * The walk stays aligned with the family's TEXT materialization: tombstones
+ * (deleted elements) contribute NOTHING to offsets, exactly like
+ * `materializeText`, so a live target preceded by a deleted collaborator scalar
+ * resolves to the same window the text slice verification uses (MAJOR 3).
  */
 export function liveInsertWindow(family                      , opId                           , text        )                                      {
   const count = scalarCount(text);
@@ -234,8 +239,9 @@ export function liveInsertWindow(family                      , opId             
   let last = 0;
   let found = 0;
   for (const [, element] of rgaTraversal(family.checkpoint)) {
+    if (element.deletedBy.length > 0) continue;
     const width = element.scalar.length;
-    if (element.deletedBy.length === 0 && keys.has(`${element.op[0]}:${element.op[1]}:${element.ordinal}`)) {
+    if (keys.has(`${element.op[0]}:${element.op[1]}:${element.ordinal}`)) {
       if (first === null) first = offset;
       last = offset + width;
       found += 1;

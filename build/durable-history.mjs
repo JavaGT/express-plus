@@ -603,16 +603,25 @@ export function createDurableHistoryRuntime({
     } else if (!await authorize({ type: origin.type, payload: origin.payload, principal: args.principal })) {
       throw forbidden();
     }
-    const originFact = privateFactFromReceipt(db, originReceipt);
-    // The move compensates the HEAD receipt (rev 3 §1): for a contribution-policy
-    // chain the target fact is the CURRENT head's own envelope, not the root
-    // origin's — redo compensates the completed undo receipt, and a later undo
-    // compensates an applied redo. Ordinary (non-annotated) actions keep their
-    // existing origin-fact target selection.
-    const compoundMoveTargetFact = (originReceipt.actionId !== receipt.actionId)
-      && Boolean(contributionPolicies?.policyFor(origin.type ?? null));
-    const targetFact = compoundMoveTargetFact ? privateFactFromReceipt(db, receipt) : originFact;
-    const originIsPolicy = Boolean(contributionPolicies?.policyFor(origin.type ?? null));
+    const originRaw = privateFactFromReceipt(db, originReceipt);
+    const originFact = movePolicy ? movePolicy.parseOriginFact(originRaw) : originRaw;
+    // Policy-owned target selection for EVERY contribution chain (#145 MAJOR 2):
+    // the registry (selectAndParseTargetFact) selects+validates the head target;
+    // the history engine never hard-codes target-fact selection.
+    const targetFact = movePolicy
+      ? movePolicy.selectAndParseTargetFact({
+          origin: { actionId: originReceipt.actionId, payload: origin.payload },
+          target: { actionId: receipt.actionId, historyTargetActionId: receipt.historyTargetActionId },
+          operation,
+          rootActionId: targetFrame.rootActionId,
+          originFact: originFact                                                                                                 ,
+          targetFact: (originReceipt.actionId === receipt.actionId
+            ? originFact
+            : movePolicy.parseTargetFact(privateFactFromReceipt(db, receipt)))                                                                                      ,
+          receipt: { actionId: receipt.actionId, operation: receipt.operation },
+        })
+      : originFact;
+    const originIsPolicy = Boolean(movePolicy);
     if (!originIsPolicy && !compoundKindOf(originFact) && (!Object.hasOwn(originFact, 'before') || !Object.hasOwn(originFact, 'after'))) {
       throw new TypeError('history action private fact is malformed');
     }
@@ -638,12 +647,16 @@ export function createDurableHistoryRuntime({
     const translated = translatedActions(
       await translate({ operation, origin, target: action, targetFact: translatorTargetFact, action: origin, fact: translatorTargetFact, principal: args.principal, session: args.session }), operation, key.scope,
     );
-    // #145 S5: no action-name classifier remains. A translation may only target
-    // a contribution-policy action when the move's ORIGIN is itself the
-    // policy-owned action; an ordinary translation that re-targets a policy
-    // action type is forbidden (the policy owns that chain).
-    const translatedIntoPolicy = translated.some((child) => Boolean(contributionPolicies?.policyFor(child.type)));
-    if (translatedIntoPolicy && !contributionPolicies?.policyFor(origin.type ?? null)) throw forbidden();
+    // Policy-owned translation validation (#145 MAJOR 2): the registry decides
+    // what a policy move may re-dispatch. For a non-policy origin, a translation
+    // that re-targets a policy action stays forbidden (the policy owns that
+    // chain) — no action-name classifier remains.
+    if (movePolicy) {
+      movePolicy.validateTranslation({ translated, origin: { type: origin.type, payload: origin.payload, scope: key.scope }, operation, scope: key.scope });
+    } else {
+      const translatedIntoPolicy = translated.some((child) => Boolean(contributionPolicies?.policyFor(child.type)));
+      if (translatedIntoPolicy) throw forbidden();
+    }
     const receiptAction = translated.length === 1 ? translated[0] : null;
     const transition = {
       handlerInputs: Object.freeze(translated.map((child) => Object.freeze({
@@ -752,15 +765,22 @@ export function createDurableHistoryRuntime({
       const inverse = await rule.inverse({ action, fact, principal: args.principal, session: args.session });
       translated.push(...translatedActions(inverse, 'undo', key.scope));
     }
-    // #145 S5: undoToPoint re-targets a contribution-policy action only when the
-    // undone action is itself policy-owned (no action-name classifier remains).
-    const translatedIntoPolicy = translated.some((child) => Boolean(contributionPolicies?.policyFor(child.type)));
-    const anyUndonePolicyOwned = sourceActionIds.some((sourceActionId) => {
+    // #145 MAJOR 2: undoToPoint re-targets a contribution-policy action only when
+    // the undone source is itself policy-owned and THAT policy validates the
+    // translation (the registry owns the decision — no action-name classifier).
+    const undoneByType = new Map                                            ();
+    for (const sourceActionId of sourceActionIds) {
       const receipt = receiptFor(db, key.scope, sourceActionId);
       const action = receipt ? actionFromRow(db, receipt) : null;
-      return Boolean(contributionPolicies?.policyFor(action?.type ?? null));
-    });
-    if (translatedIntoPolicy && !anyUndonePolicyOwned) throw forbidden();
+      if (action && typeof action.type === 'string') undoneByType.set(action.type, { type: action.type, payload: action.payload });
+    }
+    for (const child of translated) {
+      const scopePolicy = contributionPolicies?.policyFor(child.type);
+      if (!scopePolicy) continue;
+      const source = undoneByType.get(child.type);
+      if (!source) throw forbidden();
+      scopePolicy.validateTranslation({ translated: [child], origin: { type: source.type, payload: source.payload, scope: key.scope }, operation: 'undo', scope: key.scope });
+    }
     const transition = {
       handlerInputs: Object.freeze(translated.map((child) => Object.freeze({ operation: 'undo', input: child.input }))),
       metadata: {

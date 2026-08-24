@@ -266,14 +266,21 @@ function elementKeyOf(op: OpId, ordinal: number): string {
  * contiguous per-operation ordinal runs, operations ordered by `compareOpId`.
  * Each RGA element carries exactly one scalar and offsets never split
  * surrogates, so elements are always fully inside or fully outside.
+ *
+ * The window is in LIVE-text coordinates (the same scalar sequence
+ * `materializeText` produces): tombstones (deleted elements) contribute
+ * nothing to the running offset, so a window after a deleted collaborator
+ * scalar resolves against the exact text it is measured against (hostile
+ * review MAJOR 3 — shared-codec twin of the liveInsertWindow fix).
  */
 export function deleteScalarSpans(family: ContinuousTextFamily, fromUtf16: number, toUtf16: number): ScalarSpan[] {
   const spans: ScalarSpan[] = [];
   const byOp = new Map<string, { op: OpId; ordinals: number[] }>();
   let offset = 0;
   for (const [, element] of rgaTraversal(family.checkpoint)) {
+    if (element.deletedBy.length > 0) continue;
     const width = element.scalar.length;
-    if (element.deletedBy.length === 0 && offset >= fromUtf16 && offset + width <= toUtf16) {
+    if (offset >= fromUtf16 && offset + width <= toUtf16) {
       const key = `${element.op[0]}:${element.op[1]}`;
       const entry = byOp.get(key);
       if (entry) entry.ordinals.push(element.ordinal);

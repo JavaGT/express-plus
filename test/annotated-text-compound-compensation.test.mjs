@@ -215,6 +215,24 @@ function buildApp(db) {
             applicationTransition: { before: null, after: { correctionId: payload.actionRef } },
           };
         }
+        // Collaborator insert before the origin region (tombstone regression).
+        if (payload.variant === 'collab-insert-before') {
+          const descriptor = currentDescriptor(db, { from: 0, to: 0, replacement: 'X', transitions: [] });
+          return {
+            events: [{ type: 'correction.recorded', scope: 'Project:p1', data: { id: payload.actionRef } }],
+            annotatedText: [region.region(descriptor)],
+            applicationTransition: { before: null, after: { correctionId: payload.actionRef } },
+          };
+        }
+        // Collaborator delete of their own prior insert (creates a tombstone).
+        if (payload.variant === 'collab-delete-x') {
+          const descriptor = currentDescriptor(db, { from: 0, to: 1, replacement: '', transitions: [] });
+          return {
+            events: [{ type: 'correction.recorded', scope: 'Project:p1', data: { id: payload.actionRef } }],
+            annotatedText: [region.region(descriptor)],
+            applicationTransition: { before: null, after: { correctionId: payload.actionRef } },
+          };
+        }
         // Collaborator insert after the origin region.
         const descriptor = currentDescriptor(db, { from: 10, to: 10, replacement: 'X' });
         return {
@@ -317,5 +335,32 @@ test('undo removes created annotations and recreates removed ones; redo reverses
   assert.equal(liveText(db), 'hallo world');
   assert.equal(liveMemberships(db, 'note-1'), null, 'redo removes note-1 again');
   assert.deepEqual(liveMemberships(db, 'note-2'), [[0, 5]], 'redo recreates note-2 again');
+  db.close();
+});
+
+test('MAJOR 3: an undo stays APPLIED (not noop) when a deleted collaborator scalar precedes the target region', async () => {
+  // Regression for the tombstone-offset bug: liveInsertWindow now walks the same
+  // scalar sequence the text materialization uses, so a LIVE target preceded by
+  // a DELETED collaborator scalar resolves to the correct window instead of
+  // degrading to a whole-compound noop.
+  const db = setupDoc({ withNote: true });
+  const app = buildApp(db);
+  await app.start();
+
+  await dispatch(app, ALICE, 'tab-a', 'origin', 'origin-replace');
+  assert.equal(liveText(db), 'hallo world');
+  // Bob inserts X BEFORE alice's region, then deletes his own X — a tombstone
+  // that precedes alice's `hallo` run in RGA order.
+  await dispatch(app, BOB, 'tab-b', 'bob-insert-before', 'collab-insert-before');
+  assert.equal(liveText(db), 'Xhallo world');
+  await dispatch(app, BOB, 'tab-b', 'bob-delete-x', 'collab-delete-x');
+  assert.equal(liveText(db), 'hallo world', 'bob removed his own X (tombstone remains)');
+
+  // Alice's undo must APPLY (restore 'hello'), never degrade to a noop.
+  await move(app, 'undo', ALICE, 'tab-a', 'alice-undo');
+  assert.equal(liveText(db), 'hello world', 'the undo applied despite the tombstone before the target region');
+  const undoFact = JSON.parse(db.prepare("SELECT fact FROM _PrivateActionFact WHERE actionId = 'alice-undo'").get().fact);
+  assert.equal(undoFact.linkage.outcome, 'applied', 'the move was APPLIED, not a whole-compound noop');
+  assert.deepEqual(liveMemberships(db, 'note-1'), [[0, 5]], 'same-ID memberships restored');
   db.close();
 });

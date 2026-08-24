@@ -27,6 +27,12 @@
 
 import type { DbHandle } from './driver.ts';
 import type { CompoundContributionEnvelope } from './compound-contribution-fact.ts';
+import { canonicalJsonEqual, parseCompoundContributionFact } from './compound-contribution-fact.ts';
+import { assertV9AnnotatedTextOffsetEditPayload } from './entity/crud.ts';
+
+function forbidden(): Error & { status: number } {
+  return Object.assign(new Error('forbidden'), { status: 403 });
+}
 
 export type ContributionPolicyFilter = 'eligible' | 'barrier' | 'excluded';
 
@@ -64,6 +70,10 @@ export interface HistoryContributionPolicy {
   /**
    * Select and parse the target fact for a contribution chain, validating the
    * linkage (root/target/direction/outcome) and the document/action identity.
+   * This is the registry-owned replacement for the retired hardcoded
+   * annotated-move target-fact selection (#145 MAJOR 2): durable-history calls
+   * it on every contribution move (first undo, redo-of-undo, later undo) and
+   * never selects the target itself.
    */
   readonly selectAndParseTargetFact: (ctx: {
     origin: { actionId: string; payload: unknown };
@@ -72,12 +82,13 @@ export interface HistoryContributionPolicy {
     rootActionId: string;
     originFact: CompoundContributionEnvelope;
     targetFact: CompoundContributionEnvelope;
-    receipt: { actionId: string };
+    receipt: { actionId: string; operation: string };
   }) => CompoundContributionEnvelope;
   /**
    * Validate a compound history translation target: same outer action type,
    * scope, and canonical origin payload, with handler-only input, and never a
-   * native annotated target.
+   * native annotated target. The registry owns this decision; durable-history
+   * calls it instead of action-name tests.
    */
   readonly validateTranslation: (ctx: {
     translated: readonly { type: string }[];
@@ -120,20 +131,62 @@ function compilePolicy(opts: { actionType: string; handle: ContributionHandle; n
       return documentIdPresent(payload) ? 'eligible' : 'barrier';
     },
     parseOriginFact(fact) {
-      return fact as unknown as CompoundContributionEnvelope;
+      // Compound rows parse through the exact package parser; native rows ARE
+      // their own canonical shape (returned unchanged). The policy owns the
+      // parse — the caller never re-parses or re-shapes it.
+      if (nativeInsert) return fact as unknown as CompoundContributionEnvelope;
+      return parseCompoundContributionFact(fact);
     },
     parseTargetFact(fact) {
-      return fact as unknown as CompoundContributionEnvelope;
+      if (nativeInsert) return fact as unknown as CompoundContributionEnvelope;
+      return parseCompoundContributionFact(fact);
     },
-    selectAndParseTargetFact({ origin, target, operation, rootActionId, targetFact, receipt }) {
-      void origin; void target; void operation; void rootActionId; void receipt;
+    selectAndParseTargetFact({ origin, target, operation, rootActionId, originFact, targetFact, receipt }) {
+      // A move compensates the HEAD receipt (rev 3 §1). The FIRST move of the
+      // root targets the origin itself; any chain move targets the current head
+      // receipt's OWN envelope — selected and linkage-validated HERE, never by
+      // the history engine.
+      if (origin.actionId === target.actionId) return originFact;
+      void operation;
+      const rawLink = (targetFact as { linkage?: unknown }).linkage ?? null;
+      const linkage = rawLink && typeof rawLink === 'object'
+        ? rawLink as { rootActionId?: unknown; targetActionId?: unknown; direction?: unknown; outcome?: unknown }
+        : null;
+      if (nativeInsert) {
+        const tf = targetFact as { version?: unknown; kind?: unknown; documentId?: unknown };
+        if (tf?.version !== 2 || tf.kind !== 'annotated-text.compensation'
+          || tf.documentId !== (origin.payload as { id?: unknown } | null | undefined)?.id
+          || linkage?.rootActionId !== rootActionId
+          || linkage?.targetActionId !== target.historyTargetActionId
+          || linkage?.direction !== receipt.operation
+          || (linkage?.outcome !== 'applied' && linkage?.outcome !== 'noop')) throw forbidden();
+        return targetFact;
+      }
+      // Compound compensation envelope: the linkage must exactly name this
+      // chain (root, head target, the target receipt's own direction, and an
+      // applied/noop outcome). A forged/mismatched head is opaque forbidden.
+      if (!linkage || linkage.rootActionId !== rootActionId
+        || linkage.targetActionId !== target.historyTargetActionId
+        || linkage.direction !== receipt.operation
+        || (linkage.outcome !== 'applied' && linkage.outcome !== 'noop')) throw forbidden();
       return targetFact;
     },
     validateTranslation({ translated, origin, operation, scope }) {
-      if (translated.length !== 1 || translated[0].type !== actionType) {
-        throw new TypeError('compound history translation must target its outer action');
+      void operation; void scope;
+      if (nativeInsert) {
+        // Native moves re-dispatch ONLY the field's own compensate action, bound
+        // to the same document the origin operated on (handler-only input).
+        const compensateType = `${handle.entity}.${handle.fieldName}.compensate`;
+        if (translated.length !== 1 || translated[0].type !== compensateType) throw forbidden();
+        const payload = (translated[0] as { payload?: unknown }).payload;
+        if (!payload || typeof payload !== 'object'
+          || (payload as { id?: unknown }).id !== (origin.payload as { id?: unknown } | null | undefined)?.id) throw forbidden();
+        return;
       }
-      void origin; void operation; void scope;
+      // Compound moves re-dispatch the SAME outer action exactly once, with the
+      // canonical origin payload and handler-only input (never a native target).
+      if (translated.length !== 1 || translated[0].type !== actionType
+        || !canonicalJsonEqual((translated[0] as { payload?: unknown }).payload, origin.payload)) throw forbidden();
     },
     authorizationRequirements() {
       return 'outer-field';
@@ -148,18 +201,25 @@ function documentIdPresent(payload: unknown): boolean {
     && (payload as { id: string }).id.length > 0;
 }
 
-function classifyNativeInsert(_handle: ContributionHandle, payload: unknown): ContributionPolicyFilter {
+function classifyNativeInsert(handle: ContributionHandle, payload: unknown): ContributionPolicyFilter {
   if (!documentIdPresent(payload)) return 'barrier';
-  // A native annotated-text action is a contribution only when it is a
-  // non-empty text insert (v9 payloads carry `edit.kind: 'text.insert'`).
-  // Every other edit kind is a BARRIER (the "unsupported annotated action is a
-  // barrier" law) — it clears the cursor rather than exposing an older insert
-  // across it. There is no annotated-move special case.
-  const edit = (payload as { edit?: unknown }).edit;
-  const editKind = edit && typeof edit === 'object' && !Array.isArray(edit) ? (edit as { kind?: unknown }).kind : null;
-  if (editKind === 'text.insert') {
-    const text = (edit as { text?: unknown }).text;
-    if (typeof text === 'string' && text.length > 0) return 'eligible';
+  // Strict-equivalent classification (hostile review MAJOR 1): the retired
+  // classifier only called an action eligible after the FULL v9 offset-edit
+  // shape validation (assertV9AnnotatedTextOffsetEditPayload) AND a non-empty
+  // text.insert edit. A malformed persisted receipt (missing fields, wrong
+  // types, bad offsets/position tokens) must never reconstruct as eligible on
+  // cursor/list reconstruction. Per the rev-2 matrix, classification fails
+  // CLOSED: malformed/non-insert native actions are BARRIERS (the "unsupported
+  // annotated action is a barrier" law) — the cursor cleaves there instead of
+  // exposing an older insert across it. There is no annotated-move special case.
+  let command: { edit: { kind: string; text?: string } };
+  try {
+    command = assertV9AnnotatedTextOffsetEditPayload(handle.entity, handle.fieldName, payload);
+  } catch {
+    return 'barrier';
+  }
+  if (command.edit.kind === 'text.insert' && typeof command.edit.text === 'string' && command.edit.text.length > 0) {
+    return 'eligible';
   }
   return 'barrier';
 }

@@ -27,6 +27,12 @@
 
 
 
+import { canonicalJsonEqual, parseCompoundContributionFact } from './compound-contribution-fact.mjs';
+import { assertV9AnnotatedTextOffsetEditPayload } from './entity/crud.mjs';
+
+function forbidden()                             {
+  return Object.assign(new Error('forbidden'), { status: 403 });
+}
 
 
 
@@ -40,6 +46,11 @@
  * ordering (which checks run in which phase) but never grant decisions; every
  * authorization requirement is resolved by the central authorization seam.
  */
+
+
+
+
+
 
 
 
@@ -120,20 +131,62 @@ function compilePolicy(opts                                                     
       return documentIdPresent(payload) ? 'eligible' : 'barrier';
     },
     parseOriginFact(fact) {
-      return fact                                           ;
+      // Compound rows parse through the exact package parser; native rows ARE
+      // their own canonical shape (returned unchanged). The policy owns the
+      // parse — the caller never re-parses or re-shapes it.
+      if (nativeInsert) return fact                                           ;
+      return parseCompoundContributionFact(fact);
     },
     parseTargetFact(fact) {
-      return fact                                           ;
+      if (nativeInsert) return fact                                           ;
+      return parseCompoundContributionFact(fact);
     },
-    selectAndParseTargetFact({ origin, target, operation, rootActionId, targetFact, receipt }) {
-      void origin; void target; void operation; void rootActionId; void receipt;
+    selectAndParseTargetFact({ origin, target, operation, rootActionId, originFact, targetFact, receipt }) {
+      // A move compensates the HEAD receipt (rev 3 §1). The FIRST move of the
+      // root targets the origin itself; any chain move targets the current head
+      // receipt's OWN envelope — selected and linkage-validated HERE, never by
+      // the history engine.
+      if (origin.actionId === target.actionId) return originFact;
+      void operation;
+      const rawLink = (targetFact                         ).linkage ?? null;
+      const linkage = rawLink && typeof rawLink === 'object'
+        ? rawLink
+        : null;
+      if (nativeInsert) {
+        const tf = targetFact                                                               ;
+        if (tf?.version !== 2 || tf.kind !== 'annotated-text.compensation'
+          || tf.documentId !== (origin.payload                                       )?.id
+          || linkage?.rootActionId !== rootActionId
+          || linkage?.targetActionId !== target.historyTargetActionId
+          || linkage?.direction !== receipt.operation
+          || (linkage?.outcome !== 'applied' && linkage?.outcome !== 'noop')) throw forbidden();
+        return targetFact;
+      }
+      // Compound compensation envelope: the linkage must exactly name this
+      // chain (root, head target, the target receipt's own direction, and an
+      // applied/noop outcome). A forged/mismatched head is opaque forbidden.
+      if (!linkage || linkage.rootActionId !== rootActionId
+        || linkage.targetActionId !== target.historyTargetActionId
+        || linkage.direction !== receipt.operation
+        || (linkage.outcome !== 'applied' && linkage.outcome !== 'noop')) throw forbidden();
       return targetFact;
     },
     validateTranslation({ translated, origin, operation, scope }) {
-      if (translated.length !== 1 || translated[0].type !== actionType) {
-        throw new TypeError('compound history translation must target its outer action');
+      void operation; void scope;
+      if (nativeInsert) {
+        // Native moves re-dispatch ONLY the field's own compensate action, bound
+        // to the same document the origin operated on (handler-only input).
+        const compensateType = `${handle.entity}.${handle.fieldName}.compensate`;
+        if (translated.length !== 1 || translated[0].type !== compensateType) throw forbidden();
+        const payload = (translated[0]                         ).payload;
+        if (!payload || typeof payload !== 'object'
+          || (payload                    ).id !== (origin.payload                                       )?.id) throw forbidden();
+        return;
       }
-      void origin; void operation; void scope;
+      // Compound moves re-dispatch the SAME outer action exactly once, with the
+      // canonical origin payload and handler-only input (never a native target).
+      if (translated.length !== 1 || translated[0].type !== actionType
+        || !canonicalJsonEqual((translated[0]                         ).payload, origin.payload)) throw forbidden();
     },
     authorizationRequirements() {
       return 'outer-field';
@@ -148,18 +201,25 @@ function documentIdPresent(payload         )          {
     && (payload                  ).id.length > 0;
 }
 
-function classifyNativeInsert(_handle                    , payload         )                           {
+function classifyNativeInsert(handle                    , payload         )                           {
   if (!documentIdPresent(payload)) return 'barrier';
-  // A native annotated-text action is a contribution only when it is a
-  // non-empty text insert (v9 payloads carry `edit.kind: 'text.insert'`).
-  // Every other edit kind is a BARRIER (the "unsupported annotated action is a
-  // barrier" law) — it clears the cursor rather than exposing an older insert
-  // across it. There is no annotated-move special case.
-  const edit = (payload                      ).edit;
-  const editKind = edit && typeof edit === 'object' && !Array.isArray(edit) ? (edit                      ).kind : null;
-  if (editKind === 'text.insert') {
-    const text = (edit                      ).text;
-    if (typeof text === 'string' && text.length > 0) return 'eligible';
+  // Strict-equivalent classification (hostile review MAJOR 1): the retired
+  // classifier only called an action eligible after the FULL v9 offset-edit
+  // shape validation (assertV9AnnotatedTextOffsetEditPayload) AND a non-empty
+  // text.insert edit. A malformed persisted receipt (missing fields, wrong
+  // types, bad offsets/position tokens) must never reconstruct as eligible on
+  // cursor/list reconstruction. Per the rev-2 matrix, classification fails
+  // CLOSED: malformed/non-insert native actions are BARRIERS (the "unsupported
+  // annotated action is a barrier" law) — the cursor cleaves there instead of
+  // exposing an older insert across it. There is no annotated-move special case.
+  let command                                           ;
+  try {
+    command = assertV9AnnotatedTextOffsetEditPayload(handle.entity, handle.fieldName, payload);
+  } catch {
+    return 'barrier';
+  }
+  if (command.edit.kind === 'text.insert' && typeof command.edit.text === 'string' && command.edit.text.length > 0) {
+    return 'eligible';
   }
   return 'barrier';
 }
