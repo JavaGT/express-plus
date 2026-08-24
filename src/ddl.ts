@@ -21,7 +21,7 @@
 import type { DbHandle } from './driver.ts';
 import { structCellColumn } from './field-strategy.ts';
 import { sideTableDDL } from './side-table-strategy.ts';
-import { frameworkLogDDL } from './committed-log.ts';
+import { frameworkLogDDL, actionReceiptHistoryIndexDDL } from './committed-log.ts';
 import { defineSqliteSchema } from './sqlite-schema.ts';
 import { deletedRowAnchorTableDDL } from './deleted-row-anchor.ts';
 import { annotatedTextDDL, annotatedTextAuthoringStreamDDL } from './annotated-text-field.ts';
@@ -502,8 +502,13 @@ export function generateFrameworkDDL(): string[] {
 }
 
 export function executeFrameworkDDL(db: DbHandle): void {
+  // The receipt-history read index (#124) references _ActionReceipt.historyOrder,
+  // which legacy databases only receive from ensureActionReceiptColumns below.
+  // It stays DECLARED in frameworkLogDDL — generateFrameworkDDL feeds the
+  // framework object census — but is CREATED after the column migrations ran.
+  const historyIndexSql = actionReceiptHistoryIndexDDL();
   for (const sql of generateFrameworkDDL()) {
-    db.exec(sql);
+    if (sql !== historyIndexSql) db.exec(sql);
   }
   // Additive column migrations for persistent dbs where CREATE TABLE IF NOT
   // EXISTS would not add columns added after the table's first creation. Each
@@ -568,6 +573,10 @@ function ensureActionReceiptColumns(db: DbHandle): void {
       AND (earlier.committedAt < _ActionReceipt.committedAt
         OR (earlier.committedAt = _ActionReceipt.committedAt AND earlier.actionId <= _ActionReceipt.actionId))
   ) WHERE historyOrder IS NULL`);
+  // Declared with the framework DDL, created only now that historyOrder
+  // exists on every database shape (#124). IF NOT EXISTS: a no-op when the
+  // first pass already created it on a database that never needed the ALTERs.
+  db.exec(actionReceiptHistoryIndexDDL());
 }
 
 function ensureJobColumns(db: DbHandle): void {

@@ -2,6 +2,42 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
+test('executeFrameworkDDL migrates a pre-historyOrder _ActionReceipt and creates its read index (#124)', async () => {
+  const { executeFrameworkDDL } = await import('../build/ddl.mjs');
+  const { insertReceipt } = await import('../build/committed-log.mjs');
+  const db = new DatabaseSync(':memory:');
+  try {
+    // The receipt shape BEFORE the historyOrder column existed — creating the
+    // (scope, historyOrder) index against this used to fail outright.
+    db.exec(`CREATE TABLE _ActionReceipt (
+      scope TEXT NOT NULL,
+      actionId TEXT NOT NULL,
+      committedAt TEXT NOT NULL,
+      eventRefs TEXT NOT NULL,
+      PRIMARY KEY (scope, actionId)
+    );`);
+    db.prepare(
+      "INSERT INTO _ActionReceipt (scope, actionId, committedAt, eventRefs) VALUES ('Doc:1', 'old-1', '2026-01-01T00:00:00.000Z', '[]')",
+    ).run();
+
+    executeFrameworkDDL(db); // must not throw on the legacy shape
+
+    const columns = new Set(db.prepare('PRAGMA table_info(_ActionReceipt)').all().map((column) => column.name));
+    assert.ok(columns.has('historyOrder'), 'historyOrder column migrated');
+    const hasScopeHistoryIndex = db.prepare('PRAGMA index_list(_ActionReceipt)').all().some((index) => {
+      const indexed = db.prepare(`PRAGMA index_info("${String(index.name).replaceAll('"', '""')}")`).all().map((column) => column.name);
+      return indexed.length === 2 && indexed[0] === 'scope' && indexed[1] === 'historyOrder';
+    });
+    assert.equal(hasScopeHistoryIndex, true, '(scope, historyOrder) index created after migration');
+
+    // The backfill orders the legacy row; the counter seeds from it.
+    assert.equal(db.prepare("SELECT historyOrder FROM _ActionReceipt WHERE actionId = 'old-1'").get().historyOrder, 1);
+    assert.equal(insertReceipt(db, 'Doc:1', 'next-2', '2026-02-01T00:00:00.000Z', []), 2);
+  } finally {
+    db.close();
+  }
+});
+
 test('frameworkCursorSchema declares _ProjectedCursor and _ConsumerCursor via defineSqliteSchema', async () => {
   const { frameworkCursorSchema } = await import('../build/ddl.mjs');
   const schema = frameworkCursorSchema();
