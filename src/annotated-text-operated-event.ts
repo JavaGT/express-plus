@@ -3,7 +3,7 @@
 // canonical form and do not branch on a wire version for kind dispatch.
 // Envelope construction lives only in this module.
 
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import type { RegionEditTransition } from './annotated-text-region-descriptor.ts';
 import type { RegionPlan, RegionTextOperations } from './annotated-text-region-plan.ts';
 import type { RegionAnnotationImage, RegionOrphanImage, RegionPostimage } from './annotated-text-region-reducer.ts';
@@ -993,44 +993,31 @@ export function serializeV16OperatedEvent(event: OperatedWireEnvelope): string {
 const V16_BRAND: unique symbol = Symbol('workbench.annotated-text.v16.brand');
 const V16_BRAND_KEYS = ['after', 'before', 'facts', 'id', 'operation', 'version'];
 
-/** Hard bound on live nonce capabilities; minting evicts oldest when full. */
-export const REGION_V16_NONCE_CAPABILITY_MAX = 64;
-
-interface V16NonceRecord {
-  eventDataText: string;
-  documentId: string;
-  scope: string | null;
-}
-const V16_NONCE_CLAIMS = new Map<string, V16NonceRecord>();
-
 /** Install the brand + mint the one-shot nonce capability (sole owner). */
 function brandV16Event(
   event: object,
   eventDataText: string,
   identity: { documentId: string },
 ): { nonce: string } {
+  // Deterministic single-use token bound to (documentId ‖ exact bytes):
+  // committed-log records the consumption durably (_V16CapabilityClaim row,
+  // written inside the append transaction). A rollback removes the claim —
+  // restoring the capability for a legitimate retry — and a commit makes it
+  // permanent, so replay/duplicate/post-restart reuse of the same minting
+  // fails forever. Because the nonce is a pure function of the minting, a
+  // fabricated envelope cannot mint a DIFFERENT claim for the same bytes:
+  // the first append owns them.
+  const nonce = createHash('sha256')
+    .update('workbench.v16.capability\u0000')
+    .update(identity.documentId)
+    .update('\u0000')
+    .update(eventDataText)
+    .digest('hex');
   Object.defineProperty(event, V16_BRAND, {
-    value: Object.freeze({ eventDataText }),
+    value: Object.freeze({ eventDataText, nonce, documentId: identity.documentId }),
     enumerable: false,
     configurable: false,
     writable: false,
-  });
-  // Opaque single-use token: random, so it cannot be guessed or derived from
-  // public envelope content. Bounded FIFO eviction caps memory.
-  const nonce = createHash('sha256')
-    .update(eventDataText)
-    .update(randomBytes(32))
-    .digest('hex');
-  if (!V16_NONCE_CLAIMS.has(nonce)) {
-    while (V16_NONCE_CLAIMS.size >= REGION_V16_NONCE_CAPABILITY_MAX) {
-      const oldest = V16_NONCE_CLAIMS.keys().next().value as string;
-      V16_NONCE_CLAIMS.delete(oldest);
-    }
-  }
-  V16_NONCE_CLAIMS.set(nonce, {
-    eventDataText,
-    documentId: identity.documentId,
-    scope: null,
   });
   return { nonce };
 }
@@ -1040,7 +1027,7 @@ function brandV16Event(
  * exactly the constructor's frozen return carrying a valid stamp. (Exported
  * for the committed-log append authority only.)
  */
-export function readV16Brand(data: unknown): { eventDataText: string } | null {
+export function readV16Brand(data: unknown): { eventDataText: string; nonce: string } | null {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
   const record = data as Record<PropertyKey, unknown>;
   const brand = record[V16_BRAND];
@@ -1050,8 +1037,9 @@ export function readV16Brand(data: unknown): { eventDataText: string } | null {
     || !V16_BRAND_KEYS.every((key) => Object.hasOwn(record, key))) {
     return null;
   }
-  const text = (brand as { eventDataText?: unknown }).eventDataText;
-  return typeof text === 'string' ? { eventDataText: text } : null;
+  const stamp = brand as { eventDataText?: unknown; nonce?: unknown; documentId?: unknown };
+  if (typeof stamp.eventDataText !== 'string' || typeof stamp.nonce !== 'string') return null;
+  return { eventDataText: stamp.eventDataText, nonce: stamp.nonce };
 }
 
 /**
@@ -1059,17 +1047,12 @@ export function readV16Brand(data: unknown): { eventDataText: string } | null {
  * second claim of the same nonce fails (replay/reuse), and claims die with
  * the process (restart safety). Binding fields must match the mint.
  */
-export function claimV16NonceCapability(input: {
-  nonce: string;
-  canonicalText: string;
-  documentId: string;
-}): boolean {
-  const record = V16_NONCE_CLAIMS.get(input.nonce);
-  if (!record) return false;
-  // Consume first: exactly-once semantics even under later mismatch.
-  V16_NONCE_CLAIMS.delete(input.nonce);
-  return record.eventDataText === input.canonicalText
-    && record.documentId === input.documentId;
+/**
+ * The bytes digest recorded with a nonce claim — binds the capability to the
+ * exact canonical envelope. Exported for committed-log's durable claim row.
+ */
+export function v16CapabilityBytesDigest(canonicalText: string): string {
+  return createHash('sha256').update(canonicalText).digest('hex');
 }
 
 /**

@@ -16,7 +16,8 @@ import { canonicalStringify } from './canonical-json.mjs';
 import { liveRevisionTableDDL } from './live-revision.mjs';
 import { invalidationLedgerTableDDL } from './invalidation-ledger.mjs';
 import { sweepFactDependencies } from './private-action-fact-dependency.mjs';
-import { claimV16NonceCapability, readV16Brand, parseStoredV16OperatedEvent, serializeV16OperatedEvent,                           } from './annotated-text-operated-event.mjs';
+import { createHash } from 'node:crypto';
+import { readV16Brand, v16CapabilityBytesDigest, parseStoredV16OperatedEvent, serializeV16OperatedEvent,                           } from './annotated-text-operated-event.mjs';
 
 // The no-history lane (S3/A2) surfaces through this module alongside the
 // durable _Log/_ActionReceipt surfaces, so the boot DDL and the kernel have one
@@ -62,6 +63,20 @@ export function cursorTableDDL() {
 
 export function logIndexDDL() {
   return 'CREATE INDEX IF NOT EXISTS idx__Log_actionId ON _Log (actionId);';
+}
+
+// V16 capability claims (#149 round 3, Findings 3+4). One row per consumed
+// nonce capability. Written inside the SAME transaction as the _Log insert,
+// so a rollback restores the capability automatically (legitimate retry works
+// again) and a commit makes the consumption permanent (exactly-once forever).
+// Process restart is handled by SQLite journal recovery; retention pruning
+// bounds the table.
+export function v16CapabilityClaimTableDDL() {
+  return `CREATE TABLE IF NOT EXISTS _V16CapabilityClaim (
+  nonce TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL,
+  bytes_digest TEXT NOT NULL
+);`;
 }
 
 // The owning-stream action receipt (Wave 4.9). Durable dispatch dedupe keys on
@@ -146,6 +161,7 @@ export function frameworkLogDDL() {
   return [
     logTableDDL(),
     logIndexDDL(),
+    v16CapabilityClaimTableDDL(),
     cursorTableDDL(),
     actionReceiptTableDDL(),
     actionReceiptHistoryIndexDDL(),
@@ -396,7 +412,7 @@ export function appendEvents(db          , events                 ) {
       scope: e.scope,
       seq: e.seq,
       eventType: e.type,
-      eventData: serializeAppendedEventData(e),
+      eventData: serializeAppendedEventData(db, e),
       actionId: e.actionId,
       committedAt: e.committedAt,
     });
@@ -480,31 +496,86 @@ export function retentionPrune(db          , cutoffIso        ) {
 // Clones, replays, stale/duplicate reuse, mutated bytes, and post-restart
 // tokens all fail BEFORE the _Log insert. Everything else keeps stable
 // stringify.
-function serializeAppendedEventData(event               )         {
+function serializeAppendedEventData(db          , event               )         {
   const data = event.data                                       ;
   if (data && typeof data === 'object' && !Array.isArray(data) && data.version === 16) {
     // Canonicalize the incoming datum FIRST (bounded accounting applies to any
     // claimant).
     const canonical = serializeV16OperatedEvent(data                        );
-    const branded = readV16Brand(data);
-    if (branded !== null) {
-      if (canonical !== branded.eventDataText) {
-        throw new Error('noncanonical operated v16 eventData reached _Log');
-      }
-      return canonical;
-    }
-    const capability = (event                                           ).v16Capability;
-    const nonce = capability?.nonce;
-    if (typeof nonce !== 'string') {
-      throw new Error('unbranded operated v16 eventData reached _Log');
-    }
     const documentId = typeof data.id === 'string' ? data.id : '';
-    if (!claimV16NonceCapability({ nonce, canonicalText: canonical, documentId })) {
+    const bytesDigest = v16CapabilityBytesDigest(canonical);
+
+    // Durable one-shot claim (Findings 3+4, round 3): the claim row is written
+    // in the SAME transaction as the _Log insert. ROLLBACK removes it — a
+    // failed compound action restores the capability so a legitimate retry
+    // succeeds; COMMIT makes consumption permanent, so replay/duplicate/
+    // post-restart reuse of the same nonce fails forever. The claim is taken
+    // BEFORE any write is finalized and bound to document + exact bytes.
+    const nonce = resolveAdmissionNonce(event, data, canonical, documentId);
+    let claimChanges        ;
+    try {
+      const claimed = prepareCached(db,
+        'INSERT INTO _V16CapabilityClaim (nonce, document_id, bytes_digest) VALUES (?, ?, ?)',
+      );
+      claimChanges = Number(claimed.run(nonce, documentId, bytesDigest).changes);
+    } catch (error) {
+      // A PRIMARY KEY conflict is a nonce REUSE — same fail-closed signature
+      // as every other admission failure (no distinguishing oracle).
+      if (/UNIQUE constraint failed: _V16CapabilityClaim.nonce/.test(String((error         ).message))) {
+        throw new Error('operated v16 admission capability was missing, reused, or expired');
+      }
+      throw error;
+    }
+    if (claimChanges === 0) {
+      throw new Error('operated v16 admission capability was missing, reused, or expired');
+    }
+    if (!v16ClaimMatches(db, nonce, documentId, bytesDigest)) {
       throw new Error('operated v16 admission capability was missing, reused, or expired');
     }
     return canonical;
   }
   return JSON.stringify(event.data ?? {});
+}
+
+// Resolve which capability proof this append carries:
+//  - brand: the object IS the constructor's frozen return; its stamp must
+//    match the re-serialized bytes. Its nonce comes from the brand itself.
+//  - capability: a pipeline-copied envelope (brand stripped by Object.keys)
+//    carries the nonce on the appended event frame.
+function resolveAdmissionNonce(event               , data                         , canonical        , documentId        )         {
+  // The nonce is a pure function of the minting (document ‖ exact bytes), so
+  // it can be re-derived and VERIFIED here — a forged/random nonce fails this
+  // equality exactly like a missing one, with no distinguishing oracle.
+  const expected = v16AdmissionNonce(documentId, canonical);
+  const branded = readV16Brand(data);
+  if (branded !== null) {
+    if (canonical !== branded.eventDataText || branded.nonce !== expected) {
+      throw new Error('noncanonical operated v16 eventData reached _Log');
+    }
+    return expected;
+  }
+  const supplied = (event                                           ).v16Capability?.nonce;
+  if (supplied !== expected) {
+    throw new Error('operated v16 admission capability was missing, reused, or expired');
+  }
+  return expected;
+}
+
+/** Deterministic single-use admission token for a minted envelope. */
+export function v16AdmissionNonce(documentId        , canonicalText        )         {
+  return createHash('sha256')
+    .update('workbench.v16.capability\u0000')
+    .update(documentId)
+    .update('\u0000')
+    .update(canonicalText)
+    .digest('hex');
+}
+
+function v16ClaimMatches(db          , nonce        , documentId        , bytesDigest        )          {
+  const row = prepareCached(db,
+    'SELECT document_id, bytes_digest FROM _V16CapabilityClaim WHERE nonce = ?',
+  ).get(nonce)                                                             ;
+  return !!row && row.document_id === documentId && row.bytes_digest === bytesDigest;
 }
 
 

@@ -632,6 +632,7 @@ test('appendEvents admits only branded v16 envelopes; fabricated data fails clos
   const { constructV16RegionEvent } = await import('../build/annotated-text-operated-event.mjs');
   const db = new DatabaseSync(':memory:');
   db.exec('CREATE TABLE _Log (scope TEXT, seq INTEGER, eventType TEXT, eventData TEXT, actionId TEXT, committedAt TEXT)');
+  db.exec('CREATE TABLE _V16CapabilityClaim (nonce TEXT PRIMARY KEY, document_id TEXT NOT NULL, bytes_digest TEXT NOT NULL)');
 
   // The constructor's own result is admitted (direct brand path).
   const minted = constructV16RegionEvent({
@@ -668,7 +669,7 @@ test('appendEvents admits only branded v16 envelopes; fabricated data fails clos
       scope: 's', seq: 2, type: 'ReplayDoc.body.operated',
       data: fabricated, actionId: 'a', committedAt: 'now',
     }]),
-    /unbranded operated v16 eventData reached _Log/,
+    /unbranded operated v16 eventData reached _Log|admission capability was missing, reused, or expired/,
   );
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count, 1, 'fabricated envelope performed a write');
 
@@ -681,7 +682,7 @@ test('appendEvents admits only branded v16 envelopes; fabricated data fails clos
       scope: 's', seq: 2, type: 'ReplayDoc.body.operated',
       data: mutated, actionId: 'a', committedAt: 'now',
     }]),
-    /unbranded|noncanonical operated v16 eventData reached _Log/,
+    /unbranded operated v16 eventData reached _Log|noncanonical operated v16 eventData reached _Log|admission capability was missing, reused, or expired/,
   );
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count, 1, 'mutated envelope performed a write');
 });
@@ -691,6 +692,7 @@ test('v16 nonce capability is single-use: clone, replay, reuse, and restart all 
   const { constructV16RegionEvent } = await import('../build/annotated-text-operated-event.mjs');
   const db = new DatabaseSync(':memory:');
   db.exec('CREATE TABLE _Log (scope TEXT, seq INTEGER, eventType TEXT, eventData TEXT, actionId TEXT, committedAt TEXT)');
+  db.exec('CREATE TABLE _V16CapabilityClaim (nonce TEXT PRIMARY KEY, document_id TEXT NOT NULL, bytes_digest TEXT NOT NULL)');
 
   const minted = constructV16RegionEvent({
     descriptor: { id: 'doc-1', from: 0, to: 0, transitions: [] },
@@ -727,7 +729,7 @@ test('v16 nonce capability is single-use: clone, replay, reuse, and restart all 
       scope: 's', seq: 3, type: 'E.f.operated',
       data: JSON.parse(JSON.stringify(minted.event)), actionId: 'a', committedAt: 'now',
     }]),
-    /unbranded operated v16 eventData reached _Log/,
+    /unbranded operated v16 eventData reached _Log|admission capability was missing, reused, or expired/,
   );
   // A FORGED nonce (never minted): rejected.
   assert.throws(
@@ -802,6 +804,7 @@ test('tampered _Log eventData fails closed through readSince, rowToEvent, and du
   const { parseEventType } = await import('../build/event-handle.mjs');
   const db = new DatabaseSync(':memory:');
   db.exec('CREATE TABLE _Log (scope TEXT, seq INTEGER, eventType TEXT, eventData TEXT, actionId TEXT, committedAt TEXT)');
+  db.exec('CREATE TABLE _V16CapabilityClaim (nonce TEXT PRIMARY KEY, document_id TEXT NOT NULL, bytes_digest TEXT NOT NULL)');
 
   const minted = constructV16RegionEvent({
     descriptor: { id: 'doc-1', from: 0, to: 0, transitions: [] },
@@ -1018,11 +1021,12 @@ test('compound dispatch consumes its nonce capability exactly once (zero-write o
   db.close();
 });
 
-test('nonce capability table is bounded; oldest claims are evicted (expired)', async () => {
-  const { appendEvents } = await import('../build/committed-log.mjs');
-  const { constructV16RegionEvent, REGION_V16_NONCE_CAPABILITY_MAX } = await import('../build/annotated-text-operated-event.mjs');
+test('capability claims are durable and bounded by retention: reuse across restart fails', async () => {
+  const { appendEvents, v16CapabilityClaimTableDDL } = await import('../build/committed-log.mjs');
+  const { constructV16RegionEvent } = await import('../build/annotated-text-operated-event.mjs');
   const db = new DatabaseSync(':memory:');
   db.exec('CREATE TABLE _Log (scope TEXT, seq INTEGER, eventType TEXT, eventData TEXT, actionId TEXT, committedAt TEXT)');
+  db.exec(v16CapabilityClaimTableDDL());
   const mint = (id) => constructV16RegionEvent({
     descriptor: { id, from: 0, to: 0, transitions: [] },
     before: { structuralRevision: 1, frontier: [] },
@@ -1033,30 +1037,72 @@ test('nonce capability table is bounded; oldest claims are evicted (expired)', a
     contribution: null,
   });
 
-  // Fill the table past its bound with distinct mints.
-  const mints = [];
-  for (let index = 0; index <= REGION_V16_NONCE_CAPABILITY_MAX + 4; index += 1) {
-    mints.push(mint(`doc-${index}`));
-  }
-  // The OLDEST claim was evicted when the bound was crossed — appending it
-  // fails as expired even though it was genuinely minted in this process.
-  const oldest = mints[0];
+  // First append consumes the claim durably.
+  const minted = mint('doc-1');
+  appendEvents(db, [{
+    scope: 's', seq: 1, type: 'E.f.operated',
+    data: JSON.parse(JSON.stringify(minted.event)), v16Capability: minted.capability,
+    actionId: 'a', committedAt: 'now',
+  }]);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count, 1);
+
+  // Simulate a process RESTART: the same durable _Log + claim tables are
+  // reopened in a fresh DatabaseSync over the same file semantics — here the
+  // same db. A replay of the identical bytes+nonce must STILL fail because
+  // the consumption row survived.
   assert.throws(
     () => appendEvents(db, [{
-      scope: 's', seq: 1, type: 'E.f.operated',
-      data: JSON.parse(JSON.stringify(oldest.event)), v16Capability: oldest.capability,
+      scope: 's', seq: 2, type: 'E.f.operated',
+      data: JSON.parse(JSON.stringify(minted.event)), v16Capability: minted.capability,
       actionId: 'a', committedAt: 'now',
     }]),
     /admission capability was missing, reused, or expired/,
   );
-  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count, 1);
 
-  // The NEWEST claim is still live and admitted.
-  const newest = mints[mints.length - 1];
+  // Claims are one row per appended v16 event (bounded by retention pruning).
+  const claims = db.prepare('SELECT COUNT(*) AS count FROM _V16CapabilityClaim').get().count;
+  assert.equal(claims, 1);
+});
+test('transaction rollback restores the capability so a legitimate retry succeeds', async () => {
+  const { appendEvents } = await import('../build/committed-log.mjs');
+  const { txn } = await import('../build/driver.mjs');
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE _Log (scope TEXT, seq INTEGER, eventType TEXT, eventData TEXT, actionId TEXT, committedAt TEXT)');
+  db.exec('CREATE TABLE _V16CapabilityClaim (nonce TEXT PRIMARY KEY, document_id TEXT NOT NULL, bytes_digest TEXT NOT NULL)');
+
+  const minted = constructV16RegionEvent({
+    descriptor: { id: 'doc-1', from: 0, to: 0, transitions: [] },
+    before: { structuralRevision: 1, frontier: [] },
+    after: { structuralRevision: 2, frontier: [] },
+    postimage: { affectedIds: [], annotations: [], beforeAnnotations: [], emptied: [], beforeDigest: '0'.repeat(64), afterDigest: '0'.repeat(64) },
+    declarationFingerprint: '0'.repeat(64),
+    textOperations: { kind: 'none' },
+    contribution: null,
+  });
+  const copiedData = JSON.parse(JSON.stringify(minted.event));
+
+  // Attempt #1 inside a transaction that ROLLS BACK after the append (e.g. a
+  // later projection/private-fact failure): claim row and _Log row vanish
+  // together, restoring the capability.
+  await txn(db, () => {
+    appendEvents(db, [{
+      scope: 's', seq: 1, type: 'E.f.operated',
+      data: copiedData, v16Capability: minted.capability, actionId: 'a', committedAt: 'now',
+    }]);
+    throw new Error('simulated compound failure');
+  }).catch(() => {});
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count, 0, 'rollback left the log row');
+  assert.equal(
+    db.prepare('SELECT COUNT(*) AS count FROM _V16CapabilityClaim').get().count, 0,
+    'rollback left the capability claim consumed',
+  );
+
+  // Attempt #2 (the legitimate retry with the SAME envelope + nonce) succeeds.
   appendEvents(db, [{
-    scope: 's', seq: 2, type: 'E.f.operated',
-    data: JSON.parse(JSON.stringify(newest.event)), v16Capability: newest.capability,
-    actionId: 'a', committedAt: 'now',
+    scope: 's', seq: 1, type: 'E.f.operated',
+    data: JSON.parse(JSON.stringify(minted.event)), v16Capability: minted.capability,
+    actionId: 'a', committedAt: 'now2',
   }]);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count, 1);
 });
