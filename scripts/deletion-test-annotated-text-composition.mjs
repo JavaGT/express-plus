@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-const W1 = [
+const MUTATIONS = [
   {
     name: 'remove-v15-normalizer',
     expected: 'v15 fixture did not reach canonical reducer',
@@ -225,11 +225,64 @@ const W1 = [
         .replace("import { constructV16RegionEvent } from './annotated-text-operated-event.mjs';", "import { constructV15RegionEvent } from './annotated-text-operated-event.mjs';"));
     },
   },
+{
+    name: 'remove-contribution-policy',
+    expected: 'compound action remained history eligible without its policy',
+    test: 'test/annotated-text-composite-deletion.test.mjs',
+    testNamePattern: 'a composed action is a history barrier when its contribution policy is removed',
+    mutate(copyRoot) {
+      const path = join(copyRoot, 'build/kernel.mjs');
+      const source = readFileSync(path, 'utf8');
+      const needle = 'policies: [...annotatedKernel.nativeInsertPolicies, ...compoundPolicies],';
+      if (!source.includes(needle)) throw new Error('registry compound-policy assembly is missing');
+      writeFileSync(path, source.replace(
+        needle,
+        'policies: [...annotatedKernel.nativeInsertPolicies],',
+      ));
+    },
+  },
+  {
+    name: 'restore-legacy-classifier',
+    expected: 'retired annotated history symbol remains: annotatedMove',
+    kind: 'checker',
+    test: 'scripts/check-annotated-text-single-authority.mjs',
+    mutate(copyRoot) {
+      const path = join(copyRoot, 'src/durable-history.ts');
+      const source = readFileSync(path, 'utf8');
+      if (/\bannotatedMove\b/.test(source)) throw new Error('retired symbol already present');
+      writeFileSync(path, `${source}\n// restored legacy classifier (mutation fixture)\nconst annotatedMove = null;\n`);
+    },
+  },
+  {
+    name: 'import-legacy-privacy-into-history-move',
+    expected: 'legacy annotated history privacy crossed read boundary: src/durable-history.ts',
+    kind: 'checker',
+    test: 'scripts/check-annotated-text-single-authority.mjs',
+    mutate(copyRoot) {
+      const path = join(copyRoot, 'src/durable-history.ts');
+      const source = readFileSync(path, 'utf8');
+      if (/assertLegacyAnnotatedHistoryReadable/.test(source)) throw new Error('privacy import already present');
+      const needle = "export function createDurableHistoryRuntime(";
+      if (!source.includes(needle)) throw new Error('durable runtime entry is missing');
+      writeFileSync(path, source.replace(
+        needle,
+        "import { assertLegacyAnnotatedHistoryReadable } from './legacy-annotated-history-read-privacy.ts';\nexport function createDurableHistoryRuntime(",
+      ));
+    },
+  },
 ];
 
 function copyTree(copyRoot) {
   cpSync(join(root, 'build'), join(copyRoot, 'build'), { recursive: true });
   cpSync(join(root, 'public'), join(copyRoot, 'public'), { recursive: true });
+  // #145 S6: copy the authored src + the single-authority checker so the
+  // retire/boundary CI rules run against the mutated copy too.
+  cpSync(join(root, 'src'), join(copyRoot, 'src'), { recursive: true });
+  mkdirSync(join(copyRoot, 'scripts'), { recursive: true });
+  cpSync(join(root, 'scripts/check-annotated-text-single-authority.mjs'), join(copyRoot, 'scripts/check-annotated-text-single-authority.mjs'));
+  if (existsSync(join(root, 'index.d.ts'))) {
+    cpSync(join(root, 'index.d.ts'), join(copyRoot, 'index.d.ts'));
+  }
   const tests = [
     'test/annotated-text-operated-normalization.test.mjs',
     'test/annotated-text-operated-v16.test.mjs',
@@ -254,6 +307,28 @@ function runMutation(mutation) {
   try {
     copyTree(copyRoot);
     mutation.mutate(copyRoot);
+    if (mutation.kind === 'checker') {
+      // The static single-authority gate is the "test": the injected retired
+      // symbol / patience import must trip the retire/boundary rules.
+      const checkerPath = join(copyRoot, 'scripts/check-annotated-text-single-authority.mjs');
+      if (!existsSync(checkerPath)) throw new Error(`checker missing: ${checkerPath}`);
+      const result = spawnSync(process.execPath, [checkerPath], {
+        cwd: copyRoot,
+        encoding: 'utf8',
+        env: process.env,
+      });
+      const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+      if (result.status === 0) {
+        throw new Error(`deletion test unexpectedly survived: ${mutation.name}`);
+      }
+      if (!output.includes(mutation.expected)) {
+        throw new Error(
+          `deletion test ${mutation.name} failed without signature '${mutation.expected}'\n${output.slice(-4000)}`,
+        );
+      }
+      console.log(`ok ${mutation.name}`);
+      return;
+    }
     const testPath = join(copyRoot, mutation.test);
     if (!existsSync(testPath)) throw new Error(`focused test missing: ${mutation.test}`);
     const args = ['--test', '--test-force-exit', '--test-timeout=30000'];
@@ -280,9 +355,9 @@ function runMutation(mutation) {
 }
 
 const requested = process.argv.slice(2);
-const selected = requested.length ? W1.filter((mutation) => requested.includes(mutation.name)) : W1;
+const selected = requested.length ? MUTATIONS.filter((mutation) => requested.includes(mutation.name)) : MUTATIONS;
 if (requested.length && selected.length !== requested.length) {
-  const known = new Set(W1.map((mutation) => mutation.name));
+  const known = new Set(MUTATIONS.map((mutation) => mutation.name));
   const unknown = requested.filter((name) => !known.has(name));
   throw new Error(`unknown deletion mutation: ${unknown.join(', ')}`);
 }

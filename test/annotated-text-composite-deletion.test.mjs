@@ -8,21 +8,20 @@ import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  annotatedText, annotation, entity, everyone, executeDDL, executeFrameworkDDL,
-  grant, read, ref, scope, text, write, deny,
+  annotatedText, annotation, durableHistory, entity, everyone, executeDDL, executeFrameworkDDL,
+  grant, read, ref, scope, write, deny,
 } from '../build/internal.mjs';
 import { defineSqliteSchema } from '../build/server.mjs';
 import {
   importTextToFamily,
   materializeText,
   projectEndpointToOffset,
-  resolveOffsetToEndpoint,
   restoreTextFamilySerialized,
   serializeCompactTextFamilyCheckpoint,
   textFamilyBasis,
 } from '../build/annotated-text-continuous.mjs';
 import { readAnnotatedTextFamilyCheckpoint } from '../build/annotated-text-authoring-stream.mjs';
-import { attachAnnotationRange, loadAnnotationImages } from '../build/annotated-text-storage.mjs';
+import { loadAnnotationImages } from '../build/annotated-text-storage.mjs';
 import {
   computeAffectedClosure,
   digestAffectedClosure,
@@ -259,5 +258,57 @@ test('a valid compound envelope reaches _PrivateActionFact', async () => {
   const stored = db.prepare('SELECT fact FROM _PrivateActionFact').get();
   assert.ok(stored, 'valid compound envelope did not reach _PrivateActionFact');
   assert.equal(JSON.parse(stored.fact).kind, 'workbench.compound-origin');
+  db.close();
+});
+
+test('a composed action is a history barrier when its contribution policy is removed', async () => {
+  // remove-contribution-policy: dropping the compiled compound policy from the
+  // registry makes the move refuse to interpret the compound origin generically,
+  // failing with 'compound action remained history eligible without its policy'.
+  // On the real build the composed origin is moved by the policy path and this
+  // test passes; the mutation must make the move fail with the signature.
+  const db = new DatabaseSync(':memory:');
+  installSchema(db);
+  const Document = declaredEntity();
+  const region = annotatedTextOperation(Document, { fieldName: 'body' });
+  const app = workbench({
+    db,
+    schema: delSchema,
+    entities: [Document],
+    history: durableHistory({ authorize: () => true, actions: {} }),
+    actions: [{
+      type: 'correction.apply',
+      authorize: () => true,
+      history: { cursor: 'eligible' },
+      operations: [region],
+      handler: ({ history }) => {
+        if (history?.input && history.input.version === 1) {
+          return {
+            events: [],
+            applicationTransition: { before: history.input.expected, after: history.input.replacement },
+          };
+        }
+        const descriptor = currentDescriptor(db, { from: 0, to: 5, replacement: 'hallo', transitions: [] });
+        return {
+          events: [],
+          annotatedText: [region.region(descriptor)],
+          applicationTransition: { before: null, after: { correctionId: 'c-1' } },
+        };
+      },
+    }],
+  });
+  await app.start();
+  const principal = { type: 'user', id: 'u1', attributes: {} };
+  const origin = await app.dispatch({
+    actionId: 'policy-origin', type: 'correction.apply', scope: 'Project:p1',
+    payload: { id: 'doc-1' }, principal, clientId: 'tab-a', history: { session: 'tab-a' },
+  });
+  assert.equal(origin.ok, true, origin.failure?.message);
+  const cursor = await app.history.cursor({ scope: 'Project:p1', principal, session: 'tab-a' });
+  const undone = await app.history.undo({
+    scope: 'Project:p1', principal, session: 'tab-a',
+    actionId: 'policy-undo', revision: cursor.revision,
+  });
+  assert.equal(undone.ok, true, 'compound action remained history eligible without its policy');
   db.close();
 });

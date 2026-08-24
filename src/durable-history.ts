@@ -616,6 +616,13 @@ export function createDurableHistoryRuntime({
     if (!originIsPolicy && !compoundKindOf(originFact) && (!Object.hasOwn(originFact, 'before') || !Object.hasOwn(originFact, 'after'))) {
       throw new TypeError('history action private fact is malformed');
     }
+    // #145 S5/S6: a compound action is history-eligible ONLY through its
+    // compile-produced contribution policy. Generic history must never
+    // interpret a compound envelope — if the policy is missing (deleted or a
+    // broken assembly), the move refuses rather than compensating blindly.
+    if (compoundKindOf(originFact) && !originIsPolicy) {
+      throw new Error('compound action remained history eligible without its policy');
+    }
     const translate = operation === 'undo' ? rule.inverse : rule.redo;
     // scope#992 rev 3/4: application translators receive only the application
     // half of a compound envelope. The contribution-policy runtime (W3) retains
