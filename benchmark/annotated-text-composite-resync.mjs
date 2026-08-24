@@ -5,7 +5,9 @@
 
 import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { cpus, totalmem } from 'node:os';
+import { execFileSync } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
 
 import workbench, {
@@ -19,11 +21,15 @@ import { restoreTextFamilySerialized, resolveOffsetToEndpoint } from '../build/a
 import { canonicalEndpointJSON } from '../build/annotated-text-storage.mjs';
 import { createLiveDeliverySession } from '../public/workbench-client.mjs';
 
-const RECIPIENTS = 25;
+const RECIPIENTS = Number(process.env.ANNOTATED_TEXT_BENCH_RECIPIENTS ?? 25);
+const VISIBLE_RECIPIENTS = Number(process.env.ANNOTATED_TEXT_BENCH_VISIBLE_RECIPIENTS ?? 13);
 const CONTROLS = 50;
 const WORDS = Number(process.env.ANNOTATED_TEXT_BENCH_WORDS ?? 36_000);
 const ANNOTATIONS_PER_WORD = Number(process.env.ANNOTATED_TEXT_BENCH_ANNOTATIONS_PER_WORD ?? 2);
 const PROTECTED_WORDS = 100;
+const PROFILE_PHASES = process.env.ANNOTATED_TEXT_BENCH_PROFILE === '1';
+const SCENARIO = process.env.ANNOTATED_TEXT_BENCH_SCENARIO ?? 'initial';
+if (!['initial', 'fallback'].includes(SCENARIO)) throw new Error('ANNOTATED_TEXT_BENCH_SCENARIO must be initial or fallback');
 
 function percentile(values, p) {
   if (values.length === 0) return 0;
@@ -190,8 +196,9 @@ async function seedDocument(app, db) {
 }
 
 async function measureProjection(db, BenchDoc, fixture, principal, visible) {
+  const phases = [];
   const started = performance.now();
-  const snapshot = await projectAnnotatedTextSnapshot({
+  const input = {
     db,
     entity: BenchDoc,
     row: fixture.row,
@@ -199,8 +206,14 @@ async function measureProjection(db, BenchDoc, fixture, principal, visible) {
     fieldName: 'body',
     descriptor: BenchDoc.fields.body,
     mintBasis: false,
-  });
+    ...(PROFILE_PHASES ? { profile: (phase, durationMs, details) => phases.push({ phase, durationMs, details }) } : {}),
+  };
+  const snapshot = await projectAnnotatedTextSnapshot(input);
   const duration = performance.now() - started;
+  const serializationStarted = PROFILE_PHASES ? performance.now() : 0;
+  const serialized = PROFILE_PHASES ? JSON.stringify(snapshot) : '';
+  if (PROFILE_PHASES) phases.push({ phase: 'serialization', durationMs: performance.now() - serializationStarted, details: { bytes: Buffer.byteLength(serialized) } });
+  const endToEndDuration = performance.now() - started;
   if (visible) {
     if (snapshot.text !== fixture.text || snapshot.annotations.length !== fixture.annotationCount) {
       throw new Error('visible recipient did not receive the complete timing/uncertainty state');
@@ -212,7 +225,7 @@ async function measureProjection(db, BenchDoc, fixture, principal, visible) {
       throw new Error('redacted recipient received protected text or canonical annotation facts');
     }
   }
-  return duration;
+  return { duration, endToEndDuration, phases, serializedBytes: PROFILE_PHASES ? Buffer.byteLength(serialized) : null };
 }
 
 async function measureFanoutCoalescing() {
@@ -318,6 +331,8 @@ const originalHash = createHash;
 void originalHash;
 
 async function main() {
+  const benchmarkBytes = readFileSync(new URL(import.meta.url));
+  const processList = execFileSync('ps', ['-Ao', 'pid,pcpu,rss,command'], { encoding: 'utf8' });
   const rssAtStart = process.memoryUsage().rss;
   const db = new DatabaseSync(':memory:');
   install(db);
@@ -333,26 +348,53 @@ async function main() {
   // The acceptance delta measures projection/recovery over the fully seeded
   // fixture baseline; fixture construction is reported separately.
   const rssBefore = process.memoryUsage().rss;
+  const forcedFallbackFanout = SCENARIO === 'fallback' ? await measureFanoutCoalescing() : null;
 
   const projectionSamples = [];
   const visibleSamples = [];
   const redactedSamples = [];
+  const projectionPhaseSamples = [];
+  const serializedSizes = [];
+  const endToEndSamples = [];
+  let peakRss = rssBefore;
   for (let i = 0; i < RECIPIENTS; i += 1) {
     if (coordinatorHeld.value) throw new Error('snapshot work held the write coordinator');
-    const visible = i < 13;
-    const duration = await measureProjection(db, BenchDoc, fixture, { id: visible ? 'u1' : `viewer-${i}` }, visible);
-    projectionSamples.push(duration);
-    (visible ? visibleSamples : redactedSamples).push(duration);
+    const visible = i < VISIBLE_RECIPIENTS;
+    const sample = await measureProjection(db, BenchDoc, fixture, { id: visible ? 'u1' : `viewer-${i}` }, visible);
+    projectionSamples.push(sample.duration);
+    (visible ? visibleSamples : redactedSamples).push(sample.duration);
+    projectionPhaseSamples.push(sample.phases);
+    serializedSizes.push(sample.serializedBytes);
+    endToEndSamples.push(sample.endToEndDuration);
+    peakRss = Math.max(peakRss, process.memoryUsage().rss);
   }
 
-  const fanout = await measureFanoutCoalescing();
+  const fanout = forcedFallbackFanout ?? await measureFanoutCoalescing();
   const noReconnect = await measureClientBudget({ reconnect: false });
   const oneReconnect = await measureClientBudget({ reconnect: true });
   const rssAfter = process.memoryUsage().rss;
   const rssDeltaMiB = (rssAfter - rssBefore) / (1024 * 1024);
+  const peakRssDeltaMiB = (peakRss - rssBefore) / (1024 * 1024);
 
   const report = {
     recordedAt: new Date().toISOString(),
+    scenario: SCENARIO,
+    profiling: PROFILE_PHASES,
+    provenance: {
+      commit: process.env.ANNOTATED_TEXT_BENCH_COMMIT ?? null,
+      benchmarkSha256: createHash('sha256').update(benchmarkBytes).digest('hex'),
+      command: `ANNOTATED_TEXT_BENCH_SCENARIO=${SCENARIO} ANNOTATED_TEXT_BENCH_COMMIT=${process.env.ANNOTATED_TEXT_BENCH_COMMIT ?? ''} pnpm benchmark:annotated-text-composite-resync`,
+      environment: {
+        ANNOTATED_TEXT_BENCH_WORDS: String(WORDS),
+        ANNOTATED_TEXT_BENCH_ANNOTATIONS_PER_WORD: String(ANNOTATIONS_PER_WORD),
+        ANNOTATED_TEXT_BENCH_RECIPIENTS: String(RECIPIENTS),
+        ANNOTATED_TEXT_BENCH_VISIBLE_RECIPIENTS: String(VISIBLE_RECIPIENTS),
+      },
+      cpu: cpus()[0]?.model ?? 'unknown',
+      logicalCpuCount: cpus().length,
+      totalMemoryMiB: Number((totalmem() / (1024 * 1024)).toFixed(2)),
+      processList,
+    },
     node: process.version,
     platform: `${process.platform}/${process.arch}`,
     fixture: {
@@ -371,12 +413,16 @@ async function main() {
       visibleP95Ms: Number(percentile(visibleSamples, 95).toFixed(3)),
       redactedP95Ms: Number(percentile(redactedSamples, 95).toFixed(3)),
       samples: projectionSamples.map((value) => Number(value.toFixed(3))),
+      phaseSamples: projectionPhaseSamples,
+      serializedSizes,
+      endToEndSamples: endToEndSamples.map((value) => Number(value.toFixed(3))),
     },
     budget: {
       C0: noReconnect,
       C1: oneReconnect,
     },
     rssDeltaMiB: Number(rssDeltaMiB.toFixed(2)),
+    peakRssDeltaMiB: Number(peakRssDeltaMiB.toFixed(2)),
     fixtureSetupRssMiB: Number(((rssBefore - rssAtStart) / (1024 * 1024)).toFixed(2)),
     writeCoordinatorHeld: coordinatorHeld.value,
   };
@@ -384,7 +430,7 @@ async function main() {
   const thresholdNotes = [];
   if (fanout.p99 >= 100) thresholdNotes.push(`event-loop delay p99 ${fanout.p99}ms exceeds 100ms`);
   if (report.projections.p95Ms >= 500) thresholdNotes.push(`projected snapshot p95 ${report.projections.p95Ms}ms exceeds 500ms`);
-  if (rssDeltaMiB >= 256) thresholdNotes.push(`RSS growth ${rssDeltaMiB}MiB exceeds 256MiB`);
+  if (peakRssDeltaMiB >= 256) thresholdNotes.push(`peak RSS growth ${peakRssDeltaMiB}MiB exceeds 256MiB`);
   if (noReconnect.burst > noReconnect.bound || oneReconnect.burst > oneReconnect.bound) {
     thresholdNotes.push('snapshot recovery exceeded cycle budget');
   }
@@ -403,6 +449,7 @@ async function main() {
     `- Event-loop delay p99: ${report.fanout.p99LoopDelayMs} ms`,
     `- Snapshot projection p95: ${report.projections.p95Ms} ms / recipient`,
     `- RSS Δ: ${report.rssDeltaMiB} MiB`,
+    `- Peak RSS Δ: ${report.peakRssDeltaMiB} MiB`,
     `- Write coordinator held: ${report.writeCoordinatorHeld}`,
     `- Attempt histogram C=0: \`${JSON.stringify(report.budget.C0.histogram)}\``,
     `- Attempt histogram C=1: \`${JSON.stringify(report.budget.C1.histogram)}\``,
