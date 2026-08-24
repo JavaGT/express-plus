@@ -136,6 +136,13 @@ function v15Envelope() {
   return { family, annotations, envelope: constructV15RegionEvent(plan), plan };
 }
 
+test('v15 fixture file normalizes through the production constructor', () => {
+  const raw = loadJson('v15/region-edit.json');
+  const canonical = normalizeOperatedEvent(raw, { entity: 'ReplayDoc', field: 'body' });
+  assert.equal(canonical.kind, 'region.edit');
+  assert.equal(canonical.wireVersion, 15);
+});
+
 test('v15 region.edit normalizes through the production constructor', () => {
   const { envelope, plan } = v15Envelope();
   const canonical = normalizeOperatedEvent(envelope, { entity: 'ReplayDoc', field: 'body' });

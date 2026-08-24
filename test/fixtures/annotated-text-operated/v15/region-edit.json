@@ -1,0 +1,123 @@
+{
+  "version": 15,
+  "id": "doc-1",
+  "before": {
+    "structuralRevision": 1,
+    "frontier": [
+      [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        1
+      ]
+    ]
+  },
+  "after": {
+    "structuralRevision": 2,
+    "frontier": [
+      [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        1
+      ],
+      [
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbd0",
+        1
+      ],
+      [
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbe0",
+        1
+      ]
+    ]
+  },
+  "operation": {
+    "kind": "region.edit",
+    "from": 0,
+    "to": 5,
+    "text": {
+      "kind": "replace",
+      "operations": [
+        [
+          "workbench.text",
+          1,
+          [
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbd0",
+            1
+          ],
+          2,
+          [
+            [
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              1
+            ]
+          ],
+          [
+            "delete",
+            [
+              [
+                [
+                  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  1
+                ],
+                0,
+                5
+              ]
+            ]
+          ]
+        ],
+        [
+          "workbench.text",
+          1,
+          [
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbe0",
+            1
+          ],
+          3,
+          [
+            [
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              1
+            ],
+            [
+              "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbd0",
+              1
+            ]
+          ],
+          [
+            "insert",
+            [
+              "root"
+            ],
+            "hallo"
+          ]
+        ]
+      ]
+    },
+    "transitions": [
+      {
+        "kind": "range.set",
+        "annotationId": "note-1",
+        "ranges": [
+          {
+            "start": 0,
+            "end": 5
+          }
+        ]
+      }
+    ],
+    "beforeDigest": "e2a5d7f55c3da7709cb3dad198a59f100a37a8b3b214c37e1aa5b953c3cc725c",
+    "afterDigest": "186ed0d08d1640b71a9ba1334bb6ca52ae3e27ad0b17b89838dca3b373322bfa",
+    "affectedIds": [
+      "note-1"
+    ]
+  },
+  "facts": {
+    "family": null,
+    "annotation": null,
+    "ranges": [],
+    "measurements": [],
+    "lifecycle": null,
+    "result": null,
+    "emptiedAnnotations": [],
+    "actorId": null,
+    "selectedRange": null,
+    "removedAnnotationIds": []
+  }
+}

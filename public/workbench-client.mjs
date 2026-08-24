@@ -2325,10 +2325,17 @@ export function createLiveDeliverySession({
   // particular, an opaque resync must wait for every transmitted operation
   // whose outcome is still unknown; otherwise its replacement snapshot can
   // be projected over an action which may still commit.
+  // Rev 3: one shared finite budget per logical recovery cycle. Every
+  // bootstrap({mode:'snapshot'}) inside that cycle consumes one attempt,
+  // including server retry, receipt-fence, floor-coverage, and follow-up
+  // kicks. Controls only raise the cycle floor.
+  const MAX_SNAPSHOT_BOOTSTRAPS_PER_CYCLE = 4;
   let snapshotRecoveryFloor = null;
   let snapshotRecoveryRequested = false;
   let snapshotRecoveryRunning = false;
   let snapshotRecoveryWaiters = [];
+  let snapshotRecoveryCycle = null;
+  let snapshotRecoveryCycleSeq = 0;
   const listeners = new Set();
   const { operations, makeOperation, shouldReconcile, count } = createOpLifecycle();
   const recoveryRetryWaiters = new Set();
@@ -2485,10 +2492,45 @@ export function createLiveDeliverySession({
   function cancelSnapshotRecovery(error = new ClientClosedError('Live delivery is unavailable')) {
     snapshotRecoveryRequested = false;
     snapshotRecoveryFloor = null;
+    snapshotRecoveryCycle = null;
     for (const waiter of snapshotRecoveryWaiters.splice(0)) waiter.reject(error);
   }
 
+  function beginSnapshotRecoveryCycle(floor) {
+    snapshotRecoveryCycle = {
+      id: ++snapshotRecoveryCycleSeq,
+      attempts: 0,
+      floor: floor ?? null,
+      receiptFloor: floor ?? null,
+      followupRequested: false,
+      connectionGeneration,
+    };
+    return snapshotRecoveryCycle;
+  }
+
+  function raiseSnapshotCycleFloor(floor) {
+    if (floor == null || !snapshotRecoveryCycle) return;
+    snapshotRecoveryCycle.floor = snapshotRecoveryCycle.floor == null
+      ? floor
+      : Math.max(snapshotRecoveryCycle.floor, floor);
+  }
+
   function requestSnapshotRecovery(floor, wait = !hasUnknownTransmission(), inline = false) {
+    if (closed || status === 'revoked' || status === 'unavailable') {
+      const error = new ClientClosedError('Live delivery is unavailable');
+      return wait ? Promise.reject(error) : Promise.resolve();
+    }
+    if (!snapshotRecoveryCycle || snapshotRecoveryCycle.connectionGeneration !== connectionGeneration) {
+      beginSnapshotRecoveryCycle(floor);
+    } else {
+      raiseSnapshotCycleFloor(floor);
+      if (floor != null) {
+        snapshotRecoveryCycle.receiptFloor = snapshotRecoveryCycle.receiptFloor == null
+          ? floor
+          : Math.max(snapshotRecoveryCycle.receiptFloor, floor);
+      }
+      if (snapshotRecoveryRunning) snapshotRecoveryCycle.followupRequested = true;
+    }
     snapshotRecoveryRequested = true;
     if (floor != null) {
       snapshotRecoveryFloor = snapshotRecoveryFloor == null
@@ -2505,35 +2547,58 @@ export function createLiveDeliverySession({
   function kickSnapshotRecovery(inline = false) {
     if (!snapshotRecoveryRequested || snapshotRecoveryRunning || closed || status === 'revoked' || status === 'unavailable') return;
     if (hasUnknownTransmission()) return;
+    if (snapshotRecoveryCycle && snapshotRecoveryCycle.attempts >= MAX_SNAPSHOT_BOOTSTRAPS_PER_CYCLE) {
+      snapshotRecoveryRequested = false;
+      const error = new Error('snapshot recovery attempt budget exhausted');
+      becomeUnavailable(error);
+      return;
+    }
     snapshotRecoveryRunning = true;
-    const floor = snapshotRecoveryFloor;
+    const cycle = snapshotRecoveryCycle;
+    const receiptFloor = cycle?.receiptFloor ?? snapshotRecoveryFloor;
     snapshotRecoveryFloor = null;
     snapshotRecoveryRequested = false;
+    if (cycle) cycle.followupRequested = false;
     const waiters = snapshotRecoveryWaiters.splice(0);
     const snapshotGenerationAtStart = snapshotGeneration;
+    const cycleId = cycle?.id;
     const run = async () => {
       try {
-        await recover('snapshot', floor);
-        if (floor != null && !closed && status !== 'revoked' && status !== 'unavailable'
-          && snapshotGeneration === snapshotGenerationAtStart) {
+        await recover('snapshot', receiptFloor);
+        const liveCycle = snapshotRecoveryCycle?.id === cycleId ? snapshotRecoveryCycle : null;
+        const latestCoverage = liveCycle?.floor ?? null;
+        const latestReceipt = liveCycle?.receiptFloor ?? receiptFloor;
+        if (latestReceipt != null && !closed && status !== 'revoked' && status !== 'unavailable'
+          && snapshotGeneration === snapshotGenerationAtStart
+          && liveCycle) {
           // A reconnect may supersede this request without installing its
           // result. Give the coalesced recovery one fresh attempt before
           // treating an uncovered receipt fence as a terminal failure.
-          await recover('snapshot', floor);
+          await recover('snapshot', latestReceipt);
           if (snapshotGeneration === snapshotGenerationAtStart) {
             throw new Error('replacement snapshot did not supersede the receipt');
           }
         }
-        if (floor != null && !closed && status !== 'revoked' && status !== 'unavailable'
-          && cursorAnchor(cursor) < floor) {
-          await recover('snapshot', floor);
-          if (cursorAnchor(cursor) < floor) {
+        if (latestReceipt != null && !closed && status !== 'revoked' && status !== 'unavailable'
+          && cursorAnchor(cursor) < latestReceipt
+          && snapshotRecoveryCycle?.id === cycleId) {
+          await recover('snapshot', latestReceipt);
+          if (cursorAnchor(cursor) < latestReceipt) {
             throw new Error('replacement snapshot does not cover the receipt fence');
           }
         }
+        if (liveCycle && latestCoverage != null && cursorAnchor(cursor) < latestCoverage) {
+          liveCycle.followupRequested = true;
+          snapshotRecoveryRequested = true;
+        }
+        if (snapshotRecoveryCycle?.id === cycleId
+          && (latestCoverage == null || cursorAnchor(cursor) >= latestCoverage)
+          && !snapshotRecoveryCycle.followupRequested) {
+          snapshotRecoveryCycle = null;
+        }
         for (const waiter of waiters) waiter.resolve();
       } catch (error) {
-        if (!closed && status !== 'revoked') becomeUnavailable();
+        if (!closed && status !== 'revoked') becomeUnavailable(error);
         for (const waiter of waiters) waiter.reject(error);
         throw error;
       } finally {
@@ -2698,9 +2763,9 @@ export function createLiveDeliverySession({
     }
   }
 
-  function becomeUnavailable() {
+  function becomeUnavailable(error) {
     if (closed || status === 'revoked') return;
-    cancelSnapshotRecovery();
+    cancelSnapshotRecovery(error instanceof Error ? error : new ClientClosedError('Live delivery is unavailable'));
     finishRecoveryWarning();
     status = 'unavailable';
     settleAdmissions(false);
@@ -2739,10 +2804,22 @@ export function createLiveDeliverySession({
     const receiptGenerationAtStart = receiptGeneration;
     const snapshotCursorAtStart = cursor;
     status = mode === 'snapshot' ? 'recovering' : 'catching-up';
+    if (mode === 'snapshot') {
+      if (!snapshotRecoveryCycle || snapshotRecoveryCycle.connectionGeneration !== connectionGeneration) {
+        beginSnapshotRecoveryCycle(snapshotCursorFloor ?? null);
+      }
+      if (snapshotRecoveryCycle.attempts >= MAX_SNAPSHOT_BOOTSTRAPS_PER_CYCLE) {
+        throw new Error('snapshot recovery attempt budget exhausted');
+      }
+      snapshotRecoveryCycle.attempts += 1;
+    }
+    const cycleGenerationAtStart = snapshotRecoveryCycle?.connectionGeneration;
     const result = await bootstrap({ after: mode === 'catchup' ? cursor : undefined, mode });
     // A transport can revoke access while an authorized recovery request is
     // pending. Its late result must never rematerialize project state.
     if (closed || status === 'revoked' || generation !== recoveryGeneration) return;
+    if (mode === 'snapshot' && (cycleGenerationAtStart !== connectionGeneration
+      || snapshotRecoveryCycle?.connectionGeneration !== connectionGeneration)) return;
     if (!result || typeof result !== 'object') throw new Error('bootstrap returned an invalid result');
     if (result.kind === 'revoked') {
       revoke(result.reason);
@@ -2750,12 +2827,14 @@ export function createLiveDeliverySession({
     }
     if (result.kind === 'retry') {
       if (!(await waitForRecoveryRetry(retryAttempt)) || closed || status === 'revoked' || generation !== recoveryGeneration) return;
+      if (mode === 'snapshot' && snapshotRecoveryCycle?.connectionGeneration !== connectionGeneration) return;
       return recover('snapshot', snapshotCursorFloor, retryAttempt + 1);
     }
     if (result.kind === 'snapshot') {
       assertCursor(result.cursor, 'snapshot cursor');
       const nextSnapshot = validateSnapshot(result.snapshot, result);
       if (closed || status === 'revoked' || generation !== recoveryGeneration) return;
+      if (mode === 'snapshot' && snapshotRecoveryCycle?.connectionGeneration !== connectionGeneration) return;
       // A receipt confirmation must never install a replacement snapshot that
       // predates its committed fence, even when reconnect superseded its first
       // request while it was in flight.
@@ -2770,6 +2849,11 @@ export function createLiveDeliverySession({
       status = 'live';
       publish();
       if (initialized && !reconnecting) settleAdmissions(true);
+      if (mode === 'snapshot' && snapshotRecoveryCycle
+        && (snapshotRecoveryCycle.floor == null || cursorAnchor(cursor) >= snapshotRecoveryCycle.floor)
+        && !snapshotRecoveryCycle.followupRequested) {
+        snapshotRecoveryCycle = null;
+      }
       return;
     }
     if (result.kind === 'catchup' && mode === 'catchup') {
@@ -2786,15 +2870,23 @@ export function createLiveDeliverySession({
 
   async function receive(envelopes, generation) {
     if (!Array.isArray(envelopes)) throw new Error('delivery callback requires an envelope array');
+    let recoveryWait = null;
     for (const envelope of envelopes) {
       if (closed || status === 'revoked' || status === 'unavailable' || generation !== connectionGeneration) return;
       if (!isKnownEnvelopeKind(envelope)) throw new Error('delivery batch contains an invalid recipient envelope');
       // Recovery controls are intentionally opaque to applications: a transport
       // `resync` and a bounded-overflow `state-invalidate` boundary both demand
       // a fresh replacement snapshot rather than in-place reconciliation.
+      // Controls in one batch (or while a cycle is already running) only raise
+      // that cycle's floor — they do not mint a new budget.
       if (envelope.type === 'resync' || envelope.type === 'state-invalidate') {
-        const recovery = requestSnapshotRecovery(undefined, !hasUnknownTransmission(), true);
-        if (!hasUnknownTransmission()) await recovery;
+        // Controls coalesce into the current cycle. They raise the coverage
+        // high-water but are not a receipt fence — recover() still installs
+        // any authorized replacement unless a receipt floor was already set.
+        const coverage = Number.isSafeInteger(envelope.seq) ? envelope.seq : undefined;
+        if (snapshotRecoveryCycle && coverage != null) raiseSnapshotCycleFloor(coverage);
+        if (recoveryWait) requestSnapshotRecovery(undefined, false, true);
+        else recoveryWait = requestSnapshotRecovery(undefined, !hasUnknownTransmission(), true);
         continue;
       }
       // Derived/operational notifications are never authoritative domain
@@ -2821,6 +2913,7 @@ export function createLiveDeliverySession({
         }
       }
     }
+    if (recoveryWait && !hasUnknownTransmission()) await recoveryWait;
   }
 
   function deliver(envelopes, generation) {
@@ -2894,11 +2987,18 @@ export function createLiveDeliverySession({
         do {
           reconnectRequested = false;
           // Invalidate the old transport before recovery reauthorizes the stream.
+          // The old cycle is cancelled so its late bootstrap cannot install
+          // state; an uncovered receipt fence is re-queued as a new cycle.
+          const pendingReceiptFloor = snapshotRecoveryCycle?.receiptFloor ?? snapshotRecoveryFloor;
           connectionGeneration += 1;
+          if (snapshotRecoveryCycle) snapshotRecoveryCycle = null;
           subscription?.close?.();
           subscription = null;
           await recover('catchup');
           if (closed || status === 'revoked') break;
+          if (pendingReceiptFloor != null && cursorAnchor(cursor) < pendingReceiptFloor) {
+            requestSnapshotRecovery(pendingReceiptFloor, false);
+          }
           status = 'recovering';
           if (!(await connect())) {
             reconnectRequested = true;
