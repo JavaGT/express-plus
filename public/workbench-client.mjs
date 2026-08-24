@@ -2884,9 +2884,8 @@ export function createLiveDeliverySession({
         // high-water but are not a receipt fence — recover() still installs
         // any authorized replacement unless a receipt floor was already set.
         const coverage = Number.isSafeInteger(envelope.seq) ? envelope.seq : undefined;
-        if (snapshotRecoveryCycle && coverage != null) raiseSnapshotCycleFloor(coverage);
-        if (recoveryWait) requestSnapshotRecovery(undefined, false, true);
-        else recoveryWait = requestSnapshotRecovery(undefined, !hasUnknownTransmission(), true);
+        if (recoveryWait) requestSnapshotRecovery(coverage, false, true);
+        else recoveryWait = requestSnapshotRecovery(coverage, !hasUnknownTransmission(), true);
         continue;
       }
       // Derived/operational notifications are never authoritative domain

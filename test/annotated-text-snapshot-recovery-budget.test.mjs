@@ -21,7 +21,11 @@ function createBudgetClient({ bootstrapImpl, subscribeImpl } = {}) {
       bootstraps += 1;
       snapshotCalls.push(request);
       if (bootstrapImpl) return bootstrapImpl(request, bootstraps);
-      return { kind: 'snapshot', snapshot: { id: 'n1', title: `snap-${bootstraps}` }, cursor: Math.max(0, bootstraps - 1) };
+      return {
+        kind: 'snapshot',
+        snapshot: { id: 'n1', title: `snap-${bootstraps}` },
+        cursor: request.mode === 'snapshot' ? 100 : Math.max(0, bootstraps - 1),
+      };
     },
     subscribe: async ({ deliver, closed }) => {
       deliverBatch = deliver;
@@ -133,6 +137,27 @@ test('a successful snapshot covering the latest raised floor ends the cycle', as
   await flush();
   assert.equal(session.cursor, 50);
   assert.ok(bootstraps() - afterStart <= 2);
+  session.close();
+});
+
+test('the first recovery control fences its bootstrap at the control sequence', async () => {
+  let initialized = false;
+  const { session, bootstraps, deliver } = createBudgetClient({
+    bootstrapImpl: async (request) => {
+      if (!initialized) {
+        initialized = true;
+        return { kind: 'snapshot', snapshot: { id: 'n1', title: 'initial' }, cursor: 0 };
+      }
+      assert.equal(request.mode, 'snapshot');
+      return { kind: 'snapshot', snapshot: { id: 'n1', title: 'below-floor' }, cursor: 9 };
+    },
+  });
+  await session.ready;
+  await deliver([control(10)]).catch(() => {});
+  await flush();
+  assert.equal(session.snapshot.title, 'initial');
+  assert.equal(session.cursor, 0);
+  assert.ok(bootstraps() <= 5, 'initial bootstrap plus one bounded recovery cycle');
   session.close();
 });
 
