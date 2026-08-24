@@ -36,6 +36,14 @@ export interface HistoryContributionPolicy {
   readonly actionType: string;
   readonly handle: ContributionHandle;
   /**
+   * Compiled annotated-text field declaration (descriptor carrying the
+   * `annotations` config), supplied by the kernel for compound actions so the
+   * transaction-bound compensation planner can derive the compiled metadata.
+   * Undefined for native-insert policies (their compensation flows through the
+   * existing generated handler).
+   */
+  readonly fieldDeclaration?: unknown;
+  /**
    * Classify a canonical outer payload into cursor/move eligibility. A native
    * insert is eligible only when it is a text insert; a registered compound
    * action whose payload no longer carries an operable document is a barrier.
@@ -87,15 +95,16 @@ export function compileNativeInsertContributionPolicy(handle: NativeInsertPolicy
 }
 
 /** Compile a registered compound action's contribution policy. */
-export function compileCompoundContributionPolicy(handle: ContributionHandle, actionType: string): HistoryContributionPolicy {
-  return compilePolicy({ actionType, handle, nativeInsert: false });
+export function compileCompoundContributionPolicy(handle: ContributionHandle, actionType: string, fieldDeclaration?: unknown): HistoryContributionPolicy {
+  return compilePolicy({ actionType, handle, nativeInsert: false, fieldDeclaration });
 }
 
-function compilePolicy(opts: { actionType: string; handle: ContributionHandle; nativeInsert: boolean }): HistoryContributionPolicy {
-  const { actionType, handle, nativeInsert } = opts;
+function compilePolicy(opts: { actionType: string; handle: ContributionHandle; nativeInsert: boolean; fieldDeclaration?: unknown }): HistoryContributionPolicy {
+  const { actionType, handle, nativeInsert, fieldDeclaration } = opts;
   const policy: HistoryContributionPolicy = {
     actionType,
     handle,
+    ...(fieldDeclaration === undefined ? {} : { fieldDeclaration }),
     classify(payload) {
       if (nativeInsert) {
         return classifyNativeInsert(handle, payload);

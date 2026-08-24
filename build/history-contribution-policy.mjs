@@ -81,21 +81,30 @@
 
 
 
+
+
+
+
+
+
+
+
 /** Compile a native annotated text-insert contribution policy. */
 export function compileNativeInsertContributionPolicy(handle                           , actionType        )                            {
   return compilePolicy({ actionType, handle, nativeInsert: true });
 }
 
 /** Compile a registered compound action's contribution policy. */
-export function compileCompoundContributionPolicy(handle                    , actionType        )                            {
-  return compilePolicy({ actionType, handle, nativeInsert: false });
+export function compileCompoundContributionPolicy(handle                    , actionType        , fieldDeclaration          )                            {
+  return compilePolicy({ actionType, handle, nativeInsert: false, fieldDeclaration });
 }
 
-function compilePolicy(opts                                                                           )                            {
-  const { actionType, handle, nativeInsert } = opts;
+function compilePolicy(opts                                                                                                       )                            {
+  const { actionType, handle, nativeInsert, fieldDeclaration } = opts;
   const policy                            = {
     actionType,
     handle,
+    ...(fieldDeclaration === undefined ? {} : { fieldDeclaration }),
     classify(payload) {
       if (nativeInsert) {
         return classifyNativeInsert(handle, payload);

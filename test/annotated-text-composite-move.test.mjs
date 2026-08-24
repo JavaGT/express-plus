@@ -1,12 +1,15 @@
-// W2 demonstrable compound inverse/redo outcome through the REAL durable-
+// W2/W3 demonstrable compound inverse/redo outcome through the REAL durable-
 // history engine (scope#992 rev 2 Finding 3 / rev 3 §1). The composed action is
 // cursor-eligible with a registered inverse/redo; a move re-dispatches the outer
-// action with handler-only compound input in the coordinated transaction. The
-// W2-owned adapter stores the explicit whole-compound no-op compensation
-// envelope (zero document events, lineage preserved, cursor advanced) — never a
-// snapshot restore. The applied document-compensation algebra (policy planning +
-// operated contribution) is W3 #145's contribution-policy flip; W2 proves the
-// no-op move commits atomically as one receipt + one compensation envelope.
+// action with handler-only compound input in the coordinated transaction.
+// W3 (#145) replaces the hardcoded no-op adapter with the APPLIED path: when the
+// document contribution is still safely applicable, the contribution policy
+// plans the inverse region against current state and commits one fresh v16
+// operated compensation event + an `applied` compensation envelope (lineage,
+// cursor advance, single receipt). When the contribution is unsafe to
+// compensate, the W3 adapter still commits the explicit whole-compound no-op
+// compensation envelope (zero document events, lineage preserved, cursor
+// advanced). No snapshot restore is ever used.
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -14,7 +17,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
   annotatedText, annotation, durableHistory, entity, everyone, executeDDL,
-  executeFrameworkDDL, grant, read, ref, scope, text, write,
+  executeFrameworkDDL, grant, read, ref, scope, write,
 } from '../build/internal.mjs';
 import { defineSqliteSchema } from '../build/server.mjs';
 import {
@@ -117,7 +120,7 @@ function currentDescriptor(db, { from, to, replacement, transitions = [] }) {
   };
 }
 
-test('a composed undo move commits one no-op compensation envelope atomically', async () => {
+test('a composed undo move commits one applied compensation envelope atomically', async () => {
   const db = new DatabaseSync(':memory:');
   installSchema(db);
   const Document = docEntity();
@@ -134,12 +137,12 @@ test('a composed undo move commits one no-op compensation envelope atomically', 
       operations: [region],
       // In history mode the handler returns ONLY the application transition
       // (rev 3: handler performs its domain CAS and returns the inverse fact);
-      // the W2 adapter stores the whole-compound no-op with lineage.
+      // W3's adapter plans the applied document compensation.
       handler: ({ payload, history }) => {
         void payload;
         if (history?.input && history.input.version === 1) {
           // rev 3: the handler returns its inverse as { before: expected,
-          // after: replacement } — no document contribution in W2's no-op path.
+          // after: replacement } — the policy plans the document contribution.
           return {
             events: [],
             applicationTransition: { before: history.input.expected, after: history.input.replacement },
@@ -164,35 +167,36 @@ test('a composed undo move commits one no-op compensation envelope atomically', 
     clientId: session, history: { session },
   });
   assert.equal(origin.ok, true, origin.failure?.message);
-  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count, 2);
   assert.equal(materializeText(liveFamily(db)), 'hallo world');
 
   const cursor = await app.history.cursor({ scope: 'Project:p1', principal, session });
   assert.equal(cursor.undo, 1, 'the composed origin occupies one cursor frame');
 
-  // The W2 adapter's history input is the application transition the MOVE's
-  // translator registered (undo of origin: expected = correction, replacement =
-  // null). The handler receives it and returns it unchanged.
+  // The W3 adapter plans the APPLIED inverse: the handler's history input is the
+  // application transition the move's translator registered (undo of origin:
+  // expected = correction, replacement = null). The document contribution is
+  // safely applicable, so one fresh operated compensation event commits.
   const undone = await app.history.undo({
     scope: 'Project:p1', principal, session,
     actionId: 'composed-undo-1', revision: cursor.revision,
   });
   assert.equal(undone.ok, true, undone.failure?.message);
-  // One zero-event receipt for the move; the document and ledger did not move.
   const moveReceipt = db.prepare("SELECT * FROM _ActionReceipt WHERE actionId = 'composed-undo-1'").get();
   assert.ok(moveReceipt, 'the move wrote its own receipt');
-  assert.equal(JSON.parse(moveReceipt.eventRefs).length, 0, 'no document events on the no-op move');
-  assert.equal(moveReceipt.historyOutcome, 'noop');
-  // Document text unchanged: no snapshot restore, no partial document move.
-  assert.equal(materializeText(liveFamily(db)), 'hallo world', 'the document contribution stayed put on the no-op move');
-  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count, 2, 'no new _Log rows on the move');
-  // One compensation envelope with lineage, one receipt, one cursor advance.
+  const moveRefs = JSON.parse(moveReceipt.eventRefs);
+  assert.equal(moveRefs.length, 1, 'one operated compensation event on the applied move');
+  assert.equal(moveReceipt.historyOutcome, 'applied');
+  // The document contribution moved: text restored, no snapshot restore.
+  assert.equal(materializeText(liveFamily(db)), 'hello world', 'the undo restored the original text');
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count, 3, 'origin 2 events + applied-undo operated event');
+  // One applied compensation envelope (fresh contribution) with lineage.
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _PrivateActionFact WHERE scope = 'Project:p1' AND actionId = 'composed-undo-1'").get().count, 1);
   const compensation = JSON.parse(db.prepare('SELECT fact FROM _PrivateActionFact WHERE actionId = ?').get('composed-undo-1').fact);
   assert.equal(compensation.kind, 'workbench.compound-compensation');
-  assert.equal(compensation.linkage.outcome, 'noop');
+  assert.equal(compensation.linkage.outcome, 'applied');
   assert.equal(compensation.linkage.direction, 'undo');
   assert.equal(compensation.linkage.rootActionId, 'composed-origin');
+  assert.equal(compensation.contributions.length, 1, 'the applied undo stored its own fresh contribution');
   assert.deepEqual(compensation.application, { before: { correctionId: 'correction-1' }, after: null });
   const cursorAfter = await app.history.cursor({ scope: 'Project:p1', principal, session });
   assert.equal(cursorAfter.undo, 0, 'the undo move drained the cursor frame');
@@ -200,7 +204,7 @@ test('a composed undo move commits one no-op compensation envelope atomically', 
   db.close();
 });
 
-test('a composed redo of a no-op move stays a whole-compound no-op', async () => {
+test('a composed redo of an applied undo stays atomic and reapplies the document contribution', async () => {
   const db = new DatabaseSync(':memory:');
   installSchema(db);
   const Document = docEntity();
@@ -246,18 +250,90 @@ test('a composed redo of a no-op move stays a whole-compound no-op', async () =>
     actionId: 'composed-undo-r', revision: cursor.revision,
   });
   assert.equal(undone.ok, true, undone.failure?.message);
+  assert.equal(materializeText(liveFamily(db)), 'hello world');
   cursor = await app.history.cursor({ scope: 'Project:p1', principal, session });
   const redone = await app.history.redo({
     scope: 'Project:p1', principal, session,
     actionId: 'composed-redo-r', revision: cursor.revision,
   });
   assert.equal(redone.ok, true, redone.failure?.message);
-  const redoReceipt = db.prepare("SELECT actionId, historyOutcome, eventRefs FROM _ActionReceipt WHERE actionId = 'composed-redo-r'").get();
-  assert.equal(redoReceipt.historyOutcome, 'noop');
-  assert.equal(JSON.parse(redoReceipt.eventRefs).length, 0);
-  assert.equal(materializeText(liveFamily(db)), 'hallo world', 'redo of a no-op leaves the document untouched');
+  const redoReceipt = db.prepare("SELECT actionId, historyOutcome, historyTargetActionId FROM _ActionReceipt WHERE actionId = 'composed-redo-r'").get();
+  assert.equal(redoReceipt.historyOutcome, 'applied');
+  assert.equal(redoReceipt.historyTargetActionId, 'composed-undo-r', 'redo compensates the completed undo receipt');
+  assert.equal(JSON.parse(db.prepare("SELECT eventRefs FROM _ActionReceipt WHERE actionId = 'composed-redo-r'").get().eventRefs).length, 1);
+  assert.equal(materializeText(liveFamily(db)), 'hallo world', 'redo reapplied the replacement');
   cursor = await app.history.cursor({ scope: 'Project:p1', principal, session });
   assert.equal(cursor.undo, 1, 'redo returned the frame to past');
   assert.equal(cursor.redo, 0);
+  db.close();
+});
+
+test('an unsafe document contribution commits a whole-compound no-op with lineage', async () => {
+  const db = new DatabaseSync(':memory:');
+  installSchema(db);
+  const Document = docEntity();
+  const region = annotatedTextOperation(Document, { fieldName: 'body' });
+  const app = workbench({
+    db,
+    schema: moveSchema,
+    entities: [Document],
+    history: durableHistory({ authorize: () => true, actions: {} }),
+    actions: [{
+      type: 'correction.apply',
+      authorize: () => true,
+      history: { cursor: 'eligible' },
+      operations: [region],
+      handler: ({ payload, history }) => {
+        if (history?.input && history.input.version === 1) {
+          return {
+            events: [],
+            applicationTransition: { before: history.input.expected, after: history.input.replacement },
+          };
+        }
+        const replacement = payload.variant === 'overwrite' ? 'x' : 'hallo';
+        const descriptor = currentDescriptor(db, { from: 0, to: 5, replacement, transitions: [] });
+        return {
+          events: [{ type: 'correction.recorded', scope: 'Project:p1', data: { id: payload.actionRef } }],
+          annotatedText: [region.region(descriptor)],
+          applicationTransition: { before: null, after: { correctionId: payload.actionRef } },
+        };
+      },
+    }],
+  });
+  await app.start();
+  const alice = { type: 'user', id: 'u1', attributes: {} };
+  const bob = { type: 'user', id: 'u2', attributes: {} };
+  for (const [actionId, variant, principal] of [
+    ['composed-origin', 'origin', alice],
+    ['composed-merge', 'overwrite', bob],
+  ]) {
+    const dispatched = await app.dispatch({
+      actionId, type: 'correction.apply', scope: 'Project:p1',
+      payload: { id: 'doc-1', variant, actionRef: actionId }, principal, clientId: actionId,
+      history: { session: actionId },
+    });
+    assert.equal(dispatched.ok, true, dispatched.failure?.message);
+  }
+  assert.equal(materializeText(liveFamily(db)), 'x world', 'bob overwrote the origin region');
+
+  // Alice's undo targets her origin, but its insert scalars are gone (deleted by
+  // bob), so the whole-compound move is a durable no-op: zero document events,
+  // lineage preserved, cursor advanced, text untouched.
+  const cursor = await app.history.cursor({ scope: 'Project:p1', principal: alice, session: 'composed-origin' });
+  const undone = await app.history.undo({
+    scope: 'Project:p1', principal: alice, session: 'composed-origin',
+    actionId: 'composed-undo-1', revision: cursor.revision,
+  });
+  assert.equal(undone.ok, true, undone.failure?.message);
+  const moveReceipt = db.prepare("SELECT * FROM _ActionReceipt WHERE actionId = 'composed-undo-1'").get();
+  assert.equal(JSON.parse(moveReceipt.eventRefs).length, 0, 'no document events on the no-op move');
+  assert.equal(moveReceipt.historyOutcome, 'noop');
+  assert.equal(materializeText(liveFamily(db)), 'x world', 'the document contribution stayed put on the no-op move');
+  const compensation = JSON.parse(db.prepare('SELECT fact FROM _PrivateActionFact WHERE actionId = ?').get('composed-undo-1').fact);
+  assert.equal(compensation.kind, 'workbench.compound-compensation');
+  assert.equal(compensation.linkage.outcome, 'noop');
+  assert.equal(compensation.linkage.direction, 'undo');
+  assert.equal(compensation.linkage.rootActionId, 'composed-origin');
+  assert.equal(compensation.contributions.length, 0, 'no contribution on a whole-compound no-op');
   db.close();
 });

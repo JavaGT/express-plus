@@ -216,8 +216,10 @@ const W1 = [
     mutate(copyRoot) {
       const path = join(copyRoot, 'build/annotated-text-region-operation.mjs');
       const source = readFileSync(path, 'utf8');
-      const needle = 'const { event: envelope, capability } = constructV16RegionEvent(plan);';
-      if (!source.includes(needle)) throw new Error('v16 emission call is missing');
+      // The v16 constructor call now carries an admission identity argument
+      // (v16 lane in-flight); match the whole statement regardless of args.
+      const needle = /const \{ event: envelope, capability \} = constructV16RegionEvent\(plan[\s\S]*?\}\);/;
+      if (!needle.test(source)) throw new Error('v16 emission call is missing');
       writeFileSync(path, source
         .replace(needle, 'const envelope = constructV15RegionEvent(plan); void capability;')
         .replace("import { constructV16RegionEvent } from './annotated-text-operated-event.mjs';", "import { constructV15RegionEvent } from './annotated-text-operated-event.mjs';"));

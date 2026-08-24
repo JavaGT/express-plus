@@ -237,6 +237,7 @@ function collectAppEntities(app: any) {
       compoundPolicies.push(compileCompoundContributionPolicy(
         { entity: compoundContributionPolicy.entity, fieldName: compoundContributionPolicy.field },
         declaration.type,
+        entities.get(compoundContributionPolicy.entity)?.fields?.[compoundContributionPolicy.field],
       ));
       // A declaration-generated receipt matcher compares the exact canonical
       // outer payload (scope#992 W2): same actionId plus a different payload is

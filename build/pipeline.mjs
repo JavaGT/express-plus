@@ -30,7 +30,10 @@ import {
   constructCompoundCompensationEnvelope,
   constructCompoundOriginEnvelope,
   parseCompoundApplicationTransition,
+  parseCompoundApplicationTransitionInput,
+  validateApplicationTransition,
 } from './compound-contribution-fact.mjs';
+import { readMoveCompensationTarget, planRegionCompensation, loadRegionCompensationContext } from './annotated-text-region-compensation.mjs';
 import { canonicalStringify } from './canonical-json.mjs';
 import * as eventHandles from './event-handle.mjs';
 import { protectedArtefactCapability } from './protected-artefact-store.mjs';
@@ -814,8 +817,9 @@ async function coordinatedTxn   (db          , fn                  )            
 // Post-commit delivery can no longer turn a committed mutation into a failure.
 async function commitEvents(db     , events     , {
   now, actionId, principal, payload, pipeline, livePipeline, tierOfEvent, scope, type, authorize, historyCommit, handler,
-  erasureActionContext, authorization,
+  erasureActionContext, authorization, contributionPolicies = null,
 }
+
 
 
 
@@ -935,13 +939,16 @@ async function commitEvents(db     , events     , {
           throw new TypeError(`composed action '${type}' is single-dispatch and batch-forbidden`);
         }
         // History moves (durable-history.move re-dispatches the outer composed
-        // action with handler-only compound input). W2 owns the commit-ordering
-        // of the W3 contribution-policy move: this adapter stores the explicit
-        // whole-compound no-op compensation envelope (rev 2 Finding 3 outcome)
-        // with linkage and the target application preserved as lineage evidence,
-        // zero document events, cursor advanced. The applied document
-        // compensation (policy planning + operated contribution) is W3 #145.
-        // No snapshot restore is ever used.
+        // action with handler-only compound input). W3 (#145) owns the applied
+        // document compensation: the contribution policy plans the inverse of
+        // the TARGET receipt's region against CURRENT state and, when safely
+        // applicable, emits a fresh v16 operated compensation event plus an
+        // `applied` compensation envelope with linkage. An unsafe target (or a
+        // target with nothing to compensate) commits the explicit whole-compound
+        // no-op compensation envelope (rev 2 Finding 3 outcome): zero document
+        // events, lineage preserved, cursor advanced. No snapshot restore is
+        // ever used. An application CAS failure (validator throw) rolls back
+        // the entire move.
         if (historyCommit?.handlerInputs && historyCommit.apply) {
           const moveInput = historyCommit.handlerInputs[0];
           const applicationRaw = commit.applicationTransition;
@@ -949,22 +956,97 @@ async function commitEvents(db     , events     , {
             || !Object.hasOwn(applicationRaw, 'before') || !Object.hasOwn(applicationRaw, 'after')) {
             throw new TypeError(`composed action '${type}' history applicationTransition must be { before, after }`);
           }
-          const application = parseCompoundApplicationTransition(applicationRaw, `composed action '${type}' history applicationTransition`);
           const metadata = historyCommit.metadata ?? {};
-          commit = {
-            events: [],
-            privateFact: constructCompoundCompensationEnvelope({
-              application,
-              contributions: [],
-              linkage: {
-                rootActionId: metadata.historyRootActionId ?? actionId,
-                targetActionId: metadata.historyTargetActionId ?? actionId,
-                direction: moveInput?.operation === 'redo' ? 'redo' : 'undo',
-                outcome: 'noop',
-              },
-            }),
-            historyOutcome: 'noop',
-          };
+          const direction = moveInput?.operation === 'redo' ? 'redo' : 'undo';
+          const rootActionId = metadata.historyRootActionId ?? actionId;
+          const targetActionId = metadata.historyTargetActionId ?? actionId;
+          const policy = contributionPolicies?.policyFor(type);
+          const fieldDeclaration = policy?.fieldDeclaration;
+
+          const target = readMoveCompensationTarget(db, {
+            scope, entity: composedPolicy.entity, field: composedPolicy.field,
+            rootActionId, targetActionId,
+          });
+          // A no-op target (its own linkage outcome is 'noop') or a target with
+          // no applied document event has nothing to compensate.
+          const targetLinkageNoop = 'linkage' in target.envelope && target.envelope.linkage.outcome === 'noop';
+          if (target.event && !targetLinkageNoop) {
+            const documentId = target.event.id;
+            const context = loadRegionCompensationContext(
+              db, { entity: composedPolicy.entity, field: composedPolicy.field }, documentId, fieldDeclaration, principal                                  , scope, actionId,
+            );
+            const planned = planRegionCompensation({ target: target.event, contribution: target.contribution, context, actionId });
+            if (planned.outcome === 'applied') {
+              // rev 3 §1: validate the application transition against the head
+              // envelope before storing; a shape-valid but divergent fact throws
+              // and rolls back the whole move.
+              const originApplication = target.originApplication
+                ?? parseCompoundApplicationTransition({ before: null, after: null }, 'history origin application');
+              const targetApplication = parseCompoundApplicationTransition(
+                target.envelope.application, `composed action '${type}' history target application`,
+              );
+              const translatedInput = parseCompoundApplicationTransitionInput(moveInput.input);
+              const returned = validateApplicationTransition({
+                originApplication,
+                targetApplication,
+                translatedInput,
+                returnedApplication: applicationRaw,
+              });
+              const operatedHandle = eventHandles.native(composedPolicy.entity, composedPolicy.field, 'operated');
+              commit = {
+                events: [Object.freeze({
+                  handle: operatedHandle,
+                  type: operatedHandle.type,
+                  scope: context.owningScope,
+                  data: Object.freeze(planned.event),
+                  v16Capability: planned.capability,
+                })],
+                privateFact: constructCompoundCompensationEnvelope({
+                  application: returned,
+                  contributions: planned.contribution ? [planned.contribution] : [],
+                  linkage: {
+                    rootActionId,
+                    targetActionId,
+                    direction,
+                    outcome: 'applied',
+                  },
+                }),
+                historyOutcome: 'applied',
+              };
+            } else {
+              const application = parseCompoundApplicationTransition(applicationRaw, `composed action '${type}' history applicationTransition`);
+              commit = {
+                events: [],
+                privateFact: constructCompoundCompensationEnvelope({
+                  application,
+                  contributions: [],
+                  linkage: {
+                    rootActionId,
+                    targetActionId,
+                    direction,
+                    outcome: 'noop',
+                  },
+                }),
+                historyOutcome: 'noop',
+              };
+            }
+          } else {
+            const application = parseCompoundApplicationTransition(applicationRaw, `composed action '${type}' history applicationTransition`);
+            commit = {
+              events: [],
+              privateFact: constructCompoundCompensationEnvelope({
+                application,
+                contributions: [],
+                linkage: {
+                  rootActionId,
+                  targetActionId,
+                  direction,
+                  outcome: 'noop',
+                },
+              }),
+              historyOutcome: 'noop',
+            };
+          }
         } else {
           const composedKeys = ['events', 'annotatedText', 'applicationTransition'];
           const ownKeys = Object.keys(commit).filter((key) => !['directive', 'canonicalPayload', 'effects', 'historyOutcome', 'claimedBlobs'].includes(key));
@@ -987,7 +1069,7 @@ async function commitEvents(db     , events     , {
               throw new ValidationError(`composed action '${type}' applicationTransition before and after must differ`);
             }
           }
-          const plan = await composedPolicy.admitAndPlan(db, commit.annotatedText[0], principal, { scope });
+          const plan = await composedPolicy.admitAndPlan(db, commit.annotatedText[0], principal, { scope, actionId });
           // Append the package-authored operated event to the handler's domain
           // events; all commit together under one receipt.
           const operatedHandle = eventHandles.native(composedPolicy.entity, composedPolicy.field, 'operated');
@@ -1523,7 +1605,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     const committed = await commitEvents(db, emitted, {
       now, actionId, principal, payload, pipeline, livePipeline, tierOfEvent, scope, type, authorize, historyCommit,
       handler: handler.inTransaction || historyCommit?.handlerInputs ? handler : null, erasureActionContext,
-      authorization,
+      authorization, contributionPolicies,
     });
     return committed;
   }
@@ -1690,7 +1772,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     const committed = await commitEvents(db, batchCommit, {
       now, actionId, principal, payload: actions, pipeline, livePipeline, tierOfEvent, scope, type: '$batch', authorize, historyCommit,
       handler: runInTxn ? runHandlers : null,
-      authorization,
+      authorization, contributionPolicies,
     });
     return committed;
   }

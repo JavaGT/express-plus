@@ -630,7 +630,14 @@ export function createDurableHistoryRuntime({
       throw forbidden();
     }
     const originFact = privateFactFromReceipt(db, originReceipt);
-    const targetFact = originReceipt.actionId === receipt.actionId ? originFact : annotatedMove ? privateFactFromReceipt(db, receipt) : originFact;
+    // The move compensates the HEAD receipt (rev 3 §1): for a contribution-policy
+    // chain the target fact is the CURRENT head's own envelope, not the root
+    // origin's — redo compensates the completed undo receipt, and a later undo
+    // compensates an applied redo. Ordinary (non-annotated) actions keep their
+    // existing origin-fact target selection.
+    const compoundMoveTargetFact = (originReceipt.actionId !== receipt.actionId)
+      && (Boolean(contributionPolicies?.policyFor(origin.type ?? null)) || annotatedMove);
+    const targetFact = compoundMoveTargetFact ? privateFactFromReceipt(db, receipt) : originFact;
     if (!annotatedMove && !compoundKindOf(originFact) && (!Object.hasOwn(originFact, 'before') || !Object.hasOwn(originFact, 'after'))) {
       throw new TypeError('history action private fact is malformed');
     }
@@ -651,8 +658,15 @@ export function createDurableHistoryRuntime({
     // translator boundary.
     const translatorFact = applicationPrivateFactView(originFact                           );
     const translatorTargetFact = applicationPrivateFactView(targetFact                           );
+    // A contribution-policy move always compensates the HEAD receipt (rev 3 §1:
+    // "Redo compensates the completed undo receipt"). The handler input is
+    // therefore derived from the TARGET application transition for BOTH
+    // directions — undo of the root origin, undo/redo of an applied
+    // compensation, and redo of a completed undo all invert the head's
+    // application transition, never the root origin's.
+    const translatorFactForDirection = annotatedMove ? (operation === 'undo' ? translatorFact : translatorTargetFact) : translatorTargetFact;
     const translated = translatedActions(
-      await translate({ operation, origin, target: action, targetFact: translatorTargetFact, action: origin, fact: annotatedMove ? (operation === 'undo' ? translatorFact : translatorTargetFact) : translatorFact, principal: args.principal, session: args.session }), operation, key.scope,
+      await translate({ operation, origin, target: action, targetFact: translatorTargetFact, action: origin, fact: translatorFactForDirection, principal: args.principal, session: args.session }), operation, key.scope,
     );
     if (translated.some((child) => annotatedActionTypes.has(child.type)) && !annotatedMove) throw forbidden();
     const receiptAction = translated.length === 1 ? translated[0] : null;
