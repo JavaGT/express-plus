@@ -58,6 +58,28 @@ function seedDocument(db, Doc, text, annotations = []) {
   return family;
 }
 
+function withMembershipRows(db, change) {
+  return new Proxy(db, {
+    get(target, property) {
+      if (property !== 'prepare') {
+        const value = Reflect.get(target, property);
+        return typeof value === 'function' ? value.bind(target) : value;
+      }
+      return (query) => {
+        const statement = target.prepare(query);
+        if (!query.includes('"Doc_body_membership"')) return statement;
+        return {
+          setReturnArrays() {},
+          iterate(documentId) {
+            statement.setReturnArrays(true);
+            return change(statement.all(documentId));
+          },
+        };
+      };
+    },
+  });
+}
+
 test('snapshot projects one continuous text plus document ranges', async () => {
   const { db, app, Doc } = setup();
   await app.ready;
@@ -90,6 +112,46 @@ test('snapshot redacts a denied protector range', async () => {
   const snap = await projectAnnotatedTextSnapshot({ db, entity: Doc, row, principal: reader, fieldName: 'body', descriptor: Doc.fields.body, mintBasis: false });
   assert.equal(snap.text, 'open text  more');
   assert.deepEqual(snap.redactions, [{ start: 10, end: 10, placeholder: '[REDACTED]' }]);
+  await app.shutdown(); db.close();
+});
+
+test('snapshot fails closed when a protected target membership is unprojectable', async () => {
+  const { db, app, Doc } = setup();
+  await app.ready;
+  seedDocument(db, Doc, 'open text secret more', [
+    { id: 's1', family: 'sensitive', start: 10, end: 16 },
+    { id: 'c1', family: 'confidential', start: 9, end: 16, protectedTargetIds: ['s1'] },
+  ]);
+  // Simulate degraded persisted state that predates the immutable-range guard.
+  db.exec('DROP TRIGGER Doc_body_range_immutable_update');
+  db.prepare(`UPDATE Doc_body_range SET start_point = '{"point":null,"basisFrontier":[]}'
+    WHERE id = (SELECT range_id FROM Doc_body_membership WHERE annotation_id = 's1')`).run();
+  const reader = { type: 'user', id: 'reader', attributes: {} };
+  db.prepare("INSERT INTO User (id) VALUES ('reader')").run();
+  const row = db.prepare("SELECT * FROM Doc WHERE id = 'd1'").get();
+  let disclosed;
+  await assert.rejects(
+    async () => { disclosed = await projectAnnotatedTextSnapshot({ db, entity: Doc, row, principal: reader, fieldName: 'body', descriptor: Doc.fields.body, mintBasis: false }); },
+    /protected target 's1' has an unprojectable membership/,
+  );
+  assert.equal(disclosed, undefined, 'no protected text or annotation facts may reach the recipient');
+  await app.shutdown(); db.close();
+});
+
+test('snapshot rejects membership ordinal gaps and duplicates before recipient shaping', async () => {
+  const { db, app, Doc } = setup();
+  await app.ready;
+  seedDocument(db, Doc, 'hello world', [{ id: 'a1', family: 'comment', start: 0, end: 5 }]);
+  const row = db.prepare("SELECT * FROM Doc WHERE id = 'd1'").get();
+  const input = { entity: Doc, row, principal: { type: 'user', id: 'u1', attributes: {} }, fieldName: 'body', descriptor: Doc.fields.body, mintBasis: false };
+  await assert.rejects(
+    () => projectAnnotatedTextSnapshot({ ...input, db: withMembershipRows(db, (rows) => rows.map(([id, , range]) => [id, 1, range])) }),
+    /membership ordinals are not contiguous/,
+  );
+  await assert.rejects(
+    () => projectAnnotatedTextSnapshot({ ...input, db: withMembershipRows(db, (rows) => [rows[0], [...rows[0]]]) }),
+    /membership ordinals are not contiguous/,
+  );
   await app.shutdown(); db.close();
 });
 

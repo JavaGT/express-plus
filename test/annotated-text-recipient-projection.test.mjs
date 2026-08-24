@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { annotatedText, annotation, entity, grant, measurement, protectingAnnotation, read, ref, registerAnnotatedTextContract } from '../build/index.mjs';
 import { registerAnnotatedTextStructuralExtension, projectAnnotatedTextForRecipient } from '../build/internal.mjs';
-import { projectAnnotatedTextRecipient } from '../build/annotated-text-recipient-projection.mjs';
+import { createAnnotatedTextRecipientSource, projectAnnotatedTextRecipient } from '../build/annotated-text-recipient-projection.mjs';
 
 const suffix = 'recipientProjection';
 registerAnnotatedTextContract(`${suffix}Measurement`, Object.freeze({ kind: 'measurement' }));
@@ -63,7 +63,7 @@ function inlineCanonical({ protectors, hidden = 'SECRET', text = `before ${hidde
 
 test('capability-shaped recipient source is the projection boundary and rejects database handles', () => {
   const value = canonical();
-  const source = {
+  const source = createAnnotatedTextRecipientSource({
     version: 1,
     readText: () => value.text,
     rangeFormat: () => 'offset',
@@ -71,7 +71,7 @@ test('capability-shaped recipient source is the projection boundary and rejects 
     ranges: () => value.ranges,
     measurements: () => value.measurements,
     orphans: () => value.orphans,
-  };
+  });
   const decisions = { version: 1, protectors: [{ protectorId: 'protect', outcome: 'deny' }], capabilityHints: [] };
   assert.equal(
     JSON.stringify(projectAnnotatedTextRecipient({ source, descriptor: descriptor(), decisions })),
@@ -80,6 +80,17 @@ test('capability-shaped recipient source is the projection boundary and rejects 
   assert.throws(
     () => projectAnnotatedTextRecipient({ source: { ...source, db: {} }, descriptor: descriptor(), decisions }),
     /source has invalid shape/,
+  );
+  const inherited = Object.assign(Object.create({ db: {} }), source);
+  assert.throws(
+    () => projectAnnotatedTextRecipient({ source: inherited, descriptor: descriptor(), decisions }),
+    /source was not created by the recipient source factory/,
+  );
+  const _db = {};
+  const closureSource = { ...source, readText: () => (void _db, value.text) };
+  assert.throws(
+    () => projectAnnotatedTextRecipient({ source: closureSource, descriptor: descriptor(), decisions }),
+    /source was not created by the recipient source factory/,
   );
 });
 

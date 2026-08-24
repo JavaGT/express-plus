@@ -68,6 +68,8 @@ function exact(value: any, keys: string[], label: string) {
       Object.keys(value).length !== keys.length || keys.some((key) => !Object.hasOwn(value, key))) fail(`${label} has invalid shape`);
 }
 
+const recipientSources = new WeakSet<object>();
+
 export interface AnnotatedTextRecipientAnnotation {
   id: string;
   family: string;
@@ -140,6 +142,15 @@ export interface AnnotatedTextRecipientSource {
   orphans(): Iterable<AnnotatedTextRecipientOrphan>;
 }
 
+/** Mint the only source capability accepted by the recipient policy. */
+export function createAnnotatedTextRecipientSource(source: AnnotatedTextRecipientSource): AnnotatedTextRecipientSource {
+  exact(source, ['version', 'readText', 'rangeFormat', 'annotations', 'ranges', 'measurements', 'orphans'], 'source');
+  if (Object.getPrototypeOf(source) !== Object.prototype) fail('source must be a plain capability object');
+  const capability = Object.freeze(source);
+  recipientSources.add(capability);
+  return capability;
+}
+
 function freezeArray<T>(values: T[]): readonly T[] {
   return Object.freeze(values);
 }
@@ -152,6 +163,7 @@ export function projectAnnotatedTextRecipient({ source, descriptor, decisions }:
   const meta = getAnnotatedTextCompiledMetadata(descriptor);
   if (!meta) fail('descriptor must be compiled');
   exact(source, ['version', 'readText', 'rangeFormat', 'annotations', 'ranges', 'measurements', 'orphans'], 'source');
+  if (!recipientSources.has(source)) fail('source was not created by the recipient source factory');
   exact(decisions, ['version', 'protectors', 'capabilityHints'], 'decisions');
   if (source.version !== 1 || decisions.version !== 1 || typeof source.readText !== 'function' ||
       typeof source.rangeFormat !== 'function' || typeof source.annotations !== 'function' || typeof source.ranges !== 'function' ||
@@ -395,7 +407,7 @@ export function projectAnnotatedTextForRecipient(canonical: CanonicalAnnotatedTe
       !Array.isArray(canonical.annotations) || !Array.isArray(canonical.ranges) || !Array.isArray(canonical.measurements) ||
       !Array.isArray(canonical.capabilityHints) || (canonical.orphans !== undefined && !Array.isArray(canonical.orphans))) fail('invalid version or collection');
   return projectAnnotatedTextRecipient({
-    source: {
+    source: createAnnotatedTextRecipientSource({
       version: 1,
       readText: () => canonical.text,
       rangeFormat: () => 'offset',
@@ -403,7 +415,7 @@ export function projectAnnotatedTextForRecipient(canonical: CanonicalAnnotatedTe
       ranges: () => canonical.ranges,
       measurements: () => canonical.measurements,
       orphans: () => canonical.orphans ?? [],
-    },
+    }),
     descriptor,
     decisions,
   });

@@ -84,3 +84,24 @@ the exact clean-archive harness is committed, but the required uncontended
 initial and forced-fallback p95 evidence is still blocked by concurrent full
 suites. W1c must remain blocked; no historical timing and no contended result is
 carried forward as acceptance.
+
+## Hostile-review corrections
+
+The post-review benchmark defines one acceptance sample as the complete
+recipient path from projection start through `JSON.stringify`, `JSON.parse`, and
+public snapshot validation. It reports projection, serialization, validation,
+and end-to-end nearest-rank p95 independently; only end-to-end p95 is compared
+with the 500 ms gate. Exact serialized sizes and hashes of the benchmark and all
+source files on that path are included in every report.
+
+The fallback scenario now starts real client delivery sessions, changes both the
+stored protector topology and document-owner visibility, and sends the 50
+resync controls through `createLiveDeliverySession`. Instrumentation asserts no
+measured snapshot recovery occurs before those controls and at least one occurs
+afterward. Each recipient sample includes every bounded recovery attempt in that
+cycle, so a fold or a hidden second snapshot cannot masquerade as fallback.
+
+Snapshot loading also rejects non-contiguous membership ordinals and any
+unprojectable membership belonging to a protected target. Recipient policy now
+accepts only package-minted frozen source capabilities; inherited and ad hoc
+closure-bearing source objects are rejected before policy iteration.

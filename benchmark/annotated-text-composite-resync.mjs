@@ -1,7 +1,8 @@
 // Composite annotated-text resync benchmark (scope#992 W1 / Finding 5, rev 3).
 // Counts snapshot projections under a 50-control burst and records loop delay,
-// per-recipient projection time, and RSS growth. Snapshot work never enters
-// the write coordinator.
+// per-recipient projection time, and RSS growth. The acceptance boundary starts
+// before projection and ends after JSON stringify, parse, and public snapshot
+// validation. Snapshot work never enters the write coordinator.
 
 import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
@@ -20,6 +21,7 @@ import { projectAnnotatedTextSnapshot } from '../build/annotated-text-snapshot.m
 import { restoreTextFamilySerialized, resolveOffsetToEndpoint } from '../build/annotated-text-continuous.mjs';
 import { canonicalEndpointJSON } from '../build/annotated-text-storage.mjs';
 import { createLiveDeliverySession } from '../public/workbench-client.mjs';
+import { materializeAnnotatedTextSnapshot } from '../public/workbench-annotated-text-snapshot.mjs';
 
 const RECIPIENTS = Number(process.env.ANNOTATED_TEXT_BENCH_RECIPIENTS ?? 25);
 const VISIBLE_RECIPIENTS = Number(process.env.ANNOTATED_TEXT_BENCH_VISIBLE_RECIPIENTS ?? 13);
@@ -188,6 +190,7 @@ async function seedDocument(app, db) {
   }
   return {
     row: db.prepare("SELECT * FROM BenchDoc WHERE id = 'd1'").get(),
+    family,
     text,
     protectedText: text.slice(0, offsets[Math.min(PROTECTED_WORDS, WORDS)] ?? text.length),
     annotationCount,
@@ -195,7 +198,7 @@ async function seedDocument(app, db) {
   };
 }
 
-async function measureProjection(db, BenchDoc, fixture, principal, visible) {
+async function measureSnapshot(db, BenchDoc, fixture, principal, visible) {
   const phases = [];
   const started = performance.now();
   const input = {
@@ -209,23 +212,99 @@ async function measureProjection(db, BenchDoc, fixture, principal, visible) {
     ...(PROFILE_PHASES ? { profile: (phase, durationMs, details) => phases.push({ phase, durationMs, details }) } : {}),
   };
   const snapshot = await projectAnnotatedTextSnapshot(input);
-  const duration = performance.now() - started;
-  const serializationStarted = PROFILE_PHASES ? performance.now() : 0;
-  const serialized = PROFILE_PHASES ? JSON.stringify(snapshot) : '';
-  if (PROFILE_PHASES) phases.push({ phase: 'serialization', durationMs: performance.now() - serializationStarted, details: { bytes: Buffer.byteLength(serialized) } });
+  const projectionDuration = performance.now() - started;
+  const serializationStarted = performance.now();
+  const serialized = JSON.stringify(snapshot);
+  const serializationDuration = performance.now() - serializationStarted;
+  const serializedBytes = Buffer.byteLength(serialized);
+  const validationStarted = performance.now();
+  const recipient = materializeAnnotatedTextSnapshot(JSON.parse(serialized), BenchDoc.body, {
+    family: snapshot.version === 2 ? fixture.family : undefined,
+  });
+  const validationDuration = performance.now() - validationStarted;
+  if (PROFILE_PHASES) {
+    phases.push({ phase: 'serialization', durationMs: serializationDuration, details: { bytes: serializedBytes } });
+    phases.push({ phase: 'parse and recipient validation', durationMs: validationDuration, details: { bytes: serializedBytes } });
+  }
   const endToEndDuration = performance.now() - started;
   if (visible) {
-    if (snapshot.text !== fixture.text || snapshot.annotations.length !== fixture.annotationCount) {
+    if (recipient.text !== fixture.text || recipient.annotations.length !== fixture.annotationCount) {
       throw new Error('visible recipient did not receive the complete timing/uncertainty state');
     }
   } else {
-    if (!Array.isArray(snapshot.redactions) || snapshot.redactions.length !== 1 || snapshot.text.includes(fixture.protectedText)
-      || snapshot.annotations.some((entry) => entry.id === 'uncertainty-00000')
-      || snapshot.annotations.some((entry) => entry.family === 'confidential')) {
+    if (!Array.isArray(recipient.redactions) || recipient.redactions.length !== 1 || recipient.text.includes(fixture.protectedText)
+      || recipient.annotations.some((entry) => entry.id === 'uncertainty-00000')
+      || recipient.annotations.some((entry) => entry.family === 'confidential')) {
       throw new Error('redacted recipient received protected text or canonical annotation facts');
     }
   }
-  return { duration, endToEndDuration, phases, serializedBytes: PROFILE_PHASES ? Buffer.byteLength(serialized) : null };
+  return { snapshot: recipient, projectionDuration, serializationDuration, validationDuration, endToEndDuration, phases, serializedBytes };
+}
+
+async function prepareForcedFallbackSessions({ db, BenchDoc, fixture }) {
+  const recoveries = [];
+  let snapshotRecoveryCalls = 0;
+  for (let i = 0; i < RECIPIENTS; i += 1) {
+    const visible = i < VISIBLE_RECIPIENTS;
+    let armed = false;
+    let deliver;
+    const measurements = [];
+    const session = createLiveDeliverySession({
+      bootstrap: async ({ mode }) => {
+        if (!armed) return { kind: 'snapshot', snapshot: { state: 'before-visibility-change' }, cursor: 0 };
+        if (mode !== 'snapshot') throw new Error('forced fallback attempted catchup instead of snapshot recovery');
+        // Let the delivery loop observe the full control batch before snapshot
+        // work starts, matching transport-level coalescing of one resync burst.
+        await nextTurn();
+        snapshotRecoveryCalls += 1;
+        const measured = await measureSnapshot(db, BenchDoc, fixture, { id: visible ? 'u2' : `viewer-${i}` }, visible);
+        measurements.push(measured);
+        return { kind: 'snapshot', snapshot: measured.snapshot, cursor: CONTROLS };
+      },
+      subscribe: async ({ deliver: next }) => {
+        deliver = next;
+        return { close() {} };
+      },
+      validateSnapshot: (snapshot) => snapshot,
+      fold: (snapshot) => snapshot,
+      sendAction: async () => ({ ok: true }),
+    });
+    await session.ready;
+    if (snapshotRecoveryCalls !== 0) throw new Error('initial session bootstrap reached the measured fallback snapshot seam');
+    armed = true;
+    recoveries.push({
+      visible,
+      async recover() {
+        const callsBefore = snapshotRecoveryCalls;
+        const measurementsBefore = measurements.length;
+        const recoveryStarted = performance.now();
+        await deliver(Array.from({ length: CONTROLS }, (_, index) => ({
+          type: 'resync', entity: 'BenchDoc', id: 'd1', seq: index + 1, reason: 'protector-visibility-changed',
+        })));
+        await flush();
+        const recovered = measurements.slice(measurementsBefore);
+        if (snapshotRecoveryCalls <= callsBefore || recovered.length === 0) throw new Error('forced fallback did not use the snapshot recovery seam');
+        session.close();
+        return {
+          projectionDuration: recovered.reduce((sum, sample) => sum + sample.projectionDuration, 0),
+          serializationDuration: recovered.reduce((sum, sample) => sum + sample.serializationDuration, 0),
+          validationDuration: recovered.reduce((sum, sample) => sum + sample.validationDuration, 0),
+          endToEndDuration: performance.now() - recoveryStarted,
+          phases: recovered.flatMap((sample) => sample.phases),
+          serializedBytes: recovered.reduce((sum, sample) => sum + sample.serializedBytes, 0),
+          recoveryAttempts: recovered.length,
+        };
+      },
+    });
+  }
+  return { recoveries, calls: () => snapshotRecoveryCalls };
+}
+
+function forceProtectorVisibilityChange(db, fixture) {
+  db.exec("INSERT INTO User (id) VALUES ('u2')");
+  db.prepare("UPDATE BenchDoc SET owner = 'u2' WHERE id = 'd1'").run();
+  db.prepare("DELETE FROM BenchDoc_body_annotation_protected_target WHERE annotation_id = 'confidential-prefix' AND target_annotation_id = 'uncertainty-00099'").run();
+  fixture.row = db.prepare("SELECT * FROM BenchDoc WHERE id = 'd1'").get();
 }
 
 async function measureFanoutCoalescing() {
@@ -332,6 +411,12 @@ void originalHash;
 
 async function main() {
   const benchmarkBytes = readFileSync(new URL(import.meta.url));
+  const sourceSha256 = Object.fromEntries([
+    'src/annotated-text-snapshot.ts',
+    'src/annotated-text-recipient-projection.ts',
+    'public/workbench-client.mjs',
+    'public/workbench-annotated-text-snapshot.mjs',
+  ].map((path) => [path, createHash('sha256').update(readFileSync(new URL(`../${path}`, import.meta.url))).digest('hex')]));
   const processList = execFileSync('ps', ['-Ao', 'pid,pcpu,rss,command'], { encoding: 'utf8' });
   const rssAtStart = process.memoryUsage().rss;
   const db = new DatabaseSync(':memory:');
@@ -348,28 +433,42 @@ async function main() {
   // The acceptance delta measures projection/recovery over the fully seeded
   // fixture baseline; fixture construction is reported separately.
   const rssBefore = process.memoryUsage().rss;
-  const forcedFallbackFanout = SCENARIO === 'fallback' ? await measureFanoutCoalescing() : null;
+  const forcedFallback = SCENARIO === 'fallback'
+    ? await prepareForcedFallbackSessions({ db, BenchDoc, fixture })
+    : null;
+  if (forcedFallback) forceProtectorVisibilityChange(db, fixture);
 
   const projectionSamples = [];
+  const serializationSamples = [];
+  const validationSamples = [];
   const visibleSamples = [];
   const redactedSamples = [];
   const projectionPhaseSamples = [];
   const serializedSizes = [];
   const endToEndSamples = [];
+  const recoveryAttemptSamples = [];
   let peakRss = rssBefore;
   for (let i = 0; i < RECIPIENTS; i += 1) {
     if (coordinatorHeld.value) throw new Error('snapshot work held the write coordinator');
     const visible = i < VISIBLE_RECIPIENTS;
-    const sample = await measureProjection(db, BenchDoc, fixture, { id: visible ? 'u1' : `viewer-${i}` }, visible);
-    projectionSamples.push(sample.duration);
-    (visible ? visibleSamples : redactedSamples).push(sample.duration);
+    const sample = forcedFallback
+      ? await forcedFallback.recoveries[i].recover()
+      : await measureSnapshot(db, BenchDoc, fixture, { id: visible ? 'u1' : `viewer-${i}` }, visible);
+    projectionSamples.push(sample.projectionDuration);
+    serializationSamples.push(sample.serializationDuration);
+    validationSamples.push(sample.validationDuration);
+    (visible ? visibleSamples : redactedSamples).push(sample.endToEndDuration);
     projectionPhaseSamples.push(sample.phases);
     serializedSizes.push(sample.serializedBytes);
     endToEndSamples.push(sample.endToEndDuration);
+    recoveryAttemptSamples.push(sample.recoveryAttempts ?? 1);
     peakRss = Math.max(peakRss, process.memoryUsage().rss);
   }
+  if (forcedFallback && forcedFallback.calls() < RECIPIENTS) {
+    throw new Error(`forced fallback used only ${forcedFallback.calls()} snapshot recovery calls for ${RECIPIENTS} recipients`);
+  }
 
-  const fanout = forcedFallbackFanout ?? await measureFanoutCoalescing();
+  const fanout = await measureFanoutCoalescing();
   const noReconnect = await measureClientBudget({ reconnect: false });
   const oneReconnect = await measureClientBudget({ reconnect: true });
   const rssAfter = process.memoryUsage().rss;
@@ -383,6 +482,7 @@ async function main() {
     provenance: {
       commit: process.env.ANNOTATED_TEXT_BENCH_COMMIT ?? null,
       benchmarkSha256: createHash('sha256').update(benchmarkBytes).digest('hex'),
+      sourceSha256,
       command: `ANNOTATED_TEXT_BENCH_SCENARIO=${SCENARIO} ANNOTATED_TEXT_BENCH_COMMIT=${process.env.ANNOTATED_TEXT_BENCH_COMMIT ?? ''} pnpm benchmark:annotated-text-composite-resync`,
       environment: {
         ANNOTATED_TEXT_BENCH_WORDS: String(WORDS),
@@ -409,14 +509,28 @@ async function main() {
     },
     fanout: { p99LoopDelayMs: Number(fanout.p99.toFixed(3)), coalescedMessages: fanout.messages },
     projections: {
-      p95Ms: Number(percentile(projectionSamples, 95).toFixed(3)),
+      acceptanceBoundary: 'projection + JSON.stringify + JSON.parse + public snapshot validation',
+      p95Ms: Number(percentile(endToEndSamples, 95).toFixed(3)),
+      projectionP95Ms: Number(percentile(projectionSamples, 95).toFixed(3)),
+      serializationP95Ms: Number(percentile(serializationSamples, 95).toFixed(3)),
+      validationP95Ms: Number(percentile(validationSamples, 95).toFixed(3)),
+      endToEndP95Ms: Number(percentile(endToEndSamples, 95).toFixed(3)),
       visibleP95Ms: Number(percentile(visibleSamples, 95).toFixed(3)),
       redactedP95Ms: Number(percentile(redactedSamples, 95).toFixed(3)),
       samples: projectionSamples.map((value) => Number(value.toFixed(3))),
+      serializationSamples: serializationSamples.map((value) => Number(value.toFixed(3))),
+      validationSamples: validationSamples.map((value) => Number(value.toFixed(3))),
       phaseSamples: projectionPhaseSamples,
       serializedSizes,
       endToEndSamples: endToEndSamples.map((value) => Number(value.toFixed(3))),
     },
+    fallbackRecovery: forcedFallback ? {
+      topologyChanged: true,
+      visibilityChanged: true,
+      snapshotCallsBeforeControls: 0,
+      snapshotCallsAfterControls: forcedFallback.calls(),
+      attemptsPerRecipient: recoveryAttemptSamples,
+    } : null,
     budget: {
       C0: noReconnect,
       C1: oneReconnect,
@@ -429,7 +543,7 @@ async function main() {
 
   const thresholdNotes = [];
   if (fanout.p99 >= 100) thresholdNotes.push(`event-loop delay p99 ${fanout.p99}ms exceeds 100ms`);
-  if (report.projections.p95Ms >= 500) thresholdNotes.push(`projected snapshot p95 ${report.projections.p95Ms}ms exceeds 500ms`);
+  if (report.projections.endToEndP95Ms >= 500) thresholdNotes.push(`end-to-end snapshot p95 ${report.projections.endToEndP95Ms}ms exceeds 500ms`);
   if (peakRssDeltaMiB >= 256) thresholdNotes.push(`peak RSS growth ${peakRssDeltaMiB}MiB exceeds 256MiB`);
   if (noReconnect.burst > noReconnect.bound || oneReconnect.burst > oneReconnect.bound) {
     thresholdNotes.push('snapshot recovery exceeded cycle budget');
@@ -447,7 +561,10 @@ async function main() {
     `- C=0 burst projections: ${report.budget.C0.burst} (bound ${report.budget.C0.bound}; including start ${report.budget.C0.totalIncludingStart})`,
     `- C=1 burst projections: ${report.budget.C1.burst} (bound ${report.budget.C1.bound}; including start ${report.budget.C1.totalIncludingStart})`,
     `- Event-loop delay p99: ${report.fanout.p99LoopDelayMs} ms`,
-    `- Snapshot projection p95: ${report.projections.p95Ms} ms / recipient`,
+    `- Snapshot projection p95: ${report.projections.projectionP95Ms} ms / recipient`,
+    `- Snapshot serialization p95: ${report.projections.serializationP95Ms} ms / recipient`,
+    `- Snapshot parse/validation p95: ${report.projections.validationP95Ms} ms / recipient`,
+    `- Snapshot end-to-end p95 (acceptance gate): ${report.projections.endToEndP95Ms} ms / recipient`,
     `- RSS Δ: ${report.rssDeltaMiB} MiB`,
     `- Peak RSS Δ: ${report.peakRssDeltaMiB} MiB`,
     `- Write coordinator held: ${report.writeCoordinatorHeld}`,

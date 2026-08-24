@@ -1,7 +1,7 @@
 import { deserializeField } from './field-strategy.ts';
 import { compactTextFamilyCheckpoint, restoreTextFamilySerialized, materializeText, projectEndpointToOffset, textFamilyBasis } from './annotated-text-continuous.ts';
 import { getAnnotatedTextCompiledMetadata, resolveAnnotatedTextOwningScope } from './annotated-text-field.ts';
-import { projectAnnotatedTextRecipient, authoringRedactionsForRecipient } from './annotated-text-recipient-projection.ts';
+import { createAnnotatedTextRecipientSource, projectAnnotatedTextRecipient, authoringRedactionsForRecipient } from './annotated-text-recipient-projection.ts';
 import { projectAnnotatedTextCaretForRecipient } from './annotated-text-caret-projection.ts';
 import { mayFieldOp, mayRow, protectingAnnotationCapabilities } from './row-grant.ts';
 import { read, write } from './grant.ts';
@@ -279,6 +279,7 @@ function loadRecipientProjectionSource({ db, prefix, descriptor, documentId, fam
   started = performance.now();
   const droppedAnnotationIds = new Set<string>();
   const loadedRanges: Array<{ annotationId: string; rangeId: number }> = [];
+  const nextOrdinalByAnnotation = new Map<string, number>();
   let membershipCount = 0;
   for (const membership of iterateArrayRows(db, `
     SELECT annotation_id, ordinal, range_id
@@ -287,6 +288,9 @@ function loadRecipientProjectionSource({ db, prefix, descriptor, documentId, fam
      ORDER BY annotation_id, ordinal`, documentId)) {
     const [annotationId, ordinal, rangeId] = membership;
     if (membership.length !== 3 || typeof annotationId !== 'string' || !Number.isSafeInteger(ordinal) || ordinal < 0 || !Number.isSafeInteger(rangeId)) fail('stored membership row is malformed');
+    const expectedOrdinal = nextOrdinalByAnnotation.get(annotationId) ?? 0;
+    if (ordinal !== expectedOrdinal) fail(`annotation '${annotationId}' membership ordinals are not contiguous`);
+    nextOrdinalByAnnotation.set(annotationId, expectedOrdinal + 1);
     const annotation = annotationById.get(annotationId);
     const range = projectedByRangeId.get(rangeId);
     if (!annotation || !range) fail('stored membership references missing state');
@@ -299,6 +303,10 @@ function loadRecipientProjectionSource({ db, prefix, descriptor, documentId, fam
     membershipCount += 1;
   }
   profile?.('membership SQL, row load, and source fusion', performance.now() - started, { memberships: membershipCount });
+  const protectedTargetIds = new Set(annotations.flatMap((annotation) => annotation.protectedTargetIds ?? []));
+  for (const annotationId of droppedAnnotationIds) {
+    if (protectedTargetIds.has(annotationId)) fail(`protected target '${annotationId}' has an unprojectable membership`);
+  }
   const sourceAnnotations = annotations.filter((annotation) => !droppedAnnotationIds.has(annotation.id) && !orphanIds.has(annotation.id));
   const sourceAnnotationIds = new Set(sourceAnnotations.map((annotation) => annotation.id));
   const sourceRangeLinks = droppedAnnotationIds.size === 0 && orphanIds.size === 0
@@ -328,7 +336,7 @@ function loadRecipientProjectionSource({ db, prefix, descriptor, documentId, fam
         };
       }
     };
-    return {
+    return createAnnotatedTextRecipientSource({
       version: 1,
       readText: () => text,
       rangeFormat: () => anchored ? 'anchored' : 'offset',
@@ -336,7 +344,7 @@ function loadRecipientProjectionSource({ db, prefix, descriptor, documentId, fam
       ranges,
       measurements: () => measurements,
       orphans: () => orphans,
-    };
+    });
   };
 
   const relevantIds = new Set<string>();
