@@ -59,7 +59,7 @@ export type RegionPostimage = Readonly<{
   /** Complete sorted before-closure images — the v16 before-side witness. */
   beforeAnnotations: readonly RegionAnnotationImage[];
   affectedIds: readonly string[];
-  emptied: readonly Readonly<{
+  emptied: ReadonlyArray<Readonly<{
     annotationId: string;
     disposition: Readonly<{
       kind: 'deleted' | 'orphaned';
@@ -67,7 +67,7 @@ export type RegionPostimage = Readonly<{
       savedQuote: string | null;
       lastRange: readonly [number, number] | null;
     }>;
-  }>;
+  }>>;
   beforeDigest: string;
   afterDigest: string;
 }>;
