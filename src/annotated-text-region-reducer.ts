@@ -56,6 +56,8 @@ export type RegionDeclaration = Readonly<{
 
 export type RegionPostimage = Readonly<{
   annotations: readonly RegionAnnotationImage[];
+  /** Complete sorted before-closure images — the v16 before-side witness. */
+  beforeAnnotations: readonly RegionAnnotationImage[];
   affectedIds: readonly string[];
   emptied: readonly Readonly<{
     annotationId: string;
@@ -220,6 +222,20 @@ function declarationOf(declarations: readonly RegionDeclaration[], family: strin
   const declared = declarations.find((entry) => entry.annotationName === family);
   if (!declared) throw new Error(REGION_POSTIMAGE_DISAGREES);
   return declared;
+}
+
+// A surviving image must never keep an edge naming a removed annotation: the
+// projection's deletion cascade removes both edge directions, so the durable
+// postimage has to agree or replay would diverge (and the after-side closure
+// would reference a nonexistent target). Pruning happens BEFORE digesting.
+function pruneRemovedTargets(images: RegionAnnotationImage[], removedIds: ReadonlySet<string>): RegionAnnotationImage[] {
+  return images.map((image) => {
+    if (!image.protectedTargetIds.some((targetId) => removedIds.has(targetId))) return image;
+    return canonicalImage({
+      ...image,
+      protectedTargetIds: image.protectedTargetIds.filter((targetId) => !removedIds.has(targetId)),
+    });
+  });
 }
 
 function resolvePostRegionRanges(
@@ -412,12 +428,16 @@ export function reduceRegionPostimage({
 
   const annotations = sortAnnotations([...next.values()]);
   assertRegionClosureLimits(annotations);
+  const removedIds = new Set(
+    emptied.filter((entry) => entry.disposition.kind === 'deleted').map((entry) => entry.annotationId),
+  );
   return deepFreeze({
-    annotations,
+    annotations: pruneRemovedTargets(annotations, removedIds),
+    beforeAnnotations: before,
     affectedIds: Object.freeze(before.map((image) => image.id)),
     emptied: Object.freeze(emptied),
     beforeDigest,
-    afterDigest: digestAffectedClosure(annotations),
+    afterDigest: digestAffectedClosure(pruneRemovedTargets([...annotations], removedIds)),
   });
 }
 
@@ -444,3 +464,122 @@ export function namedTransitionIds(descriptor: RegionEditDescriptor): string[] {
     transition.kind === 'create' ? transition.annotation.id : transition.annotationId
   ));
 }
+
+// ---- V16 complete bounded witness (#148 rev 2 "Witness completeness") ----
+// One completeness predicate for planning AND replay. `assertCompleteRegionWitness`
+// is the sole gate between a computed postimage and a v16 event; it proves both
+// sides complete, bounded, and reducer-derived before any bytes are written.
+
+const REGION_V16_DECLARATION_FINGERPRINT_VERSION = 1;
+
+/**
+ * SHA-256 over canonical family names, declared fields/types, empty/cardinality
+ * policy, protecting relation, placeholder declaration, and the named
+ * authorization-policy handle. Replay requires the currently compiled value.
+ */
+export function regionDeclarationFingerprint(declarations: readonly RegionDeclaration[]): string {
+  const sorted = [...declarations].sort((left, right) => left.annotationName.localeCompare(right.annotationName));
+  const fields = [REGION_V16_DECLARATION_FINGERPRINT_VERSION === 1 ? 'v1' : 'v?', String(sorted.length)];
+  for (const declaration of sorted) {
+    const names = Object.keys(declaration.fields ?? {}).sort();
+    fields.push(
+      declaration.annotationName,
+      String(names.length),
+      ...names.flatMap((name) => [name, canonicalJson((declaration.fields ?? {})[name] ?? null)]),
+      (declaration.empty === 'orphan' ? 'orphan' : 'delete'),
+      ((declaration as { cardinality?: string }).cardinality === 'one' ? 'one' : 'many'),
+      (typeof declaration.protects === 'string' ? declaration.protects : ''),
+    );
+  }
+  return lengthPrefixedUtf8Digest(fields);
+}
+
+function assertWitnessImage(image: RegionAnnotationImage): void {
+  if (!/^[a-zA-Z0-9_-]+$/.test(image.id) || image.id.length > 256 || !image.id) {
+    throw regionLimitError('region.edit witness annotation id must be 1-256 ASCII letters/digits/-/_');
+  }
+  if (!Array.isArray(image.memberships)) throw new Error(REGION_POSTIMAGE_DISAGREES);
+  for (const membership of image.memberships) {
+    try {
+      canonicalEndpointJSON(membership.start);
+      canonicalEndpointJSON(membership.end);
+    } catch {
+      throw new Error(REGION_POSTIMAGE_DISAGREES);
+    }
+  }
+}
+
+function assertWitnessSide(images: readonly RegionAnnotationImage[], label: string): void {
+  assertRegionClosureLimits(images);
+  let previous = '';
+  for (const image of images) {
+    assertWitnessImage(image);
+    if (!(previous < image.id)) {
+      throw regionLimitError(`region.edit ${label} closure must be sorted and unique`);
+    }
+    previous = image.id;
+  }
+}
+
+/**
+ * The one completeness predicate. Given the planner/reducer-computed postimage
+ * plus the live pre-image annotations, prove:
+ * - before side equals the complete affected closure of the pre-image;
+ * - after side equals the fresh reducer-derived postimage closure;
+ * - created/removed IDs explain the set difference exactly;
+ * - every edge resolves inside its own side's ID set (no dangling targets).
+ * Throws ValidationError (`annotated-text-region-limit`) on overflow and
+ * `region postimage disagrees with operated event` on incompleteness.
+ */
+export function assertCompleteRegionWitness({
+  postimage,
+  liveAnnotations,
+  family,
+  from,
+  to,
+  namedIds,
+}: {
+  postimage: RegionPostimage;
+  liveAnnotations: readonly RegionAnnotationImage[];
+  family: ContinuousTextFamily;
+  from: number;
+  to: number;
+  namedIds: readonly string[];
+}): void {
+  assertWitnessSide(postimage.beforeAnnotations, 'before');
+  assertWitnessSide(postimage.annotations, 'after');
+
+  const expectedBefore = computeAffectedClosure({
+    annotations: liveAnnotations.map(canonicalImage),
+    family,
+    from,
+    to,
+    namedIds,
+  });
+  if (digestAffectedClosure(expectedBefore) !== postimage.beforeDigest
+    || JSON.stringify(sortAnnotations(expectedBefore)) !== JSON.stringify(postimage.beforeAnnotations)) {
+    throw new Error('region witness disagrees with operated event');
+  }
+
+  const beforeIds = new Set(postimage.beforeAnnotations.map((image) => image.id));
+  const afterIds = new Set(postimage.annotations.map((image) => image.id));
+  for (const id of postimage.affectedIds) {
+    if (!beforeIds.has(id)) throw new Error('region witness disagrees with operated event');
+  }
+  for (const emptied of postimage.emptied) {
+    if (!beforeIds.has(emptied.annotationId) || afterIds.has(emptied.annotationId)) {
+      throw new Error('region witness disagrees with operated event');
+    }
+  }
+  for (const image of postimage.beforeAnnotations) {
+    if (!afterIds.has(image.id) && !postimage.emptied.some((entry) => entry.annotationId === image.id)) {
+      throw new Error('region witness disagrees with operated event');
+    }
+  }
+  for (const targetId of postimage.annotations.flatMap((image) => image.protectedTargetIds)) {
+    if (!afterIds.has(targetId)) {
+      throw new Error('region witness disagrees with operated event');
+    }
+  }
+}
+
