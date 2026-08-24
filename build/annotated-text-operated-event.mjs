@@ -265,6 +265,85 @@ function parseRegionText(value         , entity        , field        )         
   invalidEnvelope(entity, field, 15);
 }
 
+const RANGE_KEYS = ['end', 'start']         ;
+const RANGE_SET_KEYS = ['annotationId', 'kind', 'ranges']         ;
+const REMOVE_KEYS = ['annotationId', 'kind']         ;
+const CREATE_KEYS = ['annotation', 'kind', 'ranges']         ;
+const CREATE_ANNOTATION_KEYS = ['family', 'fields', 'id', 'protectedTargetIds']         ;
+
+function parseV15Range(value         , entity        , field        )                                           {
+  if (!isPlainObject(value) || !exactKeys(value, RANGE_KEYS)) invalidEnvelope(entity, field, 15);
+  const { start, end } = value                                    ;
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || (end          ) <= (start          )) {
+    invalidEnvelope(entity, field, 15);
+  }
+  return Object.freeze({ start: start          , end: end           });
+}
+
+function parseV15Ranges(value         , entity        , field        )                                                      {
+  if (!Array.isArray(value)) invalidEnvelope(entity, field, 15);
+  return Object.freeze(value.map((entry) => parseV15Range(entry, entity, field)));
+}
+
+function parseV15CreateAnnotation(value         , entity        , field        )                                                                                               {
+  if (!isPlainObject(value) || !exactKeys(value, CREATE_ANNOTATION_KEYS)) invalidEnvelope(entity, field, 15);
+  const { id, family, fields, protectedTargetIds } = value
+
+   ;
+  if (typeof id !== 'string' || id.length === 0 || typeof family !== 'string' || family.length === 0) {
+    invalidEnvelope(entity, field, 15);
+  }
+  if (!isPlainObject(fields)) invalidEnvelope(entity, field, 15);
+  const fieldNames = Object.keys(fields);
+  if (fieldNames.some((name, index) => index > 0 && fieldNames[index - 1] >= name)) invalidEnvelope(entity, field, 15);
+  if (!Array.isArray(protectedTargetIds) || protectedTargetIds.some((entry) => typeof entry !== 'string' || entry.length === 0)) {
+    invalidEnvelope(entity, field, 15);
+  }
+  const targets = protectedTargetIds            ;
+  if (targets.some((id2, index) => index > 0 && targets[index - 1] >= id2)) invalidEnvelope(entity, field, 15);
+  return Object.freeze({
+    id,
+    family,
+    fields: Object.freeze({ ...fields }),
+    protectedTargetIds: Object.freeze([...targets]),
+  })                                                                                                         ;
+}
+
+// Every wire transition is validated through the same closed grammar as
+// planning's descriptor parser (region-descriptor.ts) before the reducer sees
+// it. A forged range.set naming a missing/unknown annotation, a malformed
+// create payload, or an unknown kind is rejected below with the canonical
+// `<entity>.<field>.operated v15 event has invalid envelope` signature, so the
+// reducer can never silently drop a transition while text still commits.
+function parseV15Transition(value         , entity        , field        , seenIds             )                       {
+  if (!isPlainObject(value) || typeof value.kind !== 'string') invalidEnvelope(entity, field, 15);
+  const kind = value.kind;
+  if (kind === 'range.set') {
+    if (!exactKeys(value, RANGE_SET_KEYS)) invalidEnvelope(entity, field, 15);
+    const annotationId = value.annotationId;
+    if (typeof annotationId !== 'string' || annotationId.length === 0) invalidEnvelope(entity, field, 15);
+    if (seenIds.has(annotationId)) invalidEnvelope(entity, field, 15);
+    seenIds.add(annotationId);
+    return Object.freeze({ kind: 'range.set', annotationId, ranges: parseV15Ranges(value.ranges, entity, field) });
+  }
+  if (kind === 'remove') {
+    if (!exactKeys(value, REMOVE_KEYS)) invalidEnvelope(entity, field, 15);
+    const annotationId = value.annotationId;
+    if (typeof annotationId !== 'string' || annotationId.length === 0) invalidEnvelope(entity, field, 15);
+    if (seenIds.has(annotationId)) invalidEnvelope(entity, field, 15);
+    seenIds.add(annotationId);
+    return Object.freeze({ kind: 'remove', annotationId });
+  }
+  if (kind === 'create') {
+    if (!exactKeys(value, CREATE_KEYS)) invalidEnvelope(entity, field, 15);
+    const annotation = parseV15CreateAnnotation(value.annotation, entity, field);
+    if (seenIds.has(annotation.id)) invalidEnvelope(entity, field, 15);
+    seenIds.add(annotation.id);
+    return Object.freeze({ kind: 'create', annotation, ranges: parseV15Ranges(value.ranges, entity, field) });
+  }
+  invalidEnvelope(entity, field, 15);
+}
+
 function parseV15Operation(operation                         , entity        , field        )                                                                                                 {
   const keys = ['affectedIds', 'afterDigest', 'beforeDigest', 'from', 'kind', 'text', 'to', 'transitions'];
   if (!exactKeys(operation, keys) || operation.kind !== 'region.edit') invalidEnvelope(entity, field, 15);
@@ -291,12 +370,16 @@ function parseV15Operation(operation                         , entity        , f
     }
     invalidEnvelope(entity, field, 15);
   }
+  const seenIds = new Set        ();
+  const transitions = Object.freeze(
+    (operation.transitions                      ).map((entry) => parseV15Transition(entry, entity, field, seenIds)),
+  );
   return Object.freeze({
     kind: 'region.edit',
     from: operation.from          ,
     to: operation.to          ,
     text: parseRegionText(operation.text, entity, field),
-    transitions: Object.freeze([...(operation.transitions                          )]),
+    transitions,
     beforeDigest: operation.beforeDigest,
     afterDigest: operation.afterDigest,
     affectedIds: Object.freeze([...ids]),

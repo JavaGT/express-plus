@@ -328,6 +328,81 @@ test('forged region postimage performs zero writes', () => {
   db.close();
 });
 
+test('forged v15 transitions reject through the closed grammar with zero writes', () => {
+  const fixture = unwrapFixture(loadJson('v15/region-edit.json'));
+  // Each forged transition is rejected by normalizeOperatedEvent's transition
+  // grammar (unknown kind, missing annotationId, malformed create fields,
+  // unknown range.set target, duplicate naming) BEFORE any reducer work, so a
+  // forged event writes nothing even when text would otherwise commit.
+  const cases = [
+    ['unknown-transition-kind', (event) => { event.operation.transitions = [{ kind: 'dodge', annotationId: 'note-1' }]; }],
+    ['range-set-missing-annotation-id', (event) => { event.operation.transitions = [{ kind: 'range.set', ranges: [{ start: 0, end: 5 }] }]; }],
+    ['range-set-unknown-target', (event) => { event.operation.transitions = [{ kind: 'range.set', annotationId: 'ghost-id', ranges: [{ start: 0, end: 5 }] }]; }],
+    ['create-malformed-fields', (event) => {
+      event.operation.transitions = [{
+        kind: 'create',
+        annotation: { id: 'new-note', family: 'note', fields: 'not-an-object', protectedTargetIds: [] },
+        ranges: [{ start: 0, end: 5 }],
+      }];
+    }],
+    ['duplicate-transition-id', (event) => {
+      event.operation.transitions = [
+        { kind: 'range.set', annotationId: 'note-1', ranges: [{ start: 0, end: 5 }] },
+        { kind: 'remove', annotationId: 'note-1' },
+      ];
+    }],
+  ];
+
+  for (const [name, mutate] of cases) {
+    const event = structuredClone(fixture.event);
+    mutate(event);
+    const db = new DatabaseSync(':memory:');
+    installSchema(db);
+    seedPreimage(db, fixture.preimage);
+    const before = projectedDump(db);
+    let threw = false;
+    // The event must be rejected either by the normalizer's transition grammar
+    // (unknown kind, missing annotationId, malformed create, duplicate naming)
+    // or by the reducer's unknown-target check — never silently accepted while
+    // the text still commits.
+    try {
+      normalizeOperatedEvent(event, { entity: 'ReplayDoc', field: 'body' });
+      applyOperated(db, event);
+    } catch {
+      threw = true;
+    }
+    const after = projectedDump(db);
+    assert.equal(JSON.stringify(after), JSON.stringify(before), `${name} performed a write`);
+    assert.equal(threw, true, `${name} did not reject the forged transition`);
+    db.close();
+  }
+});
+
+test('forged v15 transitions reject with the canonical invalid-envelope signature', () => {
+  const fixture = unwrapFixture(loadJson('v15/region-edit.json'));
+  const cases = [
+    ['unknown-transition-kind', (event) => { event.operation.transitions = [{ kind: 'dodge', annotationId: 'note-1' }]; }],
+    ['range-set-missing-annotation-id', (event) => { event.operation.transitions = [{ kind: 'range.set', ranges: [{ start: 0, end: 5 }] }]; }],
+    ['create-malformed-fields', (event) => {
+      event.operation.transitions = [{
+        kind: 'create',
+        annotation: { id: 'new-note', family: 'note', fields: 'not-an-object', protectedTargetIds: [] },
+        ranges: [{ start: 0, end: 5 }],
+      }];
+    }],
+  ];
+
+  for (const [name, mutate] of cases) {
+    const event = structuredClone(fixture.event);
+    mutate(event);
+    assert.throws(
+      () => normalizeOperatedEvent(event, { entity: 'ReplayDoc', field: 'body' }),
+      (error) => /ReplayDoc\.body\.operated v15 event has invalid envelope/.test(error.message),
+      name,
+    );
+  }
+});
+
 test('oversized direct v15 replay payloads fail with the region limit and write nothing', () => {
   const fixture = unwrapFixture(loadJson('v15/region-edit.json'));
   const cases = [

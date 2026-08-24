@@ -1,0 +1,46 @@
+{
+  "preimage": {
+    "text": "hello world",
+    "actor": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "documentId": "doc-1",
+    "annotations": [
+      { "id": "note-1", "family": "note", "start": 0, "end": 5 }
+    ]
+  },
+  "event": {
+    "version": 15,
+    "id": "doc-1",
+    "before": {
+      "structuralRevision": 1,
+      "frontier": [["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1]]
+    },
+    "after": {
+      "structuralRevision": 1,
+      "frontier": [["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1]]
+    },
+    "operation": {
+      "kind": "region.edit",
+      "from": 0,
+      "to": 5,
+      "text": { "kind": "none" },
+      "transitions": [
+        { "kind": "range.set", "ranges": [{ "start": 0, "end": 5 }] }
+      ],
+      "beforeDigest": "e2a5d7f55c3da7709cb3dad198a59f100a37a8b3b214c37e1aa5b953c3cc725c",
+      "afterDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+      "affectedIds": ["note-1"]
+    },
+    "facts": {
+      "family": null,
+      "annotation": null,
+      "ranges": [],
+      "measurements": [],
+      "lifecycle": null,
+      "result": null,
+      "emptiedAnnotations": [],
+      "actorId": null,
+      "selectedRange": null,
+      "removedAnnotationIds": []
+    }
+  }
+}
