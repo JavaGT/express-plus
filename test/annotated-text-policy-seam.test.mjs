@@ -209,3 +209,82 @@ test('MAJOR 2: a validateTranslation rejection on the first undo is opaque forbi
   assert.deepEqual(await server.history.cursor({ scope, principal, session: 'tab-a' }), cursor, 'the cursor did not move');
   db.close();
 });
+
+test('round 3: undoToPoint rejects forged linkage through selectAndParseTargetFact with zero writes', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  // The fixture policy treats a receipt that CLAIMS a chain link on a source
+  // being compensated as its own root as forged (its stored historyTargetActionId
+  // names a different head) — a policy-level linkage rejection.
+  const policy = basePolicy({
+    selectAndParseTargetFact: (ctx) => {
+      if (ctx.target.historyTargetActionId != null && ctx.target.historyTargetActionId !== ctx.origin.actionId) {
+        throw Object.assign(new Error('forbidden'), { status: 403 });
+      }
+      return ctx.originFact;
+    },
+  });
+  const server = makeSeamServer(db, policy);
+  await commitSet(server, 'p3');
+  // Forge the receipt's chain-link columns so the source no longer resolves.
+  db.prepare("UPDATE _ActionReceipt SET historyRootActionId = 'forged', historyTargetActionId = 'forged' WHERE actionId = 'p3'").run();
+  const before = durableCounts(db);
+  const cursor = await server.history.cursor({ scope, principal, session: 'tab-a' });
+  await assert.rejects(
+    server.history.undoToPoint({ scope, principal, session: 'tab-a', actionId: 'p3-utp', revision: cursor.revision, seq: 0 }),
+    { status: 403 },
+  );
+  assert.deepEqual(durableCounts(db), before, 'the undoToPoint policy rejection wrote nothing');
+  assert.equal(db.prepare("SELECT COUNT(*) AS c FROM _ActionReceipt WHERE actionId = 'p3-utp'").get().c, 0, 'no receipt for the rejected undoToPoint');
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM _ActionReceipt WHERE operation = \'undoToPoint\'').get().c, 0);
+  assert.deepEqual(await server.history.cursor({ scope, principal, session: 'tab-a' }), cursor, 'the cursor did not move');
+  db.close();
+});
+
+test('round 3: undoToPoint translators receive only the application view of a compound envelope', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  let capturedFact = null;
+  const registryPolicy = basePolicy({ actionType: 'doc.compound', handle: { entity: 'Doc', fieldName: 'body' } });
+  const registry = createHistoryContributionPolicyRegistry({ policies: [registryPolicy], privateHistoryScopes: new Set() });
+  const server = createServer({
+    db,
+    history: durableHistory({
+      authorize: () => true,
+      actions: { 'doc.compound': {
+        inverse: ({ fact }) => { capturedFact = fact; return { type: 'doc.changed', scope, payload: {} }; },
+        redo: ({ fact: _fact }) => ({ type: 'doc.changed', scope, payload: {} }),
+      } },
+    }),
+    contributionPolicies: registry,
+    authorize: () => true,
+    handlers: {
+      'doc.compound': () => ({
+        events: [{ type: 'doc.compound.recorded', scope, data: {} }],
+        privateFact: { version: 1, kind: 'workbench.compound-origin', application: { before: null, after: { correctionId: 'c-1' } }, contributions: [] },
+      }),
+      'doc.changed': () => [{ type: 'doc.applied', scope, data: {} }],
+    },
+    pipeline: durableMutationVariant(),
+  });
+
+  const dispatched = await server.dispatch({
+    actionId: 'p4', type: 'doc.compound', scope, principal,
+    payload: { id: 'd1' }, history: { session: 'tab-a' },
+  });
+  assert.equal(dispatched.ok, true, dispatched.failure?.message);
+  const cursor = await server.history.cursor({ scope, principal, session: 'tab-a' });
+  const undone = await server.history.undoToPoint({ scope, principal, session: 'tab-a', actionId: 'p4-utp', revision: cursor.revision, seq: 0 });
+  assert.equal(undone.ok, true, undone.failure?.message);
+
+  // The translator received the APPLICATION VIEW ONLY — no envelope material.
+  assert.ok(capturedFact, 'the undoToPoint translator ran');
+  const keys = Object.keys(capturedFact).sort();
+  assert.deepEqual(keys, ['after', 'before'], 'only { before, after } crosses into translator input');
+  assert.deepEqual(capturedFact, { before: null, after: { correctionId: 'c-1' } });
+  assert.equal('kind' in capturedFact, false);
+  assert.equal('version' in capturedFact, false);
+  assert.equal('contributions' in capturedFact, false);
+  assert.equal('linkage' in capturedFact, false);
+  db.close();
+});

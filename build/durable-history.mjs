@@ -761,8 +761,29 @@ export function createDurableHistoryRuntime({
       const rule = historyDescriptor.actions[action.type ?? ''];
       if (!rule) throw conflict(`history action '${action.type}' is not undoable`);
       if (!await authorize({ type: action.type, payload: action.payload, principal: args.principal })) throw forbidden();
-      const fact = privateFactFromReceipt(db, receipt);
-      const inverse = await rule.inverse({ action, fact, principal: args.principal, session: args.session });
+      // #145 round 3: undoToPoint resolves EACH source through the policy seam
+      // — origin parsing (parseOriginFact) and per-source target selection
+      // (selectAndParseTargetFact) run BEFORE any translator consumes private
+      // material, exactly like the move path. A policy rejection is opaque
+      // forbidden and writes nothing.
+      const sourcePolicy = contributionPolicies?.policyFor(action.type ?? null);
+      const rawFact = privateFactFromReceipt(db, receipt);
+      const originFact = sourcePolicy ? sourcePolicy.parseOriginFact(rawFact) : rawFact;
+      const seamTarget = sourcePolicy
+        ? sourcePolicy.selectAndParseTargetFact({
+            origin: { actionId: sourceActionId, payload: action.payload },
+            target: { actionId: sourceActionId, historyTargetActionId: receipt.historyTargetActionId },
+            operation: 'undo',
+            rootActionId: receipt.historyRootActionId ?? sourceActionId,
+            originFact: originFact                                                                                      ,
+            targetFact: originFact                                                                                      ,
+            receipt: { actionId: sourceActionId, operation: receipt.operation },
+          })
+        : originFact;
+      // Only the APPLICATION VIEW may cross into a translator on this path — the
+      // full private envelope never reaches rule.inverse().
+      const translatorFact = applicationPrivateFactView(seamTarget                           );
+      const inverse = await rule.inverse({ action, fact: translatorFact, targetFact: translatorFact, principal: args.principal, session: args.session });
       translated.push(...translatedActions(inverse, 'undo', key.scope));
     }
     // #145 MAJOR 2: undoToPoint re-targets a contribution-policy action only when
