@@ -1,0 +1,19 @@
+{
+  "version": 13,
+  "id": "doc-1",
+  "before": { "structuralRevision": 1, "frontier": [] },
+  "after": { "structuralRevision": 1, "frontier": [["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1]] },
+  "operation": { "kind": "text.apply", "operation": ["workbench.text", 1, ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 1], 2, [], ["insert", ["root"], "x"]] },
+  "facts": {
+    "actorId": null,
+    "annotation": null,
+    "emptiedAnnotations": [],
+    "family": { "id": "doc-1", "checkpoint": { "version": 2 } },
+    "lifecycle": null,
+    "measurements": [],
+    "ranges": [],
+    "removedAnnotationIds": [],
+    "result": null,
+    "selectedRange": null
+  }
+}

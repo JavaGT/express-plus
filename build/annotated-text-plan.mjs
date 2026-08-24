@@ -17,7 +17,7 @@ import {
   projectEndpointToOffset,
 } from './annotated-text-continuous.mjs';
 import { canonicalTextOp } from './annotated-text.mjs';
-import { packOperatedFacts } from './annotated-text-operated-facts.mjs';
+import { constructV14OperatedEvent } from './annotated-text-operated-event.mjs';
 
 
 
@@ -78,18 +78,21 @@ function before(family                      , structuralRevision        )       
 }
 
 function unifiedPlan(data                     )           {
-  return deepFreeze({
-    // v14 keeps the semantic operation and deterministic non-text facts, but
-    // no longer embeds the complete post-edit CRDT checkpoint in every event.
-    // The owning projection derives that checkpoint by reducing `operation`
-    // against its current state; historical v13 events remain replayable.
-    version: 14,
+  return deepFreeze(constructV14OperatedEvent({
     id: data.id,
     before: data.before,
     after: data.after,
     operation: data.operation,
-    facts: packOperatedFacts({ ...data, family: null }),
-  });
+    annotation: data.annotation,
+    ranges: data.ranges,
+    measurements: data.measurements,
+    lifecycle: data.lifecycle,
+    result: data.result,
+    emptiedAnnotations: data.emptiedAnnotations,
+    actorId: data.actorId,
+    selectedRange: data.selectedRange,
+    removedAnnotationIds: data.removedAnnotationIds,
+  }))            ;
 }
 
 function assertForwardOffset(text        , fromOffset        , toOffset        ) {

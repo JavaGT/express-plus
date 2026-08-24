@@ -1,0 +1,20 @@
+{
+  "version": 14,
+  "id": "doc-1",
+  "before": { "structuralRevision": 1, "frontier": [] },
+  "after": { "structuralRevision": 1, "frontier": [] },
+  "operation": { "kind": "text.apply", "operation": [] },
+  "facts": {
+    "actorId": null,
+    "annotation": null,
+    "emptiedAnnotations": [],
+    "family": null,
+    "lifecycle": null,
+    "measurements": [],
+    "ranges": [],
+    "removedAnnotationIds": [],
+    "result": null,
+    "selectedRange": null
+  },
+  "extra": true
+}

@@ -15,7 +15,17 @@ import {
   textFamilyCheckpoint as continuousTextFamilyCheckpoint,
 } from '../annotated-text-continuous.ts';
 import { resolveDeclarationMeasurementExtension } from '../annotated-text-field.ts';
-import { annotationRangeRows, attachAnnotationRange, canonicalEndpointJSON } from '../annotated-text-storage.ts';
+import { annotationRangeRows, attachAnnotationRange, canonicalEndpointJSON, loadAnnotationImages } from '../annotated-text-storage.ts';
+import { normalizeOperatedEvent, type CanonicalOperatedEvent, type CanonicalRegionEdit } from '../annotated-text-operated-event.ts';
+import {
+  computeAffectedClosure,
+  digestAffectedClosure,
+  reduceRegionPostimage,
+  regionImageFromStored,
+  REGION_POSTIMAGE_DISAGREES,
+  type RegionAnnotationImage,
+  type RegionDeclaration,
+} from '../annotated-text-region-reducer.ts';
 import { frozenJsonSnapshot } from '../frozen-json.ts';
 import { markAnnotatedEntityProjection } from '../annotated-text-history.ts';
 import type { DbHandle } from '../driver.ts';
@@ -33,7 +43,7 @@ interface FieldDescriptor {
   project?: string;
   owner?: string;
   measurements?: Array<{ measurementName?: string; formatVersion?: number }>;
-  annotations?: Array<{ annotationName?: string; fields: Record<string, FieldDescriptor> }>;
+  annotations?: Array<{ annotationName?: string; fields: Record<string, FieldDescriptor>; empty?: string; cardinality?: string }>;
   block?: Record<string, FieldDescriptor>;
   validate?: (value: unknown) => string | true;
   [key: string]: unknown;
@@ -306,41 +316,28 @@ function applyAnnotatedTextOperation({ name, fields, handle, event, db }: { name
   if (!data || typeof data !== 'object' || typeof data.id !== 'string' || data.id.length === 0) {
     throw new Error(`${name}.${handle.field}.operated event has no data`);
   }
-  if (data.version !== 13 && data.version !== 14) {
-    throw new Error(`${name}.${handle.field}.operated event version ${data.version} is not supported: only operated versions 13 and 14 are replayable; pre-13 lattice rows were retired (issue #23)`);
-  }
-  return applySpanNativeAnnotatedTextOperation({ name, handle, db, descriptor, data: data as unknown as OperatedEnvelope });
+  const canonical = normalizeOperatedEvent(data, { entity: name, field: handle.field });
+  return applyCanonicalAnnotatedTextOperation({ name, handle, db, descriptor, canonical, raw: data as unknown as OperatedEnvelope });
 }
 
-// The active durable codec is one exact envelope.  The operation-specific
-// reducers below consume only the facts in this envelope; versions before 13
-// are deliberately not accepted by the projection.
-function applySpanNativeAnnotatedTextOperation({ name, handle, db, descriptor, data }: { name: string; handle: NativeEventHandle; db: Db; descriptor: FieldDescriptor; data: OperatedEnvelope }) {
-  const prefix = `${name}.${handle.field}.operated v${data.version}`;
-  const factKeys = ['actorId', 'annotation', 'emptiedAnnotations', 'family', 'lifecycle', 'measurements', 'ranges', 'removedAnnotationIds', 'result', 'selectedRange'];
-  if (!data || typeof data !== 'object' || Array.isArray(data) ||
-      Object.keys(data).sort().join() !== 'after,before,facts,id,operation,version' || (data.version !== 13 && data.version !== 14) ||
-      typeof data.id !== 'string' || !data.id || !isTextRevision(data.before) || !isTextRevision(data.after) ||
-      !data.operation || typeof data.operation !== 'object' || Array.isArray(data.operation) ||
-      !data.facts || typeof data.facts !== 'object' || Array.isArray(data.facts) ||
-      Object.keys(data.facts).sort().join() !== factKeys.join()) {
-    throw new Error(`${prefix} event has invalid envelope`);
-  }
-  const f = data.facts;
-  if (!Array.isArray(f.ranges) || !Array.isArray(f.measurements) || !Array.isArray(f.emptiedAnnotations) || !Array.isArray(f.removedAnnotationIds) ||
-      (f.family !== null && (!f.family || typeof f.family !== 'object')) ||
-      (f.annotation !== null && (!f.annotation || typeof f.annotation !== 'object')) ||
-      (f.lifecycle !== null && (!f.lifecycle || typeof f.lifecycle !== 'object')) ||
-      (f.result !== null && (!f.result || typeof f.result !== 'object')) ||
-      (f.actorId !== null && (typeof f.actorId !== 'string' || !f.actorId)) ||
-      (f.selectedRange !== null && (!f.selectedRange || typeof f.selectedRange !== 'object'))) throw new Error(`${prefix} event has invalid facts`);
-  if (data.version === 14 && f.family !== null) throw new Error(`${prefix} compact event must not carry a family checkpoint`);
-  switch (data.operation.kind) {
-    case 'text.apply': return projectBlocklessTextApply({ name, handle, db, data });
-    case 'text.replace': return projectBlocklessTextReplace({ name, handle, db, data });
-    case 'annotation.apply-range': return projectBlocklessAnnotationApplyRange({ name, handle, db, descriptor, data });
-    case 'annotation.remove': return projectBlocklessAnnotationRemove({ name, handle, db, data });
-    default: throw new Error(`${prefix} event has unknown operation kind '${data.operation.kind}'`);
+// Reducers consume the canonical event. They do not pick a kind from the wire
+// version — v13/v14 keep their existing family-proof checks, v15 uses the
+// shared region postimage reducer.
+export function applyCanonicalAnnotatedTextOperation({ name, handle, db, descriptor, canonical, raw }: {
+  name: string;
+  handle: NativeEventHandle;
+  db: Db;
+  descriptor: FieldDescriptor;
+  canonical: CanonicalOperatedEvent;
+  raw: OperatedEnvelope;
+}) {
+  switch (canonical.kind) {
+    case 'text.apply': return projectBlocklessTextApply({ name, handle, db, data: raw });
+    case 'text.replace': return projectBlocklessTextReplace({ name, handle, db, data: raw });
+    case 'annotation.apply-range': return projectBlocklessAnnotationApplyRange({ name, handle, db, descriptor, data: raw });
+    case 'annotation.remove': return projectBlocklessAnnotationRemove({ name, handle, db, data: raw });
+    case 'region.edit': return projectRegionEdit({ name, handle, db, descriptor, canonical });
+    default: throw new Error(`${name}.${handle.field}.operated event has unknown operation kind`);
   }
 }
 
@@ -606,6 +603,129 @@ function projectBlocklessAnnotationRemove({ name, handle, db, data }: { name: st
   if (!annotation) throw new Error(`${name}.${handle.field}.operated v13 annotation to remove does not exist`);
   deleteAnnotatedTextAnnotation(db, prefix, operation.annotationId);
   db.prepare(`UPDATE ${prefix}_state SET structure_version = ? WHERE document_id = ?`).run(data.after.structuralRevision, data.id);
+}
+
+function regionDeclarations(descriptor: FieldDescriptor): RegionDeclaration[] {
+  return (descriptor.annotations ?? []).map((entry) => ({
+    annotationName: String(entry.annotationName ?? ''),
+    fields: entry.fields,
+    empty: entry.empty,
+    cardinality: entry.cardinality,
+    kind: typeof entry.kind === 'string' ? entry.kind : undefined,
+    protects: typeof (entry as { protects?: unknown }).protects === 'string' ? (entry as { protects: string }).protects : null,
+  }));
+}
+
+function applyRegionTextOperations(family: ReturnType<typeof restoreTextFamilySerialized>, text: CanonicalRegionEdit['text']) {
+  if (text.kind === 'none') return family;
+  if (text.kind === 'delete' || text.kind === 'insert') {
+    const canonical = canonicalTextOp(text.operation);
+    return applyContinuousTextOperation(family, canonical);
+  }
+  let next = family;
+  for (const raw of text.operations) {
+    next = applyContinuousTextOperation(next, canonicalTextOp(raw));
+  }
+  return next;
+}
+
+function projectRegionEdit({ name, handle, db, descriptor, canonical }: {
+  name: string;
+  handle: NativeEventHandle;
+  db: Db;
+  descriptor: FieldDescriptor;
+  canonical: CanonicalRegionEdit;
+}) {
+  const prefix = `${name}_${handle.field}`;
+  const currentRow = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(canonical.id);
+  if (!currentRow) throw new Error(`${name}.${handle.field}.operated v15 document does not exist`);
+  const current = restoreTextFamilySerialized(currentRow.family_checkpoint as string);
+  if (currentRow.structure_version !== canonical.before.structuralRevision
+    || JSON.stringify(current.checkpoint.frontier) !== JSON.stringify(canonical.before.frontier)) {
+    throw new Error(`${name}.${handle.field}.operated v15 event conflicts with projection state`);
+  }
+  const declarations = regionDeclarations(descriptor);
+  const stored = loadAnnotationImages(db, { prefix, documentId: canonical.id, declarations });
+  const images: RegionAnnotationImage[] = stored.map((image) => (
+    regionImageFromStored(image, declarations.find((entry) => entry.annotationName === image.family))
+  ));
+  const namedIds = canonical.transitions.map((transition) => (
+    transition.kind === 'create' ? transition.annotation.id : transition.annotationId
+  ));
+  const closure = computeAffectedClosure({
+    annotations: images,
+    family: current,
+    from: canonical.from,
+    to: canonical.to,
+    namedIds,
+  });
+  if (digestAffectedClosure(closure) !== canonical.beforeDigest
+    || JSON.stringify(closure.map((image) => image.id)) !== JSON.stringify(canonical.affectedIds)) {
+    throw new Error(REGION_POSTIMAGE_DISAGREES);
+  }
+  let afterFamily;
+  try {
+    afterFamily = applyRegionTextOperations(current, canonical.text);
+  } catch {
+    throw new Error(`${name}.${handle.field}.operated v15 text operation is not applicable to prior state`);
+  }
+  if (JSON.stringify(afterFamily.checkpoint.frontier) !== JSON.stringify(canonical.after.frontier)) {
+    throw new Error(`${name}.${handle.field}.operated v15 family does not match the operation`);
+  }
+  let postimage;
+  try {
+    postimage = reduceRegionPostimage({
+      beforeFamily: current,
+      afterFamily,
+      beforeAnnotations: closure,
+      region: { from: canonical.from, to: canonical.to },
+      transitions: canonical.transitions,
+      declarations,
+      expectedBeforeDigest: canonical.beforeDigest,
+    });
+  } catch {
+    throw new Error(REGION_POSTIMAGE_DISAGREES);
+  }
+  if (postimage.afterDigest !== canonical.afterDigest) throw new Error(REGION_POSTIMAGE_DISAGREES);
+
+  const beforeById = new Map(closure.map((image) => [image.id, image]));
+  const afterById = new Map(postimage.annotations.map((image) => [image.id, image]));
+  const row = rawRow(db, name, canonical.id);
+  if (!row) throw new Error(`${name}.${handle.field}.operated v15 document row is missing`);
+
+  db.prepare(`UPDATE ${prefix}_state SET structure_version = ?, family_checkpoint = ? WHERE document_id = ?`)
+    .run(canonical.after.structuralRevision, serializeCompactTextFamilyCheckpoint(afterFamily), canonical.id);
+
+  for (const emptied of postimage.emptied) {
+    if (emptied.disposition.kind === 'deleted' && !afterById.has(emptied.annotationId)) {
+      deleteAnnotatedTextAnnotation(db, prefix, emptied.annotationId);
+    } else if (emptied.disposition.kind === 'orphaned') {
+      db.prepare(`DELETE FROM ${prefix}_membership WHERE annotation_id = ?`).run(emptied.annotationId);
+      db.prepare(`INSERT INTO ${prefix}_annotation_orphan_state (annotation_id, saved_quote, last_range) VALUES (?, ?, ?)`)
+        .run(emptied.annotationId, emptied.disposition.savedQuote ?? '', JSON.stringify(emptied.disposition.lastRange ?? null));
+    }
+  }
+  for (const image of postimage.annotations) {
+    const existing = beforeById.get(image.id);
+    if (!existing) {
+      db.prepare(`INSERT INTO ${prefix}_annotation (id, document_id, project_id, owner_id, family) VALUES (?, ?, ?, ?, ?)`)
+        .run(image.id, canonical.id, row[descriptor.project as string], row[descriptor.owner as string], image.family);
+      const fieldNames = Object.keys(image.fields);
+      if (fieldNames.length) {
+        const values = fieldNames.map((fieldName) => serializeField(descriptor.annotations!.find((entry) => entry.annotationName === image.family)!.fields[fieldName], image.fields[fieldName]));
+        db.prepare(`INSERT INTO ${prefix}_annotation_${image.family} (annotation_id, ${fieldNames.join(', ')}) VALUES (?, ${fieldNames.map(() => '?').join(', ')})`)
+          .run(image.id, ...values);
+      }
+    }
+    db.prepare(`DELETE FROM ${prefix}_annotation_protected_target WHERE annotation_id = ?`).run(image.id);
+    for (const targetId of image.protectedTargetIds) {
+      db.prepare(`INSERT INTO ${prefix}_annotation_protected_target (annotation_id, target_annotation_id) VALUES (?, ?)`).run(image.id, targetId);
+    }
+    db.prepare(`DELETE FROM ${prefix}_membership WHERE annotation_id = ?`).run(image.id);
+    for (const membership of image.memberships) {
+      attachAnnotationRange(db, prefix, canonical.id, image.id, membership.start, membership.end, membership.ordinal);
+    }
+  }
 }
 
 function deleteAnnotatedTextAnnotation(db: Db, prefix: string, annotationId: string) {

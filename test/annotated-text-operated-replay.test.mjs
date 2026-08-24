@@ -366,7 +366,7 @@ function assertVersionGuardMessage(message, version) {
   const versionText = String(version);
   assert.match(message, /ReplayDoc\.body\.operated event version/);
   assert.match(message, new RegExp(`version ${versionText} is not supported`));
-  assert.match(message, /only operated versions 13 and 14 are replayable/);
+  assert.match(message, /only operated versions 13, 14, and 15 are replayable/);
   assert.match(message, /pre-13 lattice rows were retired/);
 }
 

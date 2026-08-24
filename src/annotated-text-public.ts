@@ -17,5 +17,6 @@ export {
   annotatedTextCreateAction,
   annotatedTextRetireAction,
 } from './annotated-text-action.ts';
+export { parseRegionEditDescriptor, isRegionEditDescriptor } from './annotated-text-region-descriptor.ts';
 export { exportAnnotatedText, readAnnotatedTextForRecipient } from './annotated-text-snapshot.ts';
 export { annotatedTextAnnotationAction } from './annotated-text-thread-action.ts';

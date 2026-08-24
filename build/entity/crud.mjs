@@ -22,7 +22,7 @@ import { admitRowTransition } from '../field-admission.mjs';
 import { admitsInvitationRemoval, admitInvitationAcceptance } from '../auth/invitation-acceptance-authority.mjs';
 import { clearAuthoringState, issueAuthoringSnapshot, buildAuthoringEnvelope, readAnnotatedTextFamilyCheckpoint } from '../annotated-text-authoring-stream.mjs';
 import { admitV9AnnotatedTextEdit, assertV9AuthoringBinding as assertV9AuthoringBindingFromAdmit } from '../annotated-text-admit.mjs';
-import { packOperatedFacts } from '../annotated-text-operated-facts.mjs';
+import { constructV14OperatedEvent } from '../annotated-text-operated-event.mjs';
 import { applyTextOperation, compactTextFamilyCheckpoint, materializeText, projectEndpointToOffset, restoreTextFamilySerialized, textFamilyBasis } from '../annotated-text-continuous.mjs';
 import { projectAnnotatedTextSnapshot } from '../annotated-text-snapshot.mjs';
 import { authoringRedactionsForRecipient } from '../annotated-text-recipient-projection.mjs';
@@ -728,8 +728,12 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         if (payload.history.direction === 'undo') compensation.redo = { kind: 'text.insert', opId: originalOp, anchor: contribution.anchor, text: contribution.text, scalarCount: contribution.scalarCount };
         const before = Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier });
         const after = Object.freeze({ structuralRevision: state.structure_version, frontier: nextFamily.checkpoint.frontier });
-        const operationData = { id: payload.id, before, after, operation: Object.freeze({ kind: 'text.apply', operation }), family: null };
-        const envelope = { id: payload.id, before, after, operation: operationData.operation, version: 14, facts: packOperatedFacts(operationData) };
+        const envelope = constructV14OperatedEvent({
+          id: payload.id,
+          before,
+          after,
+          operation: Object.freeze({ kind: 'text.apply', operation }),
+        });
         return { events: [Object.freeze({ handle, type: handle.type, scope, data: Object.freeze(envelope) })], privateFact: compensation, historyOutcome: 'applied' };
       }
       if (payload.version === 1) throw new ValidationError('annotated text compensation is history-authored only');
