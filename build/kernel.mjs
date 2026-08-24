@@ -31,6 +31,7 @@ import { rawRow } from './entity/query.mjs';
 import { readDeletedRowAnchor } from './deleted-row-anchor.mjs';
 import { validateAnnotatedTextEntityActions } from './annotated-text-field.mjs';
 import { createAnnotatedTextKernelSeam } from './annotated-text-kernel.mjs';
+import { createHistoryContributionPolicyRegistry, compileCompoundContributionPolicy } from './history-contribution-policy.mjs';
 import { validateProtectedArtefactsDeclaration } from './protected-artefact-store.mjs';
 import { compileRegionFieldPolicy,                                   } from './annotated-text-region-operation.mjs';
 import { canonicalStringify } from './canonical-json.mjs';
@@ -46,6 +47,7 @@ function collectAppEntities(app     ) {
   const projections        = [];
   const cursorPolicy = new Map();
   const historyActions                      = {};
+  const compoundPolicies        = [];
   const entities                   = new Map(app.entities ?? []);
   validateAnnotatedTextEntityActions(entities.values());
   for (const entity of entities.values()) {
@@ -228,6 +230,14 @@ function collectAppEntities(app     ) {
     });
     if (compoundContributionPolicy != null) {
       Object.defineProperty(handler, 'compoundContributionPolicy', { value: compoundContributionPolicy });
+      // Compile one contribution-policy entry for this compound action (scope#992
+      // Finding 6/7): keyed by the outer action type + contribution handle. The
+      // registry drives history authorization ordering; the policy never decides
+      // grants itself.
+      compoundPolicies.push(compileCompoundContributionPolicy(
+        { entity: compoundContributionPolicy.entity, fieldName: compoundContributionPolicy.field },
+        declaration.type,
+      ));
       // A declaration-generated receipt matcher compares the exact canonical
       // outer payload (scope#992 W2): same actionId plus a different payload is
       // a conflict, not a replay. Both the stored receipt payload (canonical
@@ -291,7 +301,7 @@ function collectAppEntities(app     ) {
       }
     }
   }
-  return { handlers, projections, entities, cursorPolicy, historyActions };
+  return { handlers, projections, entities, cursorPolicy, historyActions, compoundPolicies };
 }
 
 function compoundHistoryTranslation(type        , input     , direction                 ) {
@@ -538,7 +548,7 @@ function engagedPostCommitConsumerDescriptors(app     , entities     , { blobFin
 }
 
 export function buildKernel(app     ) {
-  const { handlers, projections, entities, cursorPolicy, historyActions: composedHistoryActions } = collectAppEntities(app);
+  const { handlers, projections, entities, cursorPolicy, historyActions: composedHistoryActions, compoundPolicies } = collectAppEntities(app);
   const generatedHistoryActions                      = {};
   for (const entity of entities.values()) {
     if (entity.historyActionRule) generatedHistoryActions[`${entity.name}.update`] = entity.historyActionRule;
@@ -611,6 +621,17 @@ export function buildKernel(app     ) {
   const registeredActions = new Map             ((app.actions ?? []).map((action     ) => [action.type, action]));
   const annotatedKernel = createAnnotatedTextKernelSeam(entities);
   Object.assign(generatedHistoryActions, annotatedKernel.historyActions);
+
+  // Assemble the compile-produced contribution-policy registry (scope#992
+  // Findings 6/7): native insert policies from the annotated declarations plus
+  // the compound policies compiled from registered `operations` handles, keyed
+  // by outer action type. The registry drives history authorization ordering;
+  // grants stay with the central authorize/admitRow seam. `privateHistoryScopes`
+  // is the declaration-derived read-privacy set for the history read boundary.
+  const contributionPolicies = createHistoryContributionPolicyRegistry({
+    policies: [...annotatedKernel.nativeInsertPolicies, ...compoundPolicies],
+    privateHistoryScopes: annotatedKernel.privateHistoryScopes,
+  });
 
   // S3/A8 — wire the live (no-history) mutation lane into the app kernel
   // (JavaGT/workbench#114). `tierOfEvent` resolves an emitted event's handle to
@@ -688,6 +709,7 @@ export function buildKernel(app     ) {
     historyActions: generatedHistoryActions,
     cursorPolicy,
      annotatedHistory: annotatedKernel.annotatedHistory,
+     contributionPolicies,
     // The app's injected authorization adapter (S5/A2) is THE admission engine
     // for the whole app — HTTP, live, registered actions, and the generated
     // CRUD handlers alike; with none injected each seam keeps its framework

@@ -1415,7 +1415,8 @@ export function createHistoryReader(options: {
   entities: ReadonlyMap<string, LiveDeliveryEntity> | ((name: string) => LiveDeliveryEntity | undefined);
   /** Defaults to the framework row-grant engine (same engine REST and live delivery use). */
   mayVerb?: (entity: LiveDeliveryEntity, verb: string, row: Record<string, unknown>, principal: Principal) => boolean | Promise<boolean>;
-  annotatedHistory?: { entities?: Set<string>; actionTypes?: Set<string> } | null;
+  /** Declaration-derived annotated scope set (rev 3 §3); denies actions()/events() only. */
+  privateHistoryScopes?: ReadonlySet<string> | null;
   /** Required to read committed history; optional for receipt reads only. */
   projectRecipient?: ProjectRecipient;
   scopeVisible?: ScopeVisibleCheck;

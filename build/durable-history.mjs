@@ -5,6 +5,7 @@ import { txn, upsert,               } from './driver.mjs';
 import { tryParseScopeKey } from './scope-handle.mjs';
 import { applicationPrivateFactView, parseCompoundContributionFact, compoundKindOf } from './compound-contribution-fact.mjs';
 
+
 const HISTORY_DESCRIPTOR                = Symbol('workbench.durable-history');
 
 
@@ -317,8 +318,9 @@ export function durableHistory({ authorize, actions = {} }                      
 }
 
 export function createDurableHistoryRuntime({
-  db, descriptor, generatedActions = {}, dispatch, dispatchBatch, authorize, cursorPolicy, annotatedHistory = null,
+  db, descriptor, generatedActions = {}, dispatch, dispatchBatch, authorize, cursorPolicy, annotatedHistory = null, contributionPolicies = null,
 }
+
 
 
 
@@ -367,6 +369,29 @@ export function createDurableHistoryRuntime({
   const hasAnnotatedMoveCapability = annotatedHistory !== null
     && typeof annotatedHistory?.isEligibleAction === 'function'
     && typeof annotatedHistory?.isCanonicalFact === 'function';
+
+  // Policy-owned authorization sequencing (scope#992 rev 2 Finding 9). The
+  // contribution policy returns its REQUIREMENTS for a phase; durable history
+  // evaluates them through the existing central `authorize` seam (which the
+  // kernel routes to row admission / field admission). The policy never decides
+  // a grant itself, and no private-fact or event material is read until this
+  // passes. First-move and deduped-retry paths both call this before loading
+  // any private material.
+  async function authorizeContributionPolicy(policy                           , ctx
+
+
+
+
+   )                {
+    const requirements = policy.authorizationRequirements({ phase: 'authorize', origin: ctx.origin, target: ctx.target });
+    if (requirements === 'none') return;
+    if (requirements === 'outer' || requirements === 'outer-field') {
+      // Outer canonical action authorization. For annotated/compound flows the
+      // central seam also performs the current owning-scope + annotated field
+      // admission the kernel compiles into it.
+      if (!await authorize({ type: ctx.origin.type, payload: ctx.origin.payload, principal: ctx.principal })) throw forbidden();
+    }
+  }
 
   function isAnnotatedScope(scope        )          {
     return annotatedEntities.has(tryParseScopeKey(scope)?.entity ?? '');
@@ -525,14 +550,32 @@ export function createDurableHistoryRuntime({
       if (retry.operation !== operation || retry.principalKey !== key.principalKey || retry.sessionId !== key.sessionId) {
         throw conflict('history action id is already bound to another operation');
       }
-      // A package-owned annotated v8 move must still pass the ordinary action
-      // authorization on retry.  Do this before resolving or returning events;
-      // generic receipt retries retain their existing behavior.
-      if (hasAnnotatedMoveCapability && annotatedMoveActionTypes.has(retry.actionType          )) {
-        let payload         ;
-        try { payload = parseJson(retry.actionData, null); } catch { throw forbidden(); }
-        const action = { type: retry.actionType, payload };
-        if (!await authorize({ ...action, principal: args.principal })) throw forbidden();
+      // Policy-owned retry authorization (scope#992 rev 2 Finding 9): a receipt
+      // whose action type has a contribution policy must re-run the policy's
+      // authorization requirements BEFORE any event or private material is read,
+      // so a revoked known action id is never a read oracle. This replaces the
+      // classifier-dependent `hasAnnotatedMoveCapability` retry branch.
+      const retryPolicy = contributionPolicies?.policyFor(retry.actionType ?? null);
+      if (retryPolicy) {
+        // Resolve the original root receipt through linkage, then authorize the
+        // outer canonical action and the policy's field requirements.
+        const rootActionId = retry.historyRootActionId ?? retry.actionId;
+        const rootReceipt = rootActionId === retry.actionId ? retry : receiptFor(db, key.scope, rootActionId);
+        if (!rootReceipt) throw forbidden();
+        let rootAction                                           ;
+        let targetPayload         ;
+        try {
+          rootAction = { type: rootReceipt.actionType, payload: parseJson(rootReceipt.actionData, null) };
+          targetPayload = parseJson(retry.actionData, null);
+        } catch {
+          throw forbidden();
+        }
+        await authorizeContributionPolicy(retryPolicy, {
+          operation,
+          origin: rootAction,
+          target: { type: retry.actionType, payload: targetPayload },
+          principal: args.principal,
+        });
       }
       const retried                                                                                  = { ok: true, deduped: true, events: Object.freeze(eventsFromReceipt(db, retry, parseEventType)) };
       if (retry.actionType === '$history.empty') retried.empty = true;
@@ -571,8 +614,21 @@ export function createDurableHistoryRuntime({
     const rule = rules[origin.type ?? ''];
     if (!rule) throw conflict(`history action '${origin.type}' is not undoable`);
     // Re-authorize the original canonical action before private material is
-    // loaded or supplied to application translation code.
-    if (!await authorize({ type: origin.type, payload: origin.payload, principal: args.principal })) throw forbidden();
+    // loaded or supplied to application translation code. Policy-owned ordering
+    // (scope#992 rev 2 Finding 9): when the origin action has a contribution
+    // policy, evaluate the policy's requirements through the central seam;
+    // otherwise keep the ordinary canonical-action authorization.
+    const movePolicy = contributionPolicies?.policyFor(origin.type ?? null);
+    if (movePolicy) {
+      await authorizeContributionPolicy(movePolicy, {
+        operation,
+        origin: { type: origin.type, payload: origin.payload },
+        target: { type: action.type, payload: action.payload },
+        principal: args.principal,
+      });
+    } else if (!await authorize({ type: origin.type, payload: origin.payload, principal: args.principal })) {
+      throw forbidden();
+    }
     const originFact = privateFactFromReceipt(db, originReceipt);
     const targetFact = originReceipt.actionId === receipt.actionId ? originFact : annotatedMove ? privateFactFromReceipt(db, receipt) : originFact;
     if (!annotatedMove && !compoundKindOf(originFact) && (!Object.hasOwn(originFact, 'before') || !Object.hasOwn(originFact, 'after'))) {
@@ -618,6 +674,17 @@ export function createDurableHistoryRuntime({
       async apply(dbInTxn          )                {
         await admitted(historyDescriptor, { operation, scope: key.scope, session: args.session, principal: args.principal, action });
         if (!await authorize({ type: action.type, payload: action.payload, principal: args.principal })) throw forbidden();
+        // In-transaction re-authorization of the outer canonical action when the
+        // origin carries a contribution policy (rev 2 Finding 9 first-move step 4).
+        const applyPolicy = contributionPolicies?.policyFor(origin.type ?? null);
+        if (applyPolicy) {
+          await authorizeContributionPolicy(applyPolicy, {
+            operation,
+            origin: { type: origin.type, payload: origin.payload },
+            target: { type: action.type, payload: action.payload },
+            principal: args.principal,
+          });
+        }
         privateFactFromReceipt(dbInTxn, annotatedMove ? receipt : originReceipt);
         const current = currentCursor(dbInTxn, key);
         if (!sameCursor(current, expected)) throw new Error('history cursor changed during dispatch');

@@ -8,6 +8,9 @@ import { admitRow } from './row-grant.mjs';
 import { write } from './grant.mjs';
 import { rawRow } from './entity/query.mjs';
 import { tryParseScopeKey } from './scope-handle.mjs';
+import { compileNativeInsertContributionPolicy,                                } from './history-contribution-policy.mjs';
+
+
 
 
 
@@ -33,6 +36,23 @@ export function createAnnotatedTextKernelSeam(entities                  )       
     annotatedActionDetails.set(`${entity.name}.${fieldName}.operation`, { entity, fieldName, field });
     annotatedActionDetails.set(`${entity.name}.${fieldName}.compensate`, { entity, fieldName, field, compensation: true });
   }
+
+  // Compile-produced native-insert contribution policies (scope#992 Finding 6):
+  // one policy entry per native annotated `.operation` and `.compensate` action
+  // type, so the history engine's retry/move authorization is policy-owned
+  // rather than classifier-name-driven. The policy exposes requirements only;
+  // grant decisions stay with the central authorize/admitRow seam.
+  const nativeInsertPolicies                                       = Object.freeze(
+    [...annotatedActionDetails.keys()].map((actionType) =>
+      compileNativeInsertContributionPolicy(
+        { entity: annotatedActionDetails.get(actionType).entity.name, fieldName: annotatedActionDetails.get(actionType).fieldName },
+        actionType,
+      )),
+  );
+  // Declaration-derived read-privacy scope set. It is used ONLY by the history
+  // actions()/events() read boundary (rev 3 §3); it has no eligibility,
+  // barrier, target-selection, retry, or compensation role.
+  const privateHistoryScopes                      = new Set(annotatedEntities);
 
   const isAnnotatedHistoryAction = ({ type, payload }     ) => {
     const detail = annotatedActionDetails.get(type);
@@ -138,5 +158,5 @@ export function createAnnotatedTextKernelSeam(entities                  )       
     return admitRow({ kind: 'verb', entity: projectEntity, row, principal, verb });
   }
 
-  return { historyActions, annotatedHistory, authorize, admitProject };
+  return { historyActions, annotatedHistory, nativeInsertPolicies, privateHistoryScopes, authorize, admitProject };
 }
