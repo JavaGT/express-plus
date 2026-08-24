@@ -118,6 +118,108 @@ const W1 = [
       writeFileSync(path, source.replace(needle, 'if (false && compoundKindOf(fact) !== null) {'));
     },
   },
+  // ---- W1b v16 durable-witness mutations (#149 / #148 rev 2) ----
+  {
+    name: 'w1b-remove-v16-stored-canonicalizer',
+    expected: 'noncanonical operated v16 eventData reached _Log',
+    test: 'test/annotated-text-operated-v16.test.mjs',
+    testNamePattern: 'appendEvents stores canonical bytes',
+    mutate(copyRoot) {
+      const path = join(copyRoot, 'build/committed-log.mjs');
+      const source = readFileSync(path, 'utf8');
+      const needle = "if (data && typeof data === 'object' && !Array.isArray(data) && data.version === 16) {";
+      if (!source.includes(needle)) throw new Error('v16 eventData gate is missing');
+      writeFileSync(path, source.replace(
+        needle,
+        'if (false && data && typeof data === \'object\' && !Array.isArray(data) && data.version === 16) {',
+      ));
+    },
+  },
+  {
+    name: 'w1b-accept-v16-duplicate-key',
+    // Disables BOTH duplicate-key layers (strict scanner + byte-identity
+    // reserialize). With either one alive the fixture still rejects, so the
+    // mutation only "counts" when the malformed-bytes test goes green —
+    // proving last-key-wins acceptance can never slip through.
+    expected: 'malformed stored bytes fail closed',
+    test: 'test/annotated-text-operated-v16.test.mjs',
+    testNamePattern: 'malformed stored bytes fail closed',
+    mutate(copyRoot) {
+      const path = join(copyRoot, 'build/annotated-text-operated-event.mjs');
+      const source = readFileSync(path, 'utf8');
+      const scannerNeedle = "if (seen.has(key)) fail('duplicate-key');";
+      if (!source.includes(scannerNeedle)) throw new Error('duplicate-key scanner check is missing');
+      let next = source.replace(scannerNeedle, "if (false && seen.has(key)) fail('duplicate-key');");
+      const reserNeedle = 'if (reserialized !== eventDataText) {';
+      if (!next.includes(reserNeedle)) throw new Error('canonical reserialize check is missing');
+      next = next.replace(reserNeedle, 'if (false && reserialized !== eventDataText) {');
+      writeFileSync(path, next);
+    },
+  },
+  {
+    name: 'w1b-remove-v16-witness-completeness',
+    expected: 'tampered witness fields reject with zero writes',
+    test: 'test/annotated-text-operated-v16.test.mjs',
+    testNamePattern: 'tampered witness fields reject with zero writes',
+    mutate(copyRoot) {
+      const path = join(copyRoot, 'build/entity/projection.mjs');
+      const source = readFileSync(path, 'utf8');
+      const needle = 'if (JSON.stringify(closure) !== JSON.stringify(canonical.witnessBefore)) {';
+      if (!source.includes(needle)) throw new Error('before-witness equality check is missing');
+      writeFileSync(path, source.replace(needle, 'if (false && JSON.stringify(closure) !== JSON.stringify(canonical.witnessBefore)) {'));
+    },
+  },
+  {
+    name: 'w1b-omit-reverse-protector',
+    // With pruning disabled the planner's own completeness gate rejects the
+    // dangling edge before any event exists — defense-in-depth in action.
+    expected: 'region witness disagrees with operated event',
+    test: 'test/annotated-text-operated-v16.test.mjs',
+    testNamePattern: 'topology-changing committed event is ordinary v16',
+    mutate(copyRoot) {
+      const path = join(copyRoot, 'build/annotated-text-region-reducer.mjs');
+      const source = readFileSync(path, 'utf8');
+      const needle = 'function pruneRemovedTargets(images';
+      if (!source.includes(needle)) throw new Error('dangling-edge pruning is missing');
+      writeFileSync(path, source.replace(
+        needle,
+        'function pruneRemovedTargets(images',
+      ).replace(
+        "if (!image.protectedTargetIds.some((targetId) => removedIds.has(targetId))) return image;",
+        'if (true) return image;',
+      ));
+    },
+  },
+  {
+    name: 'w1b-trust-v16-resolved-offset',
+    expected: 'forged after-digest writes nothing',
+    test: 'test/annotated-text-region-postimage.test.mjs',
+    testNamePattern: 'forged after-digest writes nothing',
+    mutate(copyRoot) {
+      const path = join(copyRoot, 'build/entity/projection.mjs');
+      const source = readFileSync(path, 'utf8');
+      const needle = 'if (postimage.afterDigest !== canonical.afterDigest)';
+      if (!source.includes(needle)) throw new Error('afterDigest verification is missing');
+      writeFileSync(path, source.replace(needle, 'if (false && postimage.afterDigest !== canonical.afterDigest)'));
+    },
+  },
+  {
+    name: 'w1b-emit-v15-from-region-policy',
+    // Rewires the compiled region policy to the retired v15 constructor; the
+    // static no-v15-emitter assertion must fail with its exact message.
+    expected: 'region policy must emit v16',
+    test: 'test/annotated-text-operated-v16.test.mjs',
+    testNamePattern: 'nothing new-emits them',
+    mutate(copyRoot) {
+      const path = join(copyRoot, 'build/annotated-text-region-operation.mjs');
+      const source = readFileSync(path, 'utf8');
+      const needle = 'const { event: envelope, eventDataText } = constructV16RegionEvent(plan);';
+      if (!source.includes(needle)) throw new Error('v16 emission call is missing');
+      writeFileSync(path, source
+        .replace(needle, 'const envelope = constructV15RegionEvent(plan); const eventDataText = null;')
+        .replace("import { constructV16RegionEvent } from './annotated-text-operated-event.mjs';", "import { constructV15RegionEvent } from './annotated-text-operated-event.mjs';"));
+    },
+  },
 ];
 
 function copyTree(copyRoot) {
@@ -125,6 +227,7 @@ function copyTree(copyRoot) {
   cpSync(join(root, 'public'), join(copyRoot, 'public'), { recursive: true });
   const tests = [
     'test/annotated-text-operated-normalization.test.mjs',
+    'test/annotated-text-operated-v16.test.mjs',
     'test/annotated-text-region-postimage.test.mjs',
     'test/annotated-text-snapshot-recovery-budget.test.mjs',
     'test/annotated-text-snapshot-cycle-budget-deletion.test.mjs',

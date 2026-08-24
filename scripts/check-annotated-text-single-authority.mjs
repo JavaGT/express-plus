@@ -121,7 +121,7 @@ if (declarationV10Owners.length !== 1 || declarationV10Owners[0] !== 'index.d.ts
   fail('declared v10 descriptor grammar', declarationV10Owners.length ? declarationV10Owners : ['<missing>']);
 }
 
-const ENVELOPE_CONSTRUCTOR = /export\s+function\s+(constructV13OperatedEvent|constructV14OperatedEvent|constructV15RegionEvent)\b/;
+const ENVELOPE_CONSTRUCTOR = /export\s+function\s+(constructV13OperatedEvent|constructV14OperatedEvent|constructV15RegionEvent|constructV16RegionEvent|serializeV16OperatedEvent|parseStoredV16OperatedEvent)\b/;
 const envelopeOwners = [];
 for (const [path, source] of byRel) {
   if (path.startsWith('src/') && ENVELOPE_CONSTRUCTOR.test(source)) envelopeOwners.push(path);
@@ -130,7 +130,67 @@ if (envelopeOwners.length !== 1 || envelopeOwners[0] !== 'src/annotated-text-ope
   fail('operated envelope construction', envelopeOwners.length ? envelopeOwners : ['<missing>']);
 }
 
-const constructorNames = new Set(['constructV13OperatedEvent', 'constructV14OperatedEvent', 'constructV15RegionEvent']);
+const constructorNames = new Set([
+  'constructV13OperatedEvent',
+  'constructV14OperatedEvent',
+  'constructV15RegionEvent',
+  'constructV16RegionEvent',
+  'serializeV16OperatedEvent',
+  'parseStoredV16OperatedEvent',
+]);
+// W1b (#149): the v16 constructor has exactly one owner. The compiled region
+// policy is the SOLE authorized caller (the new-emission path); every other
+// module referencing these names is a second authority. The stored-text
+// serializer/parser have NO other callers at all.
+const V16_AUTHORITY_OWNER = 'src/annotated-text-operated-event.ts';
+const V16_REGION_POLICY = 'src/annotated-text-region-operation.ts';
+// committed-log is the one _Log write authority and calls the serializer to
+// canonicalize/verify v16 eventData at its single insert point (W1b adapter).
+const V16_LOG_ADAPTER = 'src/committed-log.ts';
+const V16_SOLO_NAMES = ['parseStoredV16OperatedEvent'];
+const V16_CONSTRUCTOR_NAME = 'constructV16RegionEvent';
+const V16_SERIALIZER_NAME = 'serializeV16OperatedEvent';
+for (const [path, source] of byRel) {
+  if (!path.startsWith('src/') || path === V16_AUTHORITY_OWNER) continue;
+  if (path === V16_REGION_POLICY) {
+    // The policy may call the constructor but may not re-export or alias it
+    // into a second authority surface.
+    if (/export[^{]*constructV16RegionEvent/.test(source)) {
+      fail('v16 operated authority', [V16_AUTHORITY_OWNER, path]);
+    }
+    continue;
+  }
+  if (path === V16_LOG_ADAPTER) {
+    if (/export[^{]*serializeV16OperatedEvent/.test(source)) {
+      fail('v16 operated authority', [V16_AUTHORITY_OWNER, path]);
+    }
+    continue;
+  }
+  for (const name of [...V16_SOLO_NAMES, V16_SERIALIZER_NAME]) {
+    if (new RegExp(`\\b${name}\\b`).test(source)) {
+      fail('v16 operated authority', [V16_AUTHORITY_OWNER, path]);
+    }
+  }
+  if (new RegExp(`\\b${V16_CONSTRUCTOR_NAME}\\b`).test(source)) {
+    fail('v16 operated authority', [V16_AUTHORITY_OWNER, path]);
+  }
+}
+// New region writes must never lower to replay-only versions. The planner,
+// policy, and reducer modules may not reference legacy constructors at all.
+const REGION_EMITTER_FILES = [
+  'src/annotated-text-region-descriptor.ts',
+  'src/annotated-text-region-limits.ts',
+  'src/annotated-text-region-plan.ts',
+  'src/annotated-text-region-operation.ts',
+  'src/annotated-text-region-reducer.ts',
+];
+for (const path of REGION_EMITTER_FILES) {
+  const source = byRel.get(path);
+  if (!source) continue;
+  if (/\bconstructV1[345][A-Za-z]*\b/.test(source)) {
+    fail('new region emitter version', [path]);
+  }
+}
 const emittedEnvelopeOwners = [];
 for (const [path, source] of byRel) {
   if (!path.startsWith('build/')) continue;

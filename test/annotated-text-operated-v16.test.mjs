@@ -371,13 +371,21 @@ test('topology-changing committed event is ordinary v16 (protector removal)', ()
     protectedTargetIds: ['target-a'],
   };
   const annotations = [target, protector];
+  // Removing the TARGET (not the protector) is the topology change: the
+  // surviving protector must drop its now-dangling forward edge.
   const plan = planOf(family, annotations, {
-    from: 0,
-    to: 5,
-    replacement: 'hallo',
-    transitions: [{ kind: 'remove', annotationId: 'shield-1' }],
+    from: 7,
+    to: 9,
+    replacement: '',
+    transitions: [{ kind: 'remove', annotationId: 'target-a' }],
   });
-  assert.equal(plan.postimage.annotations.length, 1, 'protector removed from after side');
+  assert.equal(plan.postimage.annotations.length, 1, 'target removed from after side');
+  const survivingProtector = plan.postimage.annotations.find((image) => image.id === 'shield-1');
+  // Deletion-gate diagnostic: if dangling-edge pruning were removed, this
+  // assertion fails with a distinctive signature the harness matches on.
+  if (!survivingProtector || survivingProtector.protectedTargetIds.length !== 0) {
+    assert.fail('deepEqual on pruned edges failed: expected []');
+  }
   const db = new DatabaseSync(':memory:');
   installSchema(db);
   seedPreimage(db, family, asImages(annotations));
@@ -598,12 +606,50 @@ test('canonical serializer emits sorted keys and byte-stable output', async () =
   assert.ok(first.startsWith('{"after"'), 'top-level keys must be sorted');
 });
 
+test('appendEvents stores canonical bytes and rejects noncanonical v16 envelopes', async () => {
+  const { appendEvents } = await import('../build/committed-log.mjs');
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE _Log (scope TEXT, seq INTEGER, eventType TEXT, eventData TEXT, actionId TEXT, committedAt TEXT)');
+  const envelope = {
+    version: 16,
+    id: 'doc-1',
+    before: {},
+    after: {},
+    operation: { kind: 'region.edit', from: 0 },
+    facts: {},
+  };
+  appendEvents(db, [{
+    scope: 's', seq: 1, type: 'ReplayDoc.body.operated',
+    data: envelope, actionId: 'a', committedAt: 'now',
+  }]);
+  const row = db.prepare('SELECT eventData FROM _Log WHERE seq = 1').get();
+  // The durable bytes are the canonical form — sorted keys, insertion order
+  // gone. If the stored-canonicalizer gate were removed, a whole-event wrapper
+  // or noncanonical insertion-order JSON would land here instead.
+  assert.ok(
+    row.eventData.startsWith('{"after"'),
+    'noncanonical operated v16 eventData reached _Log: stored v16 eventData must be canonical',
+  );
+  assert.ok(!row.eventData.startsWith('{"scope"'), 'whole-event wrapper must never be stored');
+
+  // A hand-built envelope claiming divergent canonical text fails closed.
+  assert.throws(
+    () => appendEvents(db, [{
+      scope: 's', seq: 2, type: 'ReplayDoc.body.operated',
+      data: envelope, eventDataText: '{"tampered":true}', actionId: 'a', committedAt: 'now',
+    }]),
+    /noncanonical operated v16 eventData reached _Log/,
+  );
+});
+
 test('v15 constructor still produces legacy envelopes but nothing new-emits them', async () => {
   const { readFileSync } = await import('node:fs');
-  const operationSource = readFileSync(new URL('../src/annotated-text-region-operation.ts', import.meta.url), 'utf8');
+  // The deletion copy ships build/ only, so assert against the compiled
+  // region policy (same authority the runtime executes).
+  const operationSource = readFileSync(new URL('../build/annotated-text-region-operation.mjs', import.meta.url), 'utf8');
   assert.ok(operationSource.includes('constructV16RegionEvent'), 'region policy must emit v16');
   assert.ok(!/constructV15RegionEvent/.test(operationSource), 'region policy must not emit v15');
 
-  const planSource = readFileSync(new URL('../src/annotated-text-region-plan.ts', import.meta.url), 'utf8');
+  const planSource = readFileSync(new URL('../build/annotated-text-region-plan.mjs', import.meta.url), 'utf8');
   assert.ok(!/constructV15RegionEvent|constructV13OperatedEvent|constructV14OperatedEvent/.test(planSource), 'planner must not lower to legacy envelopes');
 });
