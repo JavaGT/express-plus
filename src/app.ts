@@ -73,7 +73,7 @@ import { createDerivedResourceRegistry } from './derived-resource.ts';
 import { createPrincipalSnapshotTransaction } from './principal-snapshot-transaction.ts';
 import { prepareGracefulShutdown } from './lifecycle.ts';
 import { createLog, withLog } from './log.ts';
-import { serveStatic } from './views.ts';
+import { serveStatic, type ServeStaticOptions } from './views.ts';
 import { authRoutes } from './auth/routes.ts';
 import { attachApplicationLiveDelivery } from './application-live-delivery.ts';
 import { User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor } from './auth/entities.ts';
@@ -1120,7 +1120,10 @@ export default function workbench({
     // (the file-serve factory lives in views.mjs); the framework has ONE interceptor
     // mechanism, not two. A missing file falls through to the next declared
     // handler (e.g. a SPA fallback) rather than short-circuiting the request.
-    app.static = (prefix: any, dir: any) => app.use(prefix, serveStatic(dir, {
+    // Optional caller options (cacheControl, precompressed) merge over the
+    // framework defaults; the managed-path guard cannot be overridden.
+    app.static = (prefix: any, dir: any, options: ServeStaticOptions = {}) => app.use(prefix, serveStatic(dir, {
+      ...options,
       prefix: prefix.replace(/\/+$/, ''),
       // Refuse to serve anything under the adapter-owned directory (S1/A2).
       isManagedPath: app._isManagedPath,

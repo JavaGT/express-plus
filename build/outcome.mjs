@@ -6,11 +6,13 @@
 
 
 
+
 export const FAILURE_CATEGORIES = Object.freeze([
   'invalid-input',
   'denied',
   'unknown-action',
   'not-found',
+  'not-acceptable',
   'conflict',
   'internal',
 ]         );

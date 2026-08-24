@@ -6,13 +6,14 @@ import {
 
 } from './outcome.mjs';
 
-export function statusForFailure(value                            )                              {
+export function statusForFailure(value                            )                                    {
   const category = isWorkbenchFailure(value) ? value.category : 'internal';
   switch (category) {
     case 'invalid-input': return 400;
     case 'denied': return 403;
     case 'unknown-action':
     case 'not-found': return 404;
+    case 'not-acceptable': return 406;
     case 'conflict': return 409;
     default: return 500;
   }

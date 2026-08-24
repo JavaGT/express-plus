@@ -3,6 +3,7 @@ export type FailureCategory =
   | 'denied'
   | 'unknown-action'
   | 'not-found'
+  | 'not-acceptable'
   | 'conflict'
   | 'internal';
 
@@ -11,6 +12,7 @@ export const FAILURE_CATEGORIES = Object.freeze([
   'denied',
   'unknown-action',
   'not-found',
+  'not-acceptable',
   'conflict',
   'internal',
 ] as const);

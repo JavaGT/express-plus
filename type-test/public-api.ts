@@ -692,6 +692,18 @@ const parsedCookie: Record<string, string> = parseCookies(`${SESSION_COOKIE}=tok
 const rootInvitationApi = createRootInvitationApi({ Invitation: Invitations as unknown as NonNullable<Parameters<typeof createRootInvitationApi>[0]>['Invitation'] });
 const routeMatch = matchRoute([], 'GET', '/health');
 const staticHandler = serveStatic('/tmp');
+const staticHandlerWithOptions = serveStatic('/tmp', {
+  precompressed: true,
+  cacheControl: { '/assets/': 'public, max-age=31536000, immutable', '/index.html': 'no-cache' },
+  isManagedPath: (resolved) => resolved.startsWith('/managed'),
+});
+const staticHandlerPrefixOption: import('workbench').ServeStaticOptions = { prefix: '/files' };
+const appForStaticProbe = workbench();
+const staticAppReturn: import('workbench').WorkbenchApp = appForStaticProbe.static('/', '/tmp/dist', {
+  precompressed: true,
+  cacheControl: { '/assets/': 'public, max-age=31536000, immutable' },
+});
+void [staticHandler, staticHandlerWithOptions, staticHandlerPrefixOption, staticAppReturn];
 const cookieHeader: string = sessionCookie('token');
 const sessionToken: string | undefined = sessionTokenOf({ headers: { cookie: cookieHeader } });
 const principalFromSession = sessionPrincipalOf(db);

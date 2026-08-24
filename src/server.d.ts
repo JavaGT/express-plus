@@ -1056,9 +1056,27 @@ export function matchRoute(
   | { route: { method: string; path: string; handler?: Handler }; params: Record<string, string> }
   | { route: null; params: null; pathMatched: boolean };
 
+export interface ServeStaticOptions {
+  prefix?: string;
+  /** Refuse to serve files the predicate marks as adapter-owned (fail closed). */
+  isManagedPath?: (resolvedPath: string) => boolean;
+  /**
+   * Cache-Control policies keyed by request path: exact path ('/index.html'),
+   * path prefix ('/assets/'), or extension ('.svg'). Most-specific match wins;
+   * unmatched paths get no cache header.
+   */
+  cacheControl?: Record<string, string>;
+  /**
+   * Serve precompressed `.br`/`.gz` siblings when Accept-Encoding admits them
+   * (identity unless explicitly excluded; 406 only when nothing is acceptable).
+   * Every 200 and any 406 carry `Vary` merged with any prior value.
+   */
+  precompressed?: boolean;
+}
+
 export function serveStatic(
   dir: string,
-  options?: { prefix?: string },
+  options?: ServeStaticOptions,
 ): Handler;
 
 // ---------------------------------------------------------------------------

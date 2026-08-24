@@ -2160,7 +2160,7 @@ export interface WorkbenchApp extends RouteBuilder {
   registerSearchPlugin(plugin: SearchPlugin): this;
   register(...declarations: readonly (WorkbenchEntity | readonly WorkbenchEntity[])[]): this;
   auth(options?: { identifyBy?: readonly string[] }): this;
-  static(prefix: string, directory: string): this;
+  static(prefix: string, directory: string, options?: import('./src/server.js').ServeStaticOptions): this;
   prepareSchema(): Promise<this>;
   ddl(): Promise<this>;
   /** Attach package-owned HTTP/SSE delivery to this app before start or listen. */
@@ -2295,6 +2295,7 @@ export type {
   EmailTransport,
   InvitationApi,
   Invitation as InvitationRecord,
+  ServeStaticOptions,
 } from './src/server.js';
 
 export default function workbench(options?: WorkbenchOptions): WorkbenchApp;

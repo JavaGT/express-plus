@@ -17,6 +17,17 @@ and tag are assigned at the next release.
 
 ### Added
 
+- Static serving policy options: `app.static(prefix, dir, options?)` and
+  `serveStatic(dir, options)` now accept `cacheControl` (exact-path > path-prefix >
+  extension policies) and `precompressed` (serve `.br`/`.gz` siblings when the client's
+  Accept-Encoding admits them; identity unless explicitly excluded; typed
+  `not-acceptable` failure → 406 only when nothing is acceptable; every 200/406 carries a
+  case-insensitively merged `Vary`). Public declarations updated in both `index.d.ts` and
+  `src/server.d.ts`; compile-time probes in `type-test/public-api.ts`.
+- `not-acceptable` failure category mapping to HTTP 406 in `statusForFailure`.
+
+### Added
+
 - Blob stream reads for large media: `readBlobStream`,
   `ByteStore.readPendingStream`, `lifecycle.readClaimedStream`
   (`50def23a52c6d28d936c55a94f4a7a629436dd3a`).
