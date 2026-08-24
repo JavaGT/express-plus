@@ -149,6 +149,25 @@ for (const [path, source] of byRel) {
   }
 }
 
+// W1 region path is v15-only: no region module may lower a region to the v13/v14
+// envelope constructors. The live authoring path (annotated-text-plan.ts /
+// crud.ts) still emits v14 until W3's engine flip and is not covered here.
+const regionOnly = new Set([
+  'src/annotated-text-region-descriptor.ts',
+  'src/annotated-text-region-limits.ts',
+  'src/annotated-text-region-plan.ts',
+  'src/annotated-text-region-reducer.ts',
+]);
+const legacyRegionEmitters = [];
+for (const path of regionOnly) {
+  const source = byRel.get(path);
+  if (!source) continue;
+  if (/\bconstructV1[34]OperatedEvent\b/.test(source)) legacyRegionEmitters.push(path);
+}
+if (legacyRegionEmitters.length > 0) {
+  fail('region v13/v14 emitter', legacyRegionEmitters);
+}
+
 const w3Active = byRel.has('src/legacy-annotated-history-read-privacy.ts');
 if (w3Active) {
   const banned = ['annotatedMove', 'annotatedMoveActionTypes', 'hasAnnotatedMoveCapability', 'ANNOTATED_TEXT_COMPENSATION'];
