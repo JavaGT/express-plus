@@ -37,7 +37,10 @@ import {
 
 const ACTOR = 'a'.repeat(32);
 const EDIT_ACTOR = 'b'.repeat(32);
-const DECLARATIONS = [{ annotationName: 'note', fields: {}, empty: 'delete', cardinality: 'many' }];
+const DECLARATIONS = [
+  { annotationName: 'note', fields: {}, empty: 'delete', cardinality: 'many' },
+  { annotationName: 'memo', fields: {}, empty: 'orphan', cardinality: 'many' },
+];
 
 // ---------- helpers (mirror the established normalization-suite shapes) ----
 
@@ -165,7 +168,7 @@ function declaredEntity() {
     body: annotatedText({
       project: 'project',
       owner: 'owner',
-      annotations: [annotation('note', { fields: {} })],
+      annotations: [annotation('note', { fields: {} }), annotation('memo', { fields: {}, empty: 'orphan' })],
     }),
     grant: [scope(() => everyone()).can(() => grant(read, write))],
   });
@@ -191,15 +194,19 @@ function seedPreimage(db, family, annotations = []) {
   for (const annotation of annotations) {
     db.prepare('INSERT INTO ReplayDoc_body_annotation (id, document_id, project_id, owner_id, family) VALUES (?, ?, ?, ?, ?)')
       .run(annotation.id, 'doc-1', 'p1', 'u1', annotation.family);
-    attachAnnotationRange(
-      db,
-      'ReplayDoc_body',
-      'doc-1',
-      annotation.id,
-      annotation.memberships[0].start,
-      annotation.memberships[0].end,
-      0,
-    );
+    // Seed EVERY membership with its declared ordinal — multi-range
+    // annotations must round-trip their complete membership set.
+    for (const [ordinal, m] of annotation.memberships.entries()) {
+      attachAnnotationRange(
+        db,
+        'ReplayDoc_body',
+        'doc-1',
+        annotation.id,
+        m.start,
+        m.end,
+        ordinal,
+      );
+    }
     for (const targetId of annotation.protectedTargetIds ?? []) {
       db.prepare('INSERT INTO ReplayDoc_body_annotation_protected_target (annotation_id, target_annotation_id) VALUES (?, ?)')
         .run(annotation.id, targetId);
@@ -606,42 +613,6 @@ test('canonical serializer emits sorted keys and byte-stable output', async () =
   assert.ok(first.startsWith('{"after"'), 'top-level keys must be sorted');
 });
 
-test('appendEvents stores canonical bytes and rejects noncanonical v16 envelopes', async () => {
-  const { appendEvents } = await import('../build/committed-log.mjs');
-  const db = new DatabaseSync(':memory:');
-  db.exec('CREATE TABLE _Log (scope TEXT, seq INTEGER, eventType TEXT, eventData TEXT, actionId TEXT, committedAt TEXT)');
-  const envelope = {
-    version: 16,
-    id: 'doc-1',
-    before: {},
-    after: {},
-    operation: { kind: 'region.edit', from: 0 },
-    facts: {},
-  };
-  appendEvents(db, [{
-    scope: 's', seq: 1, type: 'ReplayDoc.body.operated',
-    data: envelope, actionId: 'a', committedAt: 'now',
-  }]);
-  const row = db.prepare('SELECT eventData FROM _Log WHERE seq = 1').get();
-  // The durable bytes are the canonical form — sorted keys, insertion order
-  // gone. If the stored-canonicalizer gate were removed, a whole-event wrapper
-  // or noncanonical insertion-order JSON would land here instead.
-  assert.ok(
-    row.eventData.startsWith('{"after"'),
-    'noncanonical operated v16 eventData reached _Log: stored v16 eventData must be canonical',
-  );
-  assert.ok(!row.eventData.startsWith('{"scope"'), 'whole-event wrapper must never be stored');
-
-  // A hand-built envelope claiming divergent canonical text fails closed.
-  assert.throws(
-    () => appendEvents(db, [{
-      scope: 's', seq: 2, type: 'ReplayDoc.body.operated',
-      data: envelope, eventDataText: '{"tampered":true}', actionId: 'a', committedAt: 'now',
-    }]),
-    /noncanonical operated v16 eventData reached _Log/,
-  );
-});
-
 test('v15 constructor still produces legacy envelopes but nothing new-emits them', async () => {
   const { readFileSync } = await import('node:fs');
   // The deletion copy ships build/ only, so assert against the compiled
@@ -652,4 +623,247 @@ test('v15 constructor still produces legacy envelopes but nothing new-emits them
 
   const planSource = readFileSync(new URL('../build/annotated-text-region-plan.mjs', import.meta.url), 'utf8');
   assert.ok(!/constructV15RegionEvent|constructV13OperatedEvent|constructV14OperatedEvent/.test(planSource), 'planner must not lower to legacy envelopes');
+});
+
+// ---- Review fixes (#149 round 2): admission, escaping, real reads, overrun ----
+
+test('appendEvents admits only branded v16 envelopes; fabricated data fails closed', async () => {
+  const { appendEvents } = await import('../build/committed-log.mjs');
+  const { constructV16RegionEvent } = await import('../build/annotated-text-operated-event.mjs');
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE _Log (scope TEXT, seq INTEGER, eventType TEXT, eventData TEXT, actionId TEXT, committedAt TEXT)');
+
+  // The constructor's own result is admitted (direct brand path).
+  const minted = constructV16RegionEvent({
+    descriptor: { id: 'doc-1', from: 0, to: 0, transitions: [] },
+    before: { structuralRevision: 1, frontier: [] },
+    after: { structuralRevision: 2, frontier: [] },
+    postimage: { affectedIds: [], annotations: [], beforeAnnotations: [], emptied: [], beforeDigest: '0'.repeat(64), afterDigest: '0'.repeat(64) },
+    declarationFingerprint: '0'.repeat(64),
+    textOperations: { kind: 'none' },
+    contribution: null,
+  });
+  appendEvents(db, [{
+    scope: 's', seq: 1, type: 'ReplayDoc.body.operated',
+    data: minted.event, actionId: 'a', committedAt: 'now',
+  }]);
+  const row = db.prepare('SELECT eventData FROM _Log WHERE seq = 1').get();
+  assert.ok(
+    row.eventData.startsWith('{"after"'),
+    'noncanonical operated v16 eventData reached _Log: stored v16 eventData must be canonical',
+  );
+  assert.ok(!row.eventData.startsWith('{"scope"'), 'whole-event wrapper must never be stored');
+
+  // A fabricated v16-shaped envelope (no brand, never minted) is rejected.
+  const fabricated = {
+    version: 16,
+    id: 'doc-1',
+    before: { structuralRevision: 1, frontier: [] },
+    after: { structuralRevision: 3, frontier: [] },
+    operation: { kind: 'region.edit', from: 0 },
+    facts: {},
+  };
+  assert.throws(
+    () => appendEvents(db, [{
+      scope: 's', seq: 2, type: 'ReplayDoc.body.operated',
+      data: fabricated, actionId: 'a', committedAt: 'now',
+    }]),
+    /unbranded operated v16 eventData reached _Log/,
+  );
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count, 1, 'fabricated envelope performed a write');
+
+  // A mutated copy of the branded envelope (bytes diverge from its brand)
+  // fails closed even though the shape is intact.
+  const mutated = JSON.parse(JSON.stringify(minted.event));
+  mutated.operation.from = 999;
+  assert.throws(
+    () => appendEvents(db, [{
+      scope: 's', seq: 2, type: 'ReplayDoc.body.operated',
+      data: mutated, actionId: 'a', committedAt: 'now',
+    }]),
+    /unbranded|noncanonical operated v16 eventData reached _Log/,
+  );
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count, 1, 'mutated envelope performed a write');
+});
+
+test('escaped quotes, backslashes, and control characters round-trip through the stored parser', async () => {
+  const mod = await import('../build/annotated-text-operated-event.mjs');
+  const { packOperatedFacts } = mod;
+  const tricky = 'quote " backslash \\ tab \t newline \n unicode \u00e9\u4e2d key " escaped';
+  const envelope = {
+    version: 16,
+    id: 'doc-1',
+    before: { structuralRevision: 1, frontier: [] },
+    after: { structuralRevision: 2, frontier: [] },
+    operation: { affectedIds: [], afterDigest: 'a'.repeat(64), beforeDigest: 'b'.repeat(64),
+      declarationFingerprint: 'c'.repeat(64), emptied: [], from: 0, kind: 'region.edit',
+      text: { kind: 'none' }, to: 0, transitions: [], witnessAfter: [], witnessBefore: [] },
+    facts: packOperatedFacts({ actorId: tricky }),
+  };
+  const text = mod.serializeV16OperatedEvent(envelope);
+  // The literal contains an escaped quote — indexOf-based scanning would cut
+  // the string early; the escape-aware scanner must consume it whole.
+  const parsed = mod.parseStoredV16OperatedEvent(text, { entity: 'E', field: 'f' });
+  assert.equal(parsed.facts.actorId, tricky);
+
+  // An escaped object KEY also round-trips (duplicate detection uses decoded keys).
+  const keyedText = text.replace('"facts"', '"f\\u0061cts"');
+  assert.throws(
+    () => mod.parseStoredV16OperatedEvent(keyedText, { entity: 'E', field: 'f' }),
+    /not canonical/,
+    'unicode-escape-encoded duplicate key must still be caught or rejected as noncanonical',
+  );
+
+  // Invalid unicode escapes fail the scanner.
+  const badEscape = '{"version":16,"bad":"\\uZZZZ"}';
+  assert.throws(
+    () => mod.parseStoredV16OperatedEvent(badEscape, { entity: 'E', field: 'f' }),
+    Error,
+  );
+});
+
+test('tampered _Log eventData fails closed through readSince, rowToEvent, and durable-effect reads', async () => {
+  const { appendEvents, readSince, rowToEvent, eventsFor } = await import('../build/committed-log.mjs');
+  const { parseEventType } = await import('../build/event-handle.mjs');
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE _Log (scope TEXT, seq INTEGER, eventType TEXT, eventData TEXT, actionId TEXT, committedAt TEXT)');
+
+  const minted = constructV16RegionEvent({
+    descriptor: { id: 'doc-1', from: 0, to: 0, transitions: [] },
+    before: { structuralRevision: 1, frontier: [] },
+    after: { structuralRevision: 2, frontier: [] },
+    postimage: { affectedIds: [], annotations: [], beforeAnnotations: [], emptied: [], beforeDigest: '0'.repeat(64), afterDigest: '0'.repeat(64) },
+    declarationFingerprint: '0'.repeat(64),
+    textOperations: { kind: 'none' },
+    contribution: null,
+  });
+  appendEvents(db, [{
+    scope: 's', seq: 1, type: 'E.f.operated',
+    data: minted.event, actionId: 'a', committedAt: 'now',
+  }]);
+  const goodRow = db.prepare('SELECT * FROM _Log WHERE seq = 1').get();
+
+  // Duplicate-key tampers: last-key-wins parsing would silently accept these.
+  // The duplicate version key must resolve to 16 under last-key-wins so the
+  // strict v16 branch is the one that has to reject it.
+  const dupText = goodRow.eventData.replace('"id":"doc-1"', '"id":"doc-1","operation":{"x":1');
+  db.prepare('UPDATE _Log SET eventData = ? WHERE seq = 1').run(dupText);
+  assert.throws(() => readSince(db, 's', 0), Error, 'readSince accepted a duplicate-key v16 row');
+
+  const tamperedRow = { ...goodRow, eventData: '{"version":17,"version":16}' };
+  assert.throws(() => rowToEvent(tamperedRow, parseEventType), Error, 'rowToEvent accepted a duplicate-key v16 row');
+  assert.throws(() => eventsFor(db, 'a'), Error, 'eventsFor accepted a duplicate-key v16 row');
+
+  // Noncanonical bytes tamper: insertion-order copy of the same content.
+  const reparsed = JSON.parse(goodRow.eventData);
+  const noncanonical = `{"version":${JSON.stringify(reparsed.version)},"id":${JSON.stringify(reparsed.id)},"before":${JSON.stringify(reparsed.before)},"after":${JSON.stringify(reparsed.after)},"operation":${JSON.stringify(reparsed.operation)},"facts":${JSON.stringify(reparsed.facts)}}`;
+  db.prepare('UPDATE _Log SET eventData = ? WHERE seq = 1').run(noncanonical);
+  assert.throws(() => readSince(db, 's', 0), /not canonical/, 'readSince accepted noncanonical v16 bytes');
+
+  // Restore, then verify the clean row decodes through the strict parser.
+  db.prepare('UPDATE _Log SET eventData = ? WHERE seq = 1').run(goodRow.eventData);
+  const events = readSince(db, 's', 0);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].data.wireVersion, 16);
+});
+
+test('over-limit serialization aborts at the first over-limit token', async () => {
+  const mod = await import('../build/annotated-text-operated-event.mjs');
+  const family = importTextToFamily('doc-1', ACTOR, 'hello world');
+  const annotations = [stored(family, { id: 'note-1', start: 0, end: 5 })];
+  const plan = planOf(family, annotations, {
+    from: 0,
+    to: 5,
+    replacement: 'hallo',
+    transitions: [{ kind: 'range.set', annotationId: 'note-1', ranges: [{ start: 0, end: 5 }] }],
+  });
+  // Inflate the AFTER side far past the event ceiling via a huge field value:
+  // construction must abort during traversal, before freeze/branding.
+  const bloatedPlan = structuredClone(plan);
+  const inflatedImage = JSON.parse(JSON.stringify(bloatedPlan.postimage.annotations[0]));
+  inflatedImage.fields.payload = 'x'.repeat(1024 * 1024 + 64);
+  Object.freeze(inflatedImage.fields);
+  bloatedPlan.postimage.annotations.push(Object.freeze(inflatedImage));
+
+  assert.throws(
+    () => constructV16RegionEvent(bloatedPlan),
+    (error) => error.failure?.code === 'annotated-text-region-limit'
+      || /exceeds .* UTF-8 bytes/.test(error.message),
+  );
+});
+
+test('declaration fingerprint covers placeholder and authorization-policy source', () => {
+  const base = [
+    { annotationName: 'note', fields: {}, empty: 'delete', cardinality: 'many' },
+    {
+      annotationName: 'confidential', fields: {}, empty: 'orphan', cardinality: 'many',
+      protects: 'note', kind: 'protectingAnnotation',
+      placeholder: '[Restricted]', accessPolicySource: 'async (is, row) => (await is.owner(row))',
+    },
+  ];
+  const fp = regionDeclarationFingerprint(base);
+  assert.equal(fp, regionDeclarationFingerprint([...base].reverse()), 'order-insensitive');
+  for (const [label, mutation] of [
+    ['placeholder', { ...base[1], placeholder: '[REDACTED]' }],
+    ['policy-source', { ...base[1], accessPolicySource: 'async (is, row) => true' }],
+    ['protects-target', { ...base[1], protects: 'timing' }],
+    ['empty-policy', { ...base[1], empty: 'delete' }],
+  ]) {
+    assert.notEqual(fp, regionDeclarationFingerprint([base[0], mutation]), `${label} change must change the fingerprint`);
+  }
+  // Protecting declarations without policy identity fail closed.
+  assert.throws(
+    () => regionDeclarationFingerprint([{ ...base[1], accessPolicySource: null }]),
+    (error) => error.failure?.code === 'annotated-text-region-limit',
+    'missing authorization-policy handle must reject',
+  );
+});
+
+test('multi-range orphan carries the full saved quote and last range', async () => {
+  const family = importTextToFamily('doc-1', ACTOR, 'alpha beta gamma delta');
+  // One orphan-policy annotation with THREE memberships across the document.
+  const orphanAnnotation = {
+    id: 'multi-orphan',
+    family: 'memo',
+    fields: {},
+    protectedTargetIds: [],
+    memberships: [
+      membership(family, 0, 5),
+      membership(family, 6, 10),
+      membership(family, 16, 20),
+    ].map((m, ordinal) => ({ ...m, ordinal })),
+    prerequisites: [],
+    empty: 'orphan',
+    cardinality: 'many',
+  };
+  const plan = planOf(family, [orphanAnnotation], {
+    from: 0,
+    to: 22,
+    replacement: '',
+    transitions: [],
+  }, [
+    { annotationName: 'note', fields: {}, empty: 'delete', cardinality: 'many' },
+    { annotationName: 'memo', fields: {}, empty: 'orphan', cardinality: 'many' },
+  ]);
+  const emptied = plan.postimage.emptied.find((entry) => entry.annotationId === 'multi-orphan');
+  assert.equal(emptied.disposition.kind, 'orphaned');
+  // Quote spans from the first membership's start to the LAST membership's
+  // end in pre-edit coordinates — not merely the first membership.
+  assert.equal(emptied.disposition.savedQuote, materializeText(family).slice(0, 20));
+  // lastRange records the final membership's resolved offsets.
+  assert.deepEqual(emptied.disposition.lastRange, [16, 20]);
+  // The after-side image carries the same orphan state.
+  const afterImage = plan.postimage.annotations.find((image) => image.id === 'multi-orphan');
+  assert.equal(afterImage.orphan.savedQuote, emptied.disposition.savedQuote);
+  assert.deepEqual(afterImage.orphan.lastRange, [16, 20]);
+
+  // Replay parity: the persisted v16 event reproduces identical state.
+  const db = new DatabaseSync(':memory:');
+  installSchema(db);
+  seedPreimage(db, family, asImages([orphanAnnotation]));
+  applyOperated(db, constructV16RegionEvent(plan).event);
+  const orphanState = db.prepare('SELECT saved_quote, last_range FROM ReplayDoc_body_annotation_orphan_state').get();
+  assert.equal(orphanState.saved_quote, emptied.disposition.savedQuote);
+  assert.deepEqual(JSON.parse(orphanState.last_range), [16, 20]);
+  db.close();
 });

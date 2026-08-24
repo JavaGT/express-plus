@@ -662,15 +662,38 @@ function projectBlocklessAnnotationRemove({ name, handle, db, data }            
   db.prepare(`UPDATE ${prefix}_state SET structure_version = ? WHERE document_id = ?`).run(data.after.structuralRevision, data.id);
 }
 
+// Compiled region declarations for replay. Placeholder and the
+// authorization-policy source text ride along so the v16 fingerprint covers
+// the full ratified declaration contract (Finding 4).
 function regionDeclarations(descriptor                 )                      {
-  return (descriptor.annotations ?? []).map((entry) => ({
-    annotationName: String(entry.annotationName ?? ''),
-    fields: entry.fields,
-    empty: entry.empty,
-    cardinality: entry.cardinality,
-    kind: typeof entry.kind === 'string' ? entry.kind : undefined,
-    protects: typeof (entry                          ).protects === 'string' ? (entry                        ).protects : null,
-  }));
+  return (descriptor.annotations ?? []).map((entry) => {
+    const record = entry
+
+
+
+
+
+
+
+
+     ;
+    const access = record.access;
+    const isProtecting = typeof record.protects === 'string';
+    return {
+      annotationName: String(record.annotationName ?? ''),
+      fields: record.fields,
+      empty: record.empty,
+      cardinality: record.cardinality,
+      kind: typeof record.kind === 'string' ? record.kind : undefined,
+      protects: typeof record.protects === 'string' ? record.protects : null,
+      placeholder: typeof record.placeholder === 'string' ? record.placeholder : null,
+      // Fail closed on a protecting declaration whose policy function is
+      // missing — the fingerprint contract requires its source identity.
+      accessPolicySource: isProtecting
+        ? (typeof access === 'function' ? Function.prototype.toString.call(access) : null)
+        : null,
+    };
+  });
 }
 
 function applyRegionTextOperations(family                                                , text                             ) {
@@ -723,11 +746,13 @@ function projectRegionEdit({ name, handle, db, descriptor, canonical }
   // V16 replay: re-derive BOTH witness sides through the sole reducer and
   // require exact equality with the stored witness — a sparse or tampered
   // image can never reach projection. V15 rows carry no witness and skip this.
+  // The fingerprint comparison here is belt-and-braces; the side-digest
+  // coverage inside reduceRegionPostimage is the binding check (Finding 4).
+  if (canonical.wireVersion === 16
+    && canonical.declarationFingerprint !== regionDeclarationFingerprint(declarations)) {
+    throw new Error('region witness disagrees with operated event');
+  }
   if (canonical.wireVersion === 16) {
-    const declarationFingerprint = regionDeclarationFingerprint(declarations);
-    if (canonical.declarationFingerprint !== declarationFingerprint) {
-      throw new Error('region witness disagrees with operated event');
-    }
     if (JSON.stringify(closure) !== JSON.stringify(canonical.witnessBefore)) {
       throw new Error('region witness disagrees with operated event');
     }
@@ -751,6 +776,12 @@ function projectRegionEdit({ name, handle, db, descriptor, canonical }
       transitions: canonical.transitions,
       declarations,
       expectedBeforeDigest: canonical.beforeDigest,
+      // V16 side digests cover the declaration fingerprint (Finding 4): a
+      // mismatched declaration fails the digest comparison, not just the
+      // outer fingerprint equality.
+      ...(canonical.wireVersion === 16
+        ? { declarationFingerprint: regionDeclarationFingerprint(declarations) }
+        : {}),
     });
   } catch {
     throw new Error(REGION_POSTIMAGE_DISAGREES);

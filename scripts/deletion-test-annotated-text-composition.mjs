@@ -121,17 +121,20 @@ const W1 = [
   // ---- W1b v16 durable-witness mutations (#149 / #148 rev 2) ----
   {
     name: 'w1b-remove-v16-stored-canonicalizer',
-    expected: 'noncanonical operated v16 eventData reached _Log',
+    expected: 'stored v16 eventData must be canonical',
     test: 'test/annotated-text-operated-v16.test.mjs',
-    testNamePattern: 'appendEvents stores canonical bytes',
+    testNamePattern: 'appendEvents admits only branded v16 envelopes',
     mutate(copyRoot) {
       const path = join(copyRoot, 'build/committed-log.mjs');
       const source = readFileSync(path, 'utf8');
+      // Disables the brand admission branch entirely: the minted envelope then
+      // falls through to plain stringify and lands NONCANONICAL in _Log. The
+      // test's canonical-bytes assertion must fail with its signature.
       const needle = "if (data && typeof data === 'object' && !Array.isArray(data) && data.version === 16) {";
       if (!source.includes(needle)) throw new Error('v16 eventData gate is missing');
       writeFileSync(path, source.replace(
         needle,
-        'if (false && data && typeof data === \'object\' && !Array.isArray(data) && data.version === 16) {',
+        "if (false && data && typeof data === 'object' && !Array.isArray(data) && data.version === 16) {",
       ));
     },
   },
@@ -213,10 +216,10 @@ const W1 = [
     mutate(copyRoot) {
       const path = join(copyRoot, 'build/annotated-text-region-operation.mjs');
       const source = readFileSync(path, 'utf8');
-      const needle = 'const { event: envelope, eventDataText } = constructV16RegionEvent(plan);';
+      const needle = 'const { event: envelope } = constructV16RegionEvent(plan);';
       if (!source.includes(needle)) throw new Error('v16 emission call is missing');
       writeFileSync(path, source
-        .replace(needle, 'const envelope = constructV15RegionEvent(plan); const eventDataText = null;')
+        .replace(needle, 'const envelope = constructV15RegionEvent(plan);')
         .replace("import { constructV16RegionEvent } from './annotated-text-operated-event.mjs';", "import { constructV15RegionEvent } from './annotated-text-operated-event.mjs';"));
     },
   },

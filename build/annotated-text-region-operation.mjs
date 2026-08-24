@@ -126,14 +126,27 @@ function loadPlanContext(dbInTxn          , prefix        , documentId        , 
       ? Object.values(compiledMeta.annotationHandles).map((meta     ) => ({ annotationName: meta.annotationName, fields: descriptor.annotations?.find((a     ) => a.annotationName === meta.annotationName)?.fields ?? {} }))
       : [],
   });
-  const regionDeclarations = Object.values(compiledMeta.annotationHandles ?? {}).map((meta     ) => ({
-    annotationName: meta.annotationName,
-    fields: descriptor.annotations?.find((a     ) => a.annotationName === meta.annotationName)?.fields ?? {},
-    empty: descriptor.annotations?.find((a     ) => a.annotationName === meta.annotationName)?.empty ?? 'delete',
-    cardinality: meta.cardinality ?? 'many',
-    kind: 'annotation',
-    protects: descriptor.annotations?.find((a     ) => a.annotationName === meta.annotationName)?.protects ?? null,
-  }));
+  // Declarations carry placeholder + authorization-policy source so the v16
+  // fingerprint covers the full ratified declaration contract (Finding 4).
+  const regionDeclarations = Object.values(compiledMeta.annotationHandles ?? {}).map((meta     ) => {
+    const annConfig      = descriptor.annotations?.find((a     ) => a.annotationName === meta.annotationName);
+    const isProtecting = typeof (annConfig?.protects ?? null) === 'string';
+    const access = compiledMeta.protectingFamilies?.[meta.annotationName]?.access;
+    return {
+      annotationName: meta.annotationName,
+      fields: annConfig?.fields ?? {},
+      empty: annConfig?.empty ?? 'delete',
+      cardinality: meta.cardinality ?? 'many',
+      kind: 'annotation',
+      protects: typeof annConfig?.protects === 'string' ? annConfig.protects : null,
+      placeholder: typeof compiledMeta.protectingFamilies?.[meta.annotationName]?.placeholder === 'string'
+        ? compiledMeta.protectingFamilies[meta.annotationName].placeholder
+        : null,
+      accessPolicySource: isProtecting
+        ? (typeof access === 'function' ? Function.prototype.toString.call(access) : null)
+        : null,
+    };
+  });
   const storedAsRegion = annotations.map((image) => ({
     id: image.id,
     family: image.family,

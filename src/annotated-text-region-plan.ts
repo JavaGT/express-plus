@@ -173,6 +173,7 @@ export function planRegionEdit({
     actor,
     lamport,
   });
+  const declarationFingerprint = regionDeclarationFingerprint(declarations);
   const postimage = reduceRegionPostimage({
     beforeFamily: family,
     afterFamily,
@@ -181,6 +182,7 @@ export function planRegionEdit({
     transitions: descriptor.transitions,
     declarations,
     expectedBeforeDigest: descriptor.affectedClosureDigest,
+    declarationFingerprint,
   });
   // One completeness predicate for planning and replay: overflow rejects the
   // action here BEFORE the compound commit; a valid witness proceeds.
@@ -192,7 +194,6 @@ export function planRegionEdit({
     to: descriptor.to,
     namedIds: namedTransitionIds(descriptor),
   });
-  const declarationFingerprint = regionDeclarationFingerprint(declarations);
 
   let contribution: DeleteFact | null = null;
   if (textOperations.kind !== 'none' && descriptor.from < descriptor.to) {

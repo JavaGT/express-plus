@@ -56,6 +56,16 @@ export const REGION_POSTIMAGE_DISAGREES = 'region postimage disagrees with opera
 
 
 
+
+                                  
+
+
+
+
+
+
+
+
                                              
 
 
@@ -68,6 +78,9 @@ export const REGION_POSTIMAGE_DISAGREES = 'region postimage disagrees with opera
 
 
 
+
+
+                                        
 
 
 
@@ -129,9 +142,14 @@ function canonicalImage(image                       )                        {
   });
 }
 
-export function digestAffectedClosure(annotations                                  )         {
+export function digestAffectedClosure(annotations                                  , declarationFingerprint         )         {
   const sorted = sortAnnotations(annotations.map(canonicalImage));
   const fields           = [String(sorted.length)];
+  if (declarationFingerprint !== undefined) {
+    // Side digest covers the declaration fingerprint (Finding 4): the witness
+    // images are only meaningful under the compiled declarations.
+    fields.push(declarationFingerprint);
+  }
   for (const image of sorted) fields.push(...annotationDigestFields(image));
   return lengthPrefixedUtf8Digest(fields);
 }
@@ -308,7 +326,10 @@ export function reduceRegionPostimage({
   transitions,
   declarations,
   expectedBeforeDigest,
+  declarationFingerprint,
 }
+
+
 
 
 
@@ -319,10 +340,16 @@ export function reduceRegionPostimage({
  )                  {
   const before = sortAnnotations(beforeAnnotations.map(canonicalImage));
   assertRegionClosureLimits(before);
+  // The v10 descriptor contract compares the plain closure digest; the
+  // declaration-fingerprint-covered digest is a separate WITNESS digest
+  // carried alongside it (Finding 4).
   const beforeDigest = digestAffectedClosure(before);
   if (expectedBeforeDigest !== undefined && expectedBeforeDigest !== beforeDigest) {
     throw regionStaleError('affected closure digest does not match the live document');
   }
+  const witnessBeforeDigest = declarationFingerprint === undefined
+    ? undefined
+    : digestAffectedClosure(before, declarationFingerprint);
 
   const byId = new Map(before.map((image) => [image.id, image]));
   const named = new Map                              ();
@@ -368,26 +395,41 @@ export function reduceRegionPostimage({
     const declared = declarationOf(declarations, image.family);
     const empty = declared.empty === 'orphan' ? 'orphan' : 'delete';
     if (empty === 'orphan') {
+      // Complete-membership orphan witness (Finding 6): the saved quote spans
+      // the FULL pre-edit extent of every membership in ordinal order (not
+      // just the first), and lastRange records the LAST membership's resolved
+      // pre-edit offsets. Snapshot projection coerces a null lastRange to
+      // [0,0], so recording the real range preserves exact historical state.
       const quote = materializeText(beforeFamily);
       let savedQuote = '';
+      let lastRange                                   = null;
       try {
-        const first = image.memberships[0];
-        if (first) {
-          const start = projectEndpointToOffset(beforeFamily, first.start);
-          const end = projectEndpointToOffset(beforeFamily, first.end);
-          if (end > start) savedQuote = quote.slice(start, end);
+        let quoteStart = -1;
+        let quoteEnd = -1;
+        for (const membership of image.memberships) {
+          const start = projectEndpointToOffset(beforeFamily, membership.start);
+          const end = projectEndpointToOffset(beforeFamily, membership.end);
+          if (end > start) {
+            if (quoteStart < 0 || start < quoteStart) quoteStart = start;
+            if (end > quoteEnd) quoteEnd = end;
+            lastRange = [start, end];
+          }
+        }
+        if (quoteStart >= 0 && quoteEnd > quoteStart) {
+          savedQuote = quote.slice(quoteStart, quoteEnd);
         }
       } catch {
         savedQuote = '';
+        lastRange = null;
       }
-      next.set(image.id, cloneImage(image, [], { savedQuote, lastRange: null }));
+      next.set(image.id, cloneImage(image, [], { savedQuote, lastRange }));
       emptied.push(Object.freeze({
         annotationId: image.id,
         disposition: Object.freeze({
           kind: 'orphaned'         ,
           family: image.family,
           savedQuote,
-          lastRange: null,
+          lastRange,
         }),
       }));
     } else {
@@ -438,6 +480,12 @@ export function reduceRegionPostimage({
     emptied: Object.freeze(emptied),
     beforeDigest,
     afterDigest: digestAffectedClosure(pruneRemovedTargets([...annotations], removedIds)),
+    // Fingerprint-covered witness digests (Finding 4) — present only when the
+    // caller supplies the compiled declaration fingerprint.
+    ...(declarationFingerprint === undefined ? {} : {
+      witnessBeforeDigest,
+      witnessAfterDigest: digestAffectedClosure(pruneRemovedTargets([...annotations], removedIds), declarationFingerprint),
+    }),
   });
 }
 
@@ -482,6 +530,15 @@ export function regionDeclarationFingerprint(declarations                       
   const fields = [REGION_V16_DECLARATION_FINGERPRINT_VERSION === 1 ? 'v1' : 'v?', String(sorted.length)];
   for (const declaration of sorted) {
     const names = Object.keys(declaration.fields ?? {}).sort();
+    // Fail closed: a protecting declaration without its placeholder or
+    // authorization-policy identity cannot be fingerprinted — the v16
+    // witness contract requires both (#148 rev 2).
+    const isProtecting = typeof declaration.protects === 'string' || (declaration.kind === 'protectingAnnotation');
+    const placeholder = declaration.placeholder ?? null;
+    const policy = declaration.accessPolicySource ?? null;
+    if (isProtecting && (placeholder === null || policy === null)) {
+      throw regionLimitError('region.edit protecting declaration is missing its placeholder or authorization-policy handle');
+    }
     fields.push(
       declaration.annotationName,
       String(names.length),
@@ -489,6 +546,8 @@ export function regionDeclarationFingerprint(declarations                       
       (declaration.empty === 'orphan' ? 'orphan' : 'delete'),
       ((declaration                            ).cardinality === 'one' ? 'one' : 'many'),
       (typeof declaration.protects === 'string' ? declaration.protects : ''),
+      placeholder ?? '',
+      policy ?? '',
     );
   }
   return lengthPrefixedUtf8Digest(fields);
@@ -569,9 +628,22 @@ export function assertCompleteRegionWitness({
   for (const id of postimage.affectedIds) {
     if (!beforeIds.has(id)) throw new Error('region witness disagrees with operated event');
   }
+  // Orphan-policy empties keep a (membership-free) image in the after side;
+  // only 'deleted' dispositions must vanish from it entirely.
   for (const emptied of postimage.emptied) {
-    if (!beforeIds.has(emptied.annotationId) || afterById.has(emptied.annotationId)) {
+    if (!beforeIds.has(emptied.annotationId)) {
       throw new Error('region witness disagrees with operated event');
+    }
+    if (emptied.disposition.kind === 'deleted' && afterById.has(emptied.annotationId)) {
+      throw new Error('region witness disagrees with operated event');
+    }
+    if (emptied.disposition.kind === 'orphaned') {
+      const afterImage = afterById.get(emptied.annotationId);
+      if (!afterImage || afterImage.memberships.length !== 0
+        || afterImage.orphan === null
+        || afterImage.orphan.savedQuote !== emptied.disposition.savedQuote) {
+        throw new Error('region witness disagrees with operated event');
+      }
     }
   }
   for (const image of postimage.beforeAnnotations) {
