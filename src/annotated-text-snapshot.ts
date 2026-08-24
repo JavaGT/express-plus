@@ -157,6 +157,7 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
   const text = materializeText(family);
 
   const annotations = loadAnnotations({ db, prefix, descriptor, documentId: row.id });
+  const annotationById = new Map(annotations.map((annotation) => [annotation.id, annotation]));
 
   // Document-scoped ranges: project stored historical-basis endpoints to
   // absolute offsets. An unprojectable PROTECTOR fails the whole document
@@ -167,7 +168,7 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
   const droppedAnnotationIds = new Set<string>();
   for (const rangeRow of rangeRows) {
     const projected = projectRangeToOffsets(family, rangeRow.start_point, rangeRow.end_point);
-    const annotation = annotations.find((candidate) => candidate.id === rangeRow.annotation_id);
+    const annotation = annotationById.get(rangeRow.annotation_id);
     if (!annotation) continue;
     if (!projected) {
       if (Object.hasOwn(meta.protectingFamilies, annotation.family)) {
