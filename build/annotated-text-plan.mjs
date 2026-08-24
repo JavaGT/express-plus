@@ -6,6 +6,16 @@
 //
 // This planner does not write DB, mint authoring frames, or fold client ops.
 // One write authority stays the entity commit handler.
+//
+// Emitter note (W1 #143 MAJOR 3): the functions here drive the LIVE authoring
+// path — ordinary text typing and annotation add/remove on an open document.
+// They emit v14 events via constructV14OperatedEvent. This is NOT dormant
+// dead code and is NOT a region emitter: the region path is v15-only
+// (planRegionEdit + constructV15RegionEvent) and cannot reach these functions.
+// The design's "only v15 after the flip" instruction is scoped to the W3
+// history-engine flip; live authoring deliberately stays v14 until then
+// (see workbench#143 / scope#992 rev 1 Finding 1). check-annotated-text-
+// single-authority.mjs enforces that no region module lowers to v13/v14.
 
 import {
   applyTextOperation,
