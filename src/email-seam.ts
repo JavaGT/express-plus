@@ -31,6 +31,7 @@
 
 import { sweepBehindCursor, upsertConsumerCursor } from './consumer-cursor.ts';
 import { txn, type DbHandle } from './driver.ts';
+import { decodeConsumerLogRowData, type LogRowLike } from './committed-log.ts';
 
 const CONSUMER = 'email';
 
@@ -125,7 +126,9 @@ export function emailSeam({ transport = noopTransport }: { transport?: Transport
     let delivered = 0;
     await sweepBehindCursor(db, CONSUMER, async (row) => {
       let data: Record<string, unknown>;
-      try { data = JSON.parse(row.eventData as string) as Record<string, unknown>; } catch { data = {}; }
+      // Strict log-row decode (Finding 1): tampered v16 rows fail closed;
+      // non-v16 malformed rows degrade to {} as before.
+      try { data = decodeConsumerLogRowData(row as unknown as LogRowLike, {}); } catch { data = {}; }
       const payload = extractEmailPayload({ type: row.eventType, data });
       try {
         await deliverAndAdvance(db, { scope: row.scope, seq: row.seq }, payload);

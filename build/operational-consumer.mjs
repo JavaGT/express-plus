@@ -3,6 +3,7 @@ import { sweepBehindCursor, upsertConsumerCursor } from './consumer-cursor.mjs';
 
 import { txn } from './driver.mjs';
 
+import { decodeConsumerLogRowData,                 } from './committed-log.mjs';
 
 const IDENTIFIER = /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/;
 const cursorName = (name        ) => `operational:${name}`;
@@ -210,7 +211,9 @@ export function createOperationalConsumers(consumers                     = [], {
       .get(consumer.name, row.scope, `${row.scope}:${row.seq}`);
     if (failed?.status === 'terminal' || (failed?.nextAttemptAt != null && Number(failed.nextAttemptAt) > now())) return false;
     let data                         ;
-    try { data = JSON.parse(row.eventData); } catch { data = {}; }
+    // Strict log-row decode (Finding 1): tampered v16 rows fail closed;
+    // non-v16 malformed rows degrade to {} as before.
+    try { data = decodeConsumerLogRowData(row                         , {}); } catch { data = {}; }
     const fields = Object.create(null)                           ;
     for (const field of consumer.event.fields) fields[field] = data[field];
     let payload         ;

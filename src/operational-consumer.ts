@@ -3,6 +3,7 @@ import { sweepBehindCursor, upsertConsumerCursor } from './consumer-cursor.ts';
 import type { DbHandle } from './driver.ts';
 import { txn } from './driver.ts';
 import type { LogRow } from './committed-log.ts';
+import { decodeConsumerLogRowData, type LogRowLike } from './committed-log.ts';
 
 const IDENTIFIER = /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/;
 const cursorName = (name: string) => `operational:${name}`;
@@ -210,7 +211,9 @@ export function createOperationalConsumers(consumers: readonly unknown[] = [], {
       .get(consumer.name, row.scope, `${row.scope}:${row.seq}`);
     if (failed?.status === 'terminal' || (failed?.nextAttemptAt != null && Number(failed.nextAttemptAt) > now())) return false;
     let data: Record<string, unknown>;
-    try { data = JSON.parse(row.eventData); } catch { data = {}; }
+    // Strict log-row decode (Finding 1): tampered v16 rows fail closed;
+    // non-v16 malformed rows degrade to {} as before.
+    try { data = decodeConsumerLogRowData(row as unknown as LogRowLike, {}); } catch { data = {}; }
     const fields = Object.create(null) as Record<string, unknown>;
     for (const field of consumer.event.fields) fields[field] = data[field];
     let payload: unknown;

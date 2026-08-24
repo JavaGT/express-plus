@@ -5,6 +5,7 @@ import { getLog } from './log.mjs';
 import { compileBlobCensus,                 } from './blob-census.mjs';
 import { declaredBlobField } from './pending-blob.mjs';
 
+import { decodeConsumerLogRowData,                 } from './committed-log.mjs';
 
 // Durable, cursor-backed recovery for blob finalize — the same proven pattern
 // as effect.durable (durable-effects.mjs) and projected.async (projected-
@@ -219,7 +220,9 @@ export function createBlobLifecycle({ blobs, entities, declaredBlobFields = [] }
     if (blobFields.size > 0) {
       await sweepBehindCursor(db, CONSUMER, async (row) => {
         let data                         ;
-        try { data = JSON.parse(row.eventData); } catch { data = {}; }
+        // Strict log-row decode (Finding 1): tampered v16 rows fail closed;
+        // non-v16 malformed rows degrade to {} as before.
+        try { data = decodeConsumerLogRowData(row                         , {}); } catch { data = {}; }
         const ids = resolveBlobIds({ type: row.eventType, data });
         if (ids.length === 0) return 'skip';
         try {

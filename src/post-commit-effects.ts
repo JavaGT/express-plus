@@ -5,6 +5,7 @@
 import type { DbHandle } from './driver.ts';
 import { recordFactDependencies } from './private-action-fact-dependency.ts';
 import { isDeleteFact } from './annotated-text-delete-history.ts';
+import { parseStoredV16OperatedEvent } from './annotated-text-operated-event.ts';
 import {
   applicationPrivateFactView,
   compoundKindOf,
@@ -199,6 +200,19 @@ function parseJson(value: string, where: string): unknown {
   try { return JSON.parse(value); } catch { throw new TypeError(`${where} must contain valid JSON`); }
 }
 
+// Strict persisted-event decode for the private-fact replay path (Finding 1):
+// v16 rows go through the package's stored parser (duplicate keys,
+// noncanonical bytes, over-limits fail closed); everything else keeps the
+// same valid-JSON TypeError boundary as before.
+function decodeCommittedEventJson(value: string, where: string): unknown {
+  let probe: unknown;
+  try { probe = JSON.parse(value); } catch { throw new TypeError(`${where} must contain valid JSON`); }
+  if (probe && typeof probe === 'object' && !Array.isArray(probe) && (probe as { version?: unknown }).version === 16) {
+    return parseStoredV16OperatedEvent(value, { entity: 'Unknown', field: 'unknown' });
+  }
+  return probe;
+}
+
 interface ReceiptRow {
   scope: string;
   actionId: string;
@@ -305,7 +319,10 @@ export function replayPrivateFactProjections(db: DbHandle, projections: PostComm
       const committed: CommittedEvent = Object.freeze({
         type: stored.eventType as string, scope: stored.scope as string, seq: stored.seq as number,
         actionId: stored.actionId as string, committedAt: stored.committedAt as string,
-        data: parseJson(stored.eventData as string, 'committed event data'),
+        // One strict log-row decoder (Finding 1): v16 rows are validated
+        // before reaching private-fact projections; non-v16 rows keep the
+        // same valid-JSON error boundary.
+        data: decodeCommittedEventJson(stored.eventData as string, 'committed event data'),
       });
       const matched = projections.filter((projection) =>
         projection.eventTypes.includes(committed.type)

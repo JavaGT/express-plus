@@ -207,6 +207,33 @@ export function decodeLogRowData(row            )          {
   return probe;
 }
 
+/**
+ * Consumer-safe variant of the one log-row decoder for background effect
+ * consumers (Finding 1, review round 2). Identical v16 strictness — a
+ * tampered/duplicate-key/noncanonical v16 row throws the same fixed opaque
+ * signatures — but a non-v16 row's malformed JSON degrades to `fallback`
+ * exactly as those consumers behaved before, preserving their existing
+ * error boundaries.
+ */
+export function decodeConsumerLogRowData(row            , fallback                         )                          {
+  try {
+    const decoded = decodeLogRowData(row);
+    return (decoded && typeof decoded === 'object' && !Array.isArray(decoded)
+      ? decoded
+      : fallback);
+  } catch (error) {
+    // Only genuine v16 strictness failures propagate; plain JSON errors on
+    // non-v16 rows keep the consumer's legacy degrade-to-fallback behavior.
+    const text = row.eventData                 ;
+    let probe         ;
+    try { probe = text ? JSON.parse(text) : undefined; } catch { return fallback; }
+    if (probe && typeof probe === 'object' && !Array.isArray(probe) && (probe                         ).version === 16) {
+      throw error;
+    }
+    return fallback;
+  }
+}
+
 // eventsFor — read every event for an actionId (dedupe). Returns raw DB rows
 // with eventData parsed, ordered by scope + seq.
 export function eventsFor(db          , actionId        )             {
