@@ -229,9 +229,8 @@ function loadRecipientProjectionSource({ db, prefix, descriptor, documentId, fam
       ? { id, family: annotationFamily, fields, owner: owner ?? undefined, protectedTargetIds: targets }
       : { id, family: annotationFamily, fields, owner: owner ?? undefined };
     if (annotation.owner === undefined) delete annotation.owner;
-    const frozenAnnotation = deepFreeze(annotation);
-    annotations.push(frozenAnnotation);
-    annotationById.set(id, frozenAnnotation);
+    annotations.push(annotation);
+    annotationById.set(id, annotation);
   }
   profile?.('annotation SQL, row load, and decode', performance.now() - started, { rows: annotations.length });
 
@@ -241,15 +240,15 @@ function loadRecipientProjectionSource({ db, prefix, descriptor, documentId, fam
       FROM ${quotedIdentifier(`${prefix}_range`)}
      WHERE document_id = ?
      ORDER BY id`;
-  const projectedByRangeId = new Map                                                                                                  ();
+  const projectedByRangeId = new Map                                                                                                                            ();
   for (const stored of iterateArrayRows(db, rangeQuery, documentId)) {
     if (stored.length !== 3 || !Number.isSafeInteger(stored[0]) || typeof stored[1] !== 'string' || typeof stored[2] !== 'string') fail('stored range row is malformed');
-    const start = parseStoredEndpoint(stored[1]);
-    const end = parseStoredEndpoint(stored[2]);
+    const startPoint = parseStoredEndpoint(stored[1]);
+    const endPoint = parseStoredEndpoint(stored[2]);
     projectedByRangeId.set(stored[0], {
-      projected: projectRangeToOffsets(family, start, end, text.length),
-      startText: stored[1],
-      endText: stored[2],
+      projected: projectRangeToOffsets(family, startPoint, endPoint, text.length),
+      startPoint,
+      endPoint,
     });
   }
   profile?.('range SQL, endpoint parse, and unique projection', performance.now() - started, { ranges: projectedByRangeId.size });
@@ -313,27 +312,19 @@ function loadRecipientProjectionSource({ db, prefix, descriptor, documentId, fam
     ? loadedRanges
     : loadedRanges.filter((range) => sourceAnnotationIds.has(range.annotationId));
   const sourceFor = (anchored         )                               => {
-    const anchoredByRangeId = new Map                                                                ();
     const ranges                                = [];
     for (const link of sourceRangeLinks) {
       const stored = projectedByRangeId.get(link.rangeId) ;
       if (!stored.projected) continue;
-      if (!anchored) {
-        ranges.push({ annotationId: link.annotationId, start: stored.projected.start, end: stored.projected.end });
-        continue;
-      }
-      let endpoints = anchoredByRangeId.get(link.rangeId);
-      if (!endpoints) {
-        endpoints = { start: parseStoredEndpoint(stored.startText), end: parseStoredEndpoint(stored.endText) };
-        anchoredByRangeId.set(link.rangeId, endpoints);
-      }
-      ranges.push({
-        annotationId: link.annotationId,
-        start: stored.projected.start,
-        end: stored.projected.end,
-        anchoredStart: endpoints.start,
-        anchoredEnd: endpoints.end,
-      });
+      ranges.push(anchored
+        ? {
+          annotationId: link.annotationId,
+          start: stored.projected.start,
+          end: stored.projected.end,
+          anchoredStart: stored.startPoint,
+          anchoredEnd: stored.endPoint,
+        }
+        : { annotationId: link.annotationId, start: stored.projected.start, end: stored.projected.end });
     }
     return createAnnotatedTextRecipientSource({
       version: 1,
@@ -437,10 +428,10 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
     : projectAnnotatedTextCaretForRecipient({
       kind: 'workbench.annotatedText.canonical', version: 1,
       text,
-      annotations: [...source.annotations()],
-      ranges: [...source.ranges()].map(({ annotationId, start, end }) => ({ annotationId, start, end })),
-      measurements: [...source.measurements()],
-      orphans: [...source.orphans()],
+      annotations: [...source.annotations],
+      ranges: source.ranges.map(({ annotationId, start, end }) => ({ annotationId, start, end })),
+      measurements: [...source.measurements],
+      orphans: [...source.orphans],
       capabilityHints: [],
     }, descriptor, decisions, caret, presence);
   profile?.('recipient transform and freezing', performance.now() - started);
