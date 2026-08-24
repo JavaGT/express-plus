@@ -1266,7 +1266,7 @@ function receiptMetadata(request: any, historyCommit: any) {
 // (AGENTS.md: never a magic default); omitting it is a load-time error. When
 // Phase 2 wires this kernel to a request path, `authorize` is where the route
 // gate + grant engine compose — it is not a second, looser auth path.
-export function createServer({ handlers = {}, authorize, db, pipeline = durableMutationVariant(), livePipeline, tierOfEvent, history, historyActions = {}, cursorPolicy, annotatedHistory, contributionPolicies = null, authorization }: {
+export function createServer({ handlers = {}, authorize, db, pipeline = durableMutationVariant(), livePipeline, tierOfEvent, history, historyActions = {}, cursorPolicy, contributionPolicies = null, authorization }: {
   handlers?: Record<string, any>;
   authorize?: (context: any) => any;
   db?: any;
@@ -1282,7 +1282,6 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
   history?: any;
   historyActions?: Record<string, any>;
   cursorPolicy?: any;
-  annotatedHistory?: any;
   contributionPolicies?: any;
   authorization?: AuthorizationAdapter | null;
 } = {}) {
@@ -1779,7 +1778,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
 
   const historyRuntime = history
     ? createDurableHistoryRuntime({
-       db, descriptor: history, generatedActions: historyActions, dispatch, dispatchBatch, authorize, cursorPolicy, annotatedHistory, contributionPolicies,
+       db, descriptor: history, generatedActions: historyActions, dispatch, dispatchBatch, authorize, cursorPolicy, contributionPolicies,
     })
     : undefined;
   return { dispatch, dispatchBatch, history: historyRuntime, db, log: [] };  // log is the durable _Log table; empty array for compat

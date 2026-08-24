@@ -290,7 +290,7 @@ if (w3Retired) {
   // the retired receipt/scope scanners.
   const movementModules = [
     'src/durable-history.ts', 'src/history-contribution-policy.ts',
-    'src/pipeline.ts', 'src/kernel.ts', 'src/history-read.ts',
+    'src/pipeline.ts', 'src/kernel.ts',
   ];
   for (const path of movementModules) {
     const source = byRel.get(path);

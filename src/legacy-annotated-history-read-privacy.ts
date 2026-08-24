@@ -14,8 +14,7 @@
 //   - only the actions()/events() read functions may call it;
 //   - durable-history.ts, contribution-policy modules, cursor modules,
 //     pipeline, and kernel must contain no import or reference to this module
-//     or to the retired `receiptContainsAnnotatedText` / `scopeContainsAnnotatedText`
-//     scanners.
+//     or to the retired history-read scanners (which live only here).
 
 import { tryParseScopeKey } from './scope-handle.ts';
 import type { DbHandle } from './driver.ts';

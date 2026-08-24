@@ -9,6 +9,7 @@ import { durableHistory } from '../build/index.mjs';
 import workbench, { createServer, durableMutationVariant, executeFrameworkDDL } from '../build/internal.mjs';
 import { retentionPrune, insertReceipt } from '../build/committed-log.mjs';
 import { prepareErasureDirective, applyErasureDirective } from '../build/erasure-directive.mjs';
+import { createHistoryContributionPolicyRegistry, compileNativeInsertContributionPolicy } from '../build/history-contribution-policy.mjs';
 
 const principal = Object.freeze({ type: 'user', id: 'u1', attributes: {} });
 const scope = 'Document:1';
@@ -34,12 +35,25 @@ async function historyMove(server, operation, args) {
   return server.history[operation]({ actionId: `${operation}-${Math.random()}`, ...args, revision: cursor.revision });
 }
 
-function makeServer(db, history = historyDescriptor(), cursorPolicy, annotatedHistory) {
+// #145 S5: the retired annotatedHistory classifier option is gone. Tests build
+// the compile-produced contribution-policy registry instead: native insert
+// policies per action type plus the declaration-derived privateHistoryScopes
+// read-privacy set (used ONLY by actions()/events()).
+function annotatedRegistry(entities, actionTypes = []) {
+  const policies = actionTypes.map((type) => {
+    const parts = type.split('.');
+    const fieldName = parts[1];
+    return compileNativeInsertContributionPolicy({ entity: parts[0], fieldName }, type);
+  });
+  return createHistoryContributionPolicyRegistry({ policies, privateHistoryScopes: entities });
+}
+
+function makeServer(db, history = historyDescriptor(), cursorPolicy, contributionPolicies = null) {
   return createServer({
     db,
     history,
     cursorPolicy,
-    annotatedHistory,
+    contributionPolicies,
     authorize: () => true,
     handlers: {
       'document.set': ({ payload, scope: owningScope }) => owningScope === undefined || payload.before === undefined
@@ -777,72 +791,59 @@ test('history authorization fails closed', async () => {
   await assert.rejects(server.history.undo({ scope, principal, session: 'tab-a' }), { status: 403 });
 });
 
-test('annotated history reads deny before canonical receipts or events materialize', async () => {
+test('annotated history reads deny through privateHistoryScopes before materialization', async () => {
   const db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);
-  const annotatedHistory = {
-    entities: new Set(['AnnotatedDoc']),
-    actionTypes: new Set(['AnnotatedDoc.body.operation']),
-  };
-  const server = makeServer(db, undefined, undefined, annotatedHistory);
+  const registry = annotatedRegistry(new Set(['AnnotatedDoc']), ['AnnotatedDoc.body.operation']);
+  const server = makeServer(db, undefined, undefined, registry);
   await server.dispatch({
     actionId: 'annotated-a1', type: 'AnnotatedDoc.body.operation', scope: 'AnnotatedDoc:1', principal,
     payload: { operation: ['secret operation'], family: { text: 'secret body' } }, history: { session: 'tab-a' },
   });
 
+  // Read privacy is the declaration-derived privateHistoryScopes set — the
+  // actions()/events() boundary denies before any receipt/event materializes.
   await assert.rejects(server.history.actions({ scope: 'AnnotatedDoc:1', principal }), { status: 403 });
   await assert.rejects(server.history.events({ scope: 'AnnotatedDoc:1', principal }), { status: 403 });
-  await assert.rejects(historyMove(server, 'undo', { scope: 'AnnotatedDoc:1', principal, session: 'tab-a' }), { status: 403 });
+  // Movement is policy-governed, not scope-scanned (#145 S5): the barrier
+  // payload keeps the cursor empty but is NOT a move denial.
+  const undone = await historyMove(server, 'undo', { scope: 'AnnotatedDoc:1', principal, session: 'tab-a' });
+  assert.equal(undone.ok, true, undone.failure?.message);
   assert.partialDeepStrictEqual(await server.history.cursor({ scope: 'AnnotatedDoc:1', principal, session: 'tab-a' }), { undo: 0, redo: 0 });
 });
 
-test('receipt references deny mixed history even after annotated log retention', async () => {
+test('history reads do not scan receipts for annotated refs (retired scanner is gone)', async () => {
   const db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);
-  const annotatedHistory = {
-    entities: new Set(['AnnotatedDoc']),
-    actionTypes: new Set(['AnnotatedDoc.body.operation']),
-  };
-  const server = makeServer(db, undefined, undefined, annotatedHistory);
+  const registry = annotatedRegistry(new Set(['AnnotatedDoc']), ['AnnotatedDoc.body.operation']);
+  const server = makeServer(db, undefined, undefined, registry);
   await server.dispatch({
     actionId: 'mixed-a1', type: 'mixed.set', scope: 'custom:1', principal,
     payload: { text: 'secret canonical fact' }, history: { session: 'tab-a' },
   });
 
+  // #145 S5: receipt/event-ref scanning for annotated material is gone from
+  // movement AND read-denial; only the declaration-derived privateHistoryScopes
+  // deny the actions()/events() boundary. A scope outside that set stays
+  // readable even after retention prunes receipts.
   await retentionPrune(db, '9999-01-01T00:00:00.000Z');
-  await assert.rejects(server.history.actions({ scope: 'custom:1', principal, after: 99, limit: 1 }), { status: 403 });
-  await assert.rejects(server.history.events({ scope: 'custom:1', principal, after: 99, limit: 1 }), { status: 403 });
+  const actions = await server.history.actions({ scope: 'custom:1', principal, after: 99, limit: 1 });
+  assert.ok(Array.isArray(actions.events ?? actions), 'reads on an unlisted scope are not scanner-denied');
 });
 
-test('malformed receipt metadata denies history before canonical materialization', async () => {
+test('a generic move at an annotated scope is policy-governed, not scope-blocked', async () => {
   const db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);
-  const server = makeServer(db, undefined, undefined, {
-    entities: new Set(['AnnotatedDoc']),
-    actionTypes: new Set(['AnnotatedDoc.body.operation']),
-  });
-  await set(server, { actionId: 'a1', value: 1, before: 0, session: 'tab-a' });
-  db.prepare("UPDATE _ActionReceipt SET eventRefs = '[{}]' WHERE scope = :scope AND actionId = 'a1'").run({ scope });
-  await assert.rejects(server.history.actions({ scope, principal }), { status: 403 });
-  await assert.rejects(server.history.events({ scope, principal }), { status: 403 });
-  db.prepare("UPDATE _ActionReceipt SET actionType = '$batch', actionData = '{\"type\":\"document.set\"}', eventRefs = '[]' WHERE scope = :scope AND actionId = 'a1'").run({ scope });
-  await assert.rejects(server.history.actions({ scope, principal }), { status: 403 });
-});
-
-test('undo denies a zero-event receipt owned by an annotated scope', async () => {
-  const db = new DatabaseSync(':memory:');
-  executeFrameworkDDL(db);
-  const annotatedHistory = {
-    entities: new Set(['AnnotatedDoc']),
-    actionTypes: new Set(['AnnotatedDoc.body.operation']),
-  };
-  const server = makeServer(db, undefined, undefined, annotatedHistory);
+  const registry = annotatedRegistry(new Set(['AnnotatedDoc']), ['AnnotatedDoc.body.operation']);
+  const server = makeServer(db, undefined, undefined, registry);
   const annotatedScope = 'AnnotatedDoc:1';
+  await assert.rejects(server.history.actions({ scope: annotatedScope, principal }), { status: 403 });
   await server.dispatch({
     actionId: 'zero-event', type: 'document.set', scope: annotatedScope, principal,
-    payload: { value: 'secret receipt', before: null }, history: { session: 'tab-a' },
+    payload: { value: 'ok', before: null }, history: { session: 'tab-a' },
   });
-  await assert.rejects(historyMove(server, 'undo', { scope: annotatedScope, principal, session: 'tab-a' }), { status: 403 });
+  const result = await historyMove(server, 'undo', { scope: annotatedScope, principal, session: 'tab-a' });
+  assert.equal(result.ok, true, result.failure?.message);
 });
 
 test('history rejects an inverse translated to an annotated operation', async () => {
@@ -855,12 +856,11 @@ test('history rejects an inverse translated to an annotated operation', async ()
       redo: ({ action }) => ({ type: 'AnnotatedDoc.body.operation', scope: action.scope, payload: {} }),
     } },
   });
-  const server = makeServer(db, history, undefined, {
-    entities: new Set(['AnnotatedDoc']),
-    actionTypes: new Set(['AnnotatedDoc.body.operation']),
-  });
+  const server = makeServer(db, history, undefined, annotatedRegistry(new Set(['AnnotatedDoc']), ['AnnotatedDoc.body.operation']));
   await set(server, { actionId: 'a1', value: 1, before: 0, session: 'tab-a' });
 
+  // #145 S5: an ordinary inverse may not re-target a contribution-policy action
+  // (the policy owns its chain); the guard throws forbidden before any dispatch.
   await assert.rejects(historyMove(server, 'undo', { scope, principal, session: 'tab-a' }), { status: 403 });
   assert.partialDeepStrictEqual(await server.history.cursor({ scope, principal, session: 'tab-a' }), { undo: 1, redo: 0 });
 });
@@ -870,7 +870,7 @@ test('undoToPoint rejects an inverse translated to an annotated operation', asyn
   const history = durableHistory({ authorize: () => true, actions: { 'document.set': {
     inverse: () => ({ type: 'AnnotatedDoc.body.operation', payload: {} }), redo: () => ({ type: 'document.set', payload: {} }),
   } } });
-  const server = makeServer(db, history, undefined, { entities: new Set(['AnnotatedDoc']), actionTypes: new Set(['AnnotatedDoc.body.operation']) });
+  const server = makeServer(db, history, undefined, annotatedRegistry(new Set(['AnnotatedDoc']), ['AnnotatedDoc.body.operation']));
   await set(server, { actionId: 'point-annotated-a1', value: 1, before: 0, session: 'tab-a' });
   const cursor = await server.history.cursor({ scope, principal, session: 'tab-a' });
   await assert.rejects(server.history.undoToPoint({ scope, principal, session: 'tab-a', actionId: 'point-annotated-u1', revision: cursor.revision, seq: 0 }), { status: 403 });

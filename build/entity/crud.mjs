@@ -34,7 +34,15 @@ import { assertUtf16Range } from '../annotated-text.mjs';
 import { rawRow } from './query.mjs';
 
 export const CRUD_CURSOR_POLICY = Symbol('workbench.crud-cursor-policy');
-export const ANNOTATED_TEXT_COMPENSATION = Symbol('workbench.annotated-text-compensation');
+/**
+ * History-move compensation input discriminator. The retired
+ * `ANNOTATED_COMPENSATION_INPUT` Symbol (#145 S5 census) is replaced by this
+ * plain-string kind between the kernel's generated `.compensate` translator and
+ * this field-owned emitter. It is opaque to applications (history-authored
+ * only); the decision to dispatch compensation is the contribution policy's,
+ * never an action-name test.
+ */
+export const ANNOTATED_COMPENSATION_INPUT = 'workbench.annotated-text-compensation';
 
 /** Prefer the dispatch scope when it is the inherited parent shell for this row. */
 export function resolveGeneratedEventScope(record     , { id, row, payload, scope }     ) {
@@ -696,7 +704,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
     const handler = ({ payload, db, scope, principal, actionId, history }     ) => {
       if (!history?.input && payload?.version === 1) throw new ValidationError('annotated text compensation is history-authored only');
       const command = payload.version === 9 ? assertV9AnnotatedTextOffsetEditPayload(name, fieldName, payload) : null;
-      if (history?.input?.kind === ANNOTATED_TEXT_COMPENSATION) {
+      if (history?.input?.kind === ANNOTATED_COMPENSATION_INPUT) {
         if (payload.version !== 1 || !payload.history || payload.history.version !== 1
           || !['undo', 'redo'].includes(payload.history.direction)) throw new ValidationError('invalid annotated text compensation');
         const sourceFact = history.input.targetFact;
@@ -785,7 +793,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
     Object.defineProperty(handler, 'inTransaction', { value: true });
     Object.defineProperty(handler, 'batchForbidden', { value: true });
     Object.defineProperty(handler, 'preDedupe', { value: ({ payload, db, principal, history }     ) => {
-      if (history?.input?.kind === ANNOTATED_TEXT_COMPENSATION) return;
+      if (history?.input?.kind === ANNOTATED_COMPENSATION_INPUT) return;
       const command = assertV9AnnotatedTextOffsetEditPayload(name, fieldName, payload);
       assertV9AuthoringBinding({ command, db, principal });
     }});
@@ -793,7 +801,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       receipt.actionType === operationType && receipt.actionData === canonicalStringify(request.payload) });
     handlers[operationType] = handler;
     const compensationHandler = (context     ) => {
-      if (!context.history?.input || context.history.input.kind !== ANNOTATED_TEXT_COMPENSATION) {
+      if (!context.history?.input || context.history.input.kind !== ANNOTATED_COMPENSATION_INPUT) {
         throw new ValidationError('annotated text compensation is history-authored only');
       }
       return handler(context);
@@ -802,7 +810,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       inTransaction: { value: true },
       batchForbidden: { value: true },
       preDedupe: { value: ({ history }     ) => {
-        if (!history?.input || history.input.kind !== ANNOTATED_TEXT_COMPENSATION) {
+        if (!history?.input || history.input.kind !== ANNOTATED_COMPENSATION_INPUT) {
           throw new ValidationError('annotated text compensation is history-authored only');
         }
       } },

@@ -1,11 +1,12 @@
 // Compile-produced contribution-history policy registry (scope#992 W2/W3).
 //
-// Replaces the loose `annotatedHistory` classifier object with one registry
-// keyed by outer registered action type and annotated contribution handle. The
-// registry is compiled at application assembly time from the annotated field
-// declarations and the registered compound actions' `operations` handles. It is
-// inert data until durable-history movement consults it; it owns NO grant
-// decisions — those go through `authorizationRequirements` and the central
+// Replaces the loose application-side classifier object (the retired
+// per-action-type scopes/eligibility bag) with one registry keyed by outer
+// registered action type and annotated contribution handle. The registry is
+// compiled at application assembly time from the annotated field declarations
+// and the registered compound actions' `operations` handles. It is inert data
+// until durable-history movement consults it; it owns NO grant decisions —
+// those go through `authorizationRequirements` and the central
 // `authorize`/`admitRow` seam (scope#992 rev 2 Finding 9).
 //
 // Module authority (scope#992 Finding 7): this module is the sole home of
@@ -14,8 +15,15 @@
 //
 // A policy entry is keyed by outer action type. Native annotated insert
 // actions and registered compound actions both receive entries here; the
-// retired `ANNOTATED_TEXT_COMPENSATION` routing and `annotatedMove` special
-// cases are subsumed by this single seam.
+// retired compensation-symbol routing and the annotated-move special cases
+// are subsumed by this single seam (#145 S5).
+
+// W3_HISTORY_RETIRED
+// ---------------------------------------------------------------------------
+// #145 slice 5 completed: the special-case retirement census is done. The
+// checker's retired-symbol rules, the movement module boundary, and the retired
+// public classifier-option surface bans are ACTIVE from this marker onward
+// (they were gated on its presence to allow incremental slices).
 
 import type { DbHandle } from './driver.ts';
 import type { CompoundContributionEnvelope } from './compound-contribution-fact.ts';
@@ -143,15 +151,17 @@ function documentIdPresent(payload: unknown): boolean {
 function classifyNativeInsert(_handle: ContributionHandle, payload: unknown): ContributionPolicyFilter {
   if (!documentIdPresent(payload)) return 'barrier';
   // A native annotated-text action is a contribution only when it is a
-  // non-empty text insert. Every other edit kind is excluded from history
-  // movement through the policy (there is no annotated-move special case).
-  const operation = (payload as { operation?: unknown }).operation;
-  if (operation === 'text.insert') {
-    const text = (payload as { text?: unknown }).text;
+  // non-empty text insert (v9 payloads carry `edit.kind: 'text.insert'`).
+  // Every other edit kind is a BARRIER (the "unsupported annotated action is a
+  // barrier" law) — it clears the cursor rather than exposing an older insert
+  // across it. There is no annotated-move special case.
+  const edit = (payload as { edit?: unknown }).edit;
+  const editKind = edit && typeof edit === 'object' && !Array.isArray(edit) ? (edit as { kind?: unknown }).kind : null;
+  if (editKind === 'text.insert') {
+    const text = (edit as { text?: unknown }).text;
     if (typeof text === 'string' && text.length > 0) return 'eligible';
-    return 'excluded';
   }
-  return 'excluded';
+  return 'barrier';
 }
 
 export interface HistoryContributionPolicyRegistry {

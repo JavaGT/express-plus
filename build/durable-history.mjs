@@ -134,14 +134,6 @@ const HISTORY_DESCRIPTOR                = Symbol('workbench.durable-history');
 
 
 
-
-
-
-
-
-
-
-
 function forbidden()        {
   return Object.assign(new Error('forbidden'), { status: 403 });
 }
@@ -318,9 +310,8 @@ export function durableHistory({ authorize, actions = {} }                      
 }
 
 export function createDurableHistoryRuntime({
-  db, descriptor, generatedActions = {}, dispatch, dispatchBatch, authorize, cursorPolicy, annotatedHistory = null, contributionPolicies = null,
+  db, descriptor, generatedActions = {}, dispatch, dispatchBatch, authorize, cursorPolicy, contributionPolicies = null,
 }
-
 
 
 
@@ -358,17 +349,6 @@ export function createDurableHistoryRuntime({
   }
   const resolvedPolicy = cursorPolicy ?? new Map();
   const rules = Object.freeze({ ...generatedActions, ...descriptor.actions });
-  const annotatedEntities = annotatedHistory?.entities ?? new Set        ();
-  const annotatedActionTypes = annotatedHistory?.actionTypes ?? new Set        ();
-  const annotatedMoveActionTypes = annotatedHistory?.moveActionTypes ?? new Set        ();
-  const annotatedEligibleAction                                                                   = annotatedHistory?.isEligibleAction ?? (() => false);
-  const annotatedCanonicalFact                                                                                 = annotatedHistory?.isCanonicalFact ?? (() => false);
-  // Only the package-generated configuration may opt into the annotated move
-  // path.  In particular, actionTypes/entities alone must not turn an
-  // application-supplied history descriptor into an undo capability.
-  const hasAnnotatedMoveCapability = annotatedHistory !== null
-    && typeof annotatedHistory?.isEligibleAction === 'function'
-    && typeof annotatedHistory?.isCanonicalFact === 'function';
 
   // Policy-owned authorization sequencing (scope#992 rev 2 Finding 9). The
   // contribution policy returns its REQUIREMENTS for a phase; durable history
@@ -393,38 +373,30 @@ export function createDurableHistoryRuntime({
     }
   }
 
-  function isAnnotatedScope(scope        )          {
-    return annotatedEntities.has(tryParseScopeKey(scope)?.entity ?? '');
-  }
-
-  function receiptContainsAnnotatedText(receipt                                                                                          )          {
-    if (annotatedActionTypes.has(receipt.actionType          )) return true;
-    if (receipt.actionType === '$batch') {
-      let actions         ;
-      try { actions = parseJson(receipt.actionData, null); } catch { return true; }
-      if (receipt.operation === 'undoToPoint' || (!Array.isArray(actions) && Array.isArray((actions                                            )?.actions))) actions = (actions                                            )?.actions;
-      if (!Array.isArray(actions) || actions.some((action) => !action || typeof action.type !== 'string')) return true;
-      if (actions.some((action) => annotatedActionTypes.has(action.type))) return true;
-    }
-    let refs         ;
-    try { refs = Array.isArray(receipt.eventRefs) ? receipt.eventRefs : parseJson(receipt.eventRefs, []); } catch { return true; }
-    if (!Array.isArray(refs) || refs.some((ref) => !ref || typeof ref.scope !== 'string' || !Number.isSafeInteger(ref.seq) || ref.seq < 1)) return true;
-    return refs.some((ref) => isAnnotatedScope(ref.scope));
-  }
-
-  function scopeContainsAnnotatedText(scope        )          {
-    if (isAnnotatedScope(scope)) return true;
-    const receipts = db.prepare('SELECT actionType, actionData, eventRefs FROM _ActionReceipt WHERE scope = :scope').all({ scope });
-    return receipts.some(receiptContainsAnnotatedText);
-  }
-
+  // #145 S5: the retired annotated-scope / receipt-scanning classification is
+  // GONE from this module (moved to the read-privacy boundary). History-read
+  // privacy is the declaration-derived privateHistoryScopes set carried by the
+  // contribution-policy registry — used ONLY by the actions()/events() read
+  // functions. Movement code makes no scope or receipt-movement classification
+  // decision.
   function requireReadableHistory(scope        )       {
-    if (scopeContainsAnnotatedText(scope)) throw forbidden();
+    const handle = tryParseScopeKey(scope);
+    if (handle && contributionPolicies?.privateHistoryScopes.has(handle.entity)) throw forbidden();
   }
 
   function cursorPolicyFor(type        )                          {
     if (!rules[type]) return 'excluded';
     return resolvedPolicy.get(type) ?? 'eligible';
+  }
+
+  function classify(type                           , payload         )                                             {
+    return contributionPolicies?.classify({ type, payload }) ?? null;
+  }
+
+  function cursorOrPolicyEligible(type        , payload         )          {
+    const classified = classify(type, payload);
+    if (classified !== null) return classified === 'eligible';
+    return cursorPolicyFor(type) === 'eligible';
   }
 
   function receiptIsEligible(receipt                )          {
@@ -435,18 +407,18 @@ export function createDurableHistoryRuntime({
      if (receipt.actionType === '$batch') {
        const actions = parseJson(receipt.actionData, null);
        return Array.isArray(actions) && actions.every((action) =>
-         action && typeof action.type === 'string' && cursorPolicyFor(action.type) === 'eligible');
+         action && typeof action.type === 'string' && cursorOrPolicyEligible(action.type, action.payload));
      }
-     if (annotatedActionTypes.has(receipt.actionType ?? '')) {
-       const payload = parseJson(receipt.actionData, null);
-        return annotatedEligibleAction({ type: receipt.actionType, payload });
-      }
-    return typeof receipt.actionType === 'string' && cursorPolicyFor(receipt.actionType) === 'eligible';
+    return cursorOrPolicyEligible(receipt.actionType ?? '', parseJson(receipt.actionData, null));
   }
 
   function receiptIsBarrier(receipt                )          {
-    if (receipt.operation !== 'action' || !annotatedActionTypes.has(receipt.actionType ?? '') || receipt.actionData == null) return false;
-    try { return !annotatedEligibleAction({ type: receipt.actionType, payload: parseJson(receipt.actionData, null) }); } catch { return true; }
+    if (receipt.operation !== 'action' || receipt.actionData == null) return false;
+    try {
+      return classify(receipt.actionType ?? null, parseJson(receipt.actionData, null)) === 'barrier';
+    } catch {
+      return false;
+    }
   }
 
   function currentCursor(dbInTxn          , key            )                     {
@@ -478,18 +450,24 @@ export function createDurableHistoryRuntime({
     if (!request.history?.session || request.principal?.type !== 'user') {
       return { metadata, apply: undefined };
     }
-    // Batch: if any action is excluded, exclude cursor entry
+    // Batch: if any action is excluded (or a policy barrier), exclude cursor entry
     if (request.actions) {
        const allEligible = request.actions.every(
-         (action) => annotatedActionTypes.has(action.type ?? '') ? annotatedEligibleAction(action) : cursorPolicyFor(action.type ?? '') === 'eligible',
+         (action) => cursorOrPolicyEligible(action.type ?? '', action.payload),
        );
       if (!allEligible) return { metadata, apply: undefined };
-     } else if (annotatedActionTypes.has(request.type ?? '') ? !annotatedEligibleAction(request) : cursorPolicyFor(request.type ?? '') === 'excluded') {
-       if (annotatedActionTypes.has(request.type ?? '') && request.history?.session && request.principal?.type === 'user') {
+     } else {
+       const classified = classify(request.type ?? null, request.payload);
+       if (classified === 'barrier' && request.history?.session && request.principal?.type === 'user') {
+         // A policy barrier (e.g. a native annotated action that is not a text
+         // insert) cleaves history at that point: it clears the cursor rather
+         // than exposing an older insert across it.
          const key = identity({ scope: request.scope, session: request.history.identity ?? request.history.session, principal: request.principal });
          return { metadata, apply(dbInTxn          ) { writeCursor(dbInTxn, key, { past: [], future: [] }); } };
        }
-       return { metadata, apply: undefined };
+       if (classified !== null ? classified !== 'eligible' : cursorPolicyFor(request.type ?? '') === 'excluded') {
+        return { metadata, apply: undefined };
+      }
     }
     const key = identity({ scope: request.scope, session: request.history.identity ?? request.history.session, principal: request.principal });
     const expected = currentCursor(db, key);
@@ -554,7 +532,7 @@ export function createDurableHistoryRuntime({
       // whose action type has a contribution policy must re-run the policy's
       // authorization requirements BEFORE any event or private material is read,
       // so a revoked known action id is never a read oracle. This replaces the
-      // classifier-dependent `hasAnnotatedMoveCapability` retry branch.
+      // retired classifier-dependent retry branch (#145 S5).
       const retryPolicy = contributionPolicies?.policyFor(retry.actionType ?? null);
       if (retryPolicy) {
         // Resolve the original root receipt through linkage, then authorize the
@@ -583,9 +561,9 @@ export function createDurableHistoryRuntime({
     }
     const expected = currentCursor(db, key);
     if (expectedRevision !== revision(expected)) throw conflict('history cursor is stale');
-    if (scopeContainsAnnotatedText(key.scope) && !hasAnnotatedMoveCapability) throw forbidden();
-    // Annotated text has one narrow package-owned move path.  Public history
-    // reads and all other annotated scopes remain forbidden.
+    // #145 S5: the annotated-scope move barrier is GONE from movement
+    // classification. History moves are governed by the contribution policy +
+    // authorization, never by scope/receipt scanning.
     const source = operation === 'undo' ? expected.past : expected.future;
     const targetFrame = source[source.length - 1];
     const targetId = targetFrame?.headActionId;
@@ -607,10 +585,6 @@ export function createDurableHistoryRuntime({
     if (!originReceipt || !receipt) throw new Error(`history action '${targetId}' is no longer retained`);
     const origin = actionFromRow(db, originReceipt);
     const action = actionFromRow(db, receipt);
-    const annotatedMove = hasAnnotatedMoveCapability && annotatedMoveActionTypes.has(origin.type ?? '');
-    if (annotatedMove && (!annotatedEligibleAction(origin))) throw forbidden();
-    if (scopeContainsAnnotatedText(key.scope) && !annotatedMove) throw forbidden();
-    if (receiptContainsAnnotatedText(receipt) && !annotatedMove) throw forbidden();
     const rule = rules[origin.type ?? ''];
     if (!rule) throw conflict(`history action '${origin.type}' is not undoable`);
     // Re-authorize the original canonical action before private material is
@@ -636,27 +610,17 @@ export function createDurableHistoryRuntime({
     // compensates an applied redo. Ordinary (non-annotated) actions keep their
     // existing origin-fact target selection.
     const compoundMoveTargetFact = (originReceipt.actionId !== receipt.actionId)
-      && (Boolean(contributionPolicies?.policyFor(origin.type ?? null)) || annotatedMove);
+      && Boolean(contributionPolicies?.policyFor(origin.type ?? null));
     const targetFact = compoundMoveTargetFact ? privateFactFromReceipt(db, receipt) : originFact;
-    if (!annotatedMove && !compoundKindOf(originFact) && (!Object.hasOwn(originFact, 'before') || !Object.hasOwn(originFact, 'after'))) {
+    const originIsPolicy = Boolean(contributionPolicies?.policyFor(origin.type ?? null));
+    if (!originIsPolicy && !compoundKindOf(originFact) && (!Object.hasOwn(originFact, 'before') || !Object.hasOwn(originFact, 'after'))) {
       throw new TypeError('history action private fact is malformed');
-    }
-    if (annotatedMove && !annotatedCanonicalFact({ type: origin.type, payload: origin.payload, fact: originFact })) throw forbidden();
-    if (annotatedMove && originReceipt.actionId !== receipt.actionId) {
-      const linkage = (targetFact?.linkage ?? null)                                                                                                       ;
-      if (targetFact?.version !== 2 || targetFact.kind !== 'annotated-text.compensation'
-        || targetFact.documentId !== (origin.payload                                       )?.id
-        || linkage?.rootActionId !== targetFrame.rootActionId
-        || linkage?.targetActionId !== receipt.historyTargetActionId
-        || linkage?.direction !== receipt.operation
-        || !['applied', 'noop'].includes(linkage?.outcome          )) throw forbidden();
     }
     const translate = operation === 'undo' ? rule.inverse : rule.redo;
     // scope#992 rev 3/4: application translators receive only the application
     // half of a compound envelope. The contribution-policy runtime (W3) retains
     // the full envelope for applicability/linkage; this seam unwraps for the
     // translator boundary.
-    const translatorFact = applicationPrivateFactView(originFact                           );
     const translatorTargetFact = applicationPrivateFactView(targetFact                           );
     // A contribution-policy move always compensates the HEAD receipt (rev 3 §1:
     // "Redo compensates the completed undo receipt"). The handler input is
@@ -664,11 +628,15 @@ export function createDurableHistoryRuntime({
     // directions — undo of the root origin, undo/redo of an applied
     // compensation, and redo of a completed undo all invert the head's
     // application transition, never the root origin's.
-    const translatorFactForDirection = annotatedMove ? (operation === 'undo' ? translatorFact : translatorTargetFact) : translatorTargetFact;
     const translated = translatedActions(
-      await translate({ operation, origin, target: action, targetFact: translatorTargetFact, action: origin, fact: translatorFactForDirection, principal: args.principal, session: args.session }), operation, key.scope,
+      await translate({ operation, origin, target: action, targetFact: translatorTargetFact, action: origin, fact: translatorTargetFact, principal: args.principal, session: args.session }), operation, key.scope,
     );
-    if (translated.some((child) => annotatedActionTypes.has(child.type)) && !annotatedMove) throw forbidden();
+    // #145 S5: no action-name classifier remains. A translation may only target
+    // a contribution-policy action when the move's ORIGIN is itself the
+    // policy-owned action; an ordinary translation that re-targets a policy
+    // action type is forbidden (the policy owns that chain).
+    const translatedIntoPolicy = translated.some((child) => Boolean(contributionPolicies?.policyFor(child.type)));
+    if (translatedIntoPolicy && !contributionPolicies?.policyFor(origin.type ?? null)) throw forbidden();
     const receiptAction = translated.length === 1 ? translated[0] : null;
     const transition = {
       handlerInputs: Object.freeze(translated.map((child) => Object.freeze({
@@ -699,7 +667,7 @@ export function createDurableHistoryRuntime({
             principal: args.principal,
           });
         }
-        privateFactFromReceipt(dbInTxn, annotatedMove ? receipt : originReceipt);
+        privateFactFromReceipt(dbInTxn, contributionPolicies?.policyFor(origin.type ?? null) ? receipt : originReceipt);
         const current = currentCursor(dbInTxn, key);
         if (!sameCursor(current, expected)) throw new Error('history cursor changed during dispatch');
         const past = [...current.past];
@@ -742,7 +710,8 @@ export function createDurableHistoryRuntime({
     }
     const expected = currentCursor(db, key);
     if (revisionArg !== revision(expected)) throw conflict('history cursor is stale');
-    if (scopeContainsAnnotatedText(key.scope)) throw forbidden();
+    // #145 S5: no annotated-scope barrier on movement; the contribution policy
+    // governs which receipts undoToPoint may compensate.
     const sourceActionIds           = [];
     for (let index = expected.past.length - 1; index >= 0; index -= 1) {
       const rootActionId = expected.past[index].rootActionId;
@@ -768,7 +737,6 @@ export function createDurableHistoryRuntime({
     for (const sourceActionId of sourceActionIds) {
       const receipt = receiptFor(db, key.scope, sourceActionId);
       if (!receipt) throw new Error(`history action '${sourceActionId}' is no longer retained`);
-      if (receiptContainsAnnotatedText(receipt)) throw forbidden();
       const action = actionFromRow(db, receipt);
       const rule = historyDescriptor.actions[action.type ?? ''];
       if (!rule) throw conflict(`history action '${action.type}' is not undoable`);
@@ -777,7 +745,15 @@ export function createDurableHistoryRuntime({
       const inverse = await rule.inverse({ action, fact, principal: args.principal, session: args.session });
       translated.push(...translatedActions(inverse, 'undo', key.scope));
     }
-    if (translated.some((child) => annotatedActionTypes.has(child.type))) throw forbidden();
+    // #145 S5: undoToPoint re-targets a contribution-policy action only when the
+    // undone action is itself policy-owned (no action-name classifier remains).
+    const translatedIntoPolicy = translated.some((child) => Boolean(contributionPolicies?.policyFor(child.type)));
+    const anyUndonePolicyOwned = sourceActionIds.some((sourceActionId) => {
+      const receipt = receiptFor(db, key.scope, sourceActionId);
+      const action = receipt ? actionFromRow(db, receipt) : null;
+      return Boolean(contributionPolicies?.policyFor(action?.type ?? null));
+    });
+    if (translatedIntoPolicy && !anyUndonePolicyOwned) throw forbidden();
     const transition = {
       handlerInputs: Object.freeze(translated.map((child) => Object.freeze({ operation: 'undo', input: child.input }))),
       metadata: {

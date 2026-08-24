@@ -709,7 +709,6 @@ export function buildKernel(app: any) {
     history: app._history,
     historyActions: generatedHistoryActions,
     cursorPolicy,
-     annotatedHistory: annotatedKernel.annotatedHistory,
      contributionPolicies,
     // The app's injected authorization adapter (S5/A2) is THE admission engine
     // for the whole app — HTTP, live, registered actions, and the generated

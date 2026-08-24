@@ -3,7 +3,7 @@
 // (undo/redo compensation) actions live here, in the module that owns the
 // kind, and are contributed as a seam rather than hand-listed in kernel.mjs.
 
-import { assertV9AnnotatedTextOffsetEditPayload, ANNOTATED_TEXT_COMPENSATION } from './entity/crud.mjs';
+import { ANNOTATED_COMPENSATION_INPUT } from './entity/crud.mjs';
 import { admitRow } from './row-grant.mjs';
 import { write } from './grant.mjs';
 import { rawRow } from './entity/query.mjs';
@@ -18,17 +18,11 @@ import { compileNativeInsertContributionPolicy,                                }
 
 
 
-
 export function createAnnotatedTextKernelSeam(entities                  )                          {
-  const annotatedEntities = new Set(
+  const annotatedScopeEntities = new Set(
     [...entities.values()]
       .filter((entity     ) => Object.values(entity.fields).some((field     ) => field.kind === 'annotatedText'))
       .map((entity     ) => entity.name),
-  );
-  const annotatedActionTypes = new Set(
-    [...entities.values()].flatMap((entity     ) => Object.entries(entity.fields)
-      .filter(([, field]) => (field       ).kind === 'annotatedText')
-      .map(([field]) => `${entity.name}.${field}.operation`)),
   );
   const annotatedActionDetails = new Map();
   for (const entity of entities.values()) for (const [fieldName, field] of Object.entries(entity.fields)) {
@@ -39,9 +33,10 @@ export function createAnnotatedTextKernelSeam(entities                  )       
 
   // Compile-produced native-insert contribution policies (scope#992 Finding 6):
   // one policy entry per native annotated `.operation` and `.compensate` action
-  // type, so the history engine's retry/move authorization is policy-owned
-  // rather than classifier-name-driven. The policy exposes requirements only;
-  // grant decisions stay with the central authorize/admitRow seam.
+  // type, so the history engine's eligibility/barrier/retry decisions are
+  // policy-owned rather than classifier-name-driven. The policy exposes
+  // requirements only; grant decisions stay with the central authorize/admitRow
+  // seam.
   const nativeInsertPolicies                                       = Object.freeze(
     [...annotatedActionDetails.keys()].map((actionType) =>
       compileNativeInsertContributionPolicy(
@@ -52,47 +47,21 @@ export function createAnnotatedTextKernelSeam(entities                  )       
   // Declaration-derived read-privacy scope set. It is used ONLY by the history
   // actions()/events() read boundary (rev 3 §3); it has no eligibility,
   // barrier, target-selection, retry, or compensation role.
-  const privateHistoryScopes                      = new Set(annotatedEntities);
-
-  const isAnnotatedHistoryAction = ({ type, payload }     ) => {
-    const detail = annotatedActionDetails.get(type);
-    if (!detail || detail.compensation) return false;
-    try {
-      const command = assertV9AnnotatedTextOffsetEditPayload(detail.entity.name, detail.fieldName, payload);
-      return command.edit.kind === 'text.insert' && command.edit.text.length > 0;
-    } catch {
-      return false;
-    }
-  };
-
-  const isContribution = (fact     , documentId     ) => fact?.version === 2 && fact.kind === 'annotated-text.contribution'
-    && fact.documentId === documentId && fact.contribution?.kind === 'text.insert'
-    && (!Object.hasOwn(fact.contribution, 'blockId') || (typeof fact.contribution.blockId === 'string' && fact.contribution.blockId.length > 0))
-    && Array.isArray(fact.contribution.opId)
-    && typeof fact.contribution.text === 'string' && Number.isSafeInteger(fact.contribution.scalarCount);
-
-  const isAnnotatedHistoryFact = ({ type, payload, fact }     ) => {
-    const detail = annotatedActionDetails.get(type);
-    return Boolean(detail && isAnnotatedHistoryAction({ type, payload }) && isContribution(fact, payload.id));
-  };
+  const privateHistoryScopes                      = new Set(annotatedScopeEntities);
 
   // Annotated text history is a package-owned compensation action. It is not a
   // public action and is admitted only through the trusted history capability.
+  // The compensation dispatch is decided by the contribution policy, never by an
+  // action-name test; the plain input kind routes the move to this field-owned
+  // emitter.
   const historyActions                      = {};
-  for (const type of annotatedActionTypes) {
+  for (const [type, detail] of annotatedActionDetails) {
+    if (detail?.compensation) continue;
     historyActions[type] = {
-      inverse: ({ origin, target, targetFact }     ) => ({ type: `${type.replace(/\.operation$/, '')}.compensate`, payload: { version: 1, id: origin.payload.id, history: { version: 1, rootActionId: origin.actionId, targetActionId: target.actionId, direction: 'undo' } }, input: { kind: ANNOTATED_TEXT_COMPENSATION, targetFact } }),
-      redo: ({ origin, target, targetFact }     ) => ({ type: `${type.replace(/\.operation$/, '')}.compensate`, payload: { version: 1, id: origin.payload.id, history: { version: 1, rootActionId: origin.actionId, targetActionId: target.actionId, direction: 'redo' } }, input: { kind: ANNOTATED_TEXT_COMPENSATION, targetFact } }),
+      inverse: ({ origin, target, targetFact }     ) => ({ type: `${type.replace(/\.operation$/, '')}.compensate`, payload: { version: 1, id: origin.payload.id, history: { version: 1, rootActionId: origin.actionId, targetActionId: target.actionId, direction: 'undo' } }, input: { kind: ANNOTATED_COMPENSATION_INPUT, targetFact } }),
+      redo: ({ origin, target, targetFact }     ) => ({ type: `${type.replace(/\.operation$/, '')}.compensate`, payload: { version: 1, id: origin.payload.id, history: { version: 1, rootActionId: origin.actionId, targetActionId: target.actionId, direction: 'redo' } }, input: { kind: ANNOTATED_COMPENSATION_INPUT, targetFact } }),
     };
   }
-
-  const annotatedHistory = Object.freeze({
-    entities: annotatedEntities,
-    actionTypes: annotatedActionTypes,
-    moveActionTypes: new Set([...annotatedActionDetails].filter(([, detail]) => detail).map(([type]) => type)),
-    isEligibleAction: isAnnotatedHistoryAction,
-    isCanonicalFact: isAnnotatedHistoryFact,
-  });
 
   // Returns true/false when the action is an annotated-text action, or null
   // when it is not — the Kernel then falls through to registered actions and
@@ -158,5 +127,5 @@ export function createAnnotatedTextKernelSeam(entities                  )       
     return admitRow({ kind: 'verb', entity: projectEntity, row, principal, verb });
   }
 
-  return { historyActions, annotatedHistory, nativeInsertPolicies, privateHistoryScopes, authorize, admitProject };
+  return { historyActions, nativeInsertPolicies, privateHistoryScopes, authorize, admitProject };
 }
