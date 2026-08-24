@@ -854,6 +854,7 @@ export function constructV15RegionEvent(plan            )                       
 const V16_WITNESS_IMAGE_KEYS = [
   'cardinality',
   'empty',
+  'family',
   'fields',
   'id',
   'memberships',
@@ -875,7 +876,10 @@ const V16_WITNESS_IMAGE_KEYS = [
  * a branded v16 event.
  */
 export function constructV16RegionEvent(plan            )                                                                                                                                                                                 {
-  const operation = Object.freeze({
+  // The operation is built extensible and branded with the canonical bytes
+  // BEFORE freezing: the brand is the unforgeable durable-bytes authority that
+  // committed-log stores verbatim, invisible to JSON, delivery, and dedupe.
+  const operation                          = {
     affectedIds: plan.postimage.affectedIds,
     afterDigest: plan.postimage.afterDigest,
     beforeDigest: plan.postimage.beforeDigest,
@@ -888,7 +892,7 @@ export function constructV16RegionEvent(plan            )                       
     transitions: plan.descriptor.transitions,
     witnessAfter: plan.postimage.annotations,
     witnessBefore: plan.postimage.beforeAnnotations,
-  })                                      ;
+  };
   const event = Object.freeze({
     version: 16         ,
     id: plan.descriptor.id,

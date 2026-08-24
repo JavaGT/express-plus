@@ -16,6 +16,7 @@ import { canonicalStringify } from './canonical-json.mjs';
 import { liveRevisionTableDDL } from './live-revision.mjs';
 import { invalidationLedgerTableDDL } from './invalidation-ledger.mjs';
 import { sweepFactDependencies } from './private-action-fact-dependency.mjs';
+import { serializeV16OperatedEvent,                           } from './annotated-text-operated-event.mjs';
 
 // The no-history lane (S3/A2) surfaces through this module alongside the
 // durable _Log/_ActionReceipt surfaces, so the boot DDL and the kernel have one
@@ -312,6 +313,12 @@ export function rowToEvent(row            , parseEventType                 )    
 // transaction. Each event must already carry its resolved data, scope, seq,
 // actionId, and committedAt. The caller handles NOW-token resolution and
 // per-scope sequence assignment before calling this.
+//
+// A package-branded v16 operated event carries its canonical `_Log.eventData`
+// text precomputed by the sole constructor (annotated-text-operated-event.ts);
+// it is inserted verbatim so the durable bytes are byte-identical to what the
+// canonicalizer produced. Applications cannot supply the brand or
+// pre-serialized text: `data` must literally be that constructor's return.
 export function appendEvents(db          , events                 ) {
   const stmt = prepareCached(db,
     'INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt) VALUES (:scope, :seq, :eventType, :eventData, :actionId, :committedAt)',
@@ -321,7 +328,7 @@ export function appendEvents(db          , events                 ) {
       scope: e.scope,
       seq: e.seq,
       eventType: e.type,
-      eventData: JSON.stringify(e.data ?? {}),
+      eventData: serializeAppendedEventData(e),
       actionId: e.actionId,
       committedAt: e.committedAt,
     });
@@ -387,6 +394,40 @@ export function retentionPrune(db          , cutoffIso        ) {
 
 
 
+
+
+
+
+
+
+// One durable-bytes decision per appended event. A v16 operated envelope is
+// serialized ONLY through the package's canonical writer (sole owner:
+// annotated-text-operated-event.ts) and must arrive already byte-identical to
+// that form — a noncanonical or over-limit v16 payload fails closed here and
+// never reaches _Log. Everything else keeps its stable stringify.
+const V16_ENVELOPE_KEYS = ['after', 'before', 'facts', 'id', 'operation', 'version'];
+
+function serializeAppendedEventData(event               )         {
+  const data = event.data                                       ;
+  if (data && typeof data === 'object' && !Array.isArray(data) && data.version === 16) {
+    const keys = Object.keys(data);
+    if (keys.length !== V16_ENVELOPE_KEYS.length || !V16_ENVELOPE_KEYS.every((key) => Object.hasOwn(data, key))) {
+      throw new Error('noncanonical operated v16 eventData reached _Log');
+    }
+    // Serialize the ENVELOPE (data), never the whole appended event.
+    const canonical = serializeV16OperatedEvent(data                        );
+    if (event.eventDataText !== undefined && event.eventDataText !== canonical) {
+      // The constructor path supplies eventDataText; any other caller must not
+      // smuggle a hand-built v16 envelope through with divergent bytes.
+      throw new Error('noncanonical operated v16 eventData reached _Log');
+    }
+    return canonical;
+  }
+  if (event.eventDataText !== undefined) {
+    return event.eventDataText;
+  }
+  return JSON.stringify(event.data ?? {});
+}
 
 
 

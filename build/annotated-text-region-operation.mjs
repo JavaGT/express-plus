@@ -20,9 +20,11 @@ import { resolveAnnotatedTextOwningScope, getAnnotatedTextCompiledMetadata } fro
 import { restoreTextFamilySerialized } from './annotated-text-continuous.mjs';
 import { loadAnnotationImages } from './annotated-text-storage.mjs';
 import { planRegionEdit,                 } from './annotated-text-region-plan.mjs';
-import { constructV15RegionEvent } from './annotated-text-operated-event.mjs';
+import { constructV16RegionEvent } from './annotated-text-operated-event.mjs';
 
 import { parseRegionEditDescriptor } from './annotated-text-region-descriptor.mjs';
+
+
 
 
 
@@ -203,9 +205,14 @@ export function compileRegionFieldPolicy(
         actor,
         lamport: maxLamport + 1,
       });
+      // New region traffic emits ONLY v16 (W1b cutover). The canonical
+      // eventDataText is stored verbatim in _Log by committed-log's branded
+      // adapter; applications cannot supply the brand or pre-serialized text.
+      const { event: envelope, eventDataText } = constructV16RegionEvent(plan);
       return Object.freeze({
         plan,
-        envelope: constructV15RegionEvent(plan)                                                ,
+        envelope: envelope                                                ,
+        eventDataText,
         contribution: plan.contribution,
         entity: handle.entity,
         field: handle.field,
