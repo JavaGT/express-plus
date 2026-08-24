@@ -1,0 +1,3 @@
+$ node benchmark/annotated-text-composite-resync.mjs
+{"level":"info","channel":"system","at":"2026-08-24T23:20:11.033Z","msg":"workbench() constructed","ctx":{"db":true,"jobs":false,"migrations":0}}
+{"level":"info","channel":"system","at":"2026-08-24T23:20:11.050Z","msg":"application started"}

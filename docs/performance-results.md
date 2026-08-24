@@ -58,23 +58,96 @@ Values are operations per second. The median is the primary reference number; sa
 
 ## Annotated-text composite resync
 
-**Full acceptance fixture (36,000 words / 72,000 annotations), recorded fresh for W1 #143 review round 2.**
+**W1a #152 — authoritative fresh record at committed HEAD `37853db`.**
 
-- Recorded at: `2026-08-24T08:48:30.188Z`
-- Node: `v26.7.0`
-- Platform: `darwin/arm64`
-- Fixture: 36000 words, 72000 annotations, 25 recipients, 50 controls
-- C=0 burst projections: 50 (bound 100; including start 75)
-- C=1 burst projections: 100 (bound 200; including start 125)
-- Event-loop delay p99: 4.362 ms (limit < 100 ms) — **met**
-- Snapshot projection p95: 76529.975 ms / recipient (limit < 500 ms) — **NOT MET (≈76.5 s)**
-- RSS Δ: 315.98 MiB (limit < 256 MiB) — **NOT MET**
-- Write coordinator held: false — **met**
-- Attempt histogram C=0: `{"2":25}`
-- Attempt histogram C=1: `{"4":25}`
-- Minimum transport generations C=1: 2
+Benchmark: `benchmark/annotated-text-composite-resync.mjs`, SHA-256
+`37df6c1e0e48c03ec86de065bbc59dec43b30e9b97806616bf0af9aa77673eed`.
+Source SHAs (bytes on the measured path):
+`src/annotated-text-snapshot.ts` `11dc95f3…`, `src/annotated-text-recipient-projection.ts` `0bf09d69…`,
+`public/workbench-client.mjs` `4cc710b0…`, `public/workbench-annotated-text-snapshot.mjs` `16d19d9c…`.
+Node `v26.7.0`, `darwin/arm64`, Apple M4 (10 logical CPUs), 16,384 MiB RAM.
+Fixture: 36,000 words, 72,000 annotations (timing + transcriptionUncertainty), 36,001 unique ranges,
+one protector (100 protected targets), 25 mixed recipients (13 visible / 12 denied), 50 controls.
+Acceptance boundary per sample: projection → `JSON.stringify` → `JSON.parse` → public snapshot
+validation (`materializeAnnotatedTextSnapshot`). End-to-end p95 is the 500 ms gate.
 
-**Threshold verdict on the full fixture: FAILS.** The snapshot-recovery latency (p95 ≈ 76.5 s / recipient) and RSS growth (+316 MiB) both exceed the W1 acceptance bounds on this machine. The control-fanout coalescing bound and event-loop delay meet their limits, and snapshot work never holds the write coordinator, but the per-recipient projection cost scales badly at 72,000 annotations. This is a genuine, reproducible finding on the current harness — not a harness artifact. It indicates the snapshot projection path (not the region reducer or the normalizer) is the scaling bottleneck and needs a recipient-safe fold or projected-snapshot optimization before a "meets at full scale" claim can be made.
+### Fresh initial scenario (all recipients project a fresh snapshot)
 
-The earlier scaled run (360 words / 720 annotations, recorded `2026-08-24T05:36:33.405Z`) is superseded; it deliberately used a reduced fixture and its projection/RSS numbers are not the acceptance fixture. The prior full-scale run (recorded `2026-08-24T07:45:25.512Z`) is superseded by this fresh run on the same fixture.
+- Recorded at: `2026-08-24T23:20:24.786Z`
+- End-to-end p95: **569.851 ms** (limit < 500 ms) — **NOT MET**
+- Projection p95: **368.187 ms** (the W1 baseline was ≈ 76.5 s — the fused source repair cut this ~200×)
+- Serialization p95: 52.354 ms; parse+validation p95: 173.155 ms
+- Visible p95: 609.946 ms; redacted p95: 432.137 ms
+- Serialized envelope: 31,677,092 B visible (v2 anchored), 11,859,192 B redacted (v1 offset)
+- Per-recipient RSS window peak: **223.81 MiB** (limit < 256 MiB) — **met**
+- Raw process RSS Δ: 262.36 MiB; peak raw RSS Δ: 1114.72 MiB (reclaimable V8 heap expansion —
+  forced-GC probe returns the process to −10 MiB below its pre-loop baseline; see below)
+- Event-loop p99: 1.149 ms (limit < 100 ms) — **met**; write coordinator held: **false** — **met**
+- C=0 burst: 50 (bound 100, incl. start 75), histogram `{"2":25}`; C=1 burst: 100 (bound 200, incl.
+  start 125), histogram `{"4":25}`, minimum transport generations 2 — **met**
+- End-to-end samples (ms): `538.191, 525.858, 569.851, 512.657, 523.628, 529.617, 512.413, 536.037,
+  528.289, 566.329, 609.946, 555.523, 537.668, 398.589, 395.995, 401.563, 389.460, 397.219, 432.137,
+  372.277, 376.630, 376.785, 399.811, 378.937, 364.555`
+- Projection samples (ms): `334.045, 300.059, 355.108, 311.184, 320.944, 327.961, 306.474, 334.086,
+  326.569, 342.262, 374.160, 349.346, 330.482, 334.907, 332.151, 341.218, 326.538, 337.627, 368.187,
+  313.546, 316.014, 317.000, 338.609, 313.576, 304.061`
+- Per-recipient RSS windows (MiB): `51.48, 30.97, 143.09, 211.47, 218.06, 218.88, 223.81, −243.78,
+  56.11, 58.13, −141.05, 58.19, 58.22, 38.08, 41.67, 37.14, 40.80, 13.44, −312.86, 38.72, −710.31,
+  110.95, 130.28, −143.94, 34.36` (negative windows are V8 returning memory between recipients)
+
+### Fresh forced-fallback scenario (real delivery sessions, protector visibility/topology change)
+
+- Recorded at: `2026-08-24T23:21:12.473Z`
+- End-to-end p95: **1198.175 ms** (limit < 500 ms) — **NOT MET**
+- Projection p95: 760.333 ms; serialization p95: 103.992 ms; parse+validation p95: 431.123 ms
+- Each recipient sample is the complete recovery window and includes every bounded recovery attempt
+  in that cycle (committed hostile-review definition): 2 snapshot recoveries + 50-control delivery.
+  Per single snapshot inside the window the cost matches the initial scenario (~570 ms); the seam's
+  coalesced-recovery "one fresh attempt" policy (public/workbench-client.mjs) is what doubles it.
+- Per-recipient RSS window peak: **437.73 MiB** (limit < 256 MiB) — **NOT MET** (two full projections
+  in one window)
+- Raw process RSS Δ: 220.44 MiB; peak raw RSS Δ: 2216.25 MiB (now bounded after the harness
+  retention fix; the pre-fix run peaked at 2.6 GiB and degraded monotonically to ~7 s per recipient)
+- Event-loop p99: 1.402 ms — **met**; write coordinator held: **false** — **met**
+- Recovery: topology changed, visibility changed, 0 snapshot calls before controls, 50 after;
+  attempts per recipient `[2 × 25]`. C=0/C=1 budgets **met**.
+- End-to-end samples (ms): `1058.212, 1060.002, 1062.385, 1071.550, 1019.684, 1011.078, 1092.850,
+  1198.175, 1005.463, 1031.234, 1054.236, 1161.045, 1018.261, 870.947, 744.355, 721.282, 855.641,
+  737.316, 762.492, 722.423, 765.063, 774.595, 1175.248, 977.610, 1552.476`
+
+### Gate verdict
+
+| Gate | Initial | Forced fallback | Limit | Verdict |
+|---|--:|--:|--:|:--|
+| End-to-end snapshot p95 / recipient | 569.851 ms | 1198.175 ms | < 500 ms | **NOT MET** |
+| Snapshot projection p95 / recipient | 368.187 ms | 760.333 ms (2 attempts) | < 500 ms | MET (single-snapshot path) |
+| Per-recipient RSS window peak | 223.81 MiB | 437.73 MiB | < 256 MiB | met (initial) / NOT MET (fallback) |
+| Event-loop delay p99 | 1.149 ms | 1.402 ms | < 100 ms | met |
+| Write coordinator held | false | false | never | met |
+| Recovery budget C0 / C1 | 50 / 100 (≤ bound) | same | ≤ 100 / ≤ 200 | met |
+| Visible/redacted byte parity | policy tests green | — | identical bytes | met |
+| Malformed/degraded/protector fail closed | focused tests green | — | — | met |
+
+**The projection-side structural repair is proven:** the W1 baseline projection p95 (≈ 76.5 s,
+recorded `2026-08-24T08:48:30.188Z`) is now ~368 ms — a ~200× reduction — and the per-recipient RSS
+window (initial) is under the 256 MiB bound. The end-to-end gate is **not met** because the measured
+path also pays ~200 ms of transport + public-client costs that sit outside the W1a owned files:
+`JSON.stringify`/`JSON.parse` of the byte-parity anchored envelope (31.7 MiB — every range repeats
+its shared endpoint objects), and `materializeAnnotatedTextSnapshot` (deep-freeze + rebuild of ~200k
+objects). The forced-fallback window additionally pays the delivery seam's coalesced 2-attempt
+recovery. Measured cost split (visible recipient): projection ≈ 330–368 ms, serialization ≈ 52 ms,
+parse ≈ 97 ms, materialize ≈ 52–90 ms → single-snapshot floor ≈ 530–570 ms on this machine.
+
+RSS growth is reported both ways. Raw multi-recipient RSS Δ (780–1100 MiB initial) is V8 heap
+expansion between sequential projections, not retention: a forced-GC probe run measured peak
+retained delta **−10.14 MiB** (below the pre-loop baseline) with per-recipient heap usage stable
+(~178 MiB visible / ~107 MiB redacted). The gate therefore keys on the per-recipient window.
+
+JSON evidence: `test-results/w1a/initial-37853db.json`, `test-results/w1a/fallback-37853db.json`
+(identical content with the markdown above, plus the full phase breakdowns and process lists).
+
+The earlier W1 #143 full-scale record (`2026-08-24T08:48:30.188Z`) and the scaled run
+(`2026-08-24T05:36:33.405Z`) are superseded by this authoritative record. The W1a contended archive
+runs at `02fbac6` (see `docs/annotated-text-w1a-profile.md`) remain ineligible as acceptance
+evidence; this record is the clean-archive replacement.
 

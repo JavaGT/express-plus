@@ -1,0 +1,2 @@
+{"level":"info","channel":"system","at":"2026-08-24T23:06:07.461Z","msg":"workbench() constructed","ctx":{"db":true,"jobs":false,"migrations":0}}
+{"level":"info","channel":"system","at":"2026-08-24T23:06:07.476Z","msg":"application started"}

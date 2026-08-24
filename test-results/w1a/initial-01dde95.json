@@ -1,0 +1,2168 @@
+{
+  "recordedAt": "2026-08-24T23:15:46.598Z",
+  "scenario": "initial",
+  "profiling": true,
+  "provenance": {
+    "commit": "01dde95",
+    "benchmarkSha256": "316241d8f65c2eb6e546bc680f69a9e7d2dfcc9f4bb74938cab3853225073f0d",
+    "sourceSha256": {
+      "src/annotated-text-snapshot.ts": "11dc95f3d6bd5cf8685e460de398454e34e9554989cc499b747575004bc4f6c1",
+      "src/annotated-text-recipient-projection.ts": "0bf09d69a94d90c8375779965da3da0b01a71ea5c84771f9a936ab1bc1c4678a",
+      "public/workbench-client.mjs": "4cc710b0714d1b63650d91de168dfb635c8db55c68325e35583ec62d4a06dc87",
+      "public/workbench-annotated-text-snapshot.mjs": "16d19d9c9c178de4ca8ab2f9f87b71974a39e761c28cc13374b993500f674886"
+    },
+    "command": "ANNOTATED_TEXT_BENCH_SCENARIO=initial ANNOTATED_TEXT_BENCH_COMMIT=01dde95 pnpm benchmark:annotated-text-composite-resync",
+    "environment": {
+      "ANNOTATED_TEXT_BENCH_WORDS": "36000",
+      "ANNOTATED_TEXT_BENCH_ANNOTATIONS_PER_WORD": "2",
+      "ANNOTATED_TEXT_BENCH_RECIPIENTS": "25",
+      "ANNOTATED_TEXT_BENCH_VISIBLE_RECIPIENTS": "13"
+    },
+    "cpu": "Apple M4",
+    "logicalCpuCount": 10,
+    "totalMemoryMiB": 16384,
+    "processList": "  PID  %CPU    RSS COMMAND\n    1   0.1  11456 /sbin/launchd\n   25   0.4  11344 /usr/libexec/logd\n   27   0.0   4848 /usr/libexec/UserEventAgent (System)\n   29   0.0   8720 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/FSEvents.framework/Versions/A/Support/fseventsd\n   32   0.0   6064 /usr/sbin/systemstats --daemon\n   36   0.1   5456 /usr/libexec/configd\n   38   0.0   5664 /System/Library/CoreServices/powerd.bundle/powerd\n   39   0.0     16 /usr/libexec/IOMFB_bics_daemon\n   43   0.0    336 /usr/libexec/remoted\n   47   0.0     16 /System/Library/PrivateFrameworks/CoreSpeech.framework/corespeechd_system\n   49   0.0    192 /usr/libexec/watchdogd\n   53   0.0  17168 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds\n   55   0.0    688 /usr/libexec/kernelmanagerd\n   56   0.0   3424 /usr/libexec/diskarbitrationd\n   60   0.0    368 /usr/sbin/syslogd\n   62   0.0   1632 /usr/libexec/thermalmonitord\n   63   0.0   6416 /System/Library/PrivateFrameworks/CoreDuetContext.framework/Resources/contextstored\n   64   0.0    992 /usr/libexec/xprotectd\n   65   0.1   6352 /usr/libexec/opendirectoryd\n   66   0.0   7616 /System/Library/PrivateFrameworks/ApplePushService.framework/apsd\n   67   0.0  10304 /System/Library/CoreServices/launchservicesd\n   68   0.0   2672 /usr/libexec/timed\n   69   0.0    400 /System/Library/PrivateFrameworks/MobileDevice.framework/Versions/A/Resources/usbmuxd -launchd\n   70   0.0   2624 /usr/sbin/securityd -i\n   72   0.0  14144 /usr/libexec/locationd\n   75   0.0    112 autofsd\n   76   0.0  13728 /usr/libexec/dasd\n   77   0.0   1728 /usr/libexec/corerepaird\n   79   0.0   1920 /usr/sbin/distnoted daemon\n   83   0.0   1696 /System/Library/CoreServices/logind\n   84   0.0   2288 /System/Library/PrivateFrameworks/GenerationalStorage.framework/Versions/A/Support/revisiond\n   85   0.0    704 /usr/sbin/KernelEventAgent\n   89   0.0  19056 /usr/sbin/bluetoothd\n   90   0.2   3328 /usr/sbin/notifyd\n   92   0.0   2640 /usr/libexec/corebrightnessd --launchd\n   93   0.0   2000 /usr/libexec/AirPlayXPCHelper\n   94   0.0   2880 /System/Library/Frameworks/CoreMediaIO.framework/Versions/A/Resources/com.apple.cmio.registerassistantservice\n   98   0.0   3808 /usr/sbin/cfprefsd daemon\n  100   1.1  20096 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer -daemon\n  104   0.0   2032 /System/Library/CoreServices/coreservicesd\n  107   0.0  10704 /usr/libexec/runningboardd\n  110   0.0   7024 /System/Library/PrivateFrameworks/CoreAnalytics.framework/Support/analyticsd\n  117   0.0   6912 /usr/libexec/symptomsd\n  118   0.1   7872 /usr/sbin/mDNSResponder\n  119   0.0  13616 /usr/libexec/airportd\n  121   0.0   7952 /usr/libexec/lsd runAsRoot\n  132   0.0   3840 /usr/libexec/eligibilityd\n  136   0.0   2912 /System/Library/Frameworks/Security.framework/Versions/A/XPCServices/authd.xpc/Contents/MacOS/authd\n  137   0.0    688 /usr/sbin/mDNSResponderHelper\n  140   0.0    992 /usr/sbin/distnoted agent\n  142   0.0    992 /usr/sbin/distnoted agent\n  143   0.0   1152 /usr/libexec/corercd\n  144   0.0    992 /usr/sbin/distnoted agent\n  154   0.0    992 /usr/sbin/distnoted agent\n  164   0.0   6912 /usr/libexec/syspolicyd\n  169   0.0   2880 /usr/libexec/audiomxd\n  170   0.0    736 /usr/libexec/audioclocksyncd\n  189   0.0    992 /usr/sbin/distnoted agent\n  190   0.0   2208 /usr/libexec/com.apple.cmio.videodriverkithostextension.systemextension/Contents/MacOS/com.apple.cmio.videodriverkithostextension\n  194   0.0   2272 /usr/libexec/cameracaptured\n  195   0.0   2384 /System/Library/Frameworks/CoreMediaIO.framework/Versions/A/Resources/UVCAssistant.systemextension/Contents/MacOS/UVCAssistant\n  198   0.0    992 /usr/libexec/apfsd\n  200   0.0    480 /usr/libexec/ApplicationFirewall/socketfilterfw\n  205   0.0    736 /System/Library/DriverExtensions/com.apple.DriverKit-IOUserDockChannelSerial.dext/com.apple.DriverKit-IOUserDockChannelSerial com.apple.IOUserDockChannelSerial 0x100000c33 com.apple.DriverKit-IOUserDockChannelSerial\n  206   3.7  42432 /System/Library/DriverExtensions/com.apple.DriverKit-AppleBCMWLAN.dext/com.apple.DriverKit-AppleBCMWLAN com.apple.bcmwlan 0x100000c3b com.apple.DriverKit-AppleBCMWLAN\n  207   0.0    800 /System/Library/DriverExtensions/com.apple.AppleUserHIDDrivers.dext/com.apple.AppleUserHIDDrivers com.apple.driverkit.AppleUserHIDDrivers 0x100000c3d com.apple.AppleUserHIDDrivers\n  211   0.0    992 /usr/sbin/distnoted agent\n  214   0.0    992 /usr/sbin/distnoted agent\n  223   0.0  16224 /usr/libexec/searchpartyd\n  243   0.0    960 /usr/sbin/systemstats --logger-helper /private/var/db/systemstats\n  250   0.0    992 /usr/sbin/distnoted agent\n  258   0.0   1744 /usr/sbin/BTLEServer\n  270   0.0   2816 /System/Library/CoreServices/SubmitDiagInfo server-init\n  295   0.0   3808 /System/Library/CoreServices/appleeventsd --server\n  322   0.0    992 /usr/sbin/distnoted agent\n  390   0.0  42688 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds_stores\n  393   0.0    992 /usr/sbin/distnoted agent\n  394   0.0    160 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdbulkimport -s mdworker-bundle -c MDSImporterBundleFinder -m com.apple.metadata.mdbulkimport\n  416   0.0    736 /System/Library/DriverExtensions/IOUserBluetoothSerialDriver.dext/IOUserBluetoothSerialDriver com.apple.IOUserBluetoothSerialDriver 0x100000d97 com.apple.IOUserBluetoothSerialDriver\n  419   0.0    992 /usr/sbin/distnoted agent\n  581   0.0   1008 /usr/sbin/distnoted agent\n  665   0.0   1136 /System/Library/Frameworks/CryptoTokenKit.framework/ctkd -st\n  673   0.0   2176 /usr/sbin/filecoordinationd\n  702   0.0    992 /usr/sbin/distnoted agent\n  709   0.0   3040 /usr/libexec/nearbyd\n  754   0.0    992 /usr/sbin/distnoted agent\n  765   0.0   1056 /usr/sbin/distnoted agent\n  807   0.0    896 /System/Library/CoreServices/CrashReporterSupportHelper server-init\n  821   0.0    992 /usr/sbin/distnoted agent\n  872   0.0    992 /usr/sbin/distnoted agent\n  885   0.0    992 /usr/sbin/distnoted agent\n  892   0.0   3600 /System/Library/PrivateFrameworks/MobileAccessoryUpdater.framework/Support/accessoryupdaterd 120\n  935   0.0    224 /System/Library/Frameworks/OpenGL.framework/Versions/A/Libraries/CVMServer\n  988   0.0   3216 /usr/sbin/distnoted agent\n  989   0.0   2560 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdbulkimport -s mdworker-bundle -c MDSImporterBundleFinder -m com.apple.metadata.mdbulkimport\n  994   0.0   7744 /usr/libexec/lsd\n 1001   0.0  43216 /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow console\n 1032   0.0   3728 /usr/libexec/UserEventAgent (Aqua)\n 1034   0.0  27024 /System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter\n 1037   0.0   3152 /usr/sbin/universalaccessd launchd -s\n 1040   0.0   3712 /usr/libexec/ContinuityCaptureAgent server\n 1041   0.0   3920 /usr/libexec/pboard\n 1046   0.0   8800 /usr/libexec/nsurlsessiond\n 1048   5.7  10512 /usr/libexec/rapportd\n 1049   0.0   7136 /usr/sbin/usernoted\n 1054   0.0   5680 /System/Library/CoreServices/WiFiAgent.app/Contents/MacOS/WiFiAgent\n 1056   0.0   4816 /System/Library/PrivateFrameworks/UserNotificationsCore.framework/Support/usernotificationsd\n 1064   0.0  11296 /System/Library/PrivateFrameworks/IDS.framework/identityservicesd.app/Contents/MacOS/identityservicesd\n 1082   0.0   4512 /System/Library/PrivateFrameworks/FileProvider.framework/Support/fileproviderd\n 1086   0.0  25072 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/corespotlightd\n 1090   0.0  11792 /System/Library/PrivateFrameworks/IMCore.framework/imagent.app/Contents/MacOS/imagent\n 1097   0.0   6416 /System/Library/CoreServices/sharedfilelistd\n 1110   0.0   9744 /System/Library/PrivateFrameworks/FamilyCircle.framework/Versions/A/Resources/familycircled\n 1135   0.0  18352 /usr/libexec/duetexpertd\n 1143   0.0   4352 /System/Library/PrivateFrameworks/PassKitCore.framework/passd\n 1148   0.0   3328 /System/Library/CoreServices/AccessibilityUIServer.app/Contents/MacOS/AccessibilityUIServer\n 1151   0.0  12272 /System/Library/CoreServices/WindowManager.app/Contents/MacOS/WindowManager\n 1157   0.0   9152 /System/Library/CoreServices/NotificationCenter.app/Contents/MacOS/NotificationCenter\n 1159   0.0   5504 /System/Library/PrivateFrameworks/ChronoCore.framework/Support/chronod\n 1163   0.0   3360 /System/Library/PrivateFrameworks/StatusKit.framework/StatusKitAgent\n 1168   0.0   3344 /System/Library/PrivateFrameworks/ViewBridge.framework/Versions/A/XPCServices/ViewBridgeAuxiliary.xpc/Contents/MacOS/ViewBridgeAuxiliary\n 1184   0.0   1552 /System/Library/PrivateFrameworks/CommunicationsFilter.framework/CMFSyncAgent\n 1203   0.0   4912 /System/Library/PrivateFrameworks/CoreSpeech.framework/corespeechd\n 1226   0.0   7152 /System/Library/CoreServices/audioaccessoryd\n 1231   0.0   2192 /System/Library/Frameworks/ApplicationServices.framework/Frameworks/ATS.framework/Support/fontd\n 1234   0.0    256 /System/Library/Frameworks/ApplicationServices.framework/Versions/A/Frameworks/ATS.framework/Versions/A/Support/fontworker\n 1241   0.0     16 /System/Library/Frameworks/Contacts.framework/PlugIns/ContactsCoreSpotlightExtension.appex/Contents/MacOS/ContactsCoreSpotlightExtension -AppleLanguages (\"en-NZ\")\n 1245   0.0   4288 /System/Library/CoreServices/WallpaperAgent.app/Contents/MacOS/WallpaperAgent\n 1247   0.0     16 /System/Applications/System Settings.app/Contents/PlugIns/csimporter.appex/Contents/MacOS/csimporter -AppleLanguages (\"en-NZ\")\n 1248   0.0     16 /System/Library/ExtensionKit/Extensions/SoundIntentsExtension.appex/Contents/MacOS/SoundIntentsExtension -LaunchArguments eyJ0eXBlIjoxLCJzZXJ2aWNlTmFtZSI6ImNvbS5hcHBsZS5Tb3VuZC1TZXR0aW5ncy5Tb3VuZEludGVudHMiLCJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZX0=\n 1251   0.0     16 /System/Applications/Books.app/Contents/PlugIns/BooksSpotlightExtension.appex/Contents/MacOS/BooksSpotlightExtension -AppleLanguages (\"en-NZ\")\n 1252   0.0     16 /System/Applications/VoiceMemos.app/Contents/PlugIns/VoiceMemosSettingsWidgetExtension.appex/Contents/MacOS/VoiceMemosSettingsWidgetExtension -LaunchArguments eyJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZSwidHlwZSI6MSwic2VydmljZU5hbWUiOiJjb20uYXBwbGUuVm9pY2VNZW1vcy5Wb2ljZU1lbW9zU2V0dGluZ3NXaWRnZXQifQ==\n 1254   0.0   6400 /System/Library/ExtensionKit/Extensions/WallpaperAerialsExtension.appex/Contents/MacOS/WallpaperAerialsExtension -LaunchArguments eyJ0eXBlIjoxLCJzZXJ2aWNlTmFtZSI6ImNvbS5hcHBsZS53YWxscGFwZXIuZXh0ZW5zaW9uLmFlcmlhbHMiLCJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZX0=\n 1256   0.0     16 /System/Applications/Tips.app/Contents/PlugIns/TipsWidgetExtension.appex/Contents/MacOS/TipsWidgetExtension -LaunchArguments eyJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZSwidHlwZSI6MSwic2VydmljZU5hbWUiOiJjb20uYXBwbGUudGlwcy5XaWRnZXQifQ==\n 1258   0.0     16 /System/Applications/Calendar.app/Contents/PlugIns/CalendarWidgetExtension.appex/Contents/MacOS/CalendarWidgetExtension -LaunchArguments eyJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZSwidHlwZSI6MSwic2VydmljZU5hbWUiOiJjb20uYXBwbGUuaUNhbC5DYWxlbmRhcldpZGdldEV4dGVuc2lvbiJ9\n 1259   0.0     16 /System/Library/CoreServices/ControlCenter.app/Contents/PlugIns/DisplayControls.appex/Contents/MacOS/DisplayControls -LaunchArguments eyJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZSwidHlwZSI6MSwic2VydmljZU5hbWUiOiJjb20uYXBwbGUuY29udHJvbHMuZGlzcGxheSJ9\n 1265   0.0     16 /System/Applications/Utilities/Screenshot.app/Contents/PlugIns/ScreenshotControls.appex/Contents/MacOS/ScreenshotControls -LaunchArguments eyJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZSwidHlwZSI6MSwic2VydmljZU5hbWUiOiJjb20uYXBwbGUuY29udHJvbHMuc2NyZWVuc2hvdCJ9\n 1268   0.0     16 /System/Library/PrivateFrameworks/CalendarWidget.framework/PlugIns/IntentsExtension.appex/Contents/MacOS/IntentsExtension -AppleLanguages (\"en-NZ\")\n 1269   0.0     16 /System/Applications/Journal.app/Contents/PlugIns/JournalWidgetsSecure.appex/Contents/MacOS/JournalWidgetsSecure -LaunchArguments eyJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZSwidHlwZSI6MSwic2VydmljZU5hbWUiOiJjb20uYXBwbGUuam91cm5hbC53aWRnZXRzLnNlY3VyZSJ9\n 1270   0.0     16 /System/Library/ExtensionKit/Extensions/AccessibilitySettingsWidgetExtension.appex/Contents/MacOS/AccessibilitySettingsWidgetExtension -LaunchArguments eyJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZSwidHlwZSI6MSwic2VydmljZU5hbWUiOiJjb20uYXBwbGUuQWNjZXNzaWJpbGl0eVNldHRpbmdzV2lkZ2V0RXh0ZW5zaW9uIn0=\n 1271   0.0     16 /System/Applications/Notes.app/Contents/PlugIns/com.apple.Notes.WidgetExtension.appex/Contents/MacOS/com.apple.Notes.WidgetExtension -LaunchArguments eyJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZSwidHlwZSI6MSwic2VydmljZU5hbWUiOiJjb20uYXBwbGUuTm90ZXMuV2lkZ2V0RXh0ZW5zaW9uIn0=\n 1272   0.0   5552 /System/Library/CoreServices/diagnostics_agent\n 1275   0.0     16 /System/Applications/FindMy.app/Contents/PlugIns/FindMyWidgetPeople.appex/Contents/MacOS/FindMyWidgetPeople -LaunchArguments eyJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZSwidHlwZSI6MSwic2VydmljZU5hbWUiOiJjb20uYXBwbGUuZmluZG15LkZpbmRNeVdpZGdldFBlb3BsZSJ9\n 1286   0.0    944 /System/Library/Frameworks/CryptoTokenKit.framework/ctkahp.bundle/Contents/MacOS/ctkahp -d\n 1290   0.0   4208 /System/Library/PrivateFrameworks/TextInputUIMacHelper.framework/Versions/A/XPCServices/CursorUIViewService.xpc/Contents/MacOS/CursorUIViewService\n 1291   0.0   1696 /System/Applications/Photos.app/Contents/PlugIns/PhotosReliveWidget.appex/Contents/MacOS/PhotosReliveWidget -LaunchArguments eyJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZSwidHlwZSI6MSwic2VydmljZU5hbWUiOiJjb20uYXBwbGUuUGhvdG9zLlBob3Rvc1JlbGl2ZVdpZGdldCJ9\n 1292   0.0     16 /System/Applications/Podcasts.app/Contents/PlugIns/PodcastsWidget.appex/Contents/MacOS/PodcastsWidget -LaunchArguments eyJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZSwidHlwZSI6MSwic2VydmljZU5hbWUiOiJjb20uYXBwbGUucG9kY2FzdHMud2lkZ2V0In0=\n 1293   0.0     16 /System/Library/CoreServices/WindowManager.app/Contents/PlugIns/WindowManagerControlsExtension.appex/Contents/MacOS/WindowManagerControlsExtension -LaunchArguments eyJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZSwidHlwZSI6MSwic2VydmljZU5hbWUiOiJjb20uYXBwbGUuV2luZG93TWFuYWdlci5jb250cm9scyJ9\n 1294   0.0     16 /System/Applications/FindMy.app/Contents/PlugIns/FindMyWidgetItems.appex/Contents/MacOS/FindMyWidgetItems -LaunchArguments eyJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZSwidHlwZSI6MSwic2VydmljZU5hbWUiOiJjb20uYXBwbGUuZmluZG15LkZpbmRNeVdpZGdldEl0ZW1zIn0=\n 1295   0.0     16 /System/Applications/VoiceMemos.app/Contents/PlugIns/RecordWidgetExtension.appex/Contents/MacOS/RecordWidgetExtension -LaunchArguments eyJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZSwidHlwZSI6MSwic2VydmljZU5hbWUiOiJjb20uYXBwbGUuVm9pY2VNZW1vcy5SZWNvcmRXaWRnZXQifQ==\n 1296   0.0     16 /System/Applications/Clock.app/Contents/PlugIns/WorldClockWidget.appex/Contents/MacOS/WorldClockWidget -LaunchArguments eyJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZSwidHlwZSI6MSwic2VydmljZU5hbWUiOiJjb20uYXBwbGUuY2xvY2suV29ybGRDbG9ja1dpZGdldCJ9\n 1297   0.0     16 /System/Library/CoreServices/Dock.app/Contents/PlugIns/DockControls.appex/Contents/MacOS/DockControls -LaunchArguments eyJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZSwidHlwZSI6MSwic2VydmljZU5hbWUiOiJjb20uYXBwbGUuZG9jay5jb250cm9scyJ9\n 1298   0.0     16 /System/Applications/Journal.app/Contents/PlugIns/JournalWidgets.appex/Contents/MacOS/JournalWidgets -LaunchArguments eyJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZSwidHlwZSI6MSwic2VydmljZU5hbWUiOiJjb20uYXBwbGUuam91cm5hbC53aWRnZXRzIn0=\n 1299   0.0     16 /System/Applications/Reminders.app/Contents/PlugIns/RemindersWidgetExtension.appex/Contents/MacOS/RemindersWidgetExtension -LaunchArguments eyJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZSwidHlwZSI6MSwic2VydmljZU5hbWUiOiJjb20uYXBwbGUucmVtaW5kZXJzLldpZGdldEV4dGVuc2lvbiJ9\n 1300   0.0     16 /System/Library/CoreServices/Batteries.app/Contents/PlugIns/BatteriesAvocadoWidgetExtension.appex/Contents/MacOS/BatteriesAvocadoWidgetExtension -LaunchArguments eyJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZSwidHlwZSI6MSwic2VydmljZU5hbWUiOiJjb20uYXBwbGUuQmF0dGVyaWVzLkJhdHRlcmllc0F2b2NhZG9XaWRnZXRFeHRlbnNpb24ifQ==\n 1301   0.0     16 /System/Applications/Calculator.app/Contents/PlugIns/CalculatorWidget.appex/Contents/MacOS/CalculatorWidget -LaunchArguments eyJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZSwidHlwZSI6MSwic2VydmljZU5hbWUiOiJjb20uYXBwbGUuY2FsY3VsYXRvci5DYWxjdWxhdG9yV2lkZ2V0In0=\n 1303   0.0     16 /System/Library/CoreServices/Screen Time.app/Contents/PlugIns/ScreenTimeWidgetExtension.appex/Contents/MacOS/ScreenTimeWidgetExtension -LaunchArguments eyJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZSwidHlwZSI6MSwic2VydmljZU5hbWUiOiJjb20uYXBwbGUuU2NyZWVuVGltZVdpZGdldEFwcGxpY2F0aW9uLlNjcmVlblRpbWVXaWRnZXRFeHRlbnNpb24ifQ==\n 1304   0.0     16 /System/Applications/Notes.app/Contents/PlugIns/com.apple.Notes.IntentsExtension.appex/Contents/MacOS/com.apple.Notes.IntentsExtension -AppleLanguages (\"en-NZ\")\n 1306   0.0     16 /System/Applications/Home.app/Contents/PlugIns/HomeEnergyWidgetsExtension.appex/Contents/MacOS/HomeEnergyWidgetsExtension -LaunchArguments eyJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZSwidHlwZSI6MSwic2VydmljZU5hbWUiOiJjb20uYXBwbGUuSG9tZS5Ib21lRW5lcmd5V2lkZ2V0cyJ9\n 1307   0.0     16 /System/Applications/Home.app/Contents/PlugIns/HomeWidget.appex/Contents/MacOS/HomeWidget -LaunchArguments eyJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZSwidHlwZSI6MSwic2VydmljZU5hbWUiOiJjb20uYXBwbGUuSG9tZS5Ib21lV2lkZ2V0LkludGVyYWN0aXZlIn0=\n 1308   0.0     16 /System/Applications/Utilities/Print Center.app/Contents/PlugIns/PrintCenterWidgetExtension.macOS.appex/Contents/MacOS/PrintCenterWidgetExtension.macOS -LaunchArguments eyJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZSwidHlwZSI6MSwic2VydmljZU5hbWUiOiJjb20uYXBwbGUucHJpbnRjZW50ZXIuUHJpbnRDZW50ZXJXaWRnZXQifQ==\n 1309   0.0     16 /System/Library/PrivateFrameworks/MobileTimer.framework/PlugIns/MobileTimerIntents.appex/Contents/MacOS/MobileTimerIntents -AppleLanguages (\"en-NZ\")\n 1312   0.0     16 /System/Applications/Reminders.app/Contents/PlugIns/RemindersIntentsExtension.appex/Contents/MacOS/RemindersIntentsExtension -AppleLanguages (\"en-NZ\")\n 1314   0.0     16 /System/Library/CoreServices/PeopleViewService.app/Contents/PlugIns/PeopleWidget_macOSExtension.appex/Contents/MacOS/PeopleWidget_macOSExtension -LaunchArguments eyJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZSwidHlwZSI6MSwic2VydmljZU5hbWUiOiJjb20uYXBwbGUuUGVvcGxlVmlld1NlcnZpY2UuUGVvcGxlV2lkZ2V0LW1hY09TIn0=\n 1315   0.0     16 /System/Library/CoreServices/Screen Time.app/Contents/PlugIns/ScreenTimeWidgetIntentsExtension.appex/Contents/MacOS/ScreenTimeWidgetIntentsExtension -AppleLanguages (\"en-NZ\")\n 1319   0.0     16 /System/Library/CoreServices/PeopleViewService.app/Contents/PlugIns/SelectPerson_iOS.appex/Contents/MacOS/SelectPerson_iOS -AppleLanguages (\"en-NZ\")\n 1324   0.0   1008 /System/Library/PrivateFrameworks/MediaRemote.framework/Support/mediaremoteagent\n 1327   0.0    576 /System/Library/Frameworks/CryptoTokenKit.framework/ctkahp.bundle/Contents/MacOS/ctkahp\n 1334   0.0     16 /System/Applications/Weather.app/Contents/PlugIns/WeatherIntents.appex/Contents/MacOS/WeatherIntents -AppleLanguages (\"en-NZ\")\n 1336   0.0  15392 /usr/libexec/sharingd\n 1365   0.0    112 /System/Applications/Podcasts.app/Contents/PlugIns/com.apple.podcasts.SpotlightIndexExtension.appex/Contents/MacOS/com.apple.podcasts.SpotlightIndexExtension -AppleLanguages (\"en-NZ\")\n 1373   0.0     16 /System/Applications/Reminders.app/Contents/PlugIns/RemindersSpotlightIndexExtension.appex/Contents/MacOS/RemindersSpotlightIndexExtension -AppleLanguages (\"en-NZ\")\n 1381   0.0     16 /System/Applications/Notes.app/Contents/PlugIns/com.apple.Notes.SpotlightIndexExtension.appex/Contents/MacOS/com.apple.Notes.SpotlightIndexExtension -AppleLanguages (\"en-NZ\")\n 1382   0.0     16 /System/Applications/Mail.app/Contents/PlugIns/com.apple.mail.SpotlightIndexExtension.appex/Contents/MacOS/com.apple.mail.SpotlightIndexExtension -AppleLanguages (\"en-NZ\")\n 1435   0.0   4048 /System/Library/PrivateFrameworks/iCloudDriveCore.framework/Versions/A/Support/bird\n 1454   0.0   1984 /System/Library/PrivateFrameworks/CloudDocs.framework/PlugIns/com.apple.CloudDocs.iCloudDriveFileProvider.appex/Contents/MacOS/com.apple.CloudDocs.iCloudDriveFileProvider -LaunchArguments eyJ0eXBlIjoxLCJzZXJ2aWNlTmFtZSI6ImNvbS5hcHBsZS5DbG91ZERvY3MuaUNsb3VkRHJpdmVGaWxlUHJvdmlkZXIiLCJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZX0=\n 1474   0.0     16 /System/Library/ExtensionKit/Extensions/WallpaperSonomaExtension.appex/Contents/MacOS/WallpaperSonomaExtension -LaunchArguments eyJ0eXBlIjoxLCJzZXJ2aWNlTmFtZSI6ImNvbS5hcHBsZS53YWxscGFwZXIuZXh0ZW5zaW9uLnNvbm9tYSIsImVuaGFuY2VkU2VjdXJpdHkiOmZhbHNlfQ==\n 1475   0.0     16 /System/Library/ExtensionKit/Extensions/WallpaperGradientExtension.appex/Contents/MacOS/WallpaperGradientExtension -LaunchArguments eyJ0eXBlIjoxLCJzZXJ2aWNlTmFtZSI6ImNvbS5hcHBsZS53YWxscGFwZXIuZXh0ZW5zaW9uLmdyYWRpZW50IiwiZW5oYW5jZWRTZWN1cml0eSI6ZmFsc2V9\n 1476   0.0     32 /System/Library/ExtensionKit/Extensions/WallpaperLegacyExtension.appex/Contents/MacOS/WallpaperLegacyExtension -LaunchArguments eyJ0eXBlIjoxLCJzZXJ2aWNlTmFtZSI6ImNvbS5hcHBsZS53YWxscGFwZXIuZXh0ZW5zaW9uLmxlZ2FjeSIsImVuaGFuY2VkU2VjdXJpdHkiOmZhbHNlfQ==\n 1477   0.0     16 /System/Library/ExtensionKit/Extensions/WallpaperSequoiaExtension.appex/Contents/MacOS/WallpaperSequoiaExtension -LaunchArguments eyJ0eXBlIjoxLCJzZXJ2aWNlTmFtZSI6ImNvbS5hcHBsZS53YWxscGFwZXIuZXh0ZW5zaW9uLnNlcXVvaWEiLCJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZX0=\n 1478   0.0     16 /System/Library/ExtensionKit/Extensions/WallpaperDynamicExtension.appex/Contents/MacOS/WallpaperDynamicExtension -LaunchArguments eyJ0eXBlIjoxLCJzZXJ2aWNlTmFtZSI6ImNvbS5hcHBsZS53YWxscGFwZXIuZXh0ZW5zaW9uLmR5bmFtaWMiLCJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZX0=\n 1479   0.0     16 /System/Library/ExtensionKit/Extensions/WallpaperImageExtension.appex/Contents/MacOS/WallpaperImageExtension -LaunchArguments eyJ0eXBlIjoxLCJzZXJ2aWNlTmFtZSI6ImNvbS5hcHBsZS53YWxscGFwZXIuZXh0ZW5zaW9uLmltYWdlIiwiZW5oYW5jZWRTZWN1cml0eSI6ZmFsc2V9\n 1480   0.0     16 /System/Library/ExtensionKit/Extensions/NeptuneOneWallpaper.appex/Contents/MacOS/NeptuneOneWallpaper -LaunchArguments eyJ0eXBlIjoxLCJzZXJ2aWNlTmFtZSI6ImNvbS5hcHBsZS5OZXB0dW5lT25lRXh0ZW5zaW9uIiwiZW5oYW5jZWRTZWN1cml0eSI6ZmFsc2V9\n 1481   0.0     16 /System/Library/ExtensionKit/Extensions/WallpaperMacintoshExtension.appex/Contents/MacOS/WallpaperMacintoshExtension -LaunchArguments eyJ0eXBlIjoxLCJzZXJ2aWNlTmFtZSI6ImNvbS5hcHBsZS53YWxscGFwZXIuZXh0ZW5zaW9uLm1hY2ludG9zaCIsImVuaGFuY2VkU2VjdXJpdHkiOmZhbHNlfQ==\n 1654   0.0   3248 /System/Library/CoreServices/lockoutagent\n 1677   0.0   2672 /System/Library/CoreServices/SystemUIServer.app/Contents/MacOS/SystemUIServer\n 1681   0.0  18544 /System/Library/CoreServices/Spotlight.app/Contents/MacOS/Spotlight\n 1683   0.0    352 automountd\n 1684   0.0   2688 /System/Library/PrivateFrameworks/AMPDevices.framework/Versions/A/Support/AMPDeviceDiscoveryAgent --launchd\n 1693   0.0   1680 /System/Library/Frameworks/InputMethodKit.framework/Resources/imklaunchagent\n 1696   0.0    416 /System/Library/Image Capture/Support/icdd\n 1698   0.0   2560 /System/Library/CoreServices/AirPlayUIAgent.app/Contents/MacOS/AirPlayUIAgent --launchd\n 1699   0.0   3248 /System/Library/CoreServices/TextInputMenuAgent.app/Contents/MacOS/TextInputMenuAgent\n 1726   0.0    864 /System/Library/PrivateFrameworks/KerberosHelper/Helpers/DiskUnmountWatcher\n 1739   0.0   1424 /System/Library/PrivateFrameworks/CoreFP.framework/Versions/A/fairplayd\n 1757   0.0   5024 /System/Library/CoreServices/UniversalControl.app/Contents/MacOS/UniversalControl\n 1926   0.0    912 /usr/libexec/wifivelocityd\n 1994   0.0    272 /System/Library/PrivateFrameworks/Heimdal.framework/Helpers/kdc\n 2048   0.0   1264 /System/Cryptexes/App/usr/libexec/PasswordBreachAgent\n 2296   0.0    992 /usr/sbin/distnoted agent\n 3973   0.0   1856 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdbulkimport -s mdworker-bundle -c MDSImporterBundleFinder -m com.apple.metadata.mdbulkimport\n 3974   0.0   1072 /usr/sbin/distnoted agent\n 3976   0.0   1856 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdbulkimport -s mdworker-bundle -c MDSImporterBundleFinder -m com.apple.metadata.mdbulkimport\n 4894   0.0    160 /System/Library/CoreServices/Setup Assistant.app/Contents/Resources/mbuseragent\n 5452   0.0    128 /usr/libexec/PowerUIAgent\n 5484   0.0   2896 /System/Library/Frameworks/CoreSpotlight.framework/spotlightknowledged -x\n 5923   0.0    512 /usr/sbin/cron\n 7335   0.0    704 /System/Library/PrivateFrameworks/AmbientDisplay.framework/Versions/A/XPCServices/com.apple.AmbientDisplayAgent.xpc/Contents/MacOS/com.apple.AmbientDisplayAgent\n 9033   0.0  12224 /System/Library/PrivateFrameworks/HomeKitDaemon.framework/Support/homed\n 9797   0.0   4448 /System/Library/Frameworks/Security.framework/Versions/A/XPCServices/com.apple.CodeSigningHelper.xpc/Contents/MacOS/com.apple.CodeSigningHelper\n 9811   0.0   2928 /opt/homebrew/opt/node/bin/node apps/ignis-server/server/index.js\n10033   0.0 115936 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --allow-pre-commit-input --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-crash-reporter --disable-default-apps --disable-dev-shm-usage --disable-hang-monitor --disable-infobars --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --disable-search-engine-choice-screen --disable-sync --enable-automation --export-tagged-pdf --force-color-profile=srgb --generate-pdf-document-outline --metrics-recording-only --no-first-run --password-store=basic --use-mock-keychain --disable-features=Translate,AcceptCHFrame,MediaRouter,OptimizationHints,WebUIReloadButton,WebUIOmniboxPopup,WebUIOmniboxAimPopup,ProcessPerSiteUpToMainFrameThreshold,IsolateSandboxedIframes --enable-features=PdfOopif --user-data-dir=/Users/server/.cache/chrome-devtools-mcp/chrome-profile --disable-extensions about:blank --hide-crash-restore-bubble --remote-debugging-pipe\n10077   0.0   5376 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.174/Helpers/chrome_crashpad_handler --monitor-self-annotation=ptype=crashpad-handler --database=/Users/server/Library/Application Support/Google/Chrome/Crashpad --url=https://clients2.google.com/cr/report --annotation=channel= --annotation=plat=OS X --annotation=prod=Chrome_Mac --annotation=ver=151.0.7922.174 --handshake-fd=7\n10097   2.2  50784 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.174/Helpers/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper --type=gpu-process --disable-breakpad --user-data-dir=/Users/server/.cache/chrome-devtools-mcp/chrome-profile --gpu-preferences=WAAAAAAAAAAgAQAEAAAAAAAAAAAAAGAAQAAAAAAAAAADAAAAAAAAADgAAAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAKAAAAAAAAAAoAAAAAAAAAAgAAAAAAAAADAAAAAEAAAAAAAAAAAAAAAgAAAAAAAAACAAAAAAAAAA= --shared-files --metrics-shmem-handle=1752395122,r,2924469905508429901,13966958982856392706,262144 --field-trial-handle=1718379636,r,9856245196433002637,4024431604289922710,262144 --enable-features=PdfOopif --disable-features=AcceptCHFrame,IsolateSandboxedIframes,MediaRouter,OptimizationHints,ProcessPerSiteUpToMainFrameThreshold,Translate,WebUIOmniboxAimPopup,WebUIOmniboxPopup,WebUIReloadButton --variations-seed-version --pseudonymization-salt-handle=1935764596,r,4071129310980861673,6486169340471843654,4 --trace-process-track-uuid=3190708988185955192 --seatbelt-client=29\n10098   0.0  44384 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.174/Helpers/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper --type=utility --utility-sub-type=network.mojom.NetworkService --lang=en-GB --service-sandbox-type=network --user-data-dir=/Users/server/.cache/chrome-devtools-mcp/chrome-profile --shared-files --metrics-shmem-handle=1752395122,r,14646923835010178978,11717589141758010198,524288 --field-trial-handle=1718379636,r,9856245196433002637,4024431604289922710,262144 --enable-features=PdfOopif --disable-features=AcceptCHFrame,IsolateSandboxedIframes,MediaRouter,OptimizationHints,ProcessPerSiteUpToMainFrameThreshold,Translate,WebUIOmniboxAimPopup,WebUIOmniboxPopup,WebUIReloadButton --variations-seed-version --pseudonymization-salt-handle=1935764596,r,4071129310980861673,6486169340471843654,4 --trace-process-track-uuid=3190708989122997041 --seatbelt-client=29\n10099   0.0  21472 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.174/Helpers/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper --type=utility --utility-sub-type=storage.mojom.StorageService --lang=en-GB --service-sandbox-type=service --user-data-dir=/Users/server/.cache/chrome-devtools-mcp/chrome-profile --shared-files --metrics-shmem-handle=1752395122,r,5621483011590905522,16176487828750628306,524288 --field-trial-handle=1718379636,r,9856245196433002637,4024431604289922710,262144 --enable-features=PdfOopif --disable-features=AcceptCHFrame,IsolateSandboxedIframes,MediaRouter,OptimizationHints,ProcessPerSiteUpToMainFrameThreshold,Translate,WebUIOmniboxAimPopup,WebUIOmniboxPopup,WebUIReloadButton --variations-seed-version --pseudonymization-salt-handle=1935764596,r,4071129310980861673,6486169340471843654,4 --trace-process-track-uuid=3190708990060038890 --seatbelt-client=45\n11120   0.0   2592 /System/Library/Input Methods/PressAndHold.app/Contents/PlugIns/PAH_Extension.appex/Contents/MacOS/PAH_Extension -AppleLanguages (\"en-NZ\")\n11254   0.0   2144 /System/Library/PrivateFrameworks/IMDPersistence.framework/IMAutomaticHistoryDeletionAgent.app/Contents/MacOS/IMAutomaticHistoryDeletionAgent\n11884   0.0   2528 /System/Library/PrivateFrameworks/CoreFollowUp.framework/Versions/A/Support/followupd\n13254   0.0   8576 /System/Library/PrivateFrameworks/ScreenTimeCore.framework/Versions/A/ScreenTimeAgent\n15462   0.0   2528 /System/Library/PrivateFrameworks/UniversalAccess.framework/Versions/A/Resources/universalAccessAuthWarn.app/Contents/MacOS/universalAccessAuthWarn launchd -s\n17938   0.0   4832 nginx: worker process  \n18790   0.0  20112 /System/Library/CoreServices/Finder.app/Contents/MacOS/Finder\n19083   0.0   4544 /usr/sbin/coreaudiod\n19098   0.0   1312 Core Audio Driver (ParrotAudioPlugin.driver)\n19602   0.0   5664 /System/Library/PrivateFrameworks/TCC.framework/Support/tccd\n20009   0.0   2192 /usr/libexec/logd_helper\n20292   0.0   3200 /Users/server/.vscode-server/code-df53daabb18cd157bdb08c7f01c34df936cf12f4 --cli-data-dir /Users/server/.vscode-server/cli agent host\n20555   0.0   5328 /System/Library/Frameworks/ManagedSettings.framework/Versions/A/ManagedSettingsAgent\n22828   4.9   4992 /opt/homebrew/bin/tmux new-session -s y\n27212   0.0  13616 node projects/annotated-doc/server.mjs\n29750   0.0   8960 node /Users/server/Development/workbench/projects/gdoc.mjs\n31165   0.0   8896 /usr/libexec/PerfPowerServices\n32196   0.0   1008 /usr/sbin/distnoted agent\n33751   0.0   9056 /System/Library/PrivateFrameworks/CoreSuggestions.framework/Versions/A/Support/suggestd\n34693   0.0   4768 /usr/libexec/avconferenced\n35049   0.0   8896 /System/Library/CoreServices/CoreLocationAgent.app/Contents/MacOS/CoreLocationAgent\n35364   0.0   4304 /System/Library/CoreServices/UserNotificationCenter.app/Contents/MacOS/UserNotificationCenter\n35365   0.0  14160 /System/Library/PrivateFrameworks/CloudKitDaemon.framework/Support/cloudd\n35371   0.0   4400 /System/Library/PrivateFrameworks/CloudTelemetry.framework/Versions/A/XPCServices/CloudTelemetryService.xpc/Contents/MacOS/CloudTelemetryService\n36787   0.0   7296 npm exec chrome-devtools-mcp@latest   \n36806   0.0  14896 chrome-devtools-mcp \n36807   0.0  17888 /opt/homebrew/Cellar/node/26.7.0/bin/node /Users/server/.npm/_npx/15c61037b1978c83/node_modules/chrome-devtools-mcp/build/src/telemetry/watchdog/main.js --parent-pid=36806 --app-version=1.7.0 --os-type=2\n38403   0.0   8336 /System/Library/PrivateFrameworks/AuthKit.framework/Versions/A/Support/akd\n38516   0.0     32 nginx: master process /opt/homebrew/opt/nginx/bin/nginx -g daemon off;  \n39106   0.0  25088 /System/Library/Services/AppleSpell.service/Contents/MacOS/AppleSpell\n39161   0.0     16 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdwrite\n40443   0.0   1664 /System/Library/PrivateFrameworks/AskPermission.framework/Versions/A/Resources/askpermissiond\n41028   0.0  39328 node scripts/dev-entry.js\n41310   0.0  44304 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.174/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --user-data-dir=/Users/server/.cache/chrome-devtools-mcp/chrome-profile --disable-background-timer-throttling --disable-breakpad --enable-automation --force-color-profile=srgb --remote-debugging-pipe --allow-pre-commit-input --lang=en-GB --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=14 --time-ticks-at-unix-epoch=-1786417036306015 --launch-time-ticks=1191319868075 --shared-files --metrics-shmem-handle=1752395122,r,10401486809801568476,2521789377600401806,2097152 --field-trial-handle=1718379636,r,9856245196433002637,4024431604289922710,262144 --enable-features=PdfOopif --disable-features=AcceptCHFrame,IsolateSandboxedIframes,MediaRouter,OptimizationHints,ProcessPerSiteUpToMainFrameThreshold,Translate,WebUIOmniboxAimPopup,WebUIOmniboxPopup,WebUIReloadButton --variations-seed-version --pseudonymization-salt-handle=1935764596,r,4071129310980861673,6486169340471843654,4 --trace-process-track-uuid=3190708999430457380 --seatbelt-client=107\n42518   0.0   6624 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds_stores\n46219   0.0   4656 /System/Library/Frameworks/CryptoTokenKit.framework/ctkd -tw\n47881   0.0   1824 /System/Library/Frameworks/LocalAuthentication.framework/Support/coreauthd\n50439   0.0  13888 npm exec chrome-devtools-mcp@latest   \n50460   0.0   9744 chrome-devtools-mcp \n50479   0.0  20016 /opt/homebrew/Cellar/node/26.7.0/bin/node /Users/server/.npm/_npx/15c61037b1978c83/node_modules/chrome-devtools-mcp/build/src/telemetry/watchdog/main.js --parent-pid=50460 --app-version=1.7.0 --os-type=2\n53054   0.0    288 /usr/libexec/postfix/master -w\n53056   0.0    272 qmgr -l -t fifo -u\n53072   0.0  48448 npm exec chrome-devtools-mcp@latest   \n53090   0.0  50480 chrome-devtools-mcp \n53091   0.0  48192 /opt/homebrew/Cellar/node/26.7.0/bin/node /Users/server/.npm/_npx/15c61037b1978c83/node_modules/chrome-devtools-mcp/build/src/telemetry/watchdog/main.js --parent-pid=53090 --app-version=1.7.0 --os-type=2\n53588   0.0   6848 /System/Library/PrivateFrameworks/CoreADI.framework/adid\n53606   0.0   3216 /usr/libexec/usermanagerd -t 15\n53848   0.0   7888 /usr/libexec/nsurlsessiond --privileged\n54989   0.0  11632 /System/Library/PrivateFrameworks/SyncedDefaults.framework/Support/syncdefaultsd\n55626   0.0   9200 /usr/libexec/searchpartyuseragent\n55946   0.0   1072 /System/Library/PrivateFrameworks/MobileAccessoryUpdater.framework/XPCServices/EAUpdaterService.xpc/Contents/MacOS/EAUpdaterService\n57079   0.0   3488 /System/Library/Frameworks/LocalAuthentication.framework/Support/coreauthd\n60106   0.0   7888 /usr/libexec/trustd\n60147   0.0   2560 /usr/libexec/containermanagerd --runmode=agent --user-container-mode=current --bundle-container-mode=proxy --system-container-mode=none\n60246   0.0   7424 /System/Library/PrivateFrameworks/AppleMediaServices.framework/Resources/amsaccountsd\n60334   0.0   3984 /usr/sbin/cfprefsd agent\n60375   0.0  11152 /usr/libexec/linkd\n60399   0.1   8048 /usr/libexec/trustd --agent\n60413   0.0   8128 /System/Library/Frameworks/Accounts.framework/Versions/A/Support/accountsd\n60428   0.0   9264 /usr/libexec/gamepolicyd\n60429   0.0   3712 /System/Library/PrivateFrameworks/UserActivity.framework/Agents/useractivityd\n60431   0.0   6992 /usr/libexec/secd\n60439   0.0   4816 /usr/sbin/WirelessRadioManagerd\n60745   0.0   6208 /System/Library/PrivateFrameworks/HearingCore.framework/heard\n67452   0.0    480 npm exec chrome-devtools-mcp@latest   \n67471   0.0  26800 chrome-devtools-mcp \n67472   0.0  13648 /opt/homebrew/Cellar/node/26.7.0/bin/node /Users/server/.npm/_npx/15c61037b1978c83/node_modules/chrome-devtools-mcp/build/src/telemetry/watchdog/main.js --parent-pid=67471 --app-version=1.7.0 --os-type=2\n69060   0.0   8240 /System/Library/PrivateFrameworks/AppStoreDaemon.framework/Support/appstoreagent\n71079   0.0  12864 /usr/libexec/mobileassetd\n71640   0.0 110960 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.174/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --user-data-dir=/Users/server/.cache/chrome-devtools-mcp/chrome-profile --disable-background-timer-throttling --disable-breakpad --enable-automation --force-color-profile=srgb --remote-debugging-pipe --allow-pre-commit-input --lang=en-GB --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=17 --time-ticks-at-unix-epoch=-1786417036306015 --launch-time-ticks=1193599723139 --shared-files --metrics-shmem-handle=1752395122,r,7203299658899924439,1614239559829496416,2097152 --field-trial-handle=1718379636,r,9856245196433002637,4024431604289922710,262144 --enable-features=PdfOopif --disable-features=AcceptCHFrame,IsolateSandboxedIframes,MediaRouter,OptimizationHints,ProcessPerSiteUpToMainFrameThreshold,Translate,WebUIOmniboxAimPopup,WebUIOmniboxPopup,WebUIReloadButton --variations-seed-version --pseudonymization-salt-handle=1935764596,r,4071129310980861673,6486169340471843654,4 --trace-process-track-uuid=3190709002241582927 --seatbelt-client=116\n71648   0.0   2960 /System/Library/PrivateFrameworks/CommerceKit.framework/Versions/A/Resources/storeuid.app/Contents/MacOS/storeuid\n71656   0.0  12864 /usr/libexec/pkd\n71669   0.0   6752 /usr/libexec/secinitd\n71680   0.0  10688 /System/Library/PrivateFrameworks/GeoServices.framework/Versions/A/XPCServices/com.apple.geod.xpc/Contents/MacOS/com.apple.geod\n71687   0.0   3472 /usr/libexec/containermanagerd_system --runmode=privileged --user-container-mode=current --bundle-container-mode=global --bundle-container-owner=_appinstalld --system-container-mode=none\n71691   0.0   3360 /usr/libexec/containermanagerd --runmode=agent --user-container-mode=current --bundle-container-mode=proxy --system-container-mode=none\n71693   0.0   4256 /System/Library/PrivateFrameworks/AssetCacheServices.framework/Versions/A/XPCServices/AssetCacheLocatorService.xpc/Contents/MacOS/AssetCacheLocatorService -a\n71701   0.0   3344 /usr/libexec/containermanagerd --runmode=agent --user-container-mode=current --bundle-container-mode=proxy --system-container-mode=none\n71749   0.6 136768 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.174/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --user-data-dir=/Users/server/.cache/chrome-devtools-mcp/chrome-profile --disable-background-timer-throttling --disable-breakpad --enable-automation --force-color-profile=srgb --remote-debugging-pipe --allow-pre-commit-input --lang=en-GB --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=18 --time-ticks-at-unix-epoch=-1786417036306015 --launch-time-ticks=1193609475312 --shared-files --metrics-shmem-handle=1752395122,r,5977551233891163780,9214665549102460008,2097152 --field-trial-handle=1718379636,r,9856245196433002637,4024431604289922710,262144 --enable-features=PdfOopif --disable-features=AcceptCHFrame,IsolateSandboxedIframes,MediaRouter,OptimizationHints,ProcessPerSiteUpToMainFrameThreshold,Translate,WebUIOmniboxAimPopup,WebUIOmniboxPopup,WebUIReloadButton --variations-seed-version --pseudonymization-salt-handle=1935764596,r,4071129310980861673,6486169340471843654,4 --trace-process-track-uuid=3190709003178624776 --seatbelt-client=116\n72336   0.0   7104 /System/Library/PrivateFrameworks/BiomeStreams.framework/Support/biomed\n72538   0.0   4208 /usr/libexec/nehelper\n72539   0.0  25632 /System/Library/PrivateFrameworks/TelephonyUtilities.framework/callservicesd\n72540   0.0  22320 /System/Library/CoreServices/UIKitSystem.app/Contents/MacOS/UIKitSystem system_app_start\n72558   0.0  23536 /System/Library/PrivateFrameworks/AssistantServices.framework/Versions/A/Support/assistantd\n72577   0.0   3936 /System/Library/PrivateFrameworks/SystemStatusServer.framework/Support/systemstatusd\n72586   0.0   2832 /usr/libexec/containermanagerd --runmode=agent --user-container-mode=current --bundle-container-mode=proxy --system-container-mode=none\n72595   0.0   3712 /usr/libexec/containermanagerd --runmode=agent --user-container-mode=current --bundle-container-mode=proxy --system-container-mode=none\n72934   0.0  15552 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd\n73071   0.0   5152 /System/Library/CoreServices/TimeMachine/backupd-helper -launchd\n73072   0.0   5984 /System/Library/CoreServices/TimeMachine/backupd\n73084   0.0  11968 /usr/libexec/spotlightknowledged.updater -u\n73190   0.0  28032 /System/Library/CoreServices/CoreServicesUIAgent.app/Contents/MacOS/CoreServicesUIAgent\n73321   0.0   9152 /System/Library/Frameworks/GSS.framework/Helpers/GSSCred\n73329   0.0   2288 /System/Library/Frameworks/ApplicationServices.framework/Versions/A/Frameworks/HIServices.framework/Versions/A/XPCServices/com.apple.hiservices-xpcservice.xpc/Contents/MacOS/com.apple.hiservices-xpcservice\n73815   0.0   3072 /System/Library/CoreServices/pbs\n74054   0.0  11632 /System/Library/PrivateFrameworks/UsageTracking.framework/Versions/A/UsageTrackingAgent\n74055   0.0  24592 /usr/libexec/knowledge-agent\n74060   0.0   5856 /usr/libexec/neagent\n74061   0.0   9136 /System/Library/Frameworks/Contacts.framework/Support/contactsd\n74062   0.0   3856 /usr/libexec/securityd_system\n74066   0.0  16832 /System/Library/PrivateFrameworks/CalendarDaemon.framework/Support/calaccessd\n74070   0.0   9616 /System/Library/PrivateFrameworks/CommunicationTrust.framework/Support/communicationtrustd\n74073   0.0  13136 /usr/libexec/findmylocateagent\n74161   0.0  10352 /usr/libexec/wifip2pd\n74937   0.0  22752 /usr/libexec/routined LAUNCHED_BY_LAUNCHD\n74973   0.0   6752 /System/Cryptexes/App/usr/libexec/SafariLaunchAgent\n74974   0.0   5104 /usr/libexec/countryd\n74977   0.0     32 /System/Applications/Weather.app/Contents/PlugIns/WeatherWidget.appex/Contents/MacOS/WeatherWidget -LaunchArguments eyJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZSwidHlwZSI6MSwic2VydmljZU5hbWUiOiJjb20uYXBwbGUud2VhdGhlci53aWRnZXQifQ==\n75277   0.0  11168 /System/Library/PrivateFrameworks/GeoServices.framework/Versions/A/XPCServices/com.apple.geod.xpc/Contents/MacOS/com.apple.geod\n75278   0.0   6320 /usr/libexec/secinitd\n75279   0.0   2128 /usr/sbin/cfprefsd agent\n75280   0.0   5648 /usr/libexec/trustd --agent\n75281   0.0   3392 /usr/libexec/trustdFileHelper\n75282   0.0  11008 /System/Library/PrivateFrameworks/GeoServices.framework/Versions/A/XPCServices/com.apple.geod.xpc/Contents/MacOS/com.apple.geod\n75283   0.0   6320 /usr/libexec/secinitd\n75284   0.0   2352 /Library/Apple/System/Library/CoreServices/XProtect.app/Contents/MacOS/XProtect\n75285   0.0   4176 /Library/Apple/System/Library/CoreServices/XProtect.app/Contents/XPCServices/XProtectPluginService.xpc/Contents/MacOS/XProtectPluginService\n75693   0.0   8112 /usr/libexec/findmybeaconingd\n75700   0.0  15744 /System/Library/PrivateFrameworks/CoreDuetContext.framework/Resources/ContextStoreAgent\n75701   0.0   9568 /System/Library/PrivateFrameworks/MediaRemote.framework/Support/mediaremoted\n75713   0.0   7520 /usr/libexec/ospredictiond\n75715   0.0   6416 /System/Library/PrivateFrameworks/CoreAnalytics.framework/Support/analyticsagent\n75721   0.0   5008 /System/Library/PrivateFrameworks/CommerceKit.framework/Versions/A/Resources/commerce\n75728   0.0   5456 /usr/libexec/feedbackd\n75732   0.0   4096 /System/Library/PrivateFrameworks/EmailDaemon.framework/Versions/A/maild\n75733   0.0   5168 /usr/libexec/assessmentagent\n75734   0.0   6800 /System/Cryptexes/App/usr/libexec/com.apple.Safari.History\n75735   0.0   5824 /System/Library/PrivateFrameworks/IntelligenceFlowRuntime.framework/Versions/A/intelligenceflowd\n75736   0.0  14240 /System/Library/CoreServices/Keychain Circle Notification.app/Contents/MacOS/Keychain Circle Notification\n75765   0.0   2432 /usr/libexec/online-auth-agent\n75766   0.0   6384 /System/Library/PrivateFrameworks/CloudSubscriptionFeatures.framework/FeatureAccessAgent\n76260   0.0  50592 npm exec chrome-devtools-mcp@latest   \n76277   0.0  52640 chrome-devtools-mcp \n76278   0.0  50208 /opt/homebrew/Cellar/node/26.7.0/bin/node /Users/server/.npm/_npx/15c61037b1978c83/node_modules/chrome-devtools-mcp/build/src/telemetry/watchdog/main.js --parent-pid=76277 --app-version=1.7.0 --os-type=2\n76298   0.0   6864 osascript -e delay 1800 -e display notification \"Recheck W1a CPU and benchmark gate\" with title \"Scope follow-up\"\n76486   0.0   6800 /System/Library/PrivateFrameworks/IntelligencePlatformCore.framework/Versions/A/intelligenceplatformd\n76487   0.0   2384 /Library/Apple/System/Library/CoreServices/XProtect.app/Contents/MacOS/XProtect\n76488   0.0   4176 /Library/Apple/System/Library/CoreServices/XProtect.app/Contents/XPCServices/XProtectPluginService.xpc/Contents/MacOS/XProtectPluginService\n76490   0.0   5520 /System/Library/PrivateFrameworks/iCloudDriveService.framework/XPCServices/ContainerMetadataExtractor.xpc/Contents/MacOS/ContainerMetadataExtractor\n76491   0.0  28224 /System/Library/PrivateFrameworks/VoiceShortcuts.framework/Versions/A/Support/siriactionsd\n76504   0.0  21744 /System/Library/PrivateFrameworks/WorkflowKit.framework/XPCServices/ShortcutsViewService.xpc/Contents/MacOS/ShortcutsViewService\n76506   0.0   9936 /System/Library/PrivateFrameworks/SessionCore.framework/Support/liveactivitiesd\n76507   0.0  16240 /System/Library/PrivateFrameworks/ReplicatorCore.framework/Support/replicatord\n76508   0.0   8160 /System/Library/PrivateFrameworks/MobileTimer.framework/Executables/mobiletimerd\n76509   0.0  15408 /usr/libexec/coreduetd\n76517   0.0   4848 /usr/libexec/powerexperienced\n76521   0.0   6160 /System/Library/PrivateFrameworks/AXAssetLoader.framework/Support/axassetsd\n76605   0.0   1072 /bin/zsh -c sleep 1800; echo \"WAKE: 30-minute timer elapsed at $(date '+%H:%M:%S')\"\n76606   0.0    480 sleep 1800\n76619   0.0   2064 /usr/libexec/tipsd\n76705   0.0   7296 /usr/libexec/dmd\n76706   0.0  15312 /System/Library/PrivateFrameworks/AppleMediaServicesUI.framework/amsengagementd\n76707   0.0  19568 /System/Library/PrivateFrameworks/DoNotDisturbServer.framework/Support/donotdisturbd\n76846   0.0   1136 npm exec chrome-devtools-mcp@latest   \n76943   0.0   1104 chrome-devtools-mcp \n76957   0.0   3344 /opt/homebrew/Cellar/node/26.7.0/bin/node /Users/server/.npm/_npx/15c61037b1978c83/node_modules/chrome-devtools-mcp/build/src/telemetry/watchdog/main.js --parent-pid=76943 --app-version=1.7.0 --os-type=2\n77016   0.0   3824 /System/Library/PrivateFrameworks/MobileAccessoryUpdater.framework/XPCServices/UARPUpdaterServiceUSBPD.xpc/Contents/MacOS/UARPUpdaterServiceUSBPD\n77835   0.0    880 ssh -p 23 -i /Users/server/.ssh/cc_laptop_ed25519 -o BatchMode=yes -f admin@ssh.javagrant.ac.nz osascript -e \"with timeout of 600 seconds\\012mount volume \\\"smb://files.auckland.ac.nz/research\\\"\\012end timeout\" 2>&1; ls /Volumes/ > /tmp/cc_mount_result.txt 2>&1\n77979   0.0  16464 sshd-session: server [priv]  \n77980   0.0      0 <defunct>\n78028   2.1   1920 sshd-session: server@ttys000  \n78069   0.0  16464 sshd-session: server [priv]  \n78072   0.0  16464 sshd-session: server [priv]  \n78073   0.0  16464 sshd-session: server [priv]  \n78074   0.0  16464 sshd-session: server [priv]  \n78076   0.0      0 <defunct>\n78077   0.0      0 <defunct>\n78079   0.0      0 <defunct>\n78080   0.0      0 <defunct>\n78089   1.8   1872 sshd-session: server@ttys002  \n78090   0.3   1888 sshd-session: server@ttys008  \n78092   0.0   1856 sshd-session: server@ttys004  \n78093   0.0   1856 sshd-session: server@ttys005  \n78123   0.0   1824 pickup -l -t fifo -u -o content_filter=\n78309   0.0   9568 /System/Library/PrivateFrameworks/IntelligencePlatformCompute.framework/Versions/A/XPCServices/IntelligencePlatformComputeService.xpc/Contents/MacOS/IntelligencePlatformComputeService\n79360   0.0   1888 /usr/libexec/seputil --daemonize-reseed\n79760   0.0     16 /usr/libexec/taskgated\n79952   0.0  18448 /System/Library/Frameworks/CoreTelephony.framework/Support/CommCenter -L\n80048   0.0  17168 /usr/libexec/replayd\n80049   0.0   4480 /usr/libexec/aned\n80050   0.0   3296 /System/Library/PrivateFrameworks/PowerLog.framework/Versions/A/XPCServices/PerfPowerTelemetryClientRegistrationService.xpc/Contents/MacOS/PerfPowerTelemetryClientRegistrationService\n80152   0.0   5312 /usr/libexec/nfcd\n80156   0.0   4064 /System/Library/PrivateFrameworks/NearFieldPrivateServices.framework/Versions/A/XPCServices/NFStorageServer.xpc/Contents/MacOS/NFStorageServer\n81216   0.0   1376 /usr/sbin/netbiosd\n81934   0.1  25296 /System/Applications/Utilities/Activity Monitor.app/Contents/MacOS/Activity Monitor\n81941   0.1   2944 /usr/libexec/sysmond\n81976   0.0   8352 node dbg2.mjs\n82440   0.0   5984 /System/Library/PrivateFrameworks/BiomeStreams.framework/Support/BiomeAgent\n82713   0.0   1136 npm exec chrome-devtools-mcp@latest   \n82743   0.0   1104 chrome-devtools-mcp \n82745   0.0   2912 /opt/homebrew/Cellar/node/26.7.0/bin/node /Users/server/.npm/_npx/15c61037b1978c83/node_modules/chrome-devtools-mcp/build/src/telemetry/watchdog/main.js --parent-pid=82743 --app-version=1.7.0 --os-type=2\n82921   0.0   4416 /usr/libexec/amfid\n82931   0.0   5984 /System/Library/PrivateFrameworks/CloudTelemetry.framework/Versions/A/XPCServices/CloudTelemetryService.xpc/Contents/MacOS/CloudTelemetryService\n82932   0.0  12608 /System/Library/PrivateFrameworks/XprotectFramework.framework/Versions/A/XPCServices/XProtectBridgeService.xpc/Contents/MacOS/XProtectBridgeService\n82933   0.0   4992 /System/Library/CoreServices/osanalyticshelper server-init\n82941   0.0   5424 /usr/libexec/mobileactivationd\n82942   0.0   1856 /usr/libexec/smd\n83092   0.0  12080 /usr/libexec/mlhostd\n83093   0.0   9632 /System/Library/Frameworks/ExtensionFoundation.framework/Versions/A/XPCServices/extensionkitservice.xpc/Contents/MacOS/extensionkitservice\n83301   0.0  67216 node build/server.js\n83379   0.0  77104 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.174/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --user-data-dir=/Users/server/.cache/chrome-devtools-mcp/chrome-profile --disable-background-timer-throttling --disable-breakpad --enable-automation --force-color-profile=srgb --remote-debugging-pipe --allow-pre-commit-input --lang=en-GB --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=20 --time-ticks-at-unix-epoch=-1786417036306015 --launch-time-ticks=1195093789216 --shared-files --metrics-shmem-handle=1752395122,r,11054769452966629250,6961373363200089620,2097152 --field-trial-handle=1718379636,r,9856245196433002637,4024431604289922710,262144 --enable-features=PdfOopif --disable-features=AcceptCHFrame,IsolateSandboxedIframes,MediaRouter,OptimizationHints,ProcessPerSiteUpToMainFrameThreshold,Translate,WebUIOmniboxAimPopup,WebUIOmniboxPopup,WebUIReloadButton --variations-seed-version --pseudonymization-salt-handle=1935764596,r,4071129310980861673,6486169340471843654,4 --trace-process-track-uuid=3190709005052708474 --seatbelt-client=116\n83380   0.8 139936 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.174/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --user-data-dir=/Users/server/.cache/chrome-devtools-mcp/chrome-profile --disable-background-timer-throttling --disable-breakpad --enable-automation --force-color-profile=srgb --remote-debugging-pipe --allow-pre-commit-input --lang=en-GB --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=19 --time-ticks-at-unix-epoch=-1786417036306015 --launch-time-ticks=1195093789671 --shared-files --metrics-shmem-handle=1752395122,r,2095556709606195994,490975726952248069,2097152 --field-trial-handle=1718379636,r,9856245196433002637,4024431604289922710,262144 --enable-features=PdfOopif --disable-features=AcceptCHFrame,IsolateSandboxedIframes,MediaRouter,OptimizationHints,ProcessPerSiteUpToMainFrameThreshold,Translate,WebUIOmniboxAimPopup,WebUIOmniboxPopup,WebUIReloadButton --variations-seed-version --pseudonymization-salt-handle=1935764596,r,4071129310980861673,6486169340471843654,4 --trace-process-track-uuid=3190709004115666625 --seatbelt-client=116\n83413   0.0  45088 /opt/homebrew/bin/node /Users/server/Development/ccsearch/server/index.mjs\n83575   0.0   3680 /usr/libexec/sandboxd\n83576   0.0  16112 /System/Library/CoreServices/talagentd\n84574   0.0  50672 npm exec chrome-devtools-mcp@latest   \n84597   0.0  52720 chrome-devtools-mcp \n84598   0.0  50672 npm exec chrome-devtools-mcp@latest   \n84600   0.0  47120 /opt/homebrew/Cellar/node/26.7.0/bin/node /Users/server/.npm/_npx/15c61037b1978c83/node_modules/chrome-devtools-mcp/build/src/telemetry/watchdog/main.js --parent-pid=84597 --app-version=1.7.0 --os-type=2\n84601   0.0  50672 npm exec chrome-devtools-mcp@latest   \n84619   0.0  52720 chrome-devtools-mcp \n84634   0.0  52736 chrome-devtools-mcp \n84635   0.0  47008 /opt/homebrew/Cellar/node/26.7.0/bin/node /Users/server/.npm/_npx/15c61037b1978c83/node_modules/chrome-devtools-mcp/build/src/telemetry/watchdog/main.js --parent-pid=84619 --app-version=1.7.0 --os-type=2\n84636   0.0  47088 /opt/homebrew/Cellar/node/26.7.0/bin/node /Users/server/.npm/_npx/15c61037b1978c83/node_modules/chrome-devtools-mcp/build/src/telemetry/watchdog/main.js --parent-pid=84634 --app-version=1.7.0 --os-type=2\n85176   0.0  50672 npm exec chrome-devtools-mcp@latest   \n85196   0.0  52720 chrome-devtools-mcp \n85197   0.0  47008 /opt/homebrew/Cellar/node/26.7.0/bin/node /Users/server/.npm/_npx/15c61037b1978c83/node_modules/chrome-devtools-mcp/build/src/telemetry/watchdog/main.js --parent-pid=85196 --app-version=1.7.0 --os-type=2\n86977   0.0   6128 /usr/libexec/rtcreportingd\n87289   0.0  10384 /System/Library/CoreServices/Dock.app/Contents/MacOS/Dock\n87298   0.0   2624 /System/Library/CoreServices/Dock.app/Contents/XPCServices/com.apple.dock.extra.xpc/Contents/MacOS/com.apple.dock.extra\n87299   0.0   2896 /System/Library/CoreServices/Dock.app/Contents/XPCServices/com.apple.dock.external.extra.arm64.xpc/Contents/MacOS/com.apple.dock.external.extra.arm64\n88241   0.0   2784 /usr/libexec/keybagd -t 15\n88615   0.0    512 sleep 60\n88853   0.0  25376 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared -s mdworker -c MDSImporterWorker -m com.apple.mdworker.shared\n88861   0.0  41872 /System/Library/PrivateFrameworks/UniversalAccess.framework/Versions/A/Resources/AXVisualSupportAgent.app/Contents/MacOS/AXVisualSupportAgent launchd -s\n89134   0.0  23296 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared -s mdworker -c MDSImporterWorker -m com.apple.mdworker.shared\n89135   0.0  23536 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared -s mdworker -c MDSImporterWorker -m com.apple.mdworker.shared\n89167   0.0  48400 node /private/var/folders/71/2pg61l9d535gyhsjzvyj58kc0000gn/T/opencode/grill-tickets.cjs\n89313   0.0   4512 /System/Library/CoreServices/Software Update.app/Contents/Resources/softwareupdated\n89317   0.0    768 /System/Library/CoreServices/Software Update.app/Contents/Resources/suhelperd\n89344   0.3   2368 /bin/zsh -c ANNOTATED_TEXT_BENCH_SCENARIO=initial ANNOTATED_TEXT_BENCH_COMMIT=01dde95 ANNOTATED_TEXT_BENCH_PROFILE=1 pnpm benchmark:annotated-text-composite-resync > test-results/w1a/initial-01dde95.json 2> test-results/w1a/initial-01dde95.stderr; echo \"exit=$?\"; node -e '\\012const r = require(\"./test-results/w1a/initial-01dde95.json\");\\012console.log(\"P95s:\", {e2e: r.projections.endToEndP95Ms, proj: r.projections.projectionP95Ms, ser: r.projections.serializationP95Ms, val: r.projections.validationP95Ms});\\012console.log(\"E2E samples:\", r.projections.endToEndSamples.join(\", \"));\\012console.log(\"visibleP95:\", r.projections.visibleP95Ms, \"redactedP95:\", r.projections.redactedP95Ms);\\012console.log(\"rssDelta:\", r.rssDeltaMiB, \"peakRssDelta:\", r.peakRssDeltaMiB);\\012console.log(\"loopP99:\", r.fanout.p99LoopDelayMs, \"wcHeld:\", r.writeCoordinatorHeld);\\012console.log(\"notes:\", JSON.stringify(r.thresholdNotes));\\012'\n89349   2.8  44160 gh api repos/JavaGT/scope/issues --input -\n89350  46.9 163728 node /opt/homebrew/bin/pnpm benchmark:annotated-text-composite-resync\n89362  34.2  84576 node benchmark/annotated-text-composite-resync.mjs\n89374   0.5   1680 ps -Ao pid,pcpu,rss,command\n89948   0.0   6816 npm exec chrome-devtools-mcp@latest   \n89966   0.0   6448 chrome-devtools-mcp \n89967   0.0   7888 /opt/homebrew/Cellar/node/26.7.0/bin/node /Users/server/.npm/_npx/15c61037b1978c83/node_modules/chrome-devtools-mcp/build/src/telemetry/watchdog/main.js --parent-pid=89966 --app-version=1.7.0 --os-type=2\n92015   0.0   1104 /bin/zsh -c cd /Users/server/Development/scope || exit 1\\012echo \"[watcher] started $(date). Waiting for worktree state to settle for 15 continuous minutes...\"\\012LAST=\"\"\\012STABLE_SINCE=$(date +%s)\\012DEADLINE=$(( $(date +%s) + 86400 ))\\012while :; do\\012  NOW=$(date +%s)\\012  if [ \"$NOW\" -ge \"$DEADLINE\" ]; then\\012    echo \"ABORT: worktree never settled for 15 continuous minutes within 24h deadline.\"\\012    exit 1\\012  fi\\012  SNAP=\"$(git rev-parse HEAD 2>/dev/null)|$(git status --porcelain 2>/dev/null | sort | md5 -q)\"\\012  if [ \"$SNAP\" = \"$LAST\" ]; then\\012    if [ $(( NOW - STABLE_SINCE )) -ge 900 ]; then\\012      AHEAD=$(git rev-list --count origin/main..main 2>/dev/null || echo unknown)\\012      echo \"Settled since $(date -r $STABLE_SINCE '+%H:%M:%S') (15m+ stable). Unpushed commits: $AHEAD. Pushing...\"\\012      if git push origin main 2>&1; then\\012        echo \"PUSH_OK: main pushed to origin at $(date).\"\\012        exit 0\\012      else\\012        echo \"PUSH_FAILED: see error above (likely credentials — same auth that broke fetch yesterday). Nothing lost; rerun after fixing auth.\"\\012        exit 2\\012      fi\\012    fi\\012  else\\012    if [ -n \"$LAST\" ]; then\\012      echo \"[watcher] change detected at $(date '+%H:%M:%S') — timer reset.\"\\012    fi\\012    LAST=\"$SNAP\"\\012    STABLE_SINCE=$NOW\\012  fi\\012  sleep 60\\012done\n93200   0.0   7936 /System/Cryptexes/App/usr/libexec/SafariBookmarksSyncAgent\n96704   0.0   9792 /System/Library/PrivateFrameworks/TCC.framework/Support/tccd system\n98154  17.7 1918864 /Users/server/.bun/install/global/node_modules/@opencode-ai/cli/bin/opencode2.exe serve --service\n98211   0.0    176 npm exec chrome-devtools-mcp@latest   \n98338   0.0    176 chrome-devtools-mcp \n98349   0.0   2160 /opt/homebrew/Cellar/node/26.7.0/bin/node /Users/server/.npm/_npx/15c61037b1978c83/node_modules/chrome-devtools-mcp/build/src/telemetry/watchdog/main.js --parent-pid=98338 --app-version=1.7.0 --os-type=2\n98350   0.0    176 npm exec chrome-devtools-mcp@latest   \n98387   0.0    176 chrome-devtools-mcp \n98396   0.0   2160 /opt/homebrew/Cellar/node/26.7.0/bin/node /Users/server/.npm/_npx/15c61037b1978c83/node_modules/chrome-devtools-mcp/build/src/telemetry/watchdog/main.js --parent-pid=98387 --app-version=1.7.0 --os-type=2\n78029   0.0   1104 zsh -c TMUX_BIN=/opt/homebrew/bin/tmux; $TMUX_BIN attach-session -t k || $TMUX_BIN new-session -s k\n78030   0.0   1344 /opt/homebrew/bin/tmux attach-session -t k\n78096   0.0   1104 zsh -c TMUX_BIN=/opt/homebrew/bin/tmux; $TMUX_BIN attach-session -t grocer || $TMUX_BIN new-session -s grocer\n78102   0.0   1344 /opt/homebrew/bin/tmux attach-session -t grocer\n22829   0.0     32 -zsh\n78095   0.0   1104 zsh -c TMUX_BIN=/opt/homebrew/bin/tmux; $TMUX_BIN attach-session -t neweps || $TMUX_BIN new-session -s neweps\n78100   0.0   1344 /opt/homebrew/bin/tmux attach-session -t neweps\n78097   0.0   1104 zsh -c TMUX_BIN=/opt/homebrew/bin/tmux; $TMUX_BIN attach-session -t vpn || $TMUX_BIN new-session -s vpn\n78101   0.0   1344 /opt/homebrew/bin/tmux attach-session -t vpn\n95219   0.0    112 -zsh\n58148   0.0     32 -zsh\n78098   0.0   1104 zsh -c TMUX_BIN=/opt/homebrew/bin/tmux; $TMUX_BIN attach-session -t ccsearch || $TMUX_BIN new-session -s ccsearch\n78103   0.0   1344 /opt/homebrew/bin/tmux attach-session -t ccsearch\n86561   0.0     32 zsh -c export PATH='/Users/server/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin' && cd '/Users/server/Production/scope' && WORKER_ID='scope-prod-worker' WORKER_STATE_DIR='.worker-state/scope-prod-worker' pnpm worker 2>&1 | tee -a '/Volumes/Bard/Services/Production/Scope/logs/worker.stdout.log'\n86563   0.0    112 node /opt/homebrew/bin/pnpm worker\n86564   0.0     96 tee -a /Volumes/Bard/Services/Production/Scope/logs/worker.stdout.log\n86572   0.0  29584 node --experimental-strip-types --env-file=.env worker/index.ts\n 7889   8.7 1372816 opencode2\n26182   0.0     32 -zsh\n92428   0.0     32 -zsh\n 1255   0.0     32 -zsh\n 1501   3.2 921408 opencode2\n81183   0.0     32 -zsh\n81331  11.2 801808 opencode2\n71416   0.0     32 -zsh\n72592   4.2 1436512 opencode2\n"
+  },
+  "node": "v26.7.0",
+  "platform": "darwin/arm64",
+  "fixture": {
+    "words": 36000,
+    "annotations": 72000,
+    "uniqueRanges": 36001,
+    "protectingAnnotations": 1,
+    "visibleRecipients": 13,
+    "redactedRecipients": 12,
+    "recipients": 25,
+    "controls": 50
+  },
+  "fanout": {
+    "p99LoopDelayMs": 1.652,
+    "coalescedMessages": 25
+  },
+  "projections": {
+    "acceptanceBoundary": "projection + JSON.stringify + JSON.parse + public snapshot validation",
+    "p95Ms": 558.432,
+    "projectionP95Ms": 436.823,
+    "serializationP95Ms": 56.941,
+    "validationP95Ms": 173.656,
+    "endToEndP95Ms": 558.432,
+    "visibleP95Ms": 558.432,
+    "redactedP95Ms": 591.438,
+    "samples": [
+      313.028,
+      292.238,
+      332.476,
+      298.212,
+      320.208,
+      343.292,
+      329.969,
+      347.389,
+      316.231,
+      291.192,
+      310.408,
+      294.249,
+      318.787,
+      320.277,
+      365.664,
+      342.994,
+      386.9,
+      299.703,
+      365.229,
+      436.823,
+      502.688,
+      347.162,
+      351.829,
+      327.539,
+      323.614
+    ],
+    "serializationSamples": [
+      51.945,
+      56.941,
+      52.705,
+      51.637,
+      56.685,
+      51.116,
+      52.157,
+      51.059,
+      51.144,
+      50.749,
+      60.283,
+      50.761,
+      49.295,
+      15.703,
+      16.308,
+      17.509,
+      17.46,
+      16.418,
+      16.481,
+      18.206,
+      25.767,
+      16.262,
+      16.655,
+      15.9,
+      15.946
+    ],
+    "validationSamples": [
+      156.4,
+      181.709,
+      158.665,
+      158.248,
+      172.648,
+      158.8,
+      173.656,
+      150.681,
+      149.369,
+      147.306,
+      154.364,
+      154.601,
+      146.739,
+      44.93,
+      49.685,
+      101.28,
+      51.859,
+      53.502,
+      44.616,
+      62.671,
+      61.866,
+      44.787,
+      42.912,
+      46.705,
+      47.363
+    ],
+    "phaseSamples": [
+      [
+        {
+          "phase": "family checkpoint SQL read",
+          "durationMs": 0.06724999999983083,
+          "details": {
+            "rows": 1
+          }
+        },
+        {
+          "phase": "checkpoint JSON parse and family restore",
+          "durationMs": 0.013416999999890322
+        },
+        {
+          "phase": "full text materialization",
+          "durationMs": 0.006333000000040556
+        },
+        {
+          "phase": "protected-edge SQL and row load",
+          "durationMs": 0.05925000000002001,
+          "details": {
+            "rows": 100
+          }
+        },
+        {
+          "phase": "annotation SQL, row load, and decode",
+          "durationMs": 82.330375,
+          "details": {
+            "rows": 72001
+          }
+        },
+        {
+          "phase": "range SQL, endpoint parse, and unique projection",
+          "durationMs": 120.9554999999998,
+          "details": {
+            "ranges": 36001
+          }
+        },
+        {
+          "phase": "orphan and measurement load",
+          "durationMs": 2.9088329999999587,
+          "details": {
+            "orphans": 0,
+            "measurements": 0
+          }
+        },
+        {
+          "phase": "membership SQL, row load, and source fusion",
+          "durationMs": 50.0619999999999,
+          "details": {
+            "memberships": 72001
+          }
+        },
+        {
+          "phase": "protector and field authorization await",
+          "durationMs": 0.18812500000012733,
+          "details": {
+            "protectors": 1
+          }
+        },
+        {
+          "phase": "recipient transform and freezing",
+          "durationMs": 46.01741700000002
+        },
+        {
+          "phase": "serialization",
+          "durationMs": 51.945166999999856,
+          "details": {
+            "bytes": 31677092
+          }
+        },
+        {
+          "phase": "parse and recipient validation",
+          "durationMs": 156.39966700000014,
+          "details": {
+            "bytes": 31677092
+          }
+        }
+      ],
+      [
+        {
+          "phase": "family checkpoint SQL read",
+          "durationMs": 0.039042000000335975,
+          "details": {
+            "rows": 1
+          }
+        },
+        {
+          "phase": "checkpoint JSON parse and family restore",
+          "durationMs": 0.0157920000001468
+        },
+        {
+          "phase": "full text materialization",
+          "durationMs": 0.0015419999999721767
+        },
+        {
+          "phase": "protected-edge SQL and row load",
+          "durationMs": 0.06179100000008475,
+          "details": {
+            "rows": 100
+          }
+        },
+        {
+          "phase": "annotation SQL, row load, and decode",
+          "durationMs": 80.92533299999968,
+          "details": {
+            "rows": 72001
+          }
+        },
+        {
+          "phase": "range SQL, endpoint parse, and unique projection",
+          "durationMs": 114.09137499999997,
+          "details": {
+            "ranges": 36001
+          }
+        },
+        {
+          "phase": "orphan and measurement load",
+          "durationMs": 2.9113330000000133,
+          "details": {
+            "orphans": 0,
+            "measurements": 0
+          }
+        },
+        {
+          "phase": "membership SQL, row load, and source fusion",
+          "durationMs": 44.08054099999981,
+          "details": {
+            "memberships": 72001
+          }
+        },
+        {
+          "phase": "protector and field authorization await",
+          "durationMs": 0.051916999999775726,
+          "details": {
+            "protectors": 1
+          }
+        },
+        {
+          "phase": "recipient transform and freezing",
+          "durationMs": 39.28483300000016
+        },
+        {
+          "phase": "serialization",
+          "durationMs": 56.9409999999998,
+          "details": {
+            "bytes": 31677092
+          }
+        },
+        {
+          "phase": "parse and recipient validation",
+          "durationMs": 181.70916699999998,
+          "details": {
+            "bytes": 31677092
+          }
+        }
+      ],
+      [
+        {
+          "phase": "family checkpoint SQL read",
+          "durationMs": 0.03850000000011278,
+          "details": {
+            "rows": 1
+          }
+        },
+        {
+          "phase": "checkpoint JSON parse and family restore",
+          "durationMs": 0.016665999999986525
+        },
+        {
+          "phase": "full text materialization",
+          "durationMs": 0.001833999999689695
+        },
+        {
+          "phase": "protected-edge SQL and row load",
+          "durationMs": 0.06004199999961202,
+          "details": {
+            "rows": 100
+          }
+        },
+        {
+          "phase": "annotation SQL, row load, and decode",
+          "durationMs": 95.86116700000002,
+          "details": {
+            "rows": 72001
+          }
+        },
+        {
+          "phase": "range SQL, endpoint parse, and unique projection",
+          "durationMs": 124.04083300000002,
+          "details": {
+            "ranges": 36001
+          }
+        },
+        {
+          "phase": "orphan and measurement load",
+          "durationMs": 2.6338330000003225,
+          "details": {
+            "orphans": 0,
+            "measurements": 0
+          }
+        },
+        {
+          "phase": "membership SQL, row load, and source fusion",
+          "durationMs": 46.837332999999944,
+          "details": {
+            "memberships": 72001
+          }
+        },
+        {
+          "phase": "protector and field authorization await",
+          "durationMs": 0.08516700000018318,
+          "details": {
+            "protectors": 1
+          }
+        },
+        {
+          "phase": "recipient transform and freezing",
+          "durationMs": 51.569582999999966
+        },
+        {
+          "phase": "serialization",
+          "durationMs": 52.704749999999876,
+          "details": {
+            "bytes": 31677092
+          }
+        },
+        {
+          "phase": "parse and recipient validation",
+          "durationMs": 158.66537500000004,
+          "details": {
+            "bytes": 31677092
+          }
+        }
+      ],
+      [
+        {
+          "phase": "family checkpoint SQL read",
+          "durationMs": 0.05016699999987395,
+          "details": {
+            "rows": 1
+          }
+        },
+        {
+          "phase": "checkpoint JSON parse and family restore",
+          "durationMs": 0.01704199999994671
+        },
+        {
+          "phase": "full text materialization",
+          "durationMs": 0.0014999999998508429
+        },
+        {
+          "phase": "protected-edge SQL and row load",
+          "durationMs": 0.06124999999974534,
+          "details": {
+            "rows": 100
+          }
+        },
+        {
+          "phase": "annotation SQL, row load, and decode",
+          "durationMs": 85.51858300000004,
+          "details": {
+            "rows": 72001
+          }
+        },
+        {
+          "phase": "range SQL, endpoint parse, and unique projection",
+          "durationMs": 115.39712499999996,
+          "details": {
+            "ranges": 36001
+          }
+        },
+        {
+          "phase": "orphan and measurement load",
+          "durationMs": 2.803875000000062,
+          "details": {
+            "orphans": 0,
+            "measurements": 0
+          }
+        },
+        {
+          "phase": "membership SQL, row load, and source fusion",
+          "durationMs": 46.73362499999985,
+          "details": {
+            "memberships": 72001
+          }
+        },
+        {
+          "phase": "protector and field authorization await",
+          "durationMs": 0.077541999999994,
+          "details": {
+            "protectors": 1
+          }
+        },
+        {
+          "phase": "recipient transform and freezing",
+          "durationMs": 37.820374999999785
+        },
+        {
+          "phase": "serialization",
+          "durationMs": 51.6372080000001,
+          "details": {
+            "bytes": 31677092
+          }
+        },
+        {
+          "phase": "parse and recipient validation",
+          "durationMs": 158.2475000000004,
+          "details": {
+            "bytes": 31677092
+          }
+        }
+      ],
+      [
+        {
+          "phase": "family checkpoint SQL read",
+          "durationMs": 0.049791999999797554,
+          "details": {
+            "rows": 1
+          }
+        },
+        {
+          "phase": "checkpoint JSON parse and family restore",
+          "durationMs": 0.027207999999973254
+        },
+        {
+          "phase": "full text materialization",
+          "durationMs": 0.0015829999997549749
+        },
+        {
+          "phase": "protected-edge SQL and row load",
+          "durationMs": 0.05837500000006912,
+          "details": {
+            "rows": 100
+          }
+        },
+        {
+          "phase": "annotation SQL, row load, and decode",
+          "durationMs": 89.98116600000003,
+          "details": {
+            "rows": 72001
+          }
+        },
+        {
+          "phase": "range SQL, endpoint parse, and unique projection",
+          "durationMs": 117.99266699999953,
+          "details": {
+            "ranges": 36001
+          }
+        },
+        {
+          "phase": "orphan and measurement load",
+          "durationMs": 2.700832999999875,
+          "details": {
+            "orphans": 0,
+            "measurements": 0
+          }
+        },
+        {
+          "phase": "membership SQL, row load, and source fusion",
+          "durationMs": 54.619832999999744,
+          "details": {
+            "memberships": 72001
+          }
+        },
+        {
+          "phase": "protector and field authorization await",
+          "durationMs": 0.07087499999943248,
+          "details": {
+            "protectors": 1
+          }
+        },
+        {
+          "phase": "recipient transform and freezing",
+          "durationMs": 43.08395799999926
+        },
+        {
+          "phase": "serialization",
+          "durationMs": 56.685083000000304,
+          "details": {
+            "bytes": 31677092
+          }
+        },
+        {
+          "phase": "parse and recipient validation",
+          "durationMs": 172.64820800000052,
+          "details": {
+            "bytes": 31677092
+          }
+        }
+      ],
+      [
+        {
+          "phase": "family checkpoint SQL read",
+          "durationMs": 0.050416999999470136,
+          "details": {
+            "rows": 1
+          }
+        },
+        {
+          "phase": "checkpoint JSON parse and family restore",
+          "durationMs": 0.01900000000023283
+        },
+        {
+          "phase": "full text materialization",
+          "durationMs": 0.0020830000003115856
+        },
+        {
+          "phase": "protected-edge SQL and row load",
+          "durationMs": 0.06366699999944103,
+          "details": {
+            "rows": 100
+          }
+        },
+        {
+          "phase": "annotation SQL, row load, and decode",
+          "durationMs": 103.78549999999996,
+          "details": {
+            "rows": 72001
+          }
+        },
+        {
+          "phase": "range SQL, endpoint parse, and unique projection",
+          "durationMs": 136.05774999999994,
+          "details": {
+            "ranges": 36001
+          }
+        },
+        {
+          "phase": "orphan and measurement load",
+          "durationMs": 3.2254579999998896,
+          "details": {
+            "orphans": 0,
+            "measurements": 0
+          }
+        },
+        {
+          "phase": "membership SQL, row load, and source fusion",
+          "durationMs": 54.62433400000009,
+          "details": {
+            "memberships": 72001
+          }
+        },
+        {
+          "phase": "protector and field authorization await",
+          "durationMs": 0.05895799999962037,
+          "details": {
+            "protectors": 1
+          }
+        },
+        {
+          "phase": "recipient transform and freezing",
+          "durationMs": 37.143207999999504
+        },
+        {
+          "phase": "serialization",
+          "durationMs": 51.115749999999935,
+          "details": {
+            "bytes": 31677092
+          }
+        },
+        {
+          "phase": "parse and recipient validation",
+          "durationMs": 158.800209,
+          "details": {
+            "bytes": 31677092
+          }
+        }
+      ],
+      [
+        {
+          "phase": "family checkpoint SQL read",
+          "durationMs": 0.0672919999997248,
+          "details": {
+            "rows": 1
+          }
+        },
+        {
+          "phase": "checkpoint JSON parse and family restore",
+          "durationMs": 0.01920799999970768
+        },
+        {
+          "phase": "full text materialization",
+          "durationMs": 0.0016250000007858034
+        },
+        {
+          "phase": "protected-edge SQL and row load",
+          "durationMs": 0.059166000000004715,
+          "details": {
+            "rows": 100
+          }
+        },
+        {
+          "phase": "annotation SQL, row load, and decode",
+          "durationMs": 93.14274999999998,
+          "details": {
+            "rows": 72001
+          }
+        },
+        {
+          "phase": "range SQL, endpoint parse, and unique projection",
+          "durationMs": 131.40858300000036,
+          "details": {
+            "ranges": 36001
+          }
+        },
+        {
+          "phase": "orphan and measurement load",
+          "durationMs": 2.948457999999846,
+          "details": {
+            "orphans": 0,
+            "measurements": 0
+          }
+        },
+        {
+          "phase": "membership SQL, row load, and source fusion",
+          "durationMs": 51.68187500000022,
+          "details": {
+            "memberships": 72001
+          }
+        },
+        {
+          "phase": "protector and field authorization await",
+          "durationMs": 0.05904199999986304,
+          "details": {
+            "protectors": 1
+          }
+        },
+        {
+          "phase": "recipient transform and freezing",
+          "durationMs": 42.708708000000115
+        },
+        {
+          "phase": "serialization",
+          "durationMs": 52.15691599999991,
+          "details": {
+            "bytes": 31677092
+          }
+        },
+        {
+          "phase": "parse and recipient validation",
+          "durationMs": 173.65629200000058,
+          "details": {
+            "bytes": 31677092
+          }
+        }
+      ],
+      [
+        {
+          "phase": "family checkpoint SQL read",
+          "durationMs": 0.049332999999933236,
+          "details": {
+            "rows": 1
+          }
+        },
+        {
+          "phase": "checkpoint JSON parse and family restore",
+          "durationMs": 0.025332999999591266
+        },
+        {
+          "phase": "full text materialization",
+          "durationMs": 0.0017080000006899354
+        },
+        {
+          "phase": "protected-edge SQL and row load",
+          "durationMs": 0.05737500000032014,
+          "details": {
+            "rows": 100
+          }
+        },
+        {
+          "phase": "annotation SQL, row load, and decode",
+          "durationMs": 81.54216600000018,
+          "details": {
+            "rows": 72001
+          }
+        },
+        {
+          "phase": "range SQL, endpoint parse, and unique projection",
+          "durationMs": 155.0600829999994,
+          "details": {
+            "ranges": 36001
+          }
+        },
+        {
+          "phase": "orphan and measurement load",
+          "durationMs": 2.774833000000399,
+          "details": {
+            "orphans": 0,
+            "measurements": 0
+          }
+        },
+        {
+          "phase": "membership SQL, row load, and source fusion",
+          "durationMs": 45.831084000000374,
+          "details": {
+            "memberships": 72001
+          }
+        },
+        {
+          "phase": "protector and field authorization await",
+          "durationMs": 0.08366700000078708,
+          "details": {
+            "protectors": 1
+          }
+        },
+        {
+          "phase": "recipient transform and freezing",
+          "durationMs": 51.72004100000049
+        },
+        {
+          "phase": "serialization",
+          "durationMs": 51.0590000000002,
+          "details": {
+            "bytes": 31677092
+          }
+        },
+        {
+          "phase": "parse and recipient validation",
+          "durationMs": 150.68145899999945,
+          "details": {
+            "bytes": 31677092
+          }
+        }
+      ],
+      [
+        {
+          "phase": "family checkpoint SQL read",
+          "durationMs": 0.04849999999987631,
+          "details": {
+            "rows": 1
+          }
+        },
+        {
+          "phase": "checkpoint JSON parse and family restore",
+          "durationMs": 0.01641600000039034
+        },
+        {
+          "phase": "full text materialization",
+          "durationMs": 0.001833000000260654
+        },
+        {
+          "phase": "protected-edge SQL and row load",
+          "durationMs": 0.061375000000225555,
+          "details": {
+            "rows": 100
+          }
+        },
+        {
+          "phase": "annotation SQL, row load, and decode",
+          "durationMs": 99.94483299999956,
+          "details": {
+            "rows": 72001
+          }
+        },
+        {
+          "phase": "range SQL, endpoint parse, and unique projection",
+          "durationMs": 122.96812500000033,
+          "details": {
+            "ranges": 36001
+          }
+        },
+        {
+          "phase": "orphan and measurement load",
+          "durationMs": 2.740208000000166,
+          "details": {
+            "orphans": 0,
+            "measurements": 0
+          }
+        },
+        {
+          "phase": "membership SQL, row load, and source fusion",
+          "durationMs": 46.70245900000009,
+          "details": {
+            "memberships": 72001
+          }
+        },
+        {
+          "phase": "protector and field authorization await",
+          "durationMs": 0.07208300000002055,
+          "details": {
+            "protectors": 1
+          }
+        },
+        {
+          "phase": "recipient transform and freezing",
+          "durationMs": 36.926124999999956
+        },
+        {
+          "phase": "serialization",
+          "durationMs": 51.143708999999944,
+          "details": {
+            "bytes": 31677092
+          }
+        },
+        {
+          "phase": "parse and recipient validation",
+          "durationMs": 149.36941599999955,
+          "details": {
+            "bytes": 31677092
+          }
+        }
+      ],
+      [
+        {
+          "phase": "family checkpoint SQL read",
+          "durationMs": 0.07937500000025466,
+          "details": {
+            "rows": 1
+          }
+        },
+        {
+          "phase": "checkpoint JSON parse and family restore",
+          "durationMs": 0.0145410000004631
+        },
+        {
+          "phase": "full text materialization",
+          "durationMs": 0.0018340000005991897
+        },
+        {
+          "phase": "protected-edge SQL and row load",
+          "durationMs": 0.05904199999986304,
+          "details": {
+            "rows": 100
+          }
+        },
+        {
+          "phase": "annotation SQL, row load, and decode",
+          "durationMs": 83.08349999999973,
+          "details": {
+            "rows": 72001
+          }
+        },
+        {
+          "phase": "range SQL, endpoint parse, and unique projection",
+          "durationMs": 112.77329199999986,
+          "details": {
+            "ranges": 36001
+          }
+        },
+        {
+          "phase": "orphan and measurement load",
+          "durationMs": 2.7462500000001455,
+          "details": {
+            "orphans": 0,
+            "measurements": 0
+          }
+        },
+        {
+          "phase": "membership SQL, row load, and source fusion",
+          "durationMs": 47.030249999999796,
+          "details": {
+            "memberships": 72001
+          }
+        },
+        {
+          "phase": "protector and field authorization await",
+          "durationMs": 0.06920799999988958,
+          "details": {
+            "protectors": 1
+          }
+        },
+        {
+          "phase": "recipient transform and freezing",
+          "durationMs": 38.50170900000012
+        },
+        {
+          "phase": "serialization",
+          "durationMs": 50.7488340000009,
+          "details": {
+            "bytes": 31677092
+          }
+        },
+        {
+          "phase": "parse and recipient validation",
+          "durationMs": 147.30625000000055,
+          "details": {
+            "bytes": 31677092
+          }
+        }
+      ],
+      [
+        {
+          "phase": "family checkpoint SQL read",
+          "durationMs": 0.045166999999310065,
+          "details": {
+            "rows": 1
+          }
+        },
+        {
+          "phase": "checkpoint JSON parse and family restore",
+          "durationMs": 0.016709000000446395
+        },
+        {
+          "phase": "full text materialization",
+          "durationMs": 0.0012079999996785773
+        },
+        {
+          "phase": "protected-edge SQL and row load",
+          "durationMs": 0.06299999999919237,
+          "details": {
+            "rows": 100
+          }
+        },
+        {
+          "phase": "annotation SQL, row load, and decode",
+          "durationMs": 88.00829200000044,
+          "details": {
+            "rows": 72001
+          }
+        },
+        {
+          "phase": "range SQL, endpoint parse, and unique projection",
+          "durationMs": 118.17775000000074,
+          "details": {
+            "ranges": 36001
+          }
+        },
+        {
+          "phase": "orphan and measurement load",
+          "durationMs": 2.731709000000592,
+          "details": {
+            "orphans": 0,
+            "measurements": 0
+          }
+        },
+        {
+          "phase": "membership SQL, row load, and source fusion",
+          "durationMs": 44.418666999999914,
+          "details": {
+            "memberships": 72001
+          }
+        },
+        {
+          "phase": "protector and field authorization await",
+          "durationMs": 0.06720799999948213,
+          "details": {
+            "protectors": 1
+          }
+        },
+        {
+          "phase": "recipient transform and freezing",
+          "durationMs": 48.48779200000081
+        },
+        {
+          "phase": "serialization",
+          "durationMs": 60.28312499999993,
+          "details": {
+            "bytes": 31677092
+          }
+        },
+        {
+          "phase": "parse and recipient validation",
+          "durationMs": 154.3642919999993,
+          "details": {
+            "bytes": 31677092
+          }
+        }
+      ],
+      [
+        {
+          "phase": "family checkpoint SQL read",
+          "durationMs": 0.06591600000047038,
+          "details": {
+            "rows": 1
+          }
+        },
+        {
+          "phase": "checkpoint JSON parse and family restore",
+          "durationMs": 0.016458999999485968
+        },
+        {
+          "phase": "full text materialization",
+          "durationMs": 0.001042000000779808
+        },
+        {
+          "phase": "protected-edge SQL and row load",
+          "durationMs": 0.05770899999970425,
+          "details": {
+            "rows": 100
+          }
+        },
+        {
+          "phase": "annotation SQL, row load, and decode",
+          "durationMs": 80.56466699999964,
+          "details": {
+            "rows": 72001
+          }
+        },
+        {
+          "phase": "range SQL, endpoint parse, and unique projection",
+          "durationMs": 114.34479199999987,
+          "details": {
+            "ranges": 36001
+          }
+        },
+        {
+          "phase": "orphan and measurement load",
+          "durationMs": 2.87145800000053,
+          "details": {
+            "orphans": 0,
+            "measurements": 0
+          }
+        },
+        {
+          "phase": "membership SQL, row load, and source fusion",
+          "durationMs": 44.40637500000048,
+          "details": {
+            "memberships": 72001
+          }
+        },
+        {
+          "phase": "protector and field authorization await",
+          "durationMs": 0.0748329999996713,
+          "details": {
+            "protectors": 1
+          }
+        },
+        {
+          "phase": "recipient transform and freezing",
+          "durationMs": 45.21679099999983
+        },
+        {
+          "phase": "serialization",
+          "durationMs": 50.76066700000047,
+          "details": {
+            "bytes": 31677092
+          }
+        },
+        {
+          "phase": "parse and recipient validation",
+          "durationMs": 154.6014580000001,
+          "details": {
+            "bytes": 31677092
+          }
+        }
+      ],
+      [
+        {
+          "phase": "family checkpoint SQL read",
+          "durationMs": 0.05633300000044983,
+          "details": {
+            "rows": 1
+          }
+        },
+        {
+          "phase": "checkpoint JSON parse and family restore",
+          "durationMs": 0.017916999999215477
+        },
+        {
+          "phase": "full text materialization",
+          "durationMs": 0.0012079999996785773
+        },
+        {
+          "phase": "protected-edge SQL and row load",
+          "durationMs": 0.05983399999968242,
+          "details": {
+            "rows": 100
+          }
+        },
+        {
+          "phase": "annotation SQL, row load, and decode",
+          "durationMs": 94.88504100000137,
+          "details": {
+            "rows": 72001
+          }
+        },
+        {
+          "phase": "range SQL, endpoint parse, and unique projection",
+          "durationMs": 119.72775000000001,
+          "details": {
+            "ranges": 36001
+          }
+        },
+        {
+          "phase": "orphan and measurement load",
+          "durationMs": 2.8024999999997817,
+          "details": {
+            "orphans": 0,
+            "measurements": 0
+          }
+        },
+        {
+          "phase": "membership SQL, row load, and source fusion",
+          "durationMs": 51.893833000000086,
+          "details": {
+            "memberships": 72001
+          }
+        },
+        {
+          "phase": "protector and field authorization await",
+          "durationMs": 0.05620899999848916,
+          "details": {
+            "protectors": 1
+          }
+        },
+        {
+          "phase": "recipient transform and freezing",
+          "durationMs": 43.23166599999968
+        },
+        {
+          "phase": "serialization",
+          "durationMs": 49.29500000000007,
+          "details": {
+            "bytes": 31677092
+          }
+        },
+        {
+          "phase": "parse and recipient validation",
+          "durationMs": 146.73879099999976,
+          "details": {
+            "bytes": 31677092
+          }
+        }
+      ],
+      [
+        {
+          "phase": "family checkpoint SQL read",
+          "durationMs": 0.0523750000011205,
+          "details": {
+            "rows": 1
+          }
+        },
+        {
+          "phase": "checkpoint JSON parse and family restore",
+          "durationMs": 0.01937499999985448
+        },
+        {
+          "phase": "full text materialization",
+          "durationMs": 0.00112500000068394
+        },
+        {
+          "phase": "protected-edge SQL and row load",
+          "durationMs": 0.05908300000010058,
+          "details": {
+            "rows": 100
+          }
+        },
+        {
+          "phase": "annotation SQL, row load, and decode",
+          "durationMs": 98.98825000000033,
+          "details": {
+            "rows": 72001
+          }
+        },
+        {
+          "phase": "range SQL, endpoint parse, and unique projection",
+          "durationMs": 118.05558399999973,
+          "details": {
+            "ranges": 36001
+          }
+        },
+        {
+          "phase": "orphan and measurement load",
+          "durationMs": 2.9804579999999987,
+          "details": {
+            "orphans": 0,
+            "measurements": 0
+          }
+        },
+        {
+          "phase": "membership SQL, row load, and source fusion",
+          "durationMs": 43.986291999999594,
+          "details": {
+            "memberships": 72001
+          }
+        },
+        {
+          "phase": "protector and field authorization await",
+          "durationMs": 0.04754099999991013,
+          "details": {
+            "protectors": 1
+          }
+        },
+        {
+          "phase": "recipient transform and freezing",
+          "durationMs": 47.62162499999977
+        },
+        {
+          "phase": "serialization",
+          "durationMs": 15.702875000000859,
+          "details": {
+            "bytes": 11859192
+          }
+        },
+        {
+          "phase": "parse and recipient validation",
+          "durationMs": 44.929958000000624,
+          "details": {
+            "bytes": 11859192
+          }
+        }
+      ],
+      [
+        {
+          "phase": "family checkpoint SQL read",
+          "durationMs": 0.0645410000015545,
+          "details": {
+            "rows": 1
+          }
+        },
+        {
+          "phase": "checkpoint JSON parse and family restore",
+          "durationMs": 0.013791999999739346
+        },
+        {
+          "phase": "full text materialization",
+          "durationMs": 0.0010830000010173535
+        },
+        {
+          "phase": "protected-edge SQL and row load",
+          "durationMs": 0.05516700000043784,
+          "details": {
+            "rows": 100
+          }
+        },
+        {
+          "phase": "annotation SQL, row load, and decode",
+          "durationMs": 96.1880000000001,
+          "details": {
+            "rows": 72001
+          }
+        },
+        {
+          "phase": "range SQL, endpoint parse, and unique projection",
+          "durationMs": 159.17312499999935,
+          "details": {
+            "ranges": 36001
+          }
+        },
+        {
+          "phase": "orphan and measurement load",
+          "durationMs": 2.9127499999995052,
+          "details": {
+            "orphans": 0,
+            "measurements": 0
+          }
+        },
+        {
+          "phase": "membership SQL, row load, and source fusion",
+          "durationMs": 52.72037499999897,
+          "details": {
+            "memberships": 72001
+          }
+        },
+        {
+          "phase": "protector and field authorization await",
+          "durationMs": 0.05058399999870744,
+          "details": {
+            "protectors": 1
+          }
+        },
+        {
+          "phase": "recipient transform and freezing",
+          "durationMs": 43.92525000000023
+        },
+        {
+          "phase": "serialization",
+          "durationMs": 16.30762499999946,
+          "details": {
+            "bytes": 11859192
+          }
+        },
+        {
+          "phase": "parse and recipient validation",
+          "durationMs": 49.684666999999536,
+          "details": {
+            "bytes": 11859192
+          }
+        }
+      ],
+      [
+        {
+          "phase": "family checkpoint SQL read",
+          "durationMs": 0.07549999999901047,
+          "details": {
+            "rows": 1
+          }
+        },
+        {
+          "phase": "checkpoint JSON parse and family restore",
+          "durationMs": 0.022875000000567525
+        },
+        {
+          "phase": "full text materialization",
+          "durationMs": 0.0010839999995368998
+        },
+        {
+          "phase": "protected-edge SQL and row load",
+          "durationMs": 0.06287500000144064,
+          "details": {
+            "rows": 100
+          }
+        },
+        {
+          "phase": "annotation SQL, row load, and decode",
+          "durationMs": 93.56491599999936,
+          "details": {
+            "rows": 72001
+          }
+        },
+        {
+          "phase": "range SQL, endpoint parse, and unique projection",
+          "durationMs": 142.4405000000006,
+          "details": {
+            "ranges": 36001
+          }
+        },
+        {
+          "phase": "orphan and measurement load",
+          "durationMs": 3.056209000000308,
+          "details": {
+            "orphans": 0,
+            "measurements": 0
+          }
+        },
+        {
+          "phase": "membership SQL, row load, and source fusion",
+          "durationMs": 54.73133299999972,
+          "details": {
+            "memberships": 72001
+          }
+        },
+        {
+          "phase": "protector and field authorization await",
+          "durationMs": 0.0898749999996653,
+          "details": {
+            "protectors": 1
+          }
+        },
+        {
+          "phase": "recipient transform and freezing",
+          "durationMs": 36.40537500000028
+        },
+        {
+          "phase": "serialization",
+          "durationMs": 17.508833000001687,
+          "details": {
+            "bytes": 11859192
+          }
+        },
+        {
+          "phase": "parse and recipient validation",
+          "durationMs": 101.28033299999879,
+          "details": {
+            "bytes": 11859192
+          }
+        }
+      ],
+      [
+        {
+          "phase": "family checkpoint SQL read",
+          "durationMs": 0.14170799999919836,
+          "details": {
+            "rows": 1
+          }
+        },
+        {
+          "phase": "checkpoint JSON parse and family restore",
+          "durationMs": 0.06745799999953306
+        },
+        {
+          "phase": "full text materialization",
+          "durationMs": 0.00204200000007404
+        },
+        {
+          "phase": "protected-edge SQL and row load",
+          "durationMs": 0.13354100000105973,
+          "details": {
+            "rows": 100
+          }
+        },
+        {
+          "phase": "annotation SQL, row load, and decode",
+          "durationMs": 98.85924999999952,
+          "details": {
+            "rows": 72001
+          }
+        },
+        {
+          "phase": "range SQL, endpoint parse, and unique projection",
+          "durationMs": 135.29466700000012,
+          "details": {
+            "ranges": 36001
+          }
+        },
+        {
+          "phase": "orphan and measurement load",
+          "durationMs": 3.18316699999923,
+          "details": {
+            "orphans": 0,
+            "measurements": 0
+          }
+        },
+        {
+          "phase": "membership SQL, row load, and source fusion",
+          "durationMs": 73.53358300000036,
+          "details": {
+            "memberships": 72001
+          }
+        },
+        {
+          "phase": "protector and field authorization await",
+          "durationMs": 0.07687499999883585,
+          "details": {
+            "protectors": 1
+          }
+        },
+        {
+          "phase": "recipient transform and freezing",
+          "durationMs": 64.58158399999957
+        },
+        {
+          "phase": "serialization",
+          "durationMs": 17.460000000000946,
+          "details": {
+            "bytes": 11859192
+          }
+        },
+        {
+          "phase": "parse and recipient validation",
+          "durationMs": 51.85850000000028,
+          "details": {
+            "bytes": 11859192
+          }
+        }
+      ],
+      [
+        {
+          "phase": "family checkpoint SQL read",
+          "durationMs": 0.04899999999906868,
+          "details": {
+            "rows": 1
+          }
+        },
+        {
+          "phase": "checkpoint JSON parse and family restore",
+          "durationMs": 0.015916999998808024
+        },
+        {
+          "phase": "full text materialization",
+          "durationMs": 0.0008330000000569271
+        },
+        {
+          "phase": "protected-edge SQL and row load",
+          "durationMs": 0.06537500000013097,
+          "details": {
+            "rows": 100
+          }
+        },
+        {
+          "phase": "annotation SQL, row load, and decode",
+          "durationMs": 85.87608300000102,
+          "details": {
+            "rows": 72001
+          }
+        },
+        {
+          "phase": "range SQL, endpoint parse, and unique projection",
+          "durationMs": 117.53662500000064,
+          "details": {
+            "ranges": 36001
+          }
+        },
+        {
+          "phase": "orphan and measurement load",
+          "durationMs": 2.887249999999767,
+          "details": {
+            "orphans": 0,
+            "measurements": 0
+          }
+        },
+        {
+          "phase": "membership SQL, row load, and source fusion",
+          "durationMs": 46.19449999999961,
+          "details": {
+            "memberships": 72001
+          }
+        },
+        {
+          "phase": "protector and field authorization await",
+          "durationMs": 0.05249999999978172,
+          "details": {
+            "protectors": 1
+          }
+        },
+        {
+          "phase": "recipient transform and freezing",
+          "durationMs": 39.694250000000466
+        },
+        {
+          "phase": "serialization",
+          "durationMs": 16.418290999999954,
+          "details": {
+            "bytes": 11859192
+          }
+        },
+        {
+          "phase": "parse and recipient validation",
+          "durationMs": 53.50208300000122,
+          "details": {
+            "bytes": 11859192
+          }
+        }
+      ],
+      [
+        {
+          "phase": "family checkpoint SQL read",
+          "durationMs": 0.04837500000030559,
+          "details": {
+            "rows": 1
+          }
+        },
+        {
+          "phase": "checkpoint JSON parse and family restore",
+          "durationMs": 0.01749999999992724
+        },
+        {
+          "phase": "full text materialization",
+          "durationMs": 0.0013330000001587905
+        },
+        {
+          "phase": "protected-edge SQL and row load",
+          "durationMs": 0.061416999998982647,
+          "details": {
+            "rows": 100
+          }
+        },
+        {
+          "phase": "annotation SQL, row load, and decode",
+          "durationMs": 89.53612500000054,
+          "details": {
+            "rows": 72001
+          }
+        },
+        {
+          "phase": "range SQL, endpoint parse, and unique projection",
+          "durationMs": 168.1265000000003,
+          "details": {
+            "ranges": 36001
+          }
+        },
+        {
+          "phase": "orphan and measurement load",
+          "durationMs": 3.0727090000000317,
+          "details": {
+            "orphans": 0,
+            "measurements": 0
+          }
+        },
+        {
+          "phase": "membership SQL, row load, and source fusion",
+          "durationMs": 59.361000000000786,
+          "details": {
+            "memberships": 72001
+          }
+        },
+        {
+          "phase": "protector and field authorization await",
+          "durationMs": 0.04750000000058208,
+          "details": {
+            "protectors": 1
+          }
+        },
+        {
+          "phase": "recipient transform and freezing",
+          "durationMs": 34.38441600000078
+        },
+        {
+          "phase": "serialization",
+          "durationMs": 16.480666999999812,
+          "details": {
+            "bytes": 11859192
+          }
+        },
+        {
+          "phase": "parse and recipient validation",
+          "durationMs": 44.6155830000007,
+          "details": {
+            "bytes": 11859192
+          }
+        }
+      ],
+      [
+        {
+          "phase": "family checkpoint SQL read",
+          "durationMs": 0.059750000000349246,
+          "details": {
+            "rows": 1
+          }
+        },
+        {
+          "phase": "checkpoint JSON parse and family restore",
+          "durationMs": 0.025416000000404892
+        },
+        {
+          "phase": "full text materialization",
+          "durationMs": 0.002082999999402091
+        },
+        {
+          "phase": "protected-edge SQL and row load",
+          "durationMs": 0.06208300000071176,
+          "details": {
+            "rows": 100
+          }
+        },
+        {
+          "phase": "annotation SQL, row load, and decode",
+          "durationMs": 116.50358400000005,
+          "details": {
+            "rows": 72001
+          }
+        },
+        {
+          "phase": "range SQL, endpoint parse, and unique projection",
+          "durationMs": 168.03449999999975,
+          "details": {
+            "ranges": 36001
+          }
+        },
+        {
+          "phase": "orphan and measurement load",
+          "durationMs": 3.145249999999578,
+          "details": {
+            "orphans": 0,
+            "measurements": 0
+          }
+        },
+        {
+          "phase": "membership SQL, row load, and source fusion",
+          "durationMs": 67.76954099999966,
+          "details": {
+            "memberships": 72001
+          }
+        },
+        {
+          "phase": "protector and field authorization await",
+          "durationMs": 0.07379200000104902,
+          "details": {
+            "protectors": 1
+          }
+        },
+        {
+          "phase": "recipient transform and freezing",
+          "durationMs": 69.51341700000012
+        },
+        {
+          "phase": "serialization",
+          "durationMs": 18.20600000000013,
+          "details": {
+            "bytes": 11859192
+          }
+        },
+        {
+          "phase": "parse and recipient validation",
+          "durationMs": 62.671416999999565,
+          "details": {
+            "bytes": 11859192
+          }
+        }
+      ],
+      [
+        {
+          "phase": "family checkpoint SQL read",
+          "durationMs": 0.05104200000096171,
+          "details": {
+            "rows": 1
+          }
+        },
+        {
+          "phase": "checkpoint JSON parse and family restore",
+          "durationMs": 0.04016600000068138
+        },
+        {
+          "phase": "full text materialization",
+          "durationMs": 0.0012079999996785773
+        },
+        {
+          "phase": "protected-edge SQL and row load",
+          "durationMs": 0.06254200000148558,
+          "details": {
+            "rows": 100
+          }
+        },
+        {
+          "phase": "annotation SQL, row load, and decode",
+          "durationMs": 154.65149999999994,
+          "details": {
+            "rows": 72001
+          }
+        },
+        {
+          "phase": "range SQL, endpoint parse, and unique projection",
+          "durationMs": 223.7816669999993,
+          "details": {
+            "ranges": 36001
+          }
+        },
+        {
+          "phase": "orphan and measurement load",
+          "durationMs": 4.309709000001021,
+          "details": {
+            "orphans": 0,
+            "measurements": 0
+          }
+        },
+        {
+          "phase": "membership SQL, row load, and source fusion",
+          "durationMs": 51.02054099999987,
+          "details": {
+            "memberships": 72001
+          }
+        },
+        {
+          "phase": "protector and field authorization await",
+          "durationMs": 0.07654200000069977,
+          "details": {
+            "protectors": 1
+          }
+        },
+        {
+          "phase": "recipient transform and freezing",
+          "durationMs": 56.44716700000026
+        },
+        {
+          "phase": "serialization",
+          "durationMs": 25.767249999998967,
+          "details": {
+            "bytes": 11859192
+          }
+        },
+        {
+          "phase": "parse and recipient validation",
+          "durationMs": 61.86608299999898,
+          "details": {
+            "bytes": 11859192
+          }
+        }
+      ],
+      [
+        {
+          "phase": "family checkpoint SQL read",
+          "durationMs": 0.09566699999959383,
+          "details": {
+            "rows": 1
+          }
+        },
+        {
+          "phase": "checkpoint JSON parse and family restore",
+          "durationMs": 0.025042000001121778
+        },
+        {
+          "phase": "full text materialization",
+          "durationMs": 0.0017910000005940674
+        },
+        {
+          "phase": "protected-edge SQL and row load",
+          "durationMs": 0.07341599999926984,
+          "details": {
+            "rows": 100
+          }
+        },
+        {
+          "phase": "annotation SQL, row load, and decode",
+          "durationMs": 102.25450000000092,
+          "details": {
+            "rows": 72001
+          }
+        },
+        {
+          "phase": "range SQL, endpoint parse, and unique projection",
+          "durationMs": 144.6010839999999,
+          "details": {
+            "ranges": 36001
+          }
+        },
+        {
+          "phase": "orphan and measurement load",
+          "durationMs": 2.902874999999767,
+          "details": {
+            "orphans": 0,
+            "measurements": 0
+          }
+        },
+        {
+          "phase": "membership SQL, row load, and source fusion",
+          "durationMs": 48.663916999999856,
+          "details": {
+            "memberships": 72001
+          }
+        },
+        {
+          "phase": "protector and field authorization await",
+          "durationMs": 0.04466599999977916,
+          "details": {
+            "protectors": 1
+          }
+        },
+        {
+          "phase": "recipient transform and freezing",
+          "durationMs": 38.58141599999908
+        },
+        {
+          "phase": "serialization",
+          "durationMs": 16.26233300000058,
+          "details": {
+            "bytes": 11859192
+          }
+        },
+        {
+          "phase": "parse and recipient validation",
+          "durationMs": 44.78704199999993,
+          "details": {
+            "bytes": 11859192
+          }
+        }
+      ],
+      [
+        {
+          "phase": "family checkpoint SQL read",
+          "durationMs": 0.03941599999961909,
+          "details": {
+            "rows": 1
+          }
+        },
+        {
+          "phase": "checkpoint JSON parse and family restore",
+          "durationMs": 0.014959000000089873
+        },
+        {
+          "phase": "full text materialization",
+          "durationMs": 0.0013330000001587905
+        },
+        {
+          "phase": "protected-edge SQL and row load",
+          "durationMs": 0.056582999999591266,
+          "details": {
+            "rows": 100
+          }
+        },
+        {
+          "phase": "annotation SQL, row load, and decode",
+          "durationMs": 91.57041700000082,
+          "details": {
+            "rows": 72001
+          }
+        },
+        {
+          "phase": "range SQL, endpoint parse, and unique projection",
+          "durationMs": 151.4851669999989,
+          "details": {
+            "ranges": 36001
+          }
+        },
+        {
+          "phase": "orphan and measurement load",
+          "durationMs": 5.9470409999994445,
+          "details": {
+            "orphans": 0,
+            "measurements": 0
+          }
+        },
+        {
+          "phase": "membership SQL, row load, and source fusion",
+          "durationMs": 60.96679199999926,
+          "details": {
+            "memberships": 72001
+          }
+        },
+        {
+          "phase": "protector and field authorization await",
+          "durationMs": 0.04916699999921548,
+          "details": {
+            "protectors": 1
+          }
+        },
+        {
+          "phase": "recipient transform and freezing",
+          "durationMs": 33.977458999999726
+        },
+        {
+          "phase": "serialization",
+          "durationMs": 16.655250000001615,
+          "details": {
+            "bytes": 11859192
+          }
+        },
+        {
+          "phase": "parse and recipient validation",
+          "durationMs": 42.91204199999993,
+          "details": {
+            "bytes": 11859192
+          }
+        }
+      ],
+      [
+        {
+          "phase": "family checkpoint SQL read",
+          "durationMs": 0.06387499999982538,
+          "details": {
+            "rows": 1
+          }
+        },
+        {
+          "phase": "checkpoint JSON parse and family restore",
+          "durationMs": 0.013333000000784523
+        },
+        {
+          "phase": "full text materialization",
+          "durationMs": 0.0013340000004973263
+        },
+        {
+          "phase": "protected-edge SQL and row load",
+          "durationMs": 0.055792000001019915,
+          "details": {
+            "rows": 100
+          }
+        },
+        {
+          "phase": "annotation SQL, row load, and decode",
+          "durationMs": 94.62125000000015,
+          "details": {
+            "rows": 72001
+          }
+        },
+        {
+          "phase": "range SQL, endpoint parse, and unique projection",
+          "durationMs": 138.83541700000023,
+          "details": {
+            "ranges": 36001
+          }
+        },
+        {
+          "phase": "orphan and measurement load",
+          "durationMs": 2.9037919999991573,
+          "details": {
+            "orphans": 0,
+            "measurements": 0
+          }
+        },
+        {
+          "phase": "membership SQL, row load, and source fusion",
+          "durationMs": 49.01812500000051,
+          "details": {
+            "memberships": 72001
+          }
+        },
+        {
+          "phase": "protector and field authorization await",
+          "durationMs": 0.04841600000145263,
+          "details": {
+            "protectors": 1
+          }
+        },
+        {
+          "phase": "recipient transform and freezing",
+          "durationMs": 33.57749999999942
+        },
+        {
+          "phase": "serialization",
+          "durationMs": 15.900042000001122,
+          "details": {
+            "bytes": 11859192
+          }
+        },
+        {
+          "phase": "parse and recipient validation",
+          "durationMs": 46.704750000000786,
+          "details": {
+            "bytes": 11859192
+          }
+        }
+      ],
+      [
+        {
+          "phase": "family checkpoint SQL read",
+          "durationMs": 0.04912499999954889,
+          "details": {
+            "rows": 1
+          }
+        },
+        {
+          "phase": "checkpoint JSON parse and family restore",
+          "durationMs": 0.02012500000091677
+        },
+        {
+          "phase": "full text materialization",
+          "durationMs": 0.0017500000012660166
+        },
+        {
+          "phase": "protected-edge SQL and row load",
+          "durationMs": 0.05920799999876181,
+          "details": {
+            "rows": 100
+          }
+        },
+        {
+          "phase": "annotation SQL, row load, and decode",
+          "durationMs": 94.67287499999838,
+          "details": {
+            "rows": 72001
+          }
+        },
+        {
+          "phase": "range SQL, endpoint parse, and unique projection",
+          "durationMs": 130.67308299999968,
+          "details": {
+            "ranges": 36001
+          }
+        },
+        {
+          "phase": "orphan and measurement load",
+          "durationMs": 2.94787499999984,
+          "details": {
+            "orphans": 0,
+            "measurements": 0
+          }
+        },
+        {
+          "phase": "membership SQL, row load, and source fusion",
+          "durationMs": 50.723291999998764,
+          "details": {
+            "memberships": 72001
+          }
+        },
+        {
+          "phase": "protector and field authorization await",
+          "durationMs": 0.0382499999996071,
+          "details": {
+            "protectors": 1
+          }
+        },
+        {
+          "phase": "recipient transform and freezing",
+          "durationMs": 36.002542000000176
+        },
+        {
+          "phase": "serialization",
+          "durationMs": 15.945582999998805,
+          "details": {
+            "bytes": 11859192
+          }
+        },
+        {
+          "phase": "parse and recipient validation",
+          "durationMs": 47.36333300000115,
+          "details": {
+            "bytes": 11859192
+          }
+        }
+      ]
+    ],
+    "serializedSizes": [
+      31677092,
+      31677092,
+      31677092,
+      31677092,
+      31677092,
+      31677092,
+      31677092,
+      31677092,
+      31677092,
+      31677092,
+      31677092,
+      31677092,
+      31677092,
+      11859192,
+      11859192,
+      11859192,
+      11859192,
+      11859192,
+      11859192,
+      11859192,
+      11859192,
+      11859192,
+      11859192,
+      11859192,
+      11859192
+    ],
+    "endToEndSamples": [
+      523.378,
+      533.036,
+      545.133,
+      510.636,
+      552.37,
+      556.307,
+      558.432,
+      550.15,
+      517.831,
+      490.402,
+      527.779,
+      500.985,
+      516.124,
+      381.177,
+      431.97,
+      462.576,
+      456.558,
+      370.204,
+      427.008,
+      518.268,
+      591.438,
+      408.714,
+      411.742,
+      390.648,
+      387.39
+    ]
+  },
+  "fallbackRecovery": null,
+  "budget": {
+    "C0": {
+      "totalIncludingStart": 75,
+      "burst": 50,
+      "bound": 100,
+      "histogram": {
+        "2": 25
+      },
+      "minimumConnections": 1
+    },
+    "C1": {
+      "totalIncludingStart": 125,
+      "burst": 100,
+      "bound": 200,
+      "histogram": {
+        "4": 25
+      },
+      "minimumConnections": 2
+    }
+  },
+  "rssDeltaMiB": 80.11,
+  "peakRssDeltaMiB": 954.8,
+  "fixtureSetupRssMiB": 598.17,
+  "writeCoordinatorHeld": false,
+  "thresholdNotes": [
+    "end-to-end snapshot p95 558.432ms exceeds 500ms",
+    "peak RSS growth 954.796875MiB exceeds 256MiB"
+  ]
+}

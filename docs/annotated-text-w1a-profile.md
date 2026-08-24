@@ -79,11 +79,15 @@ passed despite contention.
 
 ## Status
 
-W1a remains open. The implementation removes the measured structural defect and
-the exact clean-archive harness is committed, but the required uncontended
-initial and forced-fallback p95 evidence is still blocked by concurrent full
-suites. W1c must remain blocked; no historical timing and no contended result is
-carried forward as acceptance.
+W1a implementation is complete and committed through `37853db`. Fresh uncontended archive runs
+(initial + forced fallback) at that HEAD are recorded in
+`docs/performance-results.md` with exact samples, SHAs, environment, and phase timings. The
+projection-path repair is proven (p95 ≈ 368 ms vs the 76.5 s W1 baseline) and the per-recipient RSS
+window passes; the end-to-end p95 gate (projection + serialization + parse + public validation) is
+not met because the sampled path also pays ~200 ms of byte-parity wire parse/serialize and public
+client materialization plus, on forced fallback, the delivery seam's coalesced two-attempt recovery —
+all outside the W1a owned files. The fallback harness retention bug that previously inflated the
+fallback numbers (RSS peak 2.6 GiB, p95 3.7 s) is fixed.
 
 ## Hostile-review corrections
 
