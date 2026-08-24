@@ -74,6 +74,9 @@ Map of modules to loops: `docs/architecture-map.md`.
   sibling).
 - Public package entrypoints (`package.json` `exports`) resolve into `build/`;
   the hand-maintained browser surface stays in `public/`.
+- Stale committed emissions fail pushes: run `pnpm setup:hooks` once per clone
+  to activate the `.githooks/pre-push` guard (issue #129), which re-emits and
+  refuses the push if `git status --porcelain build/` is not clean.
 
 ### Grammar modules are load-bearing
 

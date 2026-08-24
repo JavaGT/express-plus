@@ -72,6 +72,12 @@ schedule/tick, email).
 | `workbench/client` | Browser SDK (`public/workbench-client.mjs`) |
 | `workbench/server` | Server-only helpers for sessions, jobs, blobs, and migrations |
 
+## Consumers
+
+Scope installs this package as an immutable git-SHA tarball; the version must
+agree with the lockfile (see Scope's `scripts/verify-workbench-pin.mjs`). Bump
+version + changelog on every public-surface change.
+
 ## Examples
 
 | Path | What |
