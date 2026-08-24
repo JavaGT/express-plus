@@ -144,9 +144,9 @@ const constructorNames = new Set([
 // serializer/parser have NO other callers at all.
 const V16_AUTHORITY_OWNER = 'src/annotated-text-operated-event.ts';
 const V16_REGION_POLICY = 'src/annotated-text-region-operation.ts';
-// W3 (#145): the contribution-policy compensation planner CONSUMES the v16
-// constructor + strict stored parser (applied history-move path) but must not
-// re-export or alias them into a second authority surface.
+// W3 (#145): the contribution-policy compensation planner consumes the v16
+// constructor for new compensation events. Persisted target events must go
+// through committed-log's shared decoder, never the strict parser directly.
 const V16_COMPENSATION_PLANNER = 'src/annotated-text-region-compensation.ts';
 // committed-log is the one _Log write authority and calls the serializer to
 // canonicalize/verify v16 eventData at its single insert point (W1b adapter).
@@ -180,9 +180,9 @@ for (const [path, source] of byRel) {
     continue;
   }
   if (path === V16_COMPENSATION_PLANNER) {
-    // The planner may consume the constructor + strict parser, but may not
-    // re-export or alias them into a second authority surface.
-    if (/export[^{]*(constructV16RegionEvent|parseStoredV16OperatedEvent)/.test(source)) {
+    // The planner may consume the constructor but may not re-export it or call
+    // the stored parser directly; decodeLogRowData owns every _Log read.
+    if (/export[^{]*constructV16RegionEvent/.test(source) || /\bparseStoredV16OperatedEvent\b/.test(source)) {
       fail('v16 operated authority', [V16_AUTHORITY_OWNER, path]);
     }
     continue;

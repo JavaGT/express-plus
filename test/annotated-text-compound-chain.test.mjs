@@ -196,6 +196,44 @@ async function settle(promise) {
   }
 }
 
+function durableSnapshot(db) {
+  const names = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all();
+  return Object.fromEntries(names.map(({ name }) => [name, db.prepare(`SELECT * FROM "${name.replaceAll('"', '""')}" ORDER BY rowid`).all()]));
+}
+
+test('tampered v16 target event blocks a compound move with zero durable delta', async () => {
+  const db = new DatabaseSync(':memory:');
+  installSchema(db);
+  const state = { failureMode: 'none' };
+  const app = buildApp(db, state);
+  await app.start();
+  await commitOrigin(app);
+
+  const target = db.prepare("SELECT eventData FROM _Log WHERE actionId = 'chain-origin' AND eventType = 'ChainDoc.body.operated'").get();
+  assert.equal(typeof target?.eventData, 'string');
+  const tampered = target.eventData.replace(/^\{/, '{"version":16,');
+  assert.notEqual(tampered, target.eventData);
+  db.prepare("UPDATE _Log SET eventData = ? WHERE actionId = 'chain-origin' AND eventType = 'ChainDoc.body.operated'").run(tampered);
+
+  const cursor = await cursorOf(app);
+  const before = durableSnapshot(db);
+  const documentBefore = materializeText(liveFamily(db));
+  const moved = await settle(app.history.undo({
+    scope: 'Project:p1', principal: ALICE, session: 'tab-a',
+    actionId: 'tampered-undo', revision: cursor.revision,
+  }));
+  assert.equal(Boolean(moved.error) || moved.outcome?.ok === false, true, 'tampered v16 must fail the history move');
+  const message = moved.error?.message ?? moved.outcome?.failure?.message ?? '';
+  assert.match(String(message), /canonical|internal|invalid/i, 'strict decoder failure must propagate as a failed move');
+  assert.deepEqual(durableSnapshot(db), before, 'tampered target left zero durable delta in every table');
+  assert.equal(materializeText(liveFamily(db)), documentBefore, 'document state did not move');
+  assert.deepEqual(await cursorOf(app), cursor, 'history cursor did not advance');
+  assert.equal(db.prepare("SELECT COUNT(*) AS c FROM _ActionReceipt WHERE actionId = 'tampered-undo'").get().c, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS c FROM _PrivateActionFact WHERE actionId = 'tampered-undo'").get().c, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS c FROM _Log WHERE actionId = 'tampered-undo'").get().c, 0);
+  db.close();
+});
+
 test('a semantically divergent application fact throws and rolls the whole move back', async () => {
   const db = new DatabaseSync(':memory:');
   installSchema(db);

@@ -18,9 +18,9 @@
 // Where the design's rev-2 matrix says "unsafe to compensate", the planner
 // returns a whole-compound NOOP (missing anchor, collaborator divergent
 // memberships, digest/closure staleness, unsupported target). It never plans a
-// partial compensation: any malformed/invalid state that the reducer rejects
-// becomes noop, and a thrown application-CAS failure rolls the whole move back
-// in the caller.
+// partial compensation: a valid target that is unsafe against current state
+// becomes noop. Malformed durable v16 data and application-CAS failures throw,
+// rolling the whole move back in the caller.
 
 import type { DbHandle } from './driver.ts';
 import { scalarCount } from './annotated-text.ts';
@@ -54,9 +54,9 @@ import {
 } from './annotated-text-region-plan.ts';
 import {
   constructV16RegionEvent,
-  parseStoredV16OperatedEvent,
   type CanonicalRegionEdit,
 } from './annotated-text-operated-event.ts';
+import { decodeLogRowData, type LogRowLike } from './committed-log.ts';
 import { ValidationError } from './field-strategy.ts';
 import { getAnnotatedTextCompiledMetadata } from './annotated-text-field.ts';
 import { privateFactFromReceipt, parseCompoundApplicationTransition, type CompoundContributionEnvelope } from './compound-contribution-fact.ts';
@@ -459,16 +459,14 @@ export function readMoveCompensationTarget(
     : null;
 
   const row = db.prepare(
-    'SELECT eventData FROM _Log WHERE scope = :scope AND actionId = :actionId AND eventType = :eventType ORDER BY seq LIMIT 1',
-  ).get({ scope, actionId: targetActionId, eventType: `${entity}.${field}.operated` }) as { eventData: string } | undefined;
+    'SELECT scope, seq, eventType, eventData, actionId, committedAt FROM _Log WHERE scope = :scope AND actionId = :actionId AND eventType = :eventType ORDER BY seq LIMIT 1',
+  ).get({ scope, actionId: targetActionId, eventType: `${entity}.${field}.operated` }) as LogRowLike | undefined;
 
   let event: CanonicalRegionEdit | null = null;
   if (row) {
-    try {
-      event = parseStoredV16OperatedEvent(row.eventData as string, { entity, field });
-    } catch {
-      event = null;
-    }
+    const decoded = decodeLogRowData(row);
+    if (decoded && typeof decoded === 'object' && !Array.isArray(decoded)
+        && (decoded as { wireVersion?: unknown }).wireVersion === 16) event = decoded as CanonicalRegionEdit;
   }
 
   const contribution = (envelope.contributions[0] as import('./annotated-text-delete-history.ts').DeleteFact | undefined) ?? null;
