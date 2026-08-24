@@ -201,17 +201,12 @@ function parseJson(value: string, where: string): unknown {
 }
 
 // Strict persisted-event decode for the private-fact replay path (Finding 2,
-// review round 3): routes through the SHARED log-row decoder so a v16 row's
-// operated-handle identity is verified (entity/field for error context) and
-// duplicate-key/noncanonical/over-limit bytes fail closed. Non-v16 rows keep
-// the same valid-JSON TypeError boundary as before.
-function decodeCommittedEventJson(row: { eventType: unknown; eventData: unknown }, where: string): unknown {
-  let probe: unknown;
-  try { probe = JSON.parse(row.eventData as string); } catch { throw new TypeError(`${where} must contain valid JSON`); }
-  if (probe && typeof probe === 'object' && !Array.isArray(probe) && (probe as { version?: unknown }).version === 16) {
-    return decodeLogRowData(row as never);
-  }
-  return probe;
+// review round 4): delegates ENTIRELY to the SHARED log-row decoder — no local
+// JSON.parse of persisted eventData remains. A v16 row's operated-handle
+// identity is verified and duplicate-key/noncanonical/over-limit bytes fail
+// closed before any projection runs. Non-v16 rows keep plain parsing.
+function decodeCommittedEventJson(row: { eventType: unknown; eventData: unknown }): unknown {
+  return decodeLogRowData(row as never);
 }
 
 interface ReceiptRow {
@@ -323,7 +318,7 @@ export function replayPrivateFactProjections(db: DbHandle, projections: PostComm
         // One strict log-row decoder (Finding 1): v16 rows are validated
         // before reaching private-fact projections; non-v16 rows keep the
         // same valid-JSON error boundary.
-        data: decodeCommittedEventJson(stored as { eventType: unknown; eventData: unknown }, 'committed event data'),
+        data: decodeCommittedEventJson(stored as { eventType: unknown; eventData: unknown }),
       });
       const matched = projections.filter((projection) =>
         projection.eventTypes.includes(committed.type)

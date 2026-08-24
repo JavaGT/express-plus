@@ -115,17 +115,12 @@ function json(value         , name        )          {
   try { return JSON.parse(value          ); } catch { fail(`${name} must contain JSON`); }
 }
 
-// Strict log-row decode for the erasure census (Finding 2, round 3): a v16
-// row is validated through the package's stored parser BEFORE subject
-// matching, so a tampered row fails the directive instead of silently
-// mismatching identity pointers. Non-v16 rows keep plain parsing.
+// Strict log-row decode for the erasure census (Finding 2, review round 4):
+// delegates ENTIRELY to the shared log-row decoder — no local JSON.parse of
+// persisted eventData remains. A tampered v16 row fails the directive before
+// subject matching; non-v16 rows keep plain parsing.
 function decodeCensusEventData(row        )          {
-  let probe         ;
-  try { probe = JSON.parse(row.eventData); } catch { fail(`event ${row.scope}/${row.seq} data must contain JSON`); }
-  if (probe && typeof probe === 'object' && !Array.isArray(probe) && (probe                         ).version === 16) {
-    return decodeLogRowData(row);
-  }
-  return probe;
+  return decodeLogRowData(row);
 }
 function freeze   (value   )    {
   if (value && typeof value === 'object') {
