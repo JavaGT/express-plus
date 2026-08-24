@@ -184,11 +184,17 @@ export function planTextOffsetEdit({ documentId, structureVersion, family, actor
     if (edit.kind === 'text.replace') {
       const deleteOperation = textOperationForOffsetEdit(family, { kind: 'text.delete', from: edit.from, to: edit.to }, `${actor.slice(0, 30)}d0`, lamport);
       const intermediate = applyTextOperation(family, deleteOperation);
-      // The replacement's insert anchors at the deleted range's start offset in
-      // the intermediate text; affinity never repositions the insertion point.
-      const anchor = edit.from.offset === 0 || materializeText(intermediate).length === 0
+      // The replacement's insert anchors at the deleted range's start offset;
+      // affinity never repositions the insertion point. Deletes tombstone only
+      // elements FULLY inside [from, to), so the element owning that boundary
+      // survives untouched and the pre-delete anchor IS the post-delete anchor
+      // — resolve it from the pre-delete family's cached index instead of
+      // materializing the intermediate text just to walk it again. The empty
+      // result collapses to the root anchor exactly when from === 0 (a valid
+      // delete leaves every element before `from` visible).
+      const anchor = edit.from.offset === 0
         ? ['root']
-        : insertAnchorForOffset(intermediate, edit.from.offset);
+        : insertAnchorForOffset(family, edit.from.offset);
       let insertOperation: unknown = ['workbench.text', 1, [`${actor.slice(0, 30)}e0`, 1], lamport + 1, intermediate.checkpoint.frontier, ['insert', anchor, edit.text]];
       insertOperation = canonicalTextOp(insertOperation);
       const nextFamily = applyTextOperation(intermediate, insertOperation);

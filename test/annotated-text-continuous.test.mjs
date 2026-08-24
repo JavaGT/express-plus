@@ -10,6 +10,7 @@ import {
   createTextFamily,
   materializeText,
   resolveOffsetToEndpoint,
+  insertAnchorForOffset,
   projectEndpointToOffset,
   textOperationForOffsetEdit,
   applyTextOperation,
@@ -223,4 +224,99 @@ test('an endpoint whose frontier is NOT dominated by the current family fails cl
   const endpoint = resolveOffsetToEndpoint(family, 1, family.checkpoint.frontier, 'right');
   const divergentFamily = createTextFamily('d1', textCheckpoint(divergent));
   assert.throws(() => projectEndpointToOffset(divergentFamily, endpoint), /does not dominate/);
+});
+
+// ---------------------------------------------------------------------------
+// resolveOffsetToEndpoint basis-frontier equality (#125). The check must accept
+// any frontier structurally equal to the checkpoint's (same actors, counters,
+// order-independent entry identity) and reject every unequal one — without
+// depending on serialization or reference identity.
+// ---------------------------------------------------------------------------
+
+function cloneFrontierEntry([actor, counter]) {
+  return [actor, counter];
+}
+
+test('resolve accepts a structurally equal but distinct basis frontier', () => {
+  const family = seedViaPlanner(createTextFamily('d1', textCheckpoint(createTextState())), 'abcdef');
+  // Fresh inner/outer arrays in sorted order: structurally identical to the
+  // checkpoint frontier while sharing no reference, so the equality check
+  // cannot lean on identity or serialization.
+  const copy = family.checkpoint.frontier.map(cloneFrontierEntry);
+  assert.notEqual(copy, family.checkpoint.frontier);
+  for (const affinity of ['left', 'right']) {
+    const fromCopy = resolveOffsetToEndpoint(family, 2, copy, affinity);
+    const fromSame = resolveOffsetToEndpoint(family, 2, family.checkpoint.frontier, affinity);
+    assert.deepEqual(fromCopy, fromSame);
+  }
+});
+
+test('resolve rejects frontiers that differ in any actor counter, membership, or length', () => {
+  const family = seedViaPlanner(createTextFamily('d1', textCheckpoint(createTextState())), 'abcdef');
+  const frontier = family.checkpoint.frontier;
+  assert.ok(frontier.length >= 1, 'seeded frontier is non-empty');
+
+  const bumped = frontier.map(cloneFrontierEntry);
+  bumped[0] = [bumped[0][0], bumped[0][1] + 1];
+  assert.throws(() => resolveOffsetToEndpoint(family, 1, bumped, 'right'), /basisFrontier equal to family checkpoint frontier/, 'counter mismatch fails');
+
+  const missingActor = frontier.slice(0, -1);
+  if (missingActor.length > 0) {
+    assert.throws(() => resolveOffsetToEndpoint(family, 1, missingActor, 'right'), /basisFrontier equal/, 'missing actor fails');
+  }
+
+  const extraActor = [...frontier.map(cloneFrontierEntry), [actorFor(7777), 1]].sort(([a], [b]) => (a < b ? -1 : 1));
+  assert.throws(() => resolveOffsetToEndpoint(family, 1, extraActor, 'right'), /basisFrontier equal/, 'extra actor fails');
+
+  const swapped = frontier.map(cloneFrontierEntry);
+  swapped[0] = [actorFor(8888), swapped[0][1]];
+  assert.throws(() => resolveOffsetToEndpoint(family, 1, swapped, 'right'), /basisFrontier equal/, 'unknown actor fails');
+});
+
+// ---------------------------------------------------------------------------
+// insertAnchorForOffset semantics (#127). The anchor is a pure function of the
+// offset: the last visible element whose scalar ends at or contains it. These
+// tests pin the boundary behavior the derived-index binary search must
+// reproduce exactly — including across tombstone runs, where offsets jump but
+// ownership does not move.
+// ---------------------------------------------------------------------------
+
+test('insert anchors at exact element boundaries resolve to the element BEFORE the boundary', () => {
+  let family = seedViaPlanner(createTextFamily('anchors', textCheckpoint(createTextState())), 'abcdef');
+  const anchorFor = (op) => textOperationForOffsetEdit(family, { kind: 'text.insert', at: { offset: op, affinity: 'right' }, text: 'X' }, editActor(), 2)[5][1];
+
+  assert.deepEqual(anchorFor(0), ['root'], 'offset 0 inserts as a root child');
+  for (let offset = 1; offset <= 'abcdef'.length; offset += 1) {
+    const [kind, identity] = anchorFor(offset);
+    assert.equal(kind, 'element', `boundary ${offset} anchors at an element`);
+    assert.deepEqual(identity[0], [actorFor(offset - 1), 1], `boundary ${offset} is owned by element ${offset - 1}`);
+    assert.equal(identity[1], 0);
+  }
+  // The end of the document anchors to its last element.
+  const tailAnchor = textOperationForOffsetEdit(family, { kind: 'text.insert', at: { offset: 'abcdef'.length, affinity: 'right' }, text: '!' }, editActor(), 2);
+  family = applyTextOperation(family, tailAnchor);
+  assert.equal(materializeText(family), 'abcdef!');
+});
+
+test('insert anchors skip tombstone runs and stay stable across deletion', () => {
+  let family = seedViaPlanner(createTextFamily('anchors', textCheckpoint(createTextState())), 'abcdefgh');
+  // Delete "cde" (offsets 2..5) leaving tombstones between b and f.
+  family = applyTextOperation(family, textOperationForOffsetEdit(
+    family, { kind: 'text.delete', from: { offset: 2 }, to: { offset: 5 } }, editActor(), 2,
+  ));
+  assert.equal(materializeText(family), 'abfgh');
+
+  // Offset 2 now names the boundary before 'f'. Ownership does not move onto
+  // the tombstones: the visible element BEFORE the boundary (b) keeps it.
+  const insertOp = textOperationForOffsetEdit(family, { kind: 'text.insert', at: { offset: 2, affinity: 'right' }, text: 'X' }, editActor(), 3);
+  assert.deepEqual(insertOp[5][1], ['element', [[actorFor(1), 1], 0]], 'b, not a tombstone or f, owns the boundary');
+  family = applyTextOperation(family, insertOp);
+  assert.equal(materializeText(family), 'abXfgh', 'the anchored insert lands exactly at the requested offset');
+});
+
+test('insert anchors reject zero, past-the-end, and NaN offsets', () => {
+  const family = seedViaPlanner(createTextFamily('anchors', textCheckpoint(createTextState())), 'abc');
+  assert.throws(() => insertAnchorForOffset(family, 0), /failed to resolve insert anchor/);
+  assert.throws(() => insertAnchorForOffset(family, 4), /failed to resolve insert anchor/, 'past the visible end fails');
+  assert.throws(() => insertAnchorForOffset(family, Number.NaN), /failed to resolve insert anchor/);
 });

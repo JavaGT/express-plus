@@ -6,6 +6,7 @@ import {
   materializeText,
   resolveOffsetToEndpoint,
   projectEndpointToOffset,
+  textOperationForOffsetEdit,
 } from '../build/annotated-text-continuous.mjs';
 import {
   planTextOffsetEdit,
@@ -456,4 +457,64 @@ test('text-range apply rejects empty or inverted selections', () => {
     }),
     (error) => error.code === 'position-invalid',
   );
+});
+
+// ---------------------------------------------------------------------------
+// text.replace anchoring (#127). The replacement's insert anchor is derived
+// from the PRE-delete family's cached index: deletes only tombstone elements
+// fully inside [from, to), so the element owning the from-boundary survives
+// untouched and post-delete anchoring would resolve identically. These tests
+// pin that equivalence across split and non-split delete shapes.
+// ---------------------------------------------------------------------------
+
+test('replace anchored inside a multi-scalar import element (non-split path) lands exactly', () => {
+  const family = familyFromText('hello world');
+  // The import family is ONE root child carrying 'hello world'; the deleted
+  // middle sits strictly inside it, so no element is split away.
+  const plan = input(family, { kind: 'text.replace', text: 'X', from: at(3), to: at(8) });
+  assert.equal(plan.operation.kind, 'text.replace');
+  // 'hello world'.slice(3, 8) === 'lo wo'; the replacement lands exactly there.
+  assert.equal(materializePlan(family, plan), 'helXrld');
+});
+
+test('replace at the document start anchors the insert at root', () => {
+  const family = familyFromText('hello world');
+  const plan = input(family, { kind: 'text.replace', text: 'J', from: at(0), to: at(5) });
+  assert.equal(plan.operation.operations[1][5][1][0], 'root', 'from=0 inserts as a root child');
+  assert.equal(materializePlan(family, plan), 'J world');
+});
+
+test('replace ending at the last character keeps the pre-delete boundary owner as its anchor', () => {
+  const family = familyFromText('hello world');
+  const plan = input(family, { kind: 'text.replace', text: '!?', from: at(6), to: at(11) });
+  // The from-boundary (offset 6) is owned by the import element; the whole
+  // visible tail dies but the owner survives as its tombstone-free parent.
+  assert.equal(plan.operation.operations[1][5][2], '!?');
+  assert.equal(materializePlan(family, plan), 'hello !?');
+});
+
+test('replace across per-character elements resolves the same anchor before and after the delete', () => {
+  // Unique actor per seeded element, mirroring the real per-edit flow.
+  const actorFor = (index) => (index + 1).toString(16).padStart(32, '0');
+  let family = familyFromText('');
+  for (const [index, ch] of [...'abcdefgh'].entries()) {
+    family = applyTextOperation(family, textOperationForOffsetEdit(family, { kind: 'text.insert', at: { offset: index, affinity: 'right' }, text: ch }, actorFor(index), 1));
+  }
+  assert.equal(materializeText(family), 'abcdefgh');
+
+  // Replace "cde" with new text. The from-boundary is owned by 'b' both before
+  // the delete (visible) and after it (untouched by the delete op), so the
+  // pre-delete derived index must yield the identical anchor.
+  const plan = input(family, { kind: 'text.replace', text: 'XYZ', from: at(2), to: at(5) });
+  const [, identity] = plan.operation.operations[1][5][1];
+  assert.deepEqual(identity[0], [actorFor(1), 1], 'b owns the insert boundary');
+  assert.equal(identity[1], 0);
+  assert.equal(materializePlan(family, plan), 'abXYZfgh');
+});
+
+test('replace spanning the entire document collapses to a root-anchored insert', () => {
+  const family = familyFromText('abcdef');
+  const plan = input(family, { kind: 'text.replace', text: 'Q', from: at(0), to: at(6) });
+  assert.equal(plan.operation.operations[1][5][1][0], 'root');
+  assert.equal(materializePlan(family, plan), 'Q');
 });
