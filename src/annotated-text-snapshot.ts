@@ -277,8 +277,9 @@ function loadRecipientProjectionSource({ db, prefix, descriptor, documentId, fam
 
   started = performance.now();
   const droppedAnnotationIds = new Set<string>();
-  const loadedRanges: Array<{ annotationId: string; rangeId: number }> = [];
-  const nextOrdinalByAnnotation = new Map<string, number>();
+  const loadedRanges: Array<{ annotationId: string; stored: { projected: { start: number; end: number } | null; startPoint: StructuralEndpoint; endPoint: StructuralEndpoint } }> = [];
+  let lastAnnotationId: string | null = null;
+  let expectedOrdinal = 0;
   let membershipCount = 0;
   for (const membership of iterateArrayRows(db, `
     SELECT annotation_id, ordinal, range_id
@@ -287,18 +288,23 @@ function loadRecipientProjectionSource({ db, prefix, descriptor, documentId, fam
      ORDER BY annotation_id, ordinal`, documentId)) {
     const [annotationId, ordinal, rangeId] = membership;
     if (membership.length !== 3 || typeof annotationId !== 'string' || !Number.isSafeInteger(ordinal) || ordinal < 0 || !Number.isSafeInteger(rangeId)) fail('stored membership row is malformed');
-    const expectedOrdinal = nextOrdinalByAnnotation.get(annotationId) ?? 0;
+    // Rows arrive grouped by annotation (ORDER BY annotation_id, ordinal);
+    // contiguous ordinals start at 0 for every annotation.
+    if (annotationId !== lastAnnotationId) {
+      lastAnnotationId = annotationId;
+      expectedOrdinal = 0;
+    }
     if (ordinal !== expectedOrdinal) fail(`annotation '${annotationId}' membership ordinals are not contiguous`);
-    nextOrdinalByAnnotation.set(annotationId, expectedOrdinal + 1);
+    expectedOrdinal += 1;
     const annotation = annotationById.get(annotationId);
-    const range = projectedByRangeId.get(rangeId);
-    if (!annotation || !range) fail('stored membership references missing state');
-    if (!range.projected) {
+    const stored = projectedByRangeId.get(rangeId);
+    if (!annotation || !stored) fail('stored membership references missing state');
+    if (!stored.projected) {
       if (Object.hasOwn(meta.protectingFamilies, annotation.family)) fail(`field '${fieldName}' protector '${annotation.id}' has an unprojectable range`);
       droppedAnnotationIds.add(annotation.id);
       continue;
     }
-    loadedRanges.push({ annotationId, rangeId });
+    loadedRanges.push({ annotationId, stored });
     membershipCount += 1;
   }
   profile?.('membership SQL, row load, and source fusion', performance.now() - started, { memberships: membershipCount });
@@ -310,21 +316,20 @@ function loadRecipientProjectionSource({ db, prefix, descriptor, documentId, fam
   const sourceAnnotationIds = new Set(sourceAnnotations.map((annotation) => annotation.id));
   const sourceRangeLinks = droppedAnnotationIds.size === 0 && orphanIds.size === 0
     ? loadedRanges
-    : loadedRanges.filter((range) => sourceAnnotationIds.has(range.annotationId));
+    : loadedRanges.filter((link) => sourceAnnotationIds.has(link.annotationId));
   const sourceFor = (anchored: boolean): AnnotatedTextRecipientSource => {
     const ranges: AnnotatedTextRecipientRange[] = [];
     for (const link of sourceRangeLinks) {
-      const stored = projectedByRangeId.get(link.rangeId)!;
-      if (!stored.projected) continue;
+      if (!link.stored.projected) continue;
       ranges.push(anchored
         ? {
           annotationId: link.annotationId,
-          start: stored.projected.start,
-          end: stored.projected.end,
-          anchoredStart: stored.startPoint,
-          anchoredEnd: stored.endPoint,
+          start: link.stored.projected.start,
+          end: link.stored.projected.end,
+          anchoredStart: link.stored.startPoint,
+          anchoredEnd: link.stored.endPoint,
         }
-        : { annotationId: link.annotationId, start: stored.projected.start, end: stored.projected.end });
+        : { annotationId: link.annotationId, start: link.stored.projected.start, end: link.stored.projected.end });
     }
     return createAnnotatedTextRecipientSource({
       version: 1,
@@ -348,9 +353,8 @@ function loadRecipientProjectionSource({ db, prefix, descriptor, documentId, fam
   const relevantRanges = new Map<string, AnnotatedTextRecipientRange[]>();
   for (const link of sourceRangeLinks) {
     if (!relevantIds.has(link.annotationId)) continue;
-    const stored = projectedByRangeId.get(link.rangeId)!;
-    if (!stored.projected) continue;
-    const range = { annotationId: link.annotationId, start: stored.projected.start, end: stored.projected.end };
+    if (!link.stored.projected) continue;
+    const range = { annotationId: link.annotationId, start: link.stored.projected.start, end: link.stored.projected.end };
     const own = relevantRanges.get(link.annotationId);
     if (own) own.push(range);
     else relevantRanges.set(link.annotationId, [range]);
