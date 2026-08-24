@@ -757,10 +757,23 @@ function projectRegionEdit({ name, handle, db, descriptor, canonical }
   }
   if (postimage.afterDigest !== canonical.afterDigest) throw new Error(REGION_POSTIMAGE_DISAGREES);
   // V16 after-side witness: the replay-derived postimage must equal the stored
-  // complete after closure, image for image (already canonically ordered).
-  if (canonical.wireVersion === 16
-    && JSON.stringify(postimage.annotations) !== JSON.stringify(canonical.witnessAfter)) {
-    throw new Error('region witness disagrees with operated event');
+  // complete after closure, image for image (already canonically ordered), and
+  // facts.emptiedAnnotations must agree with the reducer-derived dispositions.
+  if (canonical.wireVersion === 16) {
+    const emptiedFromFacts = (canonical.facts.emptiedAnnotations             ).map((entry) => JSON.stringify(entry));
+    const emptiedFromWitness = postimage.emptied.map((entry) => JSON.stringify({
+      annotationId: entry.annotationId,
+      disposition: {
+        kind: entry.disposition.kind,
+        family: entry.disposition.family,
+        savedQuote: entry.disposition.savedQuote,
+        lastRange: entry.disposition.lastRange,
+      },
+    }));
+    if (JSON.stringify(postimage.annotations) !== JSON.stringify(canonical.witnessAfter)
+      || JSON.stringify(emptiedFromFacts.slice().sort()) !== JSON.stringify(emptiedFromWitness.slice().sort())) {
+      throw new Error('region witness disagrees with operated event');
+    }
   }
 
   const beforeById = new Map(closure.map((image) => [image.id, image]));
