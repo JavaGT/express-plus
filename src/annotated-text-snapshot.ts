@@ -11,6 +11,7 @@ import { readSeq } from './cursor.ts';
 import { rawRow } from './entity/query.ts';
 import { scopeOf } from './scope-handle.ts';
 import type { ContinuousTextFamily } from './annotated-text-continuous.ts';
+import type { StructuralEndpoint } from './annotated-text-family.ts';
 import { annotationRangeRows } from './annotated-text-storage.ts';
 
 function fail(message: string): never {
@@ -57,20 +58,25 @@ function unchangedCursor(db: any, scopeKey: string, before: number): boolean {
  * absolute offsets against the current continuous family. Returns null when the
  * range is unprojectable (stale basis / lost anchor).
  */
-function projectRangeToOffsets(family: ContinuousTextFamily, startPoint: string, endPoint: string): { start: number; end: number } | null {
+function projectRangeToOffsets(
+  family: ContinuousTextFamily,
+  startPoint: StructuralEndpoint,
+  endPoint: StructuralEndpoint,
+  textLength: number,
+): { start: number; end: number } | null {
   let start;
   let end;
   try {
-    start = projectEndpointToOffset(family, JSON.parse(startPoint));
-    end = projectEndpointToOffset(family, JSON.parse(endPoint));
+    start = projectEndpointToOffset(family, startPoint);
+    end = projectEndpointToOffset(family, endPoint);
   } catch {
     return null;
   }
-  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end > materializeText(family).length) return null;
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end > textLength) return null;
   return { start, end };
 }
 
-function parseStoredEndpoint(serialized: string): { point: unknown; basisFrontier: unknown } {
+function parseStoredEndpoint(serialized: string): StructuralEndpoint {
   let endpoint;
   try {
     endpoint = JSON.parse(serialized);
@@ -81,7 +87,7 @@ function parseStoredEndpoint(serialized: string): { point: unknown; basisFrontie
     || !Object.hasOwn(endpoint, 'point') || !Object.hasOwn(endpoint, 'basisFrontier')) {
     fail('stored endpoint is not a structural endpoint');
   }
-  return { point: endpoint.point, basisFrontier: endpoint.basisFrontier };
+  return { point: endpoint.point, basisFrontier: endpoint.basisFrontier } as StructuralEndpoint;
 }
 
 function isFullyVisibleRecipient(recipient: any): boolean {
@@ -102,6 +108,10 @@ function attachAnchoredRanges(recipient: any, anchored: ReadonlyArray<{ annotati
 }
 
 function loadAnnotations({ db, prefix, descriptor, documentId }: { db: any; prefix: string; descriptor: any; documentId: string }): any[] {
+  const declarations = new Map<string, { declared: any; fields: Array<[string, any]> }>();
+  for (const declared of descriptor.annotations) {
+    declarations.set(declared.annotationName, { declared, fields: Object.entries(declared.fields) });
+  }
   const rows = db.prepare(`SELECT id, family, owner_id FROM ${prefix}_annotation WHERE document_id = ? ORDER BY id`).all(documentId);
   const targets = db.prepare(
     `SELECT edge.annotation_id, edge.target_annotation_id FROM ${prefix}_annotation_protected_target AS edge
@@ -109,20 +119,27 @@ function loadAnnotations({ db, prefix, descriptor, documentId }: { db: any; pref
      WHERE annotation.document_id = ? ORDER BY edge.annotation_id, edge.target_annotation_id`,
   ).all(documentId);
   const targetsByAnnotation = new Map<string, string[]>();
-  for (const edge of targets) targetsByAnnotation.set(edge.annotation_id, [...(targetsByAnnotation.get(edge.annotation_id) ?? []), edge.target_annotation_id]);
+  for (const edge of targets) {
+    const own = targetsByAnnotation.get(edge.annotation_id);
+    if (own) own.push(edge.target_annotation_id);
+    else targetsByAnnotation.set(edge.annotation_id, [edge.target_annotation_id]);
+  }
   const storedByFamily = new Map<string, Map<string, any>>();
-  for (const declared of descriptor.annotations) {
+  for (const { declared, fields } of declarations.values()) {
+    if (fields.length === 0) continue;
     const familyRows = db.prepare(`SELECT child.* FROM ${prefix}_annotation_${declared.annotationName} AS child JOIN ${prefix}_annotation AS annotation ON annotation.id = child.annotation_id WHERE annotation.document_id = ?`).all(documentId);
-    storedByFamily.set(declared.annotationName, new Map(familyRows.map((stored: any) => [stored.annotation_id, stored])));
+    const stored = new Map<string, any>();
+    for (const row of familyRows) stored.set(row.annotation_id, row);
+    storedByFamily.set(declared.annotationName, stored);
   }
   const annotations: any[] = [];
   for (const row of rows) {
-    const declared = descriptor.annotations.find((entry: any) => entry.annotationName === row.family);
-    if (!declared) fail(`annotation '${row.id}' has unknown family`);
+    const declaration = declarations.get(row.family);
+    if (!declaration) fail(`annotation '${row.id}' has unknown family`);
     const fields: Record<string, any> = {};
     const stored = storedByFamily.get(row.family)?.get(row.id);
-    if (!stored && Object.keys(declared.fields).length !== 0) fail(`annotation '${row.id}' fields are missing`);
-    for (const [name, field] of Object.entries(declared.fields)) fields[name] = deserializeField(field as any, stored[name]);
+    if (!stored && declaration.fields.length !== 0) fail(`annotation '${row.id}' fields are missing`);
+    for (const [name, field] of declaration.fields) fields[name] = deserializeField(field, stored[name]);
     const targetIds = targetsByAnnotation.get(row.id);
     annotations.push(targetIds
       ? { id: row.id, family: row.family, fields, owner: row.owner_id, protectedTargetIds: targetIds }
@@ -168,16 +185,18 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
   const droppedAnnotationIds = new Set<string>();
   const rangeProjectionById = new Map<number, {
     projected: { start: number; end: number } | null;
-    start: { point: unknown; basisFrontier: unknown };
-    end: { point: unknown; basisFrontier: unknown };
+    start: StructuralEndpoint;
+    end: StructuralEndpoint;
   }>();
   for (const rangeRow of rangeRows) {
     let rangeProjection = rangeProjectionById.get(rangeRow.range_id);
     if (!rangeProjection) {
+      const start = parseStoredEndpoint(rangeRow.start_point);
+      const end = parseStoredEndpoint(rangeRow.end_point);
       rangeProjection = {
-        projected: projectRangeToOffsets(family, rangeRow.start_point, rangeRow.end_point),
-        start: parseStoredEndpoint(rangeRow.start_point),
-        end: parseStoredEndpoint(rangeRow.end_point),
+        projected: projectRangeToOffsets(family, start, end, text.length),
+        start,
+        end,
       };
       rangeProjectionById.set(rangeRow.range_id, rangeProjection);
     }
@@ -236,6 +255,14 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
       .map((measurement: any) => ({ id: measurement.id, family: measurement.family, formatVersion: measurement.format_version, payload: JSON.parse(measurement.payload) })),
     capabilityHints: [],
   };
+
+  // Only canonical arrays and anchored endpoints cross the authorization
+  // boundary. Release SQL rows and lookup buckets before recipient projection
+  // so a large snapshot does not retain two complete indexing representations.
+  rangeRows.length = 0;
+  rangeProjectionById.clear();
+  annotationById.clear();
+  droppedAnnotationIds.clear();
 
   const active = canonical.annotations.filter((annotation) => Object.hasOwn(meta.protectingFamilies, annotation.family) && annotation.protectedTargetIds?.length);
   const protectors: any[] = [];
@@ -351,8 +378,18 @@ function projectCanonicalExport({ db, entity, fieldName, descriptor, documentId 
   const annotations = loadAnnotations({ db, prefix, descriptor, documentId });
   const rangeRows = annotationRangeRows(db, prefix, documentId);
   const ranges: any[] = [];
+  const projectedByRangeId = new Map<number, { start: number; end: number } | null>();
   for (const rangeRow of rangeRows) {
-    const projected = projectRangeToOffsets(family, rangeRow.start_point, rangeRow.end_point);
+    let projected = projectedByRangeId.get(rangeRow.range_id);
+    if (projected === undefined) {
+      projected = projectRangeToOffsets(
+        family,
+        parseStoredEndpoint(rangeRow.start_point),
+        parseStoredEndpoint(rangeRow.end_point),
+        text.length,
+      );
+      projectedByRangeId.set(rangeRow.range_id, projected);
+    }
     if (!projected) continue;
     ranges.push({ annotationId: rangeRow.annotation_id, start: projected.start, end: projected.end });
   }

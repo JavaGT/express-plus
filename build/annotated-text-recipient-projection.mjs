@@ -55,7 +55,9 @@ function fail(message        )        { throw new Error(`annotated-text recipien
 
 function freeze(value     ) {
   if (value && typeof value === 'object') {
-    for (const child of Object.values(value)) freeze(child);
+    for (const key in value) {
+      if (Object.hasOwn(value, key)) freeze(value[key]);
+    }
     Object.freeze(value);
   }
   return value;
@@ -79,6 +81,19 @@ function exact(value     , keys          , label        ) {
 
 
 
+
+
+
+function rangesOf(value                             )                            {
+  if (value === undefined) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function rangeCollectionsIntersect(left                 , right                 )          {
+  const leftRanges = rangesOf(left);
+  const rightRanges = rangesOf(right);
+  return leftRanges.some((own) => rightRanges.some((target) => own.start < target.end && target.start < own.end));
+}
 
 
 
@@ -141,15 +156,16 @@ export function projectAnnotatedTextForRecipient(canonical                      
   // (disjoint) ranges: an exclusive 'one'-cardinality apply trims the overlapped
   // middle of a same-family annotation into left/right remnants, so a single
   // annotation is no longer guaranteed one contiguous range.
-  const rangeByAnnotation = new Map                          ();
+  const rangeByAnnotation = new Map                         ();
   for (const range of canonical.ranges) {
     exact(range, ['annotationId', 'start', 'end'], 'range');
     const annotation = annotations.get(range.annotationId);
     if (!annotation || !Number.isSafeInteger(range.start) || !Number.isSafeInteger(range.end) ||
         range.start < 0 || range.end < range.start || range.end > textLength) fail('range is invalid');
     const own = rangeByAnnotation.get(range.annotationId);
-    if (own) own.push(range);
-    else rangeByAnnotation.set(range.annotationId, [range]);
+    if (Array.isArray(own)) own.push(range);
+    else if (own) rangeByAnnotation.set(range.annotationId, [own, range]);
+    else rangeByAnnotation.set(range.annotationId, range);
   }
 
   const orphanIds = new Set        ();
@@ -187,12 +203,12 @@ export function projectAnnotatedTextForRecipient(canonical                      
   const active = new Set        ();
   for (const annotation of annotations.values()) {
     if (!Object.hasOwn(meta.protectingFamilies, annotation.family) || !annotation.protectedTargetIds?.length) continue;
-    const ownRanges = rangeByAnnotation.get(annotation.id) ?? [];
-    if (ownRanges.length === 0) continue;
-    const wholeDocument = ownRanges.some((own) => own.start === 0 && own.end === textLength);
+    const ownRanges = rangeByAnnotation.get(annotation.id);
+    if (!ownRanges) continue;
+    const wholeDocument = rangesOf(ownRanges).some((own) => own.start === 0 && own.end === textLength);
     for (const targetId of annotation.protectedTargetIds) {
-      const targetRanges = rangeByAnnotation.get(targetId) ?? [];
-      const intersects = ownRanges.some((own) => targetRanges.some((target) => own.start < target.end && target.start < own.end));
+      const targetRanges = rangeByAnnotation.get(targetId);
+      const intersects = targetRanges ? rangeCollectionsIntersect(ownRanges, targetRanges) : false;
       if (wholeDocument || intersects) {
         active.add(annotation.id);
         break;
@@ -219,7 +235,7 @@ export function projectAnnotatedTextForRecipient(canonical                      
   let restricted = false;
   for (const id of active) {
     if (outcomes.get(id) !== 'deny') continue;
-    const ownRanges = rangeByAnnotation.get(id) ;
+    const ownRanges = rangesOf(rangeByAnnotation.get(id));
     if (ownRanges.some((range) => range.start === 0 && range.end === textLength)) {
       restricted = true;
       break;
@@ -282,32 +298,38 @@ export function projectAnnotatedTextForRecipient(canonical                      
   const recipientRanges                                                              = [];
   const retainedAnnotationIds = new Set        ();
   const offsetsUnchanged = authoring.length === 0;
-  for (const [annotationId, ownRanges] of rangeByAnnotation) {
+  const appendRecipientRange = (annotationId        , range                ) => {
+    const start = visibleOffsetFor(range.start);
+    const end = visibleOffsetFor(range.end);
+    if (end > start) {
+      retainedAnnotationIds.add(annotationId);
+      recipientRanges.push(offsetsUnchanged ? range : { annotationId, start, end });
+      return;
+    }
+    // Show-through: an annotation fully inside the redacted union still shows
+    // at the zero-width marker, unless it is a denied protector's target.
+    if (start === end && redactions.some((redaction) => redaction.start === start) && !deniedProtectedTargets.has(annotationId)) {
+      retainedAnnotationIds.add(annotationId);
+      recipientRanges.push({ annotationId, start, end });
+    }
+  };
+  for (const [annotationId, ownRangeCollection] of rangeByAnnotation) {
     const family = annotations.get(annotationId) .family;
     if (Object.hasOwn(meta.protectingFamilies, family)) continue;
-    for (const range of ownRanges) {
-      const start = visibleOffsetFor(range.start);
-      const end = visibleOffsetFor(range.end);
-      if (end > start) {
-        retainedAnnotationIds.add(annotationId);
-        recipientRanges.push(offsetsUnchanged ? range : { annotationId, start, end });
-        continue;
-      }
-      // Show-through: an annotation fully inside the redacted union still shows
-      // at the zero-width marker (start === end) — unless it is itself a denied
-      // protector's protected target, which is the hidden thing and drops.
-      if (start === end && redactions.some((redaction) => redaction.start === start) && !deniedProtectedTargets.has(annotationId)) {
-        retainedAnnotationIds.add(annotationId);
-        recipientRanges.push({ annotationId, start, end });
-      }
-    }
+    if (Array.isArray(ownRangeCollection)) {
+      for (const range of ownRangeCollection) appendRecipientRange(annotationId, range);
+    } else appendRecipientRange(annotationId, ownRangeCollection);
+  }
+  const recipientAnnotations                        = [];
+  for (const annotation of annotations.values()) {
+    if (retainedAnnotationIds.has(annotation.id)) recipientAnnotations.push(annotation);
   }
 
   const result = {
     kind: 'workbench.annotatedText.recipient', version: 1,
     text,
     ranges: recipientRanges,
-    annotations: [...annotations.values()].filter((annotation) => retainedAnnotationIds.has(annotation.id)),
+    annotations: recipientAnnotations,
     measurements: canonical.measurements,
     capabilityHints: [...capabilityHints].filter((hint) => (!redactions.length) || hint !== 'body.read'),
     orphans: (canonical.orphans ?? [])
