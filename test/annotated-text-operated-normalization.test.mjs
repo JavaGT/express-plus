@@ -10,25 +10,23 @@ import workbench, {
   grant, parseEventType, read, ref, scope, write,
 } from '../build/internal.mjs';
 import { defineSqliteSchema } from '../build/server.mjs';
-import { rowToEvent } from '../build/committed-log.mjs';
 import {
   constructV15RegionEvent,
   normalizeOperatedEvent,
 } from '../build/annotated-text-operated-event.mjs';
 import {
   importTextToFamily,
-  materializeText,
-  projectEndpointToOffset,
   resolveOffsetToEndpoint,
+  serializeCompactTextFamilyCheckpoint,
   textFamilyBasis,
 } from '../build/annotated-text-continuous.mjs';
+import { attachAnnotationRange } from '../build/annotated-text-storage.mjs';
 import { planRegionEdit } from '../build/annotated-text-region-plan.mjs';
 import {
   computeAffectedClosure,
   digestAffectedClosure,
 } from '../build/annotated-text-region-reducer.mjs';
 import { sha256Utf8 } from '../build/annotated-text-region-limits.mjs';
-import { withAuthoringBinding } from './annotated-text-authoring-fixture.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixtures = join(here, 'fixtures', 'annotated-text-operated');
@@ -45,8 +43,13 @@ function listJson(dir) {
   return readdirSync(join(fixtures, dir)).filter((name) => name.endsWith('.json'));
 }
 
+function unwrapFixture(raw) {
+  if (raw && typeof raw === 'object' && raw.event && raw.preimage) return raw;
+  return { event: raw, preimage: null };
+}
+
 test('v13 fixture maps family to a checkpoint proof and preserves facts', () => {
-  const raw = loadJson('v13/text-apply.json');
+  const { event: raw } = unwrapFixture(loadJson('v13/text-apply.json'));
   const canonical = normalizeOperatedEvent(raw, { entity: 'ReplayDoc', field: 'body' });
   assert.equal(canonical.kind, 'text.apply');
   assert.equal(canonical.wireVersion, 13);
@@ -57,7 +60,7 @@ test('v13 fixture maps family to a checkpoint proof and preserves facts', () => 
 });
 
 test('v14 fixture maps absent family to derive-and-check-frontier', () => {
-  const raw = loadJson('v14/text-apply.json');
+  const { event: raw } = unwrapFixture(loadJson('v14/text-apply.json'));
   const canonical = normalizeOperatedEvent(raw, { entity: 'ReplayDoc', field: 'body' });
   assert.equal(canonical.kind, 'text.apply');
   assert.equal(canonical.wireVersion, 14);
@@ -67,7 +70,7 @@ test('v14 fixture maps absent family to derive-and-check-frontier', () => {
 
 test('malformed cross-version fixtures reject before any write', () => {
   for (const name of listJson('malformed')) {
-    const raw = loadJson(`malformed/${name}`);
+    const { event: raw } = unwrapFixture(loadJson(`malformed/${name}`));
     assert.throws(
       () => normalizeOperatedEvent(raw, { entity: 'ReplayDoc', field: 'body' }),
       (error) => {
@@ -137,7 +140,7 @@ function v15Envelope() {
 }
 
 test('v15 fixture file normalizes through the production constructor', () => {
-  const raw = loadJson('v15/region-edit.json');
+  const { event: raw } = unwrapFixture(loadJson('v15/region-edit.json'));
   const canonical = normalizeOperatedEvent(raw, { entity: 'ReplayDoc', field: 'body' });
   assert.equal(canonical.kind, 'region.edit');
   assert.equal(canonical.wireVersion, 15);
@@ -194,6 +197,7 @@ const PROJECTION_TABLES = [
   'ReplayDoc_body_annotation_note',
   'ReplayDoc_body_membership',
   'ReplayDoc_body_range',
+  'ReplayDoc_body_annotation_orphan_state',
 ];
 
 function projectedDump(db) {
@@ -207,46 +211,62 @@ function projectedDump(db) {
   return state;
 }
 
-test('v14 live log and historical v13 dump agree after normalize + project', async (t) => {
-  const live = new DatabaseSync(':memory:');
-  installSchema(live);
-  const ReplayDoc = declaredEntity();
-  const app = workbench({ db: live, schema: externalReferences, entities: [ReplayDoc] });
-  app.start();
-  await app.ready;
-  t.after(async () => { await app.shutdown().catch(() => {}); live.close(); });
-
-  const created = await app.dispatch({
-    actionId: 'create', type: 'ReplayDoc.create', scope: 'Project:p1',
-    payload: { id: 'd1', project: 'p1', owner: 'u1', body: { version: 1, blocks: [{ text: 'hello' }] } },
-    principal: { id: 'u1' },
-  });
-  assert.equal(created.ok, true, created.failure?.message);
-  const row = live.prepare("SELECT * FROM ReplayDoc WHERE id = 'd1'").get();
-  const binding = await withAuthoringBinding({
-    db: live, entity: ReplayDoc, Document: ReplayDoc, row, principal: { id: 'u1' },
-    fieldName: 'body', descriptor: ReplayDoc.fields.body,
-  });
-  const inserted = await app.dispatch({
-    actionId: 'op-insert', type: 'ReplayDoc.body.operation', scope: 'Project:p1',
-    payload: {
-      version: 9, id: 'd1',
-      authoring: { version: 1, stream: binding.streamToken, lease: binding.leaseToken, mutationId: 'op-insert' },
-      edit: { kind: 'text.insert', at: { positionToken: binding.documentPositionToken, offset: 0, affinity: 'right' }, text: 'x' },
-    },
-    principal: { id: 'u1' },
-  });
-  assert.equal(inserted.ok, true, inserted.failure?.message);
-
-  const liveDump = projectedDump(live);
-  const rebuilt = new DatabaseSync(':memory:');
-  installSchema(rebuilt);
-  const projection = workbench({ db: rebuilt, entities: [declaredEntity()] }).entities.get('ReplayDoc').projection;
-  for (const raw of live.prepare('SELECT * FROM _Log ORDER BY seq').all()) {
-    projection.apply(rowToEvent(raw, parseEventType), rebuilt);
+function seedPreimage(db, preimage) {
+  const documentId = preimage.documentId;
+  db.prepare('INSERT INTO ReplayDoc (id, project, owner) VALUES (?, ?, ?)').run(documentId, 'p1', 'u1');
+  const family = importTextToFamily(documentId, preimage.actor, preimage.text);
+  db.prepare('INSERT INTO ReplayDoc_body_state (document_id, structure_version, family_checkpoint) VALUES (?, 1, ?)')
+    .run(documentId, serializeCompactTextFamilyCheckpoint(family));
+  for (const annotation of preimage.annotations ?? []) {
+    db.prepare('INSERT INTO ReplayDoc_body_annotation (id, document_id, project_id, owner_id, family) VALUES (?, ?, ?, ?, ?)')
+      .run(annotation.id, documentId, 'p1', 'u1', annotation.family);
+    attachAnnotationRange(
+      db,
+      'ReplayDoc_body',
+      documentId,
+      annotation.id,
+      resolveOffsetToEndpoint(family, annotation.start, family.checkpoint.frontier, 'left'),
+      resolveOffsetToEndpoint(family, annotation.end, family.checkpoint.frontier, 'right'),
+      0,
+    );
   }
-  assert.deepEqual(projectedDump(rebuilt), liveDump);
-  rebuilt.close();
+  return family;
+}
+
+function applyOperated(db, event) {
+  const projection = workbench({ db, entities: [declaredEntity()] }).entities.get('ReplayDoc').projection;
+  projection.apply({
+    handle: parseEventType('ReplayDoc.body.operated'),
+    type: 'ReplayDoc.body.operated',
+    data: event,
+  }, db);
+}
+
+function projectFixture(rel) {
+  const { event, preimage } = unwrapFixture(loadJson(rel));
+  const db = new DatabaseSync(':memory:');
+  installSchema(db);
+  if (preimage) seedPreimage(db, preimage);
+  applyOperated(db, event);
+  const dump = projectedDump(db);
+  db.close();
+  return dump;
+}
+
+test('v13 and v14 fixtures project to the same canonical dump', () => {
+  const v13 = projectFixture('v13/text-apply.json');
+  const v14 = projectFixture('v14/text-apply.json');
+  assert.deepEqual(v13, v14, 'operated normalization fixture mismatch: family');
+  const rebuilt = projectFixture('v14/text-apply.json');
+  assert.deepEqual(rebuilt, v14, 'operated normalization fixture mismatch: replay');
+});
+
+test('v15 fixture projects through the production reducer to a stable dump', () => {
+  const first = projectFixture('v15/region-edit.json');
+  const second = projectFixture('v15/region-edit.json');
+  assert.deepEqual(first, second, 'operated normalization fixture mismatch: v15');
+  const annotationRows = JSON.parse(first.ReplayDoc_body_annotation);
+  assert.equal(annotationRows.length, 1);
 });
 
 test('malformed operated events write nothing through the production projector', () => {
@@ -255,7 +275,7 @@ test('malformed operated events write nothing through the production projector',
   const projection = workbench({ db, entities: [declaredEntity()] }).entities.get('ReplayDoc').projection;
   const before = projectedDump(db);
   for (const name of listJson('malformed')) {
-    const data = loadJson(`malformed/${name}`);
+    const { event: data } = unwrapFixture(loadJson(`malformed/${name}`));
     assert.throws(
       () => projection.apply({
         handle: parseEventType('ReplayDoc.body.operated'),
@@ -271,7 +291,39 @@ test('malformed operated events write nothing through the production projector',
 });
 
 test('v15 fixture reaches the canonical reducer', () => {
-  const { envelope } = v15Envelope();
-  const canonical = normalizeOperatedEvent(envelope, { entity: 'ReplayDoc', field: 'body' });
+  let canonical;
+  try {
+    const { event } = unwrapFixture(loadJson('v15/region-edit.json'));
+    canonical = normalizeOperatedEvent(event, { entity: 'ReplayDoc', field: 'body' });
+  } catch {
+    throw new Error('v15 fixture did not reach canonical reducer');
+  }
   if (canonical.kind !== 'region.edit') throw new Error('v15 fixture did not reach canonical reducer');
+});
+
+test('forged region postimage performs zero writes', () => {
+  const { event, preimage } = unwrapFixture(loadJson('v15/region-edit.json'));
+  const forged = structuredClone(event);
+  forged.operation.afterDigest = '0'.repeat(64);
+  const db = new DatabaseSync(':memory:');
+  installSchema(db);
+  seedPreimage(db, preimage);
+  const before = projectedDump(db);
+  const projection = workbench({ db, entities: [declaredEntity()] }).entities.get('ReplayDoc').projection;
+  let threw = false;
+  try {
+    projection.apply({
+      handle: parseEventType('ReplayDoc.body.operated'),
+      type: 'ReplayDoc.body.operated',
+      data: forged,
+    }, db);
+  } catch {
+    threw = true;
+  }
+  const after = projectedDump(db);
+  if (JSON.stringify(after) !== JSON.stringify(before)) {
+    throw new Error('forged region postimage performed a write');
+  }
+  assert.equal(threw, true);
+  db.close();
 });

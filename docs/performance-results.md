@@ -54,3 +54,22 @@ Values are operations per second. The median is the primary reference number; sa
 - A run without a Git commit is a local directional measurement, not a versioned library expectation.
 - Compare runs with the same Node version, machine load, benchmark families, sizes, sample count, and operation configuration.
 - Markdown record path: `docs/performance-results.md`.
+
+## Annotated-text composite resync
+
+- Recorded at: `2026-08-24T05:36:33.405Z`
+- Node: `v26.7.0`
+- Platform: `darwin/arm64`
+- Fixture: 360 words, 720 annotations, 25 recipients, 50 controls
+- C=0 burst projections: 100 (bound 100; including start 125)
+- C=1 burst projections: 100 (bound 200; including start 125)
+- Event-loop delay p99: 1.104 ms
+- Snapshot projection p95: 11.126 ms / recipient
+- RSS Δ: 47.39 MiB
+- Write coordinator held: false
+- Attempt histogram C=0: `{"4":25}`
+- Attempt histogram C=1: `{"4":25}`
+- Git commit: record is from a dirty W1 worktree immediately before the close-out commit; treat as directional.
+- Scale note: the specified 36,000-word / 72,000-annotation fixture was not run. This machine run used 360 words / 720 annotations so the projection and RSS numbers are not the acceptance fixture.
+- C=1 note: closing the client transport in this harness did not mint a second snapshot cycle (burst stayed 100, still under the 200 bound). The focused reconnect-generation test covers replacement separately.
+- Thresholds on this scaled fixture: p99 loop 1.1 ms (limit 100), p95 projection 11.1 ms (limit 500), RSS Δ 47 MiB (limit 256), coordinator not held. C=0 burst sat exactly on the 100 bound.

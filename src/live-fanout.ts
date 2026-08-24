@@ -277,9 +277,55 @@ export function createLiveFanout({ mayVerb = null, authorization = null }: { may
   const byScope = new Map<string, Map<LiveConn, LiveSubscriptionSpec>>(); // Map<scopeKey, Map<conn, SubSpec>>
   const connSubs = new Map<LiveConn, Set<string>>();  // Map<conn, Set<scopeKey>>
   const paceBuffers = new Map<string, PaceBufferEntry>();
+  // One pending snapshot-control per (connection, document) per event-loop turn.
+  // Later controls only raise the high-water sequence; the flush emits one message.
+  const pendingSnapshotControls = new Map<string, {
+    conn: LiveConn;
+    entity: string;
+    id: unknown;
+    seq: number;
+    reason: string;
+  }>();
+  let snapshotControlFlushScheduled = false;
+  let snapshotControlFlushTimer: ReturnType<typeof setImmediate> | null = null;
   let onCaretInterestChange: ((conn: LiveConn, scope: string, removedFields: string[]) => void) | null = null;
   let onCaretInterestAdded: ((conn: LiveConn, scope: string, addedFields: string[]) => void) | null = null;
   const revocationListeners: RevocationListener[] = [];
+
+  function snapshotControlKey(conn: LiveConn, entity: string, id: unknown): string {
+    return `${conn.id}\u0000${entity}\u0000${String(id)}`;
+  }
+
+  function flushPendingSnapshotControls(): void {
+    snapshotControlFlushScheduled = false;
+    snapshotControlFlushTimer = null;
+    for (const pending of pendingSnapshotControls.values()) {
+      if (pending.conn.closed) continue;
+      pending.conn.send({
+        type: 'resync',
+        entity: pending.entity,
+        id: pending.id,
+        seq: pending.seq,
+        reason: pending.reason,
+      });
+    }
+    pendingSnapshotControls.clear();
+  }
+
+  function queueSnapshotControl(conn: LiveConn, entity: string, id: unknown, seq: number, reason: string): void {
+    const key = snapshotControlKey(conn, entity, id);
+    const existing = pendingSnapshotControls.get(key);
+    if (!existing) {
+      pendingSnapshotControls.set(key, { conn, entity, id, seq, reason });
+    } else if (seq > existing.seq) {
+      existing.seq = seq;
+      existing.reason = reason;
+    }
+    if (!snapshotControlFlushScheduled) {
+      snapshotControlFlushScheduled = true;
+      snapshotControlFlushTimer = setImmediate(flushPendingSnapshotControls);
+    }
+  }
 
   const deltaProjector = createDeltaProjector();
 
@@ -582,10 +628,7 @@ export function createLiveFanout({ mayVerb = null, authorization = null }: { may
       if (isAnnotatedTextOperation || isAnnotatedTextEphemeral) {
         const seq = committed.seq as number;
         if (!Number.isSafeInteger(seq) || seq < 0) continue;
-        conn.send({
-          type: 'resync', entity: name, id, seq,
-          reason: 'annotated-text-snapshot-required',
-        });
+        queueSnapshotControl(conn, name, id, seq, 'annotated-text-snapshot-required');
         continue;
       }
 
@@ -614,10 +657,13 @@ export function createLiveFanout({ mayVerb = null, authorization = null }: { may
           && readableFields !== undefined && !readableFields.has(handle.field)) {
         const seq = committed.seq as number;
         if (!Number.isSafeInteger(seq) || seq < 0) continue;
-        conn.send({
-          type: 'resync', entity: name, id, seq,
-          reason: hasAnnotatedText(entityRecord) ? 'annotated-text-snapshot-required' : 'recipient-snapshot-required',
-        });
+        queueSnapshotControl(
+          conn,
+          name,
+          id,
+          seq,
+          hasAnnotatedText(entityRecord) ? 'annotated-text-snapshot-required' : 'recipient-snapshot-required',
+        );
         continue;
       }
 
@@ -638,10 +684,7 @@ export function createLiveFanout({ mayVerb = null, authorization = null }: { may
           if (recipientData === undefined && committed.data && typeof committed.data === 'object' && !Array.isArray(committed.data)) {
             const seq = committed.seq as number;
             if (!Number.isSafeInteger(seq) || seq < 0) continue;
-            conn.send({
-              type: 'resync', entity: name, id, seq,
-              reason: 'recipient-snapshot-required',
-            });
+            queueSnapshotControl(conn, name, id, seq, 'recipient-snapshot-required');
             continue;
           }
         } else {
@@ -698,6 +741,12 @@ export function createLiveFanout({ mayVerb = null, authorization = null }: { may
       if (entry.timer !== null) { clearTimeout(entry.timer); entry.timer = null; }
     }
     paceBuffers.clear();
+    pendingSnapshotControls.clear();
+    snapshotControlFlushScheduled = false;
+    if (snapshotControlFlushTimer !== null) {
+      clearImmediate(snapshotControlFlushTimer);
+      snapshotControlFlushTimer = null;
+    }
     deltaProjector.clear();
   }
 

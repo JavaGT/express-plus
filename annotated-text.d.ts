@@ -72,4 +72,9 @@ export type {
   AnnotatedTextRecipientReadResult,
   AnnotatedTextCreateInput,
   AnnotatedTextCreateSourceMeasurement,
+  AnnotatedTextRegionRelativeRange,
+  AnnotatedTextRegionEditTransition,
+  AnnotatedTextRegionEditDescriptor,
 } from './index.js';
+
+export { parseRegionEditDescriptor, isRegionEditDescriptor } from './index.js';

@@ -222,5 +222,5 @@ function collectCoveredIds(
       }
     }
   }
-  return ids;
+  return ids.sort();
 }

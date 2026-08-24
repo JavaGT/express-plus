@@ -5,6 +5,7 @@ import { createLiveFanout } from '../build/live-fanout.mjs';
 import { scope } from '../build/internal.mjs';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const nextTurn = () => new Promise((resolve) => setImmediate(resolve));
 
 function makeConn(id, principalId = id) {
   const messages = [];
@@ -102,6 +103,7 @@ test('live fanout invalidates annotated-text operations without serializing thei
       memberships: ['secret-membership'], protectedTargetIds: ['secret-target'],
     },
   });
+  await nextTurn();
 
   const messages = conn.drain();
   assert.deepEqual(messages, [{
@@ -137,6 +139,7 @@ test('live fanout invalidates generic ephemeral cells on annotated-text entities
     type: 'Doc.cursor.set', seq: 8,
     data: { owner: 'd1', client: 'secret-client', cells: { offset: 42, selectedText: 'secret body' } },
   });
+  await nextTurn();
 
   const messages = conn.drain();
   assert.deepEqual(messages, [{
@@ -227,4 +230,23 @@ test('live fanout close clears paced timers before they emit', async () => {
 
   assert.deepEqual(conn.drain(), []);
   assert.equal(fanout.subscriptionCount(conn), 0);
+});
+
+test('live fanout coalesces a burst of annotated-text controls to one high-water resync', async () => {
+  const fanout = createLiveFanout({ mayVerb: async () => true });
+  const conn = makeConn('c1');
+  const entity = makeEntity({ fields: { body: { kind: 'annotatedText' } } });
+  fanout.addSubscription('Doc', 'd1', conn);
+
+  // Start the burst in one turn. Sequential `await emit()` would yield after
+  // each authorization and flush the previous control before the next queues.
+  await Promise.all(Array.from({ length: 50 }, (_, index) => fanout.emit(entity, 'd1', { id: 'd1' }, {
+    type: 'Doc.body.operated', seq: index + 1,
+    data: { operation: ['secret'], family: { text: 'secret' } },
+  })));
+  await nextTurn();
+  assert.deepEqual(conn.drain(), [{
+    type: 'resync', entity: 'Doc', id: 'd1', seq: 50,
+    reason: 'annotated-text-snapshot-required',
+  }], 'a 50-control burst collapses to one high-water resync');
 });

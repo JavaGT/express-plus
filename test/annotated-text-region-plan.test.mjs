@@ -237,6 +237,73 @@ test('stale covered-text digest fails before a plan is returned', () => {
   );
 });
 
+test('several logical word edits inside one region normalize to one replacement', () => {
+  const family = familyFrom('one two three');
+  const annotations = [
+    stored(family, { id: 'keep-1', start: 0, end: 3 }),
+    stored(family, { id: 'gone-1', start: 4, end: 7 }),
+  ];
+  const plan = planRegionEdit({
+    descriptor: descriptorFor(family, {
+      from: 0,
+      to: 13,
+      replacement: 'uno two four',
+      annotations,
+      transitions: [
+        { kind: 'range.set', annotationId: 'keep-1', ranges: [{ start: 0, end: 3 }] },
+        { kind: 'remove', annotationId: 'gone-1' },
+        {
+          kind: 'create',
+          annotation: { id: 'new-1', family: 'note', fields: {}, protectedTargetIds: [] },
+          ranges: [{ start: 8, end: 12 }],
+        },
+      ],
+    }),
+    family,
+    structureVersion: 1,
+    annotations,
+    declarations: DECLARATIONS,
+    actor: EDIT_ACTOR,
+    lamport: 2,
+  });
+  assert.equal(plan.textOperations.kind, 'replace');
+  assert.equal(materializeText(plan.afterFamily), 'uno two four');
+  assert.deepEqual(plan.postimage.annotations.map((image) => image.id).sort(), ['keep-1', 'new-1']);
+  assert.ok(!plan.postimage.annotations.some((image) => image.id === 'gone-1'));
+  assert.notEqual(plan.postimage.annotations.find((image) => image.id === 'new-1')?.id, 'keep-1');
+});
+
+test('inserted annotations receive new ids distinct from preserved ones', () => {
+  const family = familyFrom('hello world');
+  const annotations = [stored(family, { id: 'timing-keep', start: 0, end: 5 })];
+  const plan = planRegionEdit({
+    descriptor: descriptorFor(family, {
+      from: 5,
+      to: 5,
+      replacement: ' there',
+      annotations,
+      transitions: [
+        { kind: 'range.set', annotationId: 'timing-keep', ranges: [{ start: 0, end: 5 }] },
+        {
+          kind: 'create',
+          annotation: { id: 'timing-new', family: 'note', fields: {}, protectedTargetIds: [] },
+          ranges: [{ start: 5, end: 11 }],
+        },
+      ],
+    }),
+    family,
+    structureVersion: 1,
+    annotations,
+    declarations: DECLARATIONS,
+    actor: EDIT_ACTOR,
+    lamport: 2,
+  });
+  const ids = plan.postimage.annotations.map((image) => image.id);
+  assert.ok(ids.includes('timing-keep'));
+  assert.ok(ids.includes('timing-new'));
+  assert.notEqual('timing-new', 'timing-keep');
+});
+
 test('forged after-digest disagrees with the shared reducer', () => {
   const family = familyFrom('hello world');
   const annotations = asImages([stored(family, { id: 'note-1', start: 0, end: 5 })]);

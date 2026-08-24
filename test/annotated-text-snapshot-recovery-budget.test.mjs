@@ -54,7 +54,7 @@ test('no-reconnect burst of 50 controls performs at most four bootstraps', async
   const initial = bootstraps();
   await deliver(Array.from({ length: 50 }, (_, index) => control(index + 1)));
   await flush();
-  assert.ok(bootstraps() - initial <= 4, `burst used ${bootstraps() - initial} snapshot bootstraps`);
+  if (bootstraps() - initial > 4) throw new Error('snapshot recovery exceeded four attempts in one cycle');
   session.close();
 });
 
@@ -68,7 +68,7 @@ test('one reconnect during a burst performs at most eight total bootstraps', asy
   await flush();
   await deliver(Array.from({ length: 25 }, (_, index) => control(index + 26)));
   await flush();
-  assert.ok(bootstraps() - initial <= 8, `reconnect burst used ${bootstraps() - initial} snapshot bootstraps`);
+  if (bootstraps() - initial > 8) throw new Error('snapshot recovery exceeded four attempts in one cycle');
   session.close();
 });
 
@@ -85,21 +85,30 @@ test('the fourth failed attempt becomes unavailable with budget exhausted', asyn
   await flush();
   // Force recovery after the successful start snapshot.
   const client = createBudgetClient({
-    bootstrapImpl: async () => ({ kind: 'retry' }),
+    bootstrapImpl: async (_request, count) => {
+      if (count > 4) throw new Error('snapshot recovery exceeded four attempts in one cycle');
+      return { kind: 'retry' };
+    },
   });
-  await client.session.ready.catch(() => {});
+  await client.session.ready.catch((error) => {
+    if (error?.message === 'snapshot recovery exceeded four attempts in one cycle') throw error;
+  });
   await flush();
+  if (client.bootstraps() > 4) throw new Error('snapshot recovery exceeded four attempts in one cycle');
   assert.equal(client.session.status, 'unavailable');
-  assert.ok(client.bootstraps() <= 4);
   const exhausted = [];
   const failing = createBudgetClient({
     bootstrapImpl: async (_request, count) => {
       exhausted.push(count);
+      if (count > 4) throw new Error('snapshot recovery exceeded four attempts in one cycle');
       return { kind: 'retry' };
     },
   });
-  await failing.session.ready.catch(() => {});
+  await failing.session.ready.catch((error) => {
+    if (error?.message === 'snapshot recovery exceeded four attempts in one cycle') throw error;
+  });
   await flush();
+  if (failing.bootstraps() > 4) throw new Error('snapshot recovery exceeded four attempts in one cycle');
   assert.equal(failing.session.status, 'unavailable');
   assert.equal(failing.bootstraps(), 4);
   session.close();

@@ -812,6 +812,54 @@ export type AnnotatedTextOperationCommand =
   | AnnotatedTextApplyAnnotationCommand
   | AnnotatedTextRemoveAnnotationCommand;
 
+/** One post-edit range, measured in UTF-16 offsets relative to the region start. */
+export interface AnnotatedTextRegionRelativeRange {
+  readonly start: number;
+  readonly end: number;
+}
+
+export type AnnotatedTextRegionEditTransition =
+  | {
+      readonly kind: 'range.set';
+      readonly annotationId: string;
+      readonly ranges: readonly AnnotatedTextRegionRelativeRange[];
+    }
+  | {
+      readonly kind: 'remove';
+      readonly annotationId: string;
+    }
+  | {
+      readonly kind: 'create';
+      readonly annotation: {
+        readonly id: string;
+        readonly family: string;
+        readonly fields: Readonly<Record<string, unknown>>;
+        readonly protectedTargetIds: readonly string[];
+      };
+      readonly ranges: readonly AnnotatedTextRegionRelativeRange[];
+    };
+
+/** Closed v10 public `region.edit` descriptor. Sole parser: `parseRegionEditDescriptor`. */
+export interface AnnotatedTextRegionEditDescriptor {
+  readonly version: 10;
+  readonly kind: 'region.edit';
+  readonly id: string;
+  readonly basis: {
+    readonly version: 1;
+    readonly id: string;
+    readonly frontier: unknown;
+  };
+  readonly from: number;
+  readonly to: number;
+  readonly coveredTextDigest: string;
+  readonly affectedClosureDigest: string;
+  readonly expectedCoveredAnnotationIds: readonly string[];
+  readonly replacement: string;
+  readonly transitions: readonly AnnotatedTextRegionEditTransition[];
+}
+export function parseRegionEditDescriptor(raw: unknown): AnnotatedTextRegionEditDescriptor;
+export function isRegionEditDescriptor(value: unknown): value is AnnotatedTextRegionEditDescriptor;
+
 /** The `edit` half of a v9 operation payload (command minus id/authoring). */
 export type AnnotatedTextOperationEdit =
   | Omit<AnnotatedTextInsertCommand, 'id' | 'authoring'>

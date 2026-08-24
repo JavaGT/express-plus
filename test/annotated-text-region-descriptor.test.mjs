@@ -9,10 +9,14 @@ import {
 } from '../build/annotated-text-region-descriptor.mjs';
 import {
   ANNOTATED_TEXT_REGION_LIMIT,
+  REGION_AFFECTED_ANNOTATION_MAX,
+  REGION_DESCRIPTOR_MAX_UTF8_BYTES,
+  REGION_MEMBERSHIP_MAX,
   REGION_REPLACEMENT_MAX_UTF8_BYTES,
   REGION_TRANSITION_MAX,
   sha256Utf8,
 } from '../build/annotated-text-region-limits.mjs';
+import { assertRegionClosureLimits } from '../build/annotated-text-region-reducer.mjs';
 
 const digest = sha256Utf8('hello');
 
@@ -96,6 +100,53 @@ test('rejects over-limit replacement and transition counts before allocation', (
 test('rejects a malformed digest', () => {
   assert.throws(
     () => parseRegionEditDescriptor(validDescriptor({ coveredTextDigest: 'not-a-digest' })),
+    (error) => error.failure?.code === ANNOTATED_TEXT_REGION_LIMIT,
+  );
+});
+
+test('rejects an over-limit serialized descriptor before hashing', () => {
+  const padded = validDescriptor({
+    replacement: 'x'.repeat(REGION_DESCRIPTOR_MAX_UTF8_BYTES),
+  });
+  assert.throws(
+    () => parseRegionEditDescriptor(padded),
+    (error) => error.failure?.code === ANNOTATED_TEXT_REGION_LIMIT,
+  );
+});
+
+test('closure limits reject one-over-max annotations and memberships', () => {
+  const tooMany = Array.from({ length: REGION_AFFECTED_ANNOTATION_MAX + 1 }, (_, index) => ({
+    id: `ann-${String(index).padStart(4, '0')}`,
+    family: 'note',
+    fields: {},
+    protectedTargetIds: [],
+    memberships: [],
+    orphan: null,
+    empty: 'delete',
+    cardinality: 'many',
+    prerequisites: [],
+  }));
+  assert.throws(
+    () => assertRegionClosureLimits(tooMany),
+    (error) => error.failure?.code === ANNOTATED_TEXT_REGION_LIMIT,
+  );
+  const tooManyMemberships = [{
+    id: 'ann-1',
+    family: 'note',
+    fields: {},
+    protectedTargetIds: [],
+    memberships: Array.from({ length: REGION_MEMBERSHIP_MAX + 1 }, (_, ordinal) => ({
+      ordinal,
+      start: { point: ['point', ['root'], 'left'], basisFrontier: [] },
+      end: { point: ['point', ['root'], 'right'], basisFrontier: [] },
+    })),
+    orphan: null,
+    empty: 'delete',
+    cardinality: 'many',
+    prerequisites: [],
+  }];
+  assert.throws(
+    () => assertRegionClosureLimits(tooManyMemberships),
     (error) => error.failure?.code === ANNOTATED_TEXT_REGION_LIMIT,
   );
 });
