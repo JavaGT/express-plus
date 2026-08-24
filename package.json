@@ -34,6 +34,7 @@
 	"scripts": {
 		"emit:ts": "node --disable-warning=ExperimentalWarning scripts/emit-ts.mjs",
 		"build": "pnpm emit:ts",
+		"setup:hooks": "sh scripts/setup-hooks.sh",
 		"lint": "eslint .",
 		"test": "pnpm emit:ts && node scripts/run-tests.mjs",
 		"bench": "node bench/hot-path.mjs",

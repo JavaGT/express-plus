@@ -1,0 +1,27 @@
+#!/bin/sh
+# Pre-push guard (issue #129): fail the push when the committed build/ tree is
+# stale relative to src/. `pnpm test` regenerates build/ before every run, so
+# the freshness test can only see working-tree drift; this guard closes the
+# gap where stale build/ gets committed and shipped to consumers.
+#
+# Install once per clone: `pnpm setup:hooks` (sets git config core.hooksPath).
+# Bypass with `git push --no-verify` only when you know build/ is current.
+
+set -e
+
+echo "pre-push: regenerating build/ via emit:ts..."
+pnpm emit:ts
+
+dirty="$(git status --porcelain -- build/)"
+if [ -n "$dirty" ]; then
+	echo "" >&2
+	echo "pre-push: REFUSED — committed build/ is stale or incomplete." >&2
+	echo "" >&2
+	echo "emissions not present in the index/HEAD:" >&2
+	echo "$dirty" | sed 's/^/  /' >&2
+	echo "" >&2
+	echo "Fix: commit the regenerated build/ files above, then push again." >&2
+	exit 1
+fi
+
+echo "pre-push: build/ is fresh."
