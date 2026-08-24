@@ -7,9 +7,15 @@ import type { RegionEditTransition } from './annotated-text-region-descriptor.ts
 import type { RegionPlan, RegionTextOperations } from './annotated-text-region-plan.ts';
 import {
   REGION_AFFECTED_ANNOTATION_MAX,
+  REGION_DESCRIPTOR_MAX_UTF8_BYTES,
+  REGION_MEMBERSHIP_MAX,
+  REGION_PREREQUISITE_MAX,
+  REGION_PROTECTED_EDGE_MAX,
+  REGION_REPLACEMENT_MAX_UTF8_BYTES,
   REGION_TRANSITION_MAX,
   SHA256_HEX,
   regionLimitError,
+  utf8ByteLength,
 } from './annotated-text-region-limits.ts';
 
 export const OPERATED_FACT_KEYS = [
@@ -199,6 +205,51 @@ function assertNoV15Proof(operation: Record<string, unknown>, entity: string, fi
   }
 }
 
+function serializedUtf8Bytes(value: unknown, label: string): number {
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    throw regionLimitError(`${label} must be JSON-serializable`);
+  }
+  return utf8ByteLength(serialized);
+}
+
+function preflightV15Payload(raw: Record<string, unknown>, operation: Record<string, unknown>, entity: string, field: string): void {
+  const label = `${entity}.${field}.operated v15`;
+  if (serializedUtf8Bytes(operation, `${label} operation`) > REGION_DESCRIPTOR_MAX_UTF8_BYTES) {
+    throw regionLimitError(`${label} operation exceeds ${REGION_DESCRIPTOR_MAX_UTF8_BYTES} UTF-8 bytes`);
+  }
+  if (serializedUtf8Bytes(raw, `${label} payload`) > REGION_DESCRIPTOR_MAX_UTF8_BYTES) {
+    throw regionLimitError(`${label} payload exceeds ${REGION_DESCRIPTOR_MAX_UTF8_BYTES} UTF-8 bytes`);
+  }
+
+  let memberships = 0;
+  let protectedEdges = 0;
+  let prerequisites = 0;
+  const visit = (value: unknown, key = '', underText = false): void => {
+    if (typeof value === 'string') {
+      if (underText && utf8ByteLength(value) > REGION_REPLACEMENT_MAX_UTF8_BYTES) {
+        throw regionLimitError(`${label} text operation exceeds ${REGION_REPLACEMENT_MAX_UTF8_BYTES} UTF-8 bytes`);
+      }
+      return;
+    }
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) {
+      if (key === 'ranges' || key === 'memberships') memberships += value.length;
+      if (key === 'protectedTargetIds') protectedEdges += value.length;
+      if (key === 'prerequisites') prerequisites += value.length;
+      for (const child of value) visit(child, '', underText);
+      return;
+    }
+    for (const [name, child] of Object.entries(value)) visit(child, name, underText || name === 'text');
+  };
+  visit(raw);
+  if (memberships > REGION_MEMBERSHIP_MAX) throw regionLimitError(`${label} memberships exceed ${REGION_MEMBERSHIP_MAX}`);
+  if (protectedEdges > REGION_PROTECTED_EDGE_MAX) throw regionLimitError(`${label} protected edges exceed ${REGION_PROTECTED_EDGE_MAX}`);
+  if (prerequisites > REGION_PREREQUISITE_MAX) throw regionLimitError(`${label} prerequisites exceed ${REGION_PREREQUISITE_MAX}`);
+}
+
 function parseRegionText(value: unknown, entity: string, field: string): RegionTextOperations {
   if (!isPlainObject(value) || typeof value.kind !== 'string') invalidEnvelope(entity, field, 15);
   if (value.kind === 'none' && exactKeys(value, ['kind'])) return Object.freeze({ kind: 'none' });
@@ -265,6 +316,7 @@ export function normalizeOperatedEvent(raw: unknown, context: { entity: string; 
     || !isPlainObject(raw.operation)) {
     invalidEnvelope(entity, field, version);
   }
+  if (version === 15) preflightV15Payload(raw, raw.operation, entity, field);
   const facts = parseFacts(raw.facts, entity, field, version);
   const familyProof = familyProofFor(version, facts.family, entity, field);
   const operation = raw.operation;

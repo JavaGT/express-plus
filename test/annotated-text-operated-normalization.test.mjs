@@ -327,3 +327,36 @@ test('forged region postimage performs zero writes', () => {
   assert.equal(threw, true);
   db.close();
 });
+
+test('oversized direct v15 replay payloads fail with the region limit and write nothing', () => {
+  const fixture = unwrapFixture(loadJson('v15/region-edit.json'));
+  const cases = [
+    ['text-operation', (event) => { event.operation.text.operations[1][5][2] = 'x'.repeat((1024 * 1024) + 1); }],
+    ['memberships', (event) => { event.operation.transitions[0].ranges = Array.from({ length: 8193 }, () => ({ start: 0, end: 1 })); }],
+    ['protected-edges', (event) => {
+      event.operation.transitions = [{
+        kind: 'create',
+        annotation: { id: 'new-note', family: 'note', fields: {}, protectedTargetIds: Array.from({ length: 8193 }, (_, index) => `t${index}`) },
+        ranges: [],
+      }];
+    }],
+    ['prerequisites', (event) => { event.operation.prerequisites = Array.from({ length: 8193 }, () => ({ entity: 'Code', id: 'c1' })); }],
+    ['payload', (event) => { event.facts.measurements = ['x'.repeat((2 * 1024 * 1024) + 1)]; }],
+  ];
+
+  for (const [name, mutate] of cases) {
+    const event = structuredClone(fixture.event);
+    mutate(event);
+    const db = new DatabaseSync(':memory:');
+    installSchema(db);
+    seedPreimage(db, fixture.preimage);
+    const before = projectedDump(db);
+    assert.throws(
+      () => applyOperated(db, event),
+      (error) => error.failure?.code === 'annotated-text-region-limit',
+      name,
+    );
+    assert.deepEqual(projectedDump(db), before, `${name} performed a write`);
+    db.close();
+  }
+});
