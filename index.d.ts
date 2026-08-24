@@ -701,7 +701,7 @@ export interface AnnotatedTextClientEntityHandle {
   readonly fields: Readonly<Record<string, { readonly kind: string }>>;
 }
 export function annotatedTextClientHandle(
-  entity: WorkbenchEntity,
+  entity: WorkbenchEntity<any>,
   field: AnnotatedTextFieldHandle,
 ): AnnotatedTextClientEntityHandle & Readonly<Record<string, unknown>>;
 
@@ -832,7 +832,7 @@ export interface AnnotatedTextActionRequest<Payload = unknown> {
   readonly payload: Payload;
 }
 export function annotatedTextAction(
-  entity: WorkbenchEntity,
+  entity: WorkbenchEntity<any>,
   field: AnnotatedTextFieldHandle,
   command: AnnotatedTextOperationCommand,
 ): AnnotatedTextActionRequest<AnnotatedTextOperationPayload>;
@@ -846,7 +846,7 @@ export type AnnotatedTextAnnotationActionValues<
 export function annotatedTextAnnotationAction<
   Action extends AnnotatedTextAnnotationEntityActionHandle | AnnotatedTextDomainActionHandle,
 >(
-  entity: WorkbenchEntity,
+  entity: WorkbenchEntity<any>,
   field: AnnotatedTextFieldHandle,
   actionHandle: Action,
   input: {
@@ -880,11 +880,11 @@ export interface AnnotatedTextCreateInput {
   };
 }
 export function annotatedTextCreateAction(
-  entity: WorkbenchEntity,
+  entity: WorkbenchEntity<any>,
   field: AnnotatedTextFieldHandle,
   input: AnnotatedTextCreateInput,
 ): AnnotatedTextActionRequest;
-export function annotatedTextRetireAction(entity: WorkbenchEntity, documentId: string): AnnotatedTextActionRequest<{ readonly id: string }>;
+export function annotatedTextRetireAction(entity: WorkbenchEntity<any>, documentId: string): AnnotatedTextActionRequest<{ readonly id: string }>;
 
 export interface AnnotatedTextAnnotation {
   readonly id: string;
