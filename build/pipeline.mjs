@@ -31,6 +31,7 @@ import {
   constructCompoundOriginEnvelope,
   parseCompoundApplicationTransition,
 } from './compound-contribution-fact.mjs';
+import { canonicalStringify } from './canonical-json.mjs';
 import * as eventHandles from './event-handle.mjs';
 import { protectedArtefactCapability } from './protected-artefact-store.mjs';
 
@@ -721,7 +722,7 @@ function checkDurableDedupe(db         , scope        , actionId        , reques
 function checkDurableBatchDedupe(db         , scope        , actionId        , actions       ) {
   const receipt = receiptFor(db            , scope, actionId);
   if (!receipt) return null;
-  if (receipt.actionType !== '$batch' || receipt.actionData !== JSON.stringify(actions)) {
+  if (receipt.actionType !== '$batch' || receipt.actionData !== canonicalStringify(actions)) {
     return failureOutcome(failure('conflict', 'Action ID is already committed for a different batch.'));
   }
   return Object.freeze({ ...successOutcome(eventsFromReceipt(db            , receipt, parseEventType), true), resultData: receipt.resultData });
@@ -1587,7 +1588,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     // same (scope, actionId) identity as `dispatch`, one grammar for both.
     const mixedDedupe = livePipeline
       ? checkMixedDedupe(db, scope, actionId, actions, (receipt, retryActions) =>
-        receipt.actionType === '$batch' && receipt.actionData === JSON.stringify(retryActions))
+        receipt.actionType === '$batch' && receipt.actionData === canonicalStringify(retryActions))
       : null;
     if (mixedDedupe) return mixedDedupe;
     const dedupe = checkDurableBatchDedupe(db, scope, actionId, actions);

@@ -33,6 +33,7 @@ import { validateAnnotatedTextEntityActions } from './annotated-text-field.mjs';
 import { createAnnotatedTextKernelSeam } from './annotated-text-kernel.mjs';
 import { validateProtectedArtefactsDeclaration } from './protected-artefact-store.mjs';
 import { compileRegionFieldPolicy,                                   } from './annotated-text-region-operation.mjs';
+import { canonicalStringify } from './canonical-json.mjs';
 
 // Framework auth entities are always-available effect targets (an app's effect
 // may target Inbox without mounting it — auth entities are never request-facing
@@ -229,10 +230,12 @@ function collectAppEntities(app     ) {
       Object.defineProperty(handler, 'compoundContributionPolicy', { value: compoundContributionPolicy });
       // A declaration-generated receipt matcher compares the exact canonical
       // outer payload (scope#992 W2): same actionId plus a different payload is
-      // a conflict, not a replay.
+      // a conflict, not a replay. Both the stored receipt payload (canonical
+      // at insert) and this comparison use the SAME canonical serializer, so
+      // equivalent payloads with different object-key insertion order dedupe.
       Object.defineProperty(handler, 'dedupeReceiptMatches', {
         value: (receipt     , request     ) =>
-          receipt.actionType === declaration.type && receipt.actionData === JSON.stringify(request.payload),
+          receipt.actionType === declaration.type && receipt.actionData === canonicalStringify(request.payload),
       });
     }
     // An action wrapped by `atomicOperation(...)` (S3/A6) carries its

@@ -12,6 +12,7 @@ import { readSeq as cursorReadSeq, type CursorDatabase } from './cursor.ts';
 import type { EventIdentityHandle } from './event-handle.ts';
 import { prepareCached, txn, type DbHandle } from './driver.ts';
 import { noHistoryReceiptTableDDL } from './no-history-receipt.ts';
+import { canonicalStringify } from './canonical-json.ts';
 import { liveRevisionTableDDL } from './live-revision.ts';
 import { invalidationLedgerTableDDL } from './invalidation-ledger.ts';
 import { sweepFactDependencies } from './private-action-fact-dependency.ts';
@@ -242,7 +243,7 @@ export function insertReceipt(db: DbHandle, scope: string, actionId: string, com
     eventRefs: JSON.stringify(events.map((e) => ({ scope: e.scope, seq: e.seq }))),
     historyOrder,
     actionType: metadata.actionType ?? null,
-    actionData: JSON.stringify(metadata.actionData ?? null),
+    actionData: canonicalStringify(metadata.actionData ?? null),
     principalKey: metadata.principalKey ?? null,
     sessionId: metadata.sessionId ?? null,
     operation: metadata.operation ?? 'action',

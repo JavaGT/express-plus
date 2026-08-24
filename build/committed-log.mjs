@@ -12,6 +12,7 @@ import { readSeq as cursorReadSeq,                     } from './cursor.mjs';
 
 import { prepareCached, txn,               } from './driver.mjs';
 import { noHistoryReceiptTableDDL } from './no-history-receipt.mjs';
+import { canonicalStringify } from './canonical-json.mjs';
 import { liveRevisionTableDDL } from './live-revision.mjs';
 import { invalidationLedgerTableDDL } from './invalidation-ledger.mjs';
 import { sweepFactDependencies } from './private-action-fact-dependency.mjs';
@@ -242,7 +243,7 @@ export function insertReceipt(db          , scope        , actionId        , com
     eventRefs: JSON.stringify(events.map((e) => ({ scope: e.scope, seq: e.seq }))),
     historyOrder,
     actionType: metadata.actionType ?? null,
-    actionData: JSON.stringify(metadata.actionData ?? null),
+    actionData: canonicalStringify(metadata.actionData ?? null),
     principalKey: metadata.principalKey ?? null,
     sessionId: metadata.sessionId ?? null,
     operation: metadata.operation ?? 'action',

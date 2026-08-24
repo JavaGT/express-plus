@@ -16,6 +16,7 @@ import { assertUtf16Offset, assertWellFormedText, canonicalTextOp, scalarCount }
 import { getAnnotatedTextCompiledMetadata, resolveAnnotatedTextOwningScope, resolveDeclarationMeasurementExtension } from '../annotated-text-field.mjs';
 import { frozenJsonSnapshot } from '../frozen-json.mjs';
 import { erasureDirectivePreparation } from '../erasure-directive.mjs';
+import { canonicalStringify } from '../canonical-json.mjs';
 import { CASCADE_DESCENDANT, CASCADE_PREAUTHORIZED } from './removal-cascade.mjs';
 import { admitRow } from '../row-grant.mjs';
 import { admitRowTransition } from '../field-admission.mjs';
@@ -789,7 +790,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       assertV9AuthoringBinding({ command, db, principal });
     }});
     Object.defineProperty(handler, 'dedupeReceiptMatches', { value: (receipt     , request     ) =>
-      receipt.actionType === operationType && receipt.actionData === JSON.stringify(request.payload) });
+      receipt.actionType === operationType && receipt.actionData === canonicalStringify(request.payload) });
     handlers[operationType] = handler;
     const compensationHandler = (context     ) => {
       if (!context.history?.input || context.history.input.kind !== ANNOTATED_TEXT_COMPENSATION) {
@@ -806,7 +807,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         }
       } },
       dedupeReceiptMatches: { value: (receipt     , request     ) =>
-        receipt.actionType === `${name}.${fieldName}.compensate` && receipt.actionData === JSON.stringify(request.payload) },
+        receipt.actionType === `${name}.${fieldName}.compensate` && receipt.actionData === canonicalStringify(request.payload) },
     });
     handlers[`${name}.${fieldName}.compensate`] = compensationHandler;
     cursorPolicy[operationType] = 'excluded';
@@ -948,7 +949,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
             const handle = eventHandles.native(name, fieldName, 'operated');
             return { events: [{ handle, type: handle.type, scope: documentScope, data: plan }], canonicalPayload: payload, authoringReceipt: async ({ confirmedThrough }     ) => Object.freeze({ actionId, confirmedThrough, annotationId }) };
           };
-          Object.defineProperties(domainHandler, { inTransaction: { value: true }, batchForbidden: { value: true }, dedupeReceiptMatches: { value: (receipt     , request     ) => receipt.actionType === actionType && receipt.actionData === JSON.stringify(request.payload) } });
+          Object.defineProperties(domainHandler, { inTransaction: { value: true }, batchForbidden: { value: true }, dedupeReceiptMatches: { value: (receipt     , request     ) => receipt.actionType === actionType && receipt.actionData === canonicalStringify(request.payload) } });
           handlers[actionType] = domainHandler;
           continue;
         }
@@ -1027,7 +1028,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
            const annotationEvent = { handle, type: handle.type, scope: documentScope, data: plan };
            return { events: [...relatedEvents, annotationEvent], canonicalPayload: payload, authoringReceipt: async ({ confirmedThrough }     ) => Object.freeze({ actionId, confirmedThrough, relatedId, annotationId }) };
         };
-        Object.defineProperties(threadHandler, { inTransaction: { value: true }, batchForbidden: { value: true }, dedupeReceiptMatches: { value: (receipt     , request     ) => receipt.actionType === actionType && receipt.actionData === JSON.stringify(request.payload) } });
+        Object.defineProperties(threadHandler, { inTransaction: { value: true }, batchForbidden: { value: true }, dedupeReceiptMatches: { value: (receipt     , request     ) => receipt.actionType === actionType && receipt.actionData === canonicalStringify(request.payload) } });
         handlers[actionType] = threadHandler;
       }
     }

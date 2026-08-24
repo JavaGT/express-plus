@@ -240,6 +240,9 @@ test('one composed dispatch commits one receipt, fact, and operated event atomic
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _ActionReceipt').get().count, 1);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _PrivateActionFact').get().count, 1);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count, 2);
+  // No history session on this dispatch: no cursor row and no history frame
+  // are created — the composed dispatch alone is not a history entry.
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _HistoryCursor').get().count, 0);
   assert.equal(readCommittedCursor(db, 'Project:p1'), 2);
   const stored = JSON.parse(db.prepare('SELECT fact FROM _PrivateActionFact').get().fact);
   assert.equal(stored.kind, 'workbench.compound-origin');
@@ -305,6 +308,69 @@ test('exact retry dedupes; changed payload conflicts with zero new writes', asyn
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _ActionReceipt').get().count, 1);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _PrivateActionFact').get().count, factCount);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count, 2);
+  db.close();
+});
+
+test('same payload with reordered object keys dedupes as one receipt', async () => {
+  // The receipt stores the canonical payload and the dedupe matcher compares
+  // with the SAME canonical serializer: a retry whose object keys are inserted
+  // in a different order is JSON-equivalent and must dedupe, not conflict.
+  const db = new DatabaseSync(':memory:');
+  installSchema(db);
+  seedDocument(db, { text: 'hello world', annotations: [] });
+  const region = makeRegionHandle();
+  const app = workbench({
+    db,
+    schema: compoundSchema,
+    entities: [declaredEntity()],
+    actions: [{
+      type: 'correction.apply',
+      authorize: () => true,
+      operations: [region],
+      handler: ({ payload }) => {
+        // Rebuild the region descriptor from live state so a reordered-key
+        // retry still plans against current state (the payload itself is the
+        // dedupe subject).
+        void payload;
+        const descriptor = currentDescriptor(db, { from: 0, to: 5, replacement: 'hallo', transitions: [] });
+        return {
+          events: [{ type: 'correction.recorded', scope: 'Project:p1', data: { id: 'correction-1' } }],
+          annotatedText: [region.region(descriptor)],
+          applicationTransition: { before: null, after: { correctionId: 'correction-1' } },
+        };
+      },
+    }],
+  });
+  await app.start();
+
+  const first = {
+    actionId: 'composed-key-order', type: 'correction.apply', scope: 'Project:p1',
+    payload: { id: 'doc-1', meta: { z: 1, a: { q: 2, b: 3 } } },
+    principal: { type: 'user', id: 'u1', attributes: {} },
+  };
+  const r1 = await app.dispatch(first);
+  assert.equal(r1.ok, true, r1.failure?.message);
+  // Reordered insertion order at every level, same JSON content: must be the
+  // SAME receipt.
+  const reordered = {
+    actionId: 'composed-key-order', type: 'correction.apply', scope: 'Project:p1',
+    payload: { meta: { a: { b: 3, q: 2 }, z: 1 }, id: 'doc-1' },
+    principal: { type: 'user', id: 'u1', attributes: {} },
+  };
+  const r2 = await app.dispatch(reordered);
+  assert.equal(r2.ok, true, r2.failure?.message);
+  assert.equal(r2.deduped, true, 'reordered-key retry must dedupe, not conflict');
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _ActionReceipt').get().count, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count, 2);
+
+  // Genuinely different content is still a conflict.
+  const changed = await app.dispatch({
+    ...reordered,
+    payload: { meta: { a: { b: 3, q: 2 }, z: 2 }, id: 'doc-1' },
+  });
+  assert.equal(changed.ok, false);
+  assert.equal(changed.failure.category, 'conflict');
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _ActionReceipt').get().count, 1);
   db.close();
 });
 
@@ -477,6 +543,59 @@ test('no-text-change region commits an envelope with zero contributions', async 
   const stored = JSON.parse(db.prepare('SELECT fact FROM _PrivateActionFact').get().fact);
   assert.equal(stored.kind, 'workbench.compound-origin');
   assert.equal(stored.contributions.length, 0, 'a no-text-change region contributes nothing');
+  db.close();
+});
+
+test('composed dispatch with history session writes exactly one cursor frame', async () => {
+  // The duration of a composed dispatch in a document-local history session:
+  // the _HistoryCursor row holds exactly ONE past frame for the composed
+  // receipt, and the composed action is the single entry (root == head). This
+  // is the receipt-integrity inventory's cursor side.
+  const db = new DatabaseSync(':memory:');
+  installSchema(db);
+  installCorrectionLedger(db);
+  seedDocument(db, { text: 'hello world', annotations: [] });
+  const region = makeRegionHandle();
+  const app = workbench({
+    db,
+    schema: compoundSchema,
+    entities: [declaredEntity()],
+    history: durableHistory({ authorize: () => true, actions: {} }),
+    actions: [{
+      type: 'correction.apply',
+      authorize: () => true,
+      history: { cursor: 'eligible' },
+      operations: [region],
+      handler: ({ payload }) => {
+        void payload;
+        return {
+          events: [{ type: 'correction.recorded', scope: 'Project:p1', data: { id: 'correction-1' } }],
+          annotatedText: [region.region(currentDescriptor(db, { from: 0, to: 5, replacement: 'hallo', transitions: [] }))],
+          applicationTransition: { before: null, after: { correctionId: 'correction-1' } },
+        };
+      },
+    }],
+  });
+  await app.start();
+  const result = await app.dispatch({
+    actionId: 'composed-cursor-frame', type: 'correction.apply', scope: 'Project:p1',
+    payload: { id: 'doc-1' }, principal: { type: 'user', id: 'u1', attributes: {} },
+    clientId: 'session-1', history: { session: 'session-1' },
+  });
+  assert.equal(result.ok, true, result.failure?.message);
+  // Exactly one receipt + one cursor row + one past frame pointing at itself.
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _ActionReceipt').get().count, 1);
+  const cursorRows = db.prepare('SELECT * FROM _HistoryCursor').all();
+  assert.equal(cursorRows.length, 1, 'exactly one cursor row for the composed session');
+  const past = JSON.parse(cursorRows[0].past);
+  assert.equal(past.length, 1, 'exactly one past frame for the composed receipt');
+  assert.equal(past[0].rootActionId, 'composed-cursor-frame');
+  assert.equal(past[0].headActionId, 'composed-cursor-frame');
+  assert.equal(JSON.parse(cursorRows[0].future).length, 0);
+
+  const cursor = await app.history.cursor({ scope: 'Project:p1', principal: { type: 'user', id: 'u1', attributes: {} }, session: 'session-1' });
+  assert.equal(cursor.undo, 1);
+  assert.equal(cursor.redo, 0);
   db.close();
 });
 

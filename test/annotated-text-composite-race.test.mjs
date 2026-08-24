@@ -36,7 +36,25 @@ import { withAuthoringBinding, authoringBinding } from './annotated-text-authori
 
 const ACTOR = 'a'.repeat(32);
 
-function docEntity() {
+function docEntity(fieldGate = null) {
+  if (fieldGate) {
+    // In-transaction field admission gate: blocks the native authoring edit
+    // ONLY while it is inside the shared coordinator (db.isTransaction), so
+    // the reverse-order race is genuinely concurrent.
+    return entity('RaceDoc', {
+      project: ref('Project'),
+      owner: ref('User', { role: 'owner' }),
+      body: annotatedText({
+        project: 'project',
+        owner: 'owner',
+        annotations: [annotation('note', { fields: {} })],
+      }).can(async () => {
+        if (dbOf()?.isTransaction === true) await fieldGate();
+        return grant(read, write);
+      }),
+      grant: [scope(() => everyone()).can(() => grant(read, write))],
+    });
+  }
   return entity('RaceDoc', {
     project: ref('Project'),
     owner: ref('User', { role: 'owner' }),
@@ -47,6 +65,11 @@ function docEntity() {
     }).can(() => grant(read, write)),
     grant: [scope(() => everyone()).can(() => grant(read, write))],
   });
+}
+
+let sharedDb = null;
+function dbOf() {
+  return sharedDb;
 }
 
 const raceSchema = defineSqliteSchema({
@@ -212,44 +235,32 @@ test('composed dispatch blocked mid-coordinator: native edit waits, then native-
   assert.equal(materializeText(liveFamily(db)), 'hallo world', 'the native edit wrote nothing');
 });
 
-test('native edit blocked mid-coordinator: composed waits and observes the committed basis', async (t) => {
+test('native edit blocked mid-coordinator: composed waits, then native commits and compound fails stale', async (t) => {
   const db = new DatabaseSync(':memory:');
+  sharedDb = db;
   installSchema(db);
-  // Native handler blocks via an in-tsn admission hook is not available; use
-  // the same gate mechanism by wrapping the native DB write instead: hold the
-  // coordinator with a deliberately slow composed... simpler: prove the reverse
-  // ORDER natively — dispatch the native edit FIRST to completion, then a
-  // composed descriptor computed BEFORE the native edit must reject stale.
-  const { app, Document } = buildApp(db, null);
-  await app.start();
-  t.after(async () => { await app.shutdown(); db.close(); });
+  let releaseNative;
+  let nativeEntered;
+  const nativeHasEntered = new Promise((resolve) => { nativeEntered = resolve; });
+  const nativeGate = new Promise((resolve) => { releaseNative = resolve; });
 
-  const principal = { type: 'user', id: 'u1' };
+  // The native authoring edit's in-transaction field admission (.can) blocks
+  // ONLY inside the shared coordinator (db.isTransaction), so the reverse-order
+  // race is genuinely concurrent: the native dispatch holds the coordinator
+  // while the composed dispatch is issued and must WAIT on the same tail.
+  const Document = docEntity(async () => {
+    nativeEntered();
+    await nativeGate;
+  });
+  const region = annotatedTextOperation(Document, { fieldName: 'body' });
   const staleDescriptor = currentDescriptor(db, { from: 0, to: 5, replacement: 'hallo', transitions: [] });
 
-  const native = await nativeEditRequest(db, Document, principal);
-  const nativeResult = await app.dispatch(native);
-  assert.equal(nativeResult.ok, true, nativeResult.failure?.message);
-  assert.equal(materializeText(liveFamily(db)), 'hello! world');
-
-  // The composed action now plans against a descriptor computed against the
-  // PRE-EDIT basis — the planner must reject it as stale with zero writes.
-  const app2 = buildAppWithDescriptor(db, staleDescriptor);
-  await app2.start();
-  t.after(async () => { await app2.shutdown(); });
-  const composed = await app2.dispatch({
-    actionId: 'composed-stale-after-native', type: 'correction.apply', scope: 'Project:p1',
-    payload: { id: 'doc-1' }, principal,
-  });
-  assert.equal(composed.ok, false);
-  assert.match(String(composed.failure?.message), /stale|digest|basis|affected/i);
-  assert.equal(materializeText(liveFamily(db)), 'hello! world', 'the composed edit wrote nothing');
-});
-
-function buildAppWithDescriptor(db, descriptor) {
-  const Document = docEntity();
-  const region = annotatedTextOperation(Document, { fieldName: 'body' });
-  return workbench({
+  // ONE app owns both dispatches (shared coordinator + shared app.db), exactly
+  // like the composed-first case. The composed handler returns a descriptor
+  // computed against the PRE-edit basis; if the coordinator ever let it plan
+  // against the post-native basis it would silently commit, which is the bug
+  // this race forbids.
+  const app = workbench({
     db,
     schema: raceSchema,
     entities: [Document],
@@ -259,9 +270,54 @@ function buildAppWithDescriptor(db, descriptor) {
       operations: [region],
       handler: () => ({
         events: [],
-        annotatedText: [region.region(descriptor)],
+        annotatedText: [region.region(staleDescriptor)],
         applicationTransition: { before: null, after: { correctionId: 'c-1' } },
       }),
     }],
   });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); });
+
+  const principal = { type: 'user', id: 'u1' };
+  const native = await nativeEditRequest(db, Document, principal);
+
+  // Dispatch the native edit FIRST. It enters the coordinator, blocks inside
+  // its in-txn field admission. The composed dispatch issued next must NOT
+  // resolve while the native holds the coordinator.
+  let nativeSettled = false;
+  const nativePromise = app.dispatch(native).then((result) => { nativeSettled = true; return result; });
+  await nativeHasEntered;
+  assert.equal(nativeSettled, false, 'native edit settled before its in-txn gate released');
+
+  let composedSettled = false;
+  const composedPromise = app.dispatch({
+    actionId: 'composed-race-reverse', type: 'correction.apply', scope: 'Project:p1',
+    payload: { id: 'doc-1' }, principal,
+  }).then((result) => { composedSettled = true; return result; });
+
+  // Both dispatches share one coordinator: while the native holds it, the
+  // composed dispatch cannot even enter, let alone plan.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(nativeSettled, false, 'native dispatch not yet released');
+  assert.equal(composedSettled, false, 'composed dispatch escaped the shared coordinator while the native held it');
+
+  // Release the native txn: native commits its insert FIRST; the composed
+  // dispatch then enters the coordinator, replans the stale descriptor against
+  // the committed basis and must fail stale — the native-first/compound-stale
+  // outcome, zero composed writes.
+  releaseNative();
+  assert.equal((await nativePromise).ok, true, 'native edit must commit');
+  assert.equal(materializeText(liveFamily(db)), 'hello! world');
+  const composedResult = await composedPromise;
+  assert.equal(composedSettled, true, 'composed dispatch ran after the coordinator released');
+  assert.equal(composedResult.ok, false, 'composed edit must fail stale against the committed basis');
+  assert.match(String(composedResult.failure?.message), /stale|digest|basis|affected/i);
+  assert.equal(materializeText(liveFamily(db)), 'hello! world', 'the composed edit wrote nothing');
+  sharedDb = null;
+});
+
+function buildAppWithDescriptor(db, descriptor) {
+  void db;
+  void descriptor;
+  throw new Error('buildAppWithDescriptor is superseded by the single-app reverse-order race');
 }
