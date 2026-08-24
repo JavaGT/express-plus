@@ -281,6 +281,7 @@ export function projectAnnotatedTextForRecipient(canonical: CanonicalAnnotatedTe
 
   const recipientRanges: Array<{ annotationId: string; start: number; end: number }> = [];
   const retainedAnnotationIds = new Set<string>();
+  const offsetsUnchanged = authoring.length === 0;
   for (const [annotationId, ownRanges] of rangeByAnnotation) {
     const family = annotations.get(annotationId)!.family;
     if (Object.hasOwn(meta.protectingFamilies, family)) continue;
@@ -289,7 +290,7 @@ export function projectAnnotatedTextForRecipient(canonical: CanonicalAnnotatedTe
       const end = visibleOffsetFor(range.end);
       if (end > start) {
         retainedAnnotationIds.add(annotationId);
-        recipientRanges.push({ annotationId, start, end });
+        recipientRanges.push(offsetsUnchanged ? range : { annotationId, start, end });
         continue;
       }
       // Show-through: an annotation fully inside the redacted union still shows
@@ -306,8 +307,8 @@ export function projectAnnotatedTextForRecipient(canonical: CanonicalAnnotatedTe
     kind: 'workbench.annotatedText.recipient', version: 1,
     text,
     ranges: recipientRanges,
-    annotations: [...annotations.values()].filter((a) => retainedAnnotationIds.has(a.id)).map(({ id, family, fields, owner }) => ({ id, family, fields: { ...fields }, ...(owner ? { owner } : {}) })),
-    measurements: canonical.measurements.map((m) => ({ ...m })),
+    annotations: [...annotations.values()].filter((annotation) => retainedAnnotationIds.has(annotation.id)),
+    measurements: canonical.measurements,
     capabilityHints: [...capabilityHints].filter((hint) => (!redactions.length) || hint !== 'body.read'),
     orphans: (canonical.orphans ?? [])
       .filter((orphan) => !Object.hasOwn(meta.protectingFamilies, orphan.family))

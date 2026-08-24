@@ -166,22 +166,35 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
   const ranges        = [];
   const anchoredRanges                                                                                                                                      = [];
   const droppedAnnotationIds = new Set        ();
+  const rangeProjectionById = new Map
+
+
+
+    ();
   for (const rangeRow of rangeRows) {
-    const projected = projectRangeToOffsets(family, rangeRow.start_point, rangeRow.end_point);
+    let rangeProjection = rangeProjectionById.get(rangeRow.range_id);
+    if (!rangeProjection) {
+      rangeProjection = {
+        projected: projectRangeToOffsets(family, rangeRow.start_point, rangeRow.end_point),
+        start: parseStoredEndpoint(rangeRow.start_point),
+        end: parseStoredEndpoint(rangeRow.end_point),
+      };
+      rangeProjectionById.set(rangeRow.range_id, rangeProjection);
+    }
     const annotation = annotationById.get(rangeRow.annotation_id);
     if (!annotation) continue;
-    if (!projected) {
+    if (!rangeProjection.projected) {
       if (Object.hasOwn(meta.protectingFamilies, annotation.family)) {
         fail(`field '${fieldName}' protector '${annotation.id}' has an unprojectable range`);
       }
       droppedAnnotationIds.add(annotation.id);
       continue;
     }
-    ranges.push({ annotationId: rangeRow.annotation_id, start: projected.start, end: projected.end });
+    ranges.push({ annotationId: rangeRow.annotation_id, start: rangeProjection.projected.start, end: rangeProjection.projected.end });
     anchoredRanges.push({
       annotationId: rangeRow.annotation_id,
-      start: parseStoredEndpoint(rangeRow.start_point),
-      end: parseStoredEndpoint(rangeRow.end_point),
+      start: rangeProjection.start,
+      end: rangeProjection.end,
     });
   }
 
