@@ -435,6 +435,93 @@ test('foreign-field annotated operation is rejected inside the transaction', asy
   db.close();
 });
 
+test('composed dispatch payload carrying a Date rejects with zero writes', async () => {
+  // canonicalStringify fails closed on non-plain values: a Date in the request
+  // payload must never become a receipt identity (two different Dates would
+  // otherwise collapse to one receipt). The constructed Date reaches receipt
+  // storage, the canonicalizer throws before the _PrivateActionFact insert,
+  // and the whole txn rolls back.
+  const db = new DatabaseSync(':memory:');
+  installSchema(db);
+  installCorrectionLedger(db);
+  seedDocument(db, { text: 'hello world', annotations: [] });
+  const region = makeRegionHandle();
+  const app = workbench({
+    db,
+    schema: compoundSchema,
+    entities: [declaredEntity()],
+    actions: [{
+      type: 'correction.apply',
+      authorize: () => true,
+      operations: [region],
+      handler: ({ payload }) => {
+        void payload;
+        const descriptor = currentDescriptor(db, { from: 0, to: 5, replacement: 'hallo', transitions: [] });
+        return {
+          events: [{ type: 'correction.recorded', scope: 'Project:p1', data: { id: 'correction-1' } }],
+          annotatedText: [region.region(descriptor)],
+          applicationTransition: { before: null, after: { correctionId: 'correction-1' } },
+        };
+      },
+    }],
+  });
+  await app.start();
+  const baseline = tableCounts(db);
+  const result = await app.dispatch({
+    actionId: 'composed-date-payload', type: 'correction.apply', scope: 'Project:p1',
+    payload: { id: 'doc-1', stampedAt: new Date('2026-08-25T00:00:00Z') },
+    principal: { type: 'user', id: 'u1', attributes: {} },
+  });
+  assert.equal(result.ok, false, 'a Date payload must fail closed');
+  // The canonicalizer's typed rejection surfaces as invalid-input (it extends
+  // ValidationError) with the offending path named.
+  assert.equal(result.failure.category, 'invalid-input');
+  assert.match(result.failure.message, /canonical JSON value at .*stampedAt.*is a Date/);
+  assertNoNewWrites(db, baseline);
+  db.close();
+});
+
+test('composed dispatch payload with a null-prototype object rejects with zero writes', async () => {
+  // A null-prototype object is not plain JSON; canonicalStringify must reject it
+  // rather than emit identity-collapsing output.
+  const db = new DatabaseSync(':memory:');
+  installSchema(db);
+  installCorrectionLedger(db);
+  seedDocument(db, { text: 'hello world', annotations: [] });
+  const region = makeRegionHandle();
+  const app = workbench({
+    db,
+    schema: compoundSchema,
+    entities: [declaredEntity()],
+    actions: [{
+      type: 'correction.apply',
+      authorize: () => true,
+      operations: [region],
+      handler: ({ payload }) => {
+        void payload;
+        const descriptor = currentDescriptor(db, { from: 0, to: 5, replacement: 'hallo', transitions: [] });
+        return {
+          events: [{ type: 'correction.recorded', scope: 'Project:p1', data: { id: 'correction-1' } }],
+          annotatedText: [region.region(descriptor)],
+          applicationTransition: { before: null, after: { correctionId: 'correction-1' } },
+        };
+      },
+    }],
+  });
+  await app.start();
+  const baseline = tableCounts(db);
+  const result = await app.dispatch({
+    actionId: 'composed-null-proto-payload', type: 'correction.apply', scope: 'Project:p1',
+    payload: Object.assign(Object.create(null), { id: 'doc-1' }),
+    principal: { type: 'user', id: 'u1', attributes: {} },
+  });
+  assert.equal(result.ok, false, 'a null-prototype payload must fail closed');
+  assert.equal(result.failure.category, 'invalid-input');
+  assert.match(result.failure.message, /canonical JSON value at .*non-plain object/);
+  assertNoNewWrites(db, baseline);
+  db.close();
+});
+
 test('composed handler with a top-level privateFact fails closed with zero writes', async () => {
   const db = new DatabaseSync(':memory:');
   installSchema(db);

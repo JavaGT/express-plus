@@ -17,12 +17,17 @@ const W1 = [
     mutate(copyRoot) {
       const path = join(copyRoot, 'build/annotated-text-operated-event.mjs');
       const source = readFileSync(path, 'utf8');
-      const needle = 'if (version === 15) {';
-      if (!source.includes(needle)) throw new Error('v15 normalizer case is missing');
-      writeFileSync(path, source.replace(
-        needle,
-        'if (version === 15) {\n    throw new Error(`${entity}.${field}.operated event version 15 is not supported`);\n  }\n  if (false) {',
-      ));
+      // The v15 dispatch guard appears as `if (version === 15) {` (committed
+      // W1) or `if (version === 15 || version === 16) {` (in-flight W1 lanes);
+      // the mutation must remove the v15 normalizer branch either way.
+      const needle = /if \(version === 15(?:\s*\|\|\s*version === 16)?\) \{/;
+      const match = source.match(needle);
+      if (!match) throw new Error('v15 normalizer case is missing');
+      const replacement = `if (version === 15) {
+    throw new Error(\`\${entity}.\${field}.operated event version 15 is not supported\`);
+  }
+  if (false) {`;
+      writeFileSync(path, source.replace(match[0], replacement));
     },
   },
   {
