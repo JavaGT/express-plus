@@ -68,7 +68,7 @@ function exact(value: any, keys: string[], label: string) {
       Object.keys(value).length !== keys.length || keys.some((key) => !Object.hasOwn(value, key))) fail(`${label} has invalid shape`);
 }
 
-interface CanonicalAnnotation {
+export interface AnnotatedTextRecipientAnnotation {
   id: string;
   family: string;
   fields: Record<string, any>;
@@ -76,15 +76,17 @@ interface CanonicalAnnotation {
   protectedTargetIds?: string[];
 }
 
-interface CanonicalRange {
+export interface AnnotatedTextRecipientRange {
   annotationId: string;
   start: number;
   end: number;
+  anchoredStart?: unknown;
+  anchoredEnd?: unknown;
 }
 
-type CanonicalRanges = CanonicalRange | CanonicalRange[];
+type CanonicalRanges = AnnotatedTextRecipientRange | AnnotatedTextRecipientRange[];
 
-function rangesOf(value: CanonicalRanges | undefined): readonly CanonicalRange[] {
+function rangesOf(value: CanonicalRanges | undefined): readonly AnnotatedTextRecipientRange[] {
   if (value === undefined) return [];
   return Array.isArray(value) ? value : [value];
 }
@@ -95,14 +97,14 @@ function rangeCollectionsIntersect(left: CanonicalRanges, right: CanonicalRanges
   return leftRanges.some((own) => rightRanges.some((target) => own.start < target.end && target.start < own.end));
 }
 
-interface CanonicalMeasurement {
+export interface AnnotatedTextRecipientMeasurement {
   id: string;
   family: string;
   formatVersion: number;
   payload: any;
 }
 
-interface CanonicalOrphan {
+export interface AnnotatedTextRecipientOrphan {
   id: string;
   family: string;
   fields: Record<string, any>;
@@ -115,34 +117,51 @@ interface CanonicalAnnotatedText {
   kind: string;
   version: number;
   text: string;
-  annotations: CanonicalAnnotation[];
-  ranges: CanonicalRange[];
-  measurements: CanonicalMeasurement[];
+  annotations: AnnotatedTextRecipientAnnotation[];
+  ranges: AnnotatedTextRecipientRange[];
+  measurements: AnnotatedTextRecipientMeasurement[];
   capabilityHints: string[];
-  orphans?: CanonicalOrphan[];
+  orphans?: AnnotatedTextRecipientOrphan[];
 }
 
-interface ProtectorDecisions {
+export interface AnnotatedTextRecipientDecisions {
   version: number;
   protectors: Array<{ protectorId: string; outcome: string }>;
   capabilityHints: string[];
 }
 
-export function projectAnnotatedTextForRecipient(canonical: CanonicalAnnotatedText, descriptor: any, decisions: ProtectorDecisions) {
+export interface AnnotatedTextRecipientSource {
+  readonly version: 1;
+  readText(): string;
+  annotations(): Iterable<AnnotatedTextRecipientAnnotation>;
+  ranges(): Iterable<AnnotatedTextRecipientRange>;
+  measurements(): Iterable<AnnotatedTextRecipientMeasurement>;
+  orphans(): Iterable<AnnotatedTextRecipientOrphan>;
+}
+
+function freezeArray<T>(values: T[]): readonly T[] {
+  return Object.freeze(values);
+}
+
+export function projectAnnotatedTextRecipient({ source, descriptor, decisions }: {
+  source: AnnotatedTextRecipientSource;
+  descriptor: any;
+  decisions: AnnotatedTextRecipientDecisions;
+}) {
   const meta = getAnnotatedTextCompiledMetadata(descriptor);
   if (!meta) fail('descriptor must be compiled');
-  const canonicalKeys = ['kind', 'version', 'text', 'annotations', 'ranges', 'measurements', 'capabilityHints'];
-  if (Object.hasOwn(canonical ?? {}, 'orphans')) canonicalKeys.push('orphans');
-  exact(canonical, canonicalKeys, 'canonical');
+  exact(source, ['version', 'readText', 'annotations', 'ranges', 'measurements', 'orphans'], 'source');
   exact(decisions, ['version', 'protectors', 'capabilityHints'], 'decisions');
-  if (canonical.kind !== 'workbench.annotatedText.canonical' || canonical.version !== 1 || decisions.version !== 1 ||
-      typeof canonical.text !== 'string' || !Array.isArray(canonical.annotations) || !Array.isArray(canonical.ranges) ||
-      !Array.isArray(canonical.measurements) || !Array.isArray(canonical.capabilityHints) ||
-      (canonical.orphans !== undefined && !Array.isArray(canonical.orphans)) || !Array.isArray(decisions.protectors) || !Array.isArray(decisions.capabilityHints)) fail('invalid version or collection');
+  if (source.version !== 1 || decisions.version !== 1 || typeof source.readText !== 'function' ||
+      typeof source.annotations !== 'function' || typeof source.ranges !== 'function' ||
+      typeof source.measurements !== 'function' || typeof source.orphans !== 'function' ||
+      !Array.isArray(decisions.protectors) || !Array.isArray(decisions.capabilityHints)) fail('invalid version or collection');
 
-  const textLength = canonical.text.length;
-  const annotations = new Map<string, CanonicalAnnotation>();
-  for (const annotation of canonical.annotations) {
+  const canonicalText = source.readText();
+  if (typeof canonicalText !== 'string') fail('source text is invalid');
+  const textLength = canonicalText.length;
+  const annotations = new Map<string, AnnotatedTextRecipientAnnotation>();
+  for (const annotation of source.annotations()) {
     const keys = annotation?.protectedTargetIds === undefined
       ? (annotation?.owner === undefined ? ['id', 'family', 'fields'] : ['id', 'family', 'fields', 'owner'])
       : (annotation?.owner === undefined ? ['id', 'family', 'fields', 'protectedTargetIds'] : ['id', 'family', 'fields', 'owner', 'protectedTargetIds']);
@@ -157,8 +176,12 @@ export function projectAnnotatedTextForRecipient(canonical: CanonicalAnnotatedTe
   // middle of a same-family annotation into left/right remnants, so a single
   // annotation is no longer guaranteed one contiguous range.
   const rangeByAnnotation = new Map<string, CanonicalRanges>();
-  for (const range of canonical.ranges) {
-    exact(range, ['annotationId', 'start', 'end'], 'range');
+  let anchoredRangeCount = 0;
+  let rangeCount = 0;
+  for (const range of source.ranges()) {
+    const anchored = range?.anchoredStart !== undefined || range?.anchoredEnd !== undefined;
+    exact(range, anchored ? ['annotationId', 'start', 'end', 'anchoredStart', 'anchoredEnd'] : ['annotationId', 'start', 'end'], 'range');
+    if (anchored && (range.anchoredStart === undefined || range.anchoredEnd === undefined)) fail('range is invalid');
     const annotation = annotations.get(range.annotationId);
     if (!annotation || !Number.isSafeInteger(range.start) || !Number.isSafeInteger(range.end) ||
         range.start < 0 || range.end < range.start || range.end > textLength) fail('range is invalid');
@@ -166,11 +189,13 @@ export function projectAnnotatedTextForRecipient(canonical: CanonicalAnnotatedTe
     if (Array.isArray(own)) own.push(range);
     else if (own) rangeByAnnotation.set(range.annotationId, [own, range]);
     else rangeByAnnotation.set(range.annotationId, range);
+    rangeCount += 1;
+    if (anchored) anchoredRangeCount += 1;
   }
 
   const orphanIds = new Set<string>();
-  const disclosableOrphans: CanonicalOrphan[] = [];
-  for (const orphan of canonical.orphans ?? []) {
+  const disclosableOrphans: AnnotatedTextRecipientOrphan[] = [];
+  for (const orphan of source.orphans()) {
     exact(orphan, orphan?.owner === undefined ? ['id', 'family', 'fields', 'savedQuote', 'savedRange'] : ['id', 'family', 'fields', 'owner', 'savedQuote', 'savedRange'], 'orphan');
     if (typeof orphan.id !== 'string' || orphanIds.has(orphan.id) || !Object.hasOwn(meta.annotationHandles, orphan.family) ||
         typeof orphan.savedQuote !== 'string' || !Array.isArray(orphan.savedRange) || orphan.savedRange.length !== 2 ||
@@ -181,11 +206,13 @@ export function projectAnnotatedTextForRecipient(canonical: CanonicalAnnotatedTe
   }
 
   const measurementIds = new Set<string>();
-  for (const measurement of canonical.measurements) {
+  const measurements: AnnotatedTextRecipientMeasurement[] = [];
+  for (const measurement of source.measurements()) {
     exact(measurement, ['id', 'family', 'formatVersion', 'payload'], 'measurement');
     if (typeof measurement.id !== 'string' || measurementIds.has(measurement.id) ||
         !Object.hasOwn(meta.measurementHandles, measurement.family) || !Number.isSafeInteger(measurement.formatVersion) || measurement.formatVersion < 1) fail('measurement is invalid');
     measurementIds.add(measurement.id);
+    measurements.push(measurement);
   }
 
   // Protector activation: a protector range must intersect a protected target's
@@ -246,9 +273,9 @@ export function projectAnnotatedTextForRecipient(canonical: CanonicalAnnotatedTe
   }
   if (restricted) {
     // Restricted recipients are review-only and receive no authoring hints.
-    const result = { kind: 'workbench.annotatedText.recipient', version: 1, restricted: true, text: '', ranges: [], annotations: [], measurements: [], capabilityHints: [], orphans: [] };
+    const result = { kind: 'workbench.annotatedText.recipient', version: 1, restricted: true, text: '', ranges: freezeArray([]), annotations: freezeArray([]), measurements: freezeArray([]), capabilityHints: freezeArray([]), orphans: freezeArray([]) };
     recipientRedactionIntervals.set(result, []);
-    return freeze(result);
+    return Object.freeze(result);
   }
   deniedIntervals.sort((left, right) => left.start - right.start || right.end - left.end);
   const merged: Array<{ start: number; end: number; placeholder: any }> = [];
@@ -267,13 +294,13 @@ export function projectAnnotatedTextForRecipient(canonical: CanonicalAnnotatedTe
   let offset = 0;
   const authoring: Array<{ visibleStart: number; start: number; end: number }> = [];
   const redactions = merged.map((interval) => {
-    text += canonical.text.slice(offset, interval.start);
+    text += canonicalText.slice(offset, interval.start);
     const visibleStart = text.length;
     offset = interval.end;
     authoring.push(Object.freeze({ visibleStart, start: interval.start, end: interval.end }));
     return { start: visibleStart, end: visibleStart, placeholder: interval.placeholder };
   });
-  text += canonical.text.slice(offset);
+  text += canonicalText.slice(offset);
 
   const visibleOffsetFor = (canonicalOffset: number) => {
     let hidden = 0;
@@ -295,15 +322,18 @@ export function projectAnnotatedTextForRecipient(canonical: CanonicalAnnotatedTe
     for (const targetId of annotations.get(id)!.protectedTargetIds ?? []) deniedProtectedTargets.add(targetId);
   }
 
-  const recipientRanges: Array<{ annotationId: string; start: number; end: number }> = [];
+  const recipientRanges: Array<{ annotationId: string; start: any; end: any }> = [];
   const retainedAnnotationIds = new Set<string>();
   const offsetsUnchanged = authoring.length === 0;
-  const appendRecipientRange = (annotationId: string, range: CanonicalRange) => {
+  const fullyAnchored = authoring.length === 0 && rangeCount > 0 && anchoredRangeCount === rangeCount;
+  const appendRecipientRange = (annotationId: string, range: AnnotatedTextRecipientRange) => {
     const start = visibleOffsetFor(range.start);
     const end = visibleOffsetFor(range.end);
     if (end > start) {
       retainedAnnotationIds.add(annotationId);
-      recipientRanges.push(offsetsUnchanged ? range : { annotationId, start, end });
+      recipientRanges.push(fullyAnchored
+        ? { annotationId, start: range.anchoredStart, end: range.anchoredEnd }
+        : (offsetsUnchanged ? { annotationId, start: range.start, end: range.end } : { annotationId, start, end }));
       return;
     }
     // Show-through: an annotation fully inside the redacted union still shows
@@ -320,28 +350,51 @@ export function projectAnnotatedTextForRecipient(canonical: CanonicalAnnotatedTe
       for (const range of ownRangeCollection) appendRecipientRange(annotationId, range);
     } else appendRecipientRange(annotationId, ownRangeCollection);
   }
-  const recipientAnnotations: CanonicalAnnotation[] = [];
+  const recipientAnnotations: AnnotatedTextRecipientAnnotation[] = [];
   for (const annotation of annotations.values()) {
-    if (retainedAnnotationIds.has(annotation.id)) recipientAnnotations.push(annotation);
+    if (retainedAnnotationIds.has(annotation.id)) recipientAnnotations.push(freeze(annotation));
   }
 
   const result = {
-    kind: 'workbench.annotatedText.recipient', version: 1,
+    kind: 'workbench.annotatedText.recipient', version: fullyAnchored ? 2 : 1,
     text,
-    ranges: recipientRanges,
-    annotations: recipientAnnotations,
-    measurements: canonical.measurements,
-    capabilityHints: [...capabilityHints].filter((hint) => (!redactions.length) || hint !== 'body.read'),
-    orphans: (canonical.orphans ?? [])
+    ranges: freezeArray(recipientRanges.map((range) => freeze(range))),
+    annotations: freezeArray(recipientAnnotations),
+    measurements: freezeArray(measurements.map((measurement) => freeze(measurement))),
+    capabilityHints: freezeArray([...capabilityHints].filter((hint) => (!redactions.length) || hint !== 'body.read')),
+    orphans: freezeArray(disclosableOrphans
       .filter((orphan) => !Object.hasOwn(meta.protectingFamilies, orphan.family))
       // An orphan's savedQuote is HISTORICAL text (the range it lived in is
       // gone) and cannot be provenance-checked against the current text. Any
       // redaction for this recipient could have come to cover where that quote
       // originated, so fail closed: no redacted document discloses orphans.
       .filter(() => redactions.length === 0)
-      .map(({ id, family, fields, savedQuote, owner }) => ({ id, family, fields: { ...fields }, savedQuote, ...(owner ? { owner } : {}) })),
-    ...(redactions.length ? { redactions } : {}),
+      .map(({ id, family, fields, savedQuote, owner }) => freeze({ id, family, fields: { ...fields }, savedQuote, ...(owner ? { owner } : {}) }))),
+    ...(redactions.length ? { redactions: freezeArray(redactions.map((redaction) => freeze(redaction))) } : {}),
   };
   recipientRedactionIntervals.set(result, authoring);
-  return freeze(result);
+  Object.freeze(authoring);
+  return Object.freeze(result);
+}
+
+/** Canonical-array adapter retained for caret projection and existing package tests. */
+export function projectAnnotatedTextForRecipient(canonical: CanonicalAnnotatedText, descriptor: any, decisions: AnnotatedTextRecipientDecisions) {
+  const canonicalKeys = ['kind', 'version', 'text', 'annotations', 'ranges', 'measurements', 'capabilityHints'];
+  if (Object.hasOwn(canonical ?? {}, 'orphans')) canonicalKeys.push('orphans');
+  exact(canonical, canonicalKeys, 'canonical');
+  if (canonical.kind !== 'workbench.annotatedText.canonical' || canonical.version !== 1 || typeof canonical.text !== 'string' ||
+      !Array.isArray(canonical.annotations) || !Array.isArray(canonical.ranges) || !Array.isArray(canonical.measurements) ||
+      !Array.isArray(canonical.capabilityHints) || (canonical.orphans !== undefined && !Array.isArray(canonical.orphans))) fail('invalid version or collection');
+  return projectAnnotatedTextRecipient({
+    source: {
+      version: 1,
+      readText: () => canonical.text,
+      annotations: () => canonical.annotations,
+      ranges: () => canonical.ranges,
+      measurements: () => canonical.measurements,
+      orphans: () => canonical.orphans ?? [],
+    },
+    descriptor,
+    decisions,
+  });
 }

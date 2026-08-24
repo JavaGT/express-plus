@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { annotatedText, annotation, entity, grant, measurement, protectingAnnotation, read, ref, registerAnnotatedTextContract } from '../build/index.mjs';
 import { registerAnnotatedTextStructuralExtension, projectAnnotatedTextForRecipient } from '../build/internal.mjs';
+import { projectAnnotatedTextRecipient } from '../build/annotated-text-recipient-projection.mjs';
 
 const suffix = 'recipientProjection';
 registerAnnotatedTextContract(`${suffix}Measurement`, Object.freeze({ kind: 'measurement' }));
@@ -58,6 +59,27 @@ function inlineCanonical({ protectors, hidden = 'SECRET', text = `before ${hidde
     text, annotations, ranges, measurements: [], capabilityHints: [], orphans: [],
   };
 }
+
+test('capability-shaped recipient source is the projection boundary and rejects database handles', () => {
+  const value = canonical();
+  const source = {
+    version: 1,
+    readText: () => value.text,
+    annotations: () => value.annotations,
+    ranges: () => value.ranges,
+    measurements: () => value.measurements,
+    orphans: () => value.orphans,
+  };
+  const decisions = { version: 1, protectors: [{ protectorId: 'protect', outcome: 'deny' }], capabilityHints: [] };
+  assert.deepEqual(
+    projectAnnotatedTextRecipient({ source, descriptor: descriptor(), decisions }),
+    projectAnnotatedTextForRecipient(value, descriptor(), decisions),
+  );
+  assert.throws(
+    () => projectAnnotatedTextRecipient({ source: { ...source, db: {} }, descriptor: descriptor(), decisions }),
+    /source has invalid shape/,
+  );
+});
 
 test('denied protector redacts its range without hidden details', () => {
   const projected = projectAnnotatedTextForRecipient(canonical(), descriptor(), {
