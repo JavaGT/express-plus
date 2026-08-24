@@ -455,6 +455,55 @@ describe('LiveList', () => {
     }
   });
 
+  it('a failed resync keeps earlier ops rendered and the retry completes the batch', async () => {
+    // Ops 1-2 are valid; op 3 reuses op 2's operation ID with different
+    // content, which applyTextOp fails closed on; op 3'/4 complete the batch.
+    let state = createTextState();
+    const build = (counter, text) => {
+      const operation = insertText(state, { actor: TEXT_ACTOR, counter, lamport: counter }, counter - 1, text);
+      state = applyTextOp(state, operation);
+      return operation;
+    };
+    const op1 = build(1, '1');
+    const op2 = build(2, '2');
+    const op3 = build(3, '3');
+    const op4 = build(4, '4');
+    const poisoned = ['workbench.text', 1, [TEXT_ACTOR, 2], 9, [], ['insert', ['root'], 'X']];
+    const row = (seq, operation) => ({ seq, type: 'Doc.body.applied', data: { id: '1', operation } });
+
+    let eventsCalls = 0;
+    const channel = makeFakeChannel();
+    channel._setAck({ currentSeq: 4 });
+    const fetch = makeFakeFetch([
+      { match: '/snapshot', response: { snapshot: { id: '1', body: '' }, seq: 0 } },
+      { match: '/events', responseFn: () => {
+        eventsCalls += 1;
+        // First attempt carries the poisoned row; the repaired server data completes it.
+        return { events: eventsCalls === 1 ? [row(1, op1), row(2, op2), row(3, poisoned)] : [row(1, op1), row(2, op2), row(3, op3), row(4, op4)] };
+      } },
+    ]);
+
+    const list = new LiveList({
+      entity: 'Doc', id: '1', channel, fetchImpl: fetch,
+      snapshotUrl: () => '/snapshot', eventsSinceUrl: () => '/events',
+      resyncBackoffBase: 1,
+    });
+    await list.subscribe();
+
+    // Ops 1-2 applied before the throw must be visible even though the batch
+    // failed — the retry resumes after their cursor and never refolds them.
+    assert.equal(list.state.body, '12');
+    assert.equal(list.cursor, 2);
+
+    const deadline = Date.now() + 1000;
+    while (list.state.body !== '1234' && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(list.state.body, '1234', 'retry completed the remaining ops');
+    assert.equal(list.cursor, 4);
+    await list.close();
+  });
+
   // --- 6b. Value-XOR-delta: a field present in delta must NOT ALSO be
   // whole-applied from event.data (the real server sends BOTH — event.data
   // carries the whole new value, delta carries the diff for the same field).

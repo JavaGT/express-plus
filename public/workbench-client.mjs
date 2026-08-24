@@ -1219,6 +1219,12 @@ export class LiveList {
         }
       }
     } catch {
+      // The fold loop advances the cursor past every row it applied, so a
+      // mid-batch failure leaves earlier ops folded-but-unmaterialized while
+      // the retry resumes AFTER them. Materialize what succeeded BEFORE the
+      // cleanup discards the marks — exactly what per-op materialization did
+      // at this point before batching (#126).
+      try { this._flushDirtyTextFields(); } catch { /* retry recovers */ }
       failed = !this._consumeTerminalRemoval();
     }
 
@@ -1226,8 +1232,9 @@ export class LiveList {
     this._snapshotRecovery = false;
     if (this._closed || epoch !== this._epoch) return;
     if (failed) {
-      // Discard pending rematerializations from a partially-folded batch —
-      // the retry refolds from the cursor, so stale marks must not leak.
+      // Successful folds were already materialized in the catch above; drop
+      // any leftovers that could not be flushed safely so a later render
+      // cannot apply them out of context.
       this._dirtyTextFields.clear();
       this._forceSnapshotRequested = this._forceSnapshotRequested || snapshotRequested;
       this._scheduleResync();
