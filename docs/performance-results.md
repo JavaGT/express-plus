@@ -55,37 +55,26 @@ Values are operations per second. The median is the primary reference number; sa
 - Compare runs with the same Node version, machine load, benchmark families, sizes, sample count, and operation configuration.
 - Markdown record path: `docs/performance-results.md`.
 
-## Annotated-text composite resync
-
-- Recorded at: `2026-08-24T05:36:33.405Z`
-- Node: `v26.7.0`
-- Platform: `darwin/arm64`
-- Fixture: 360 words, 720 annotations, 25 recipients, 50 controls
-- C=0 burst projections: 100 (bound 100; including start 125)
-- C=1 burst projections: 100 (bound 200; including start 125)
-- Event-loop delay p99: 1.104 ms
-- Snapshot projection p95: 11.126 ms / recipient
-- RSS Δ: 47.39 MiB
-- Write coordinator held: false
-- Attempt histogram C=0: `{"4":25}`
-- Attempt histogram C=1: `{"4":25}`
-- Git commit: record is from a dirty W1 worktree immediately before the close-out commit; treat as directional.
-- Scale note: the specified 36,000-word / 72,000-annotation fixture was not run. This machine run used 360 words / 720 annotations so the projection and RSS numbers are not the acceptance fixture.
-- C=1 note: closing the client transport in this harness did not mint a second snapshot cycle (burst stayed 100, still under the 200 bound). The focused reconnect-generation test covers replacement separately.
-- Thresholds on this scaled fixture: p99 loop 1.1 ms (limit 100), p95 projection 11.1 ms (limit 500), RSS Δ 47 MiB (limit 256), coordinator not held. C=0 burst sat exactly on the 100 bound.
 
 ## Annotated-text composite resync
 
-- Recorded at: `2026-08-24T07:45:25.512Z`
+**Full acceptance fixture (36,000 words / 72,000 annotations), recorded fresh for W1 #143 review round 2.**
+
+- Recorded at: `2026-08-24T08:48:30.188Z`
 - Node: `v26.7.0`
 - Platform: `darwin/arm64`
 - Fixture: 36000 words, 72000 annotations, 25 recipients, 50 controls
 - C=0 burst projections: 50 (bound 100; including start 75)
 - C=1 burst projections: 100 (bound 200; including start 125)
-- Event-loop delay p99: 1.022 ms
-- Snapshot projection p95: 233936.623 ms / recipient
-- RSS Δ: 383.97 MiB
-- Write coordinator held: false
+- Event-loop delay p99: 4.362 ms (limit < 100 ms) — **met**
+- Snapshot projection p95: 76529.975 ms / recipient (limit < 500 ms) — **NOT MET (≈76.5 s)**
+- RSS Δ: 315.98 MiB (limit < 256 MiB) — **NOT MET**
+- Write coordinator held: false — **met**
 - Attempt histogram C=0: `{"2":25}`
 - Attempt histogram C=1: `{"4":25}`
 - Minimum transport generations C=1: 2
+
+**Threshold verdict on the full fixture: FAILS.** The snapshot-recovery latency (p95 ≈ 76.5 s / recipient) and RSS growth (+316 MiB) both exceed the W1 acceptance bounds on this machine. The control-fanout coalescing bound and event-loop delay meet their limits, and snapshot work never holds the write coordinator, but the per-recipient projection cost scales badly at 72,000 annotations. This is a genuine, reproducible finding on the current harness — not a harness artifact. It indicates the snapshot projection path (not the region reducer or the normalizer) is the scaling bottleneck and needs a recipient-safe fold or projected-snapshot optimization before a "meets at full scale" claim can be made.
+
+The earlier scaled run (360 words / 720 annotations, recorded `2026-08-24T05:36:33.405Z`) is superseded; it deliberately used a reduced fixture and its projection/RSS numbers are not the acceptance fixture. The prior full-scale run (recorded `2026-08-24T07:45:25.512Z`) is superseded by this fresh run on the same fixture.
+
