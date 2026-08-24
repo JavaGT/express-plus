@@ -512,7 +512,7 @@ export interface AnnotatedTextAnnotationDescriptor<
   readonly annotationName: Name;
   readonly appliesTo: 'text-range';
   readonly cardinality: 'many' | 'one';
-  readonly fields: Readonly<Record<string, FieldDescriptor>>;
+  readonly fields: Readonly<Record<string, FieldDescriptor<unknown, FieldMode>>>;
   readonly actions: Actions;
   readonly empty: 'delete' | 'orphan';
 }
@@ -522,7 +522,7 @@ export interface AnnotatedTextProtectingAnnotationDescriptor<
 > {
   readonly kind: 'protectingAnnotation';
   readonly annotationName: Name;
-  readonly fields: Readonly<Record<string, FieldDescriptor>>;
+  readonly fields: Readonly<Record<string, FieldDescriptor<unknown, FieldMode>>>;
   readonly protects: string | null;
   readonly placeholder: string;
   readonly access: ((context: { readonly is: Record<string, () => Promise<boolean>>; readonly entity: unknown; readonly annotation: unknown }) => unknown) | null;
@@ -578,7 +578,7 @@ export function annotation<
 >(name: Name, options?: {
   appliesTo?: 'text-range';
   cardinality?: 'many' | 'one';
-  fields?: Record<string, FieldDescriptor>;
+  fields?: Record<string, FieldDescriptor<unknown, FieldMode>>;
   actions?: Actions;
   empty?: 'delete' | 'orphan';
 }): AnnotatedTextAnnotationDescriptor<Name, Actions>;
@@ -586,7 +586,7 @@ export function protectingAnnotation<
   Name extends string,
   Actions extends Readonly<Record<string, AnnotatedTextDeclaredActionDescriptor>> = Readonly<Record<string, never>>,
 >(name: Name, options?: {
-  fields?: Record<string, FieldDescriptor>;
+  fields?: Record<string, FieldDescriptor<unknown, FieldMode>>;
   protects?: string | null;
   placeholder?: string;
   access?: (context: { readonly is: Record<string, () => Promise<boolean>>; readonly entity: unknown; readonly annotation: unknown }) => unknown;
@@ -1235,7 +1235,7 @@ export type ApplicationHttpCrudVerb = 'create' | 'update' | 'remove';
 
 export interface WorkbenchEntity<Row extends object = Record<string, unknown>> {
   readonly name: string;
-  readonly fields: Readonly<Record<string, FieldDescriptor>>;
+  readonly fields: Readonly<Record<string, FieldDescriptor<unknown, FieldMode>>>;
   readonly indexes: readonly EntityIndexDeclaration<Row>[];
   readonly field: EntityFields<Row>;
   readonly verbs: Readonly<Record<string, ActionHandle | EventHandle>>;
