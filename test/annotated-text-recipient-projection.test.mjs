@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { annotatedText, annotation, entity, grant, measurement, protectingAnnotation, read, ref, registerAnnotatedTextContract } from '../build/index.mjs';
 import { registerAnnotatedTextStructuralExtension, projectAnnotatedTextForRecipient } from '../build/internal.mjs';
@@ -65,19 +66,33 @@ test('capability-shaped recipient source is the projection boundary and rejects 
   const source = {
     version: 1,
     readText: () => value.text,
+    rangeFormat: () => 'offset',
     annotations: () => value.annotations,
     ranges: () => value.ranges,
     measurements: () => value.measurements,
     orphans: () => value.orphans,
   };
   const decisions = { version: 1, protectors: [{ protectorId: 'protect', outcome: 'deny' }], capabilityHints: [] };
-  assert.deepEqual(
-    projectAnnotatedTextRecipient({ source, descriptor: descriptor(), decisions }),
-    projectAnnotatedTextForRecipient(value, descriptor(), decisions),
+  assert.equal(
+    JSON.stringify(projectAnnotatedTextRecipient({ source, descriptor: descriptor(), decisions })),
+    JSON.stringify(projectAnnotatedTextForRecipient(value, descriptor(), decisions)),
   );
   assert.throws(
     () => projectAnnotatedTextRecipient({ source: { ...source, db: {} }, descriptor: descriptor(), decisions }),
     /source has invalid shape/,
+  );
+});
+
+test('snapshot deletion mutation cannot bypass the common recipient policy', () => {
+  const snapshotSource = readFileSync(new URL('../src/annotated-text-snapshot.ts', import.meta.url), 'utf8');
+  const assertCommonPolicy = (source) => {
+    assert.match(source, /projectAnnotatedTextRecipient\(\{ source, descriptor, decisions \}\)/, 'snapshot bypassed projectAnnotatedTextRecipient');
+    assert.doesNotMatch(source, /projectAnnotatedTextForRecipient\(canonical/, 'snapshot restored a second canonical projection path');
+  };
+  assertCommonPolicy(snapshotSource);
+  assert.throws(
+    () => assertCommonPolicy(snapshotSource.replace('projectAnnotatedTextRecipient({ source, descriptor, decisions })', 'source.readText()')),
+    /snapshot bypassed projectAnnotatedTextRecipient/,
   );
 });
 

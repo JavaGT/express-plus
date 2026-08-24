@@ -54,7 +54,7 @@ export function mapVisibleOffsetToCanonical(offset: number, affinity: 'left' | '
 function fail(message: string): never { throw new Error(`annotated-text recipient projection: ${message}`); }
 
 function freeze(value: any) {
-  if (value && typeof value === 'object') {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
     for (const key in value) {
       if (Object.hasOwn(value, key)) freeze(value[key]);
     }
@@ -133,6 +133,7 @@ export interface AnnotatedTextRecipientDecisions {
 export interface AnnotatedTextRecipientSource {
   readonly version: 1;
   readText(): string;
+  rangeFormat(): 'offset' | 'anchored';
   annotations(): Iterable<AnnotatedTextRecipientAnnotation>;
   ranges(): Iterable<AnnotatedTextRecipientRange>;
   measurements(): Iterable<AnnotatedTextRecipientMeasurement>;
@@ -147,18 +148,19 @@ export function projectAnnotatedTextRecipient({ source, descriptor, decisions }:
   source: AnnotatedTextRecipientSource;
   descriptor: any;
   decisions: AnnotatedTextRecipientDecisions;
-}) {
+}): any {
   const meta = getAnnotatedTextCompiledMetadata(descriptor);
   if (!meta) fail('descriptor must be compiled');
-  exact(source, ['version', 'readText', 'annotations', 'ranges', 'measurements', 'orphans'], 'source');
+  exact(source, ['version', 'readText', 'rangeFormat', 'annotations', 'ranges', 'measurements', 'orphans'], 'source');
   exact(decisions, ['version', 'protectors', 'capabilityHints'], 'decisions');
   if (source.version !== 1 || decisions.version !== 1 || typeof source.readText !== 'function' ||
-      typeof source.annotations !== 'function' || typeof source.ranges !== 'function' ||
+      typeof source.rangeFormat !== 'function' || typeof source.annotations !== 'function' || typeof source.ranges !== 'function' ||
       typeof source.measurements !== 'function' || typeof source.orphans !== 'function' ||
       !Array.isArray(decisions.protectors) || !Array.isArray(decisions.capabilityHints)) fail('invalid version or collection');
 
   const canonicalText = source.readText();
-  if (typeof canonicalText !== 'string') fail('source text is invalid');
+  const rangeFormat = source.rangeFormat();
+  if (typeof canonicalText !== 'string' || !['offset', 'anchored'].includes(rangeFormat)) fail('source text or range format is invalid');
   const textLength = canonicalText.length;
   const annotations = new Map<string, AnnotatedTextRecipientAnnotation>();
   for (const annotation of source.annotations()) {
@@ -175,6 +177,12 @@ export function projectAnnotatedTextRecipient({ source, descriptor, decisions }:
   // (disjoint) ranges: an exclusive 'one'-cardinality apply trims the overlapped
   // middle of a same-family annotation into left/right remnants, so a single
   // annotation is no longer guaranteed one contiguous range.
+  const relevantRangeIds = new Set<string>();
+  for (const annotation of annotations.values()) {
+    if (!Object.hasOwn(meta.protectingFamilies, annotation.family) || !annotation.protectedTargetIds?.length) continue;
+    relevantRangeIds.add(annotation.id);
+    for (const targetId of annotation.protectedTargetIds) relevantRangeIds.add(targetId);
+  }
   const rangeByAnnotation = new Map<string, CanonicalRanges>();
   let anchoredRangeCount = 0;
   let rangeCount = 0;
@@ -185,10 +193,12 @@ export function projectAnnotatedTextRecipient({ source, descriptor, decisions }:
     const annotation = annotations.get(range.annotationId);
     if (!annotation || !Number.isSafeInteger(range.start) || !Number.isSafeInteger(range.end) ||
         range.start < 0 || range.end < range.start || range.end > textLength) fail('range is invalid');
-    const own = rangeByAnnotation.get(range.annotationId);
-    if (Array.isArray(own)) own.push(range);
-    else if (own) rangeByAnnotation.set(range.annotationId, [own, range]);
-    else rangeByAnnotation.set(range.annotationId, range);
+    if (relevantRangeIds.has(range.annotationId)) {
+      const own = rangeByAnnotation.get(range.annotationId);
+      if (Array.isArray(own)) own.push(range);
+      else if (own) rangeByAnnotation.set(range.annotationId, [own, range]);
+      else rangeByAnnotation.set(range.annotationId, range);
+    }
     rangeCount += 1;
     if (anchored) anchoredRangeCount += 1;
   }
@@ -325,14 +335,14 @@ export function projectAnnotatedTextRecipient({ source, descriptor, decisions }:
   const recipientRanges: Array<{ annotationId: string; start: any; end: any }> = [];
   const retainedAnnotationIds = new Set<string>();
   const offsetsUnchanged = authoring.length === 0;
-  const fullyAnchored = authoring.length === 0 && rangeCount > 0 && anchoredRangeCount === rangeCount;
+  const fullyAnchored = authoring.length === 0 && rangeFormat === 'anchored' && anchoredRangeCount === rangeCount;
   const appendRecipientRange = (annotationId: string, range: AnnotatedTextRecipientRange) => {
     const start = visibleOffsetFor(range.start);
     const end = visibleOffsetFor(range.end);
     if (end > start) {
       retainedAnnotationIds.add(annotationId);
       recipientRanges.push(fullyAnchored
-        ? { annotationId, start: range.anchoredStart, end: range.anchoredEnd }
+        ? { annotationId, start: Object.freeze(range.anchoredStart as object), end: Object.freeze(range.anchoredEnd as object) }
         : (offsetsUnchanged ? { annotationId, start: range.start, end: range.end } : { annotationId, start, end }));
       return;
     }
@@ -343,12 +353,11 @@ export function projectAnnotatedTextRecipient({ source, descriptor, decisions }:
       recipientRanges.push({ annotationId, start, end });
     }
   };
-  for (const [annotationId, ownRangeCollection] of rangeByAnnotation) {
+  for (const range of source.ranges()) {
+    const annotationId = range.annotationId;
     const family = annotations.get(annotationId)!.family;
     if (Object.hasOwn(meta.protectingFamilies, family)) continue;
-    if (Array.isArray(ownRangeCollection)) {
-      for (const range of ownRangeCollection) appendRecipientRange(annotationId, range);
-    } else appendRecipientRange(annotationId, ownRangeCollection);
+    appendRecipientRange(annotationId, range);
   }
   const recipientAnnotations: AnnotatedTextRecipientAnnotation[] = [];
   for (const annotation of annotations.values()) {
@@ -378,7 +387,7 @@ export function projectAnnotatedTextRecipient({ source, descriptor, decisions }:
 }
 
 /** Canonical-array adapter retained for caret projection and existing package tests. */
-export function projectAnnotatedTextForRecipient(canonical: CanonicalAnnotatedText, descriptor: any, decisions: AnnotatedTextRecipientDecisions) {
+export function projectAnnotatedTextForRecipient(canonical: CanonicalAnnotatedText, descriptor: any, decisions: AnnotatedTextRecipientDecisions): any {
   const canonicalKeys = ['kind', 'version', 'text', 'annotations', 'ranges', 'measurements', 'capabilityHints'];
   if (Object.hasOwn(canonical ?? {}, 'orphans')) canonicalKeys.push('orphans');
   exact(canonical, canonicalKeys, 'canonical');
@@ -389,6 +398,7 @@ export function projectAnnotatedTextForRecipient(canonical: CanonicalAnnotatedTe
     source: {
       version: 1,
       readText: () => canonical.text,
+      rangeFormat: () => 'offset',
       annotations: () => canonical.annotations,
       ranges: () => canonical.ranges,
       measurements: () => canonical.measurements,

@@ -1,7 +1,7 @@
 import { deserializeField } from './field-strategy.ts';
 import { compactTextFamilyCheckpoint, restoreTextFamilySerialized, materializeText, projectEndpointToOffset, textFamilyBasis } from './annotated-text-continuous.ts';
 import { getAnnotatedTextCompiledMetadata, resolveAnnotatedTextOwningScope } from './annotated-text-field.ts';
-import { projectAnnotatedTextForRecipient, authoringRedactionsForRecipient } from './annotated-text-recipient-projection.ts';
+import { projectAnnotatedTextRecipient, authoringRedactionsForRecipient } from './annotated-text-recipient-projection.ts';
 import { projectAnnotatedTextCaretForRecipient } from './annotated-text-caret-projection.ts';
 import { mayFieldOp, mayRow, protectingAnnotationCapabilities } from './row-grant.ts';
 import { read, write } from './grant.ts';
@@ -12,6 +12,7 @@ import { rawRow } from './entity/query.ts';
 import { scopeOf } from './scope-handle.ts';
 import type { ContinuousTextFamily } from './annotated-text-continuous.ts';
 import type { StructuralEndpoint } from './annotated-text-family.ts';
+import type { AnnotatedTextRecipientAnnotation, AnnotatedTextRecipientRange, AnnotatedTextRecipientSource } from './annotated-text-recipient-projection.ts';
 import { annotationRangeRows } from './annotated-text-storage.ts';
 
 function fail(message: string): never {
@@ -83,28 +84,16 @@ function parseStoredEndpoint(serialized: string): StructuralEndpoint {
   } catch {
     fail('stored endpoint is not JSON');
   }
+  return validateStoredEndpoint(endpoint);
+}
+
+function validateStoredEndpoint(endpoint: unknown): StructuralEndpoint {
   if (!endpoint || typeof endpoint !== 'object' || Array.isArray(endpoint)
     || !Object.hasOwn(endpoint, 'point') || !Object.hasOwn(endpoint, 'basisFrontier')) {
     fail('stored endpoint is not a structural endpoint');
   }
-  return { point: endpoint.point, basisFrontier: endpoint.basisFrontier } as StructuralEndpoint;
-}
-
-function isFullyVisibleRecipient(recipient: any): boolean {
-  return !recipient.restricted && !recipient.redactions?.length && authoringRedactionsForRecipient(recipient).length === 0;
-}
-
-// Fully-visible recipients receive the stored structural endpoints (envelope v2).
-// Redacted/restricted recipients keep the offset-only v1 wire so op ids in a
-// basisFrontier never leak hidden causal history.
-function attachAnchoredRanges(recipient: any, anchored: ReadonlyArray<{ annotationId: string; start: { point: unknown; basisFrontier: unknown }; end: { point: unknown; basisFrontier: unknown } }>): any {
-  if (!isFullyVisibleRecipient(recipient)) return recipient;
-  const retained = new Set(recipient.ranges.map((range: { annotationId: string }) => range.annotationId));
-  return Object.freeze({ ...recipient, version: 2, ranges: Object.freeze(anchored.filter((range) => retained.has(range.annotationId)).map((range) => Object.freeze({
-    annotationId: range.annotationId,
-    start: Object.freeze(range.start),
-    end: Object.freeze(range.end),
-  }))) });
+  const stored = endpoint as { point: unknown; basisFrontier: unknown };
+  return { point: stored.point, basisFrontier: stored.basisFrontier } as StructuralEndpoint;
 }
 
 function loadAnnotations({ db, prefix, descriptor, documentId }: { db: any; prefix: string; descriptor: any; documentId: string }): any[] {
@@ -148,10 +137,241 @@ function loadAnnotations({ db, prefix, descriptor, documentId }: { db: any; pref
   return annotations;
 }
 
+type SnapshotProfile = (phase: string, durationMs: number, details?: Readonly<Record<string, number>>) => void;
+
+function quotedIdentifier(value: string): string {
+  return `"${value.replaceAll('"', '""')}"`;
+}
+
+function readArrayRows(db: any, query: string, documentId: string): any[][] {
+  const statement = db.prepare(query);
+  statement.setReturnArrays(true);
+  return statement.all(documentId);
+}
+
+function iterateArrayRows(db: any, query: string, documentId: string): Iterable<any[]> {
+  const statement = db.prepare(query);
+  statement.setReturnArrays(true);
+  return statement.iterate(documentId);
+}
+
+function rangesIntersect(left: readonly AnnotatedTextRecipientRange[], right: readonly AnnotatedTextRecipientRange[]): boolean {
+  return left.some((own) => right.some((target) => own.start < target.end && target.start < own.end));
+}
+
+function loadRecipientProjectionSource({ db, prefix, descriptor, documentId, family, text, fieldName, meta, profile }: {
+  db: any;
+  prefix: string;
+  descriptor: any;
+  documentId: string;
+  family: ContinuousTextFamily;
+  text: string;
+  fieldName: string;
+  meta: any;
+  profile?: SnapshotProfile;
+}): { sourceFor: (anchored: boolean) => AnnotatedTextRecipientSource; activeProtectors: AnnotatedTextRecipientAnnotation[] } {
+  const declarations = descriptor.annotations.map((declared: any, declarationIndex: number) => ({
+    declared,
+    alias: `family_${declarationIndex}`,
+    fields: Object.entries(declared.fields),
+  }));
+  const joins: string[] = [];
+  const selected = ['annotation.id', 'annotation.family', 'annotation.owner_id'];
+  const layouts = new Map<string, Array<{ index: number; name: string; field: any }>>();
+  for (const declaration of declarations) {
+    const layout: Array<{ index: number; name: string; field: any }> = [];
+    if (declaration.fields.length > 0) {
+      joins.push(`LEFT JOIN ${quotedIdentifier(`${prefix}_annotation_${declaration.declared.annotationName}`)} AS ${declaration.alias} ON ${declaration.alias}.annotation_id = annotation.id`);
+      for (const [name, field] of declaration.fields) {
+        layout.push({ index: selected.length, name, field });
+        selected.push(`${declaration.alias}.${quotedIdentifier(name)}`);
+      }
+    }
+    layouts.set(declaration.declared.annotationName, layout);
+  }
+
+  let started = performance.now();
+  const annotationQuery = `
+    SELECT ${selected.join(', ')}
+      FROM ${quotedIdentifier(`${prefix}_annotation`)} AS annotation
+      ${joins.join('\n')}
+     WHERE annotation.document_id = ?
+     ORDER BY annotation.id`;
+
+  started = performance.now();
+  const edgeRows = readArrayRows(db, `
+    SELECT edge.annotation_id, edge.target_annotation_id
+      FROM ${quotedIdentifier(`${prefix}_annotation_protected_target`)} AS edge
+      JOIN ${quotedIdentifier(`${prefix}_annotation`)} AS annotation ON annotation.id = edge.annotation_id
+     WHERE annotation.document_id = ?
+     ORDER BY edge.annotation_id, edge.target_annotation_id`, documentId);
+  profile?.('protected-edge SQL and row load', performance.now() - started, { rows: edgeRows.length });
+  const targetsByAnnotation = new Map<string, string[]>();
+  for (const edge of edgeRows) {
+    if (edge.length !== 2 || typeof edge[0] !== 'string' || typeof edge[1] !== 'string') fail('stored protector edge is malformed');
+    const targets = targetsByAnnotation.get(edge[0]);
+    if (targets) targets.push(edge[1]);
+    else targetsByAnnotation.set(edge[0], [edge[1]]);
+  }
+
+  started = performance.now();
+  const annotations: AnnotatedTextRecipientAnnotation[] = [];
+  const annotationById = new Map<string, AnnotatedTextRecipientAnnotation>();
+  for (const stored of iterateArrayRows(db, annotationQuery, documentId)) {
+    const [id, annotationFamily, owner] = stored;
+    if (typeof id !== 'string' || typeof annotationFamily !== 'string' || (owner !== null && typeof owner !== 'string')) fail('stored annotation row is malformed');
+    const layout = layouts.get(annotationFamily);
+    if (!layout) fail(`annotation '${id}' has unknown family`);
+    const fields: Record<string, any> = {};
+    for (const entry of layout) fields[entry.name] = deserializeField(entry.field, stored[entry.index]);
+    const targets = targetsByAnnotation.get(id);
+    const annotation = targets
+      ? { id, family: annotationFamily, fields, owner: owner ?? undefined, protectedTargetIds: targets }
+      : { id, family: annotationFamily, fields, owner: owner ?? undefined };
+    if (annotation.owner === undefined) delete annotation.owner;
+    const frozenAnnotation = deepFreeze(annotation);
+    annotations.push(frozenAnnotation);
+    annotationById.set(id, frozenAnnotation);
+  }
+  profile?.('annotation SQL, row load, and decode', performance.now() - started, { rows: annotations.length });
+
+  started = performance.now();
+  const rangeQuery = `
+    SELECT id, start_point, end_point
+      FROM ${quotedIdentifier(`${prefix}_range`)}
+     WHERE document_id = ?
+     ORDER BY id`;
+  const projectedByRangeId = new Map<number, { projected: { start: number; end: number } | null; startText: string; endText: string }>();
+  for (const stored of iterateArrayRows(db, rangeQuery, documentId)) {
+    if (stored.length !== 3 || !Number.isSafeInteger(stored[0]) || typeof stored[1] !== 'string' || typeof stored[2] !== 'string') fail('stored range row is malformed');
+    const start = parseStoredEndpoint(stored[1]);
+    const end = parseStoredEndpoint(stored[2]);
+    projectedByRangeId.set(stored[0], {
+      projected: projectRangeToOffsets(family, start, end, text.length),
+      startText: stored[1],
+      endText: stored[2],
+    });
+  }
+  profile?.('range SQL, endpoint parse, and unique projection', performance.now() - started, { ranges: projectedByRangeId.size });
+
+  started = performance.now();
+  const orphanRows = db.prepare(
+    `SELECT a.id, a.family, a.owner_id, o.saved_quote, o.last_range
+       FROM ${prefix}_annotation AS a
+       JOIN ${prefix}_annotation_orphan_state AS o ON o.annotation_id = a.id
+      WHERE a.document_id = ?
+      ORDER BY a.id`,
+  ).all(documentId);
+  const orphans = orphanRows.map((stored: any) => {
+    const annotation = annotationById.get(stored.id);
+    if (!annotation) fail(`orphan '${stored.id}' annotation is missing`);
+    let savedRange;
+    try { savedRange = JSON.parse(stored.last_range ?? 'null'); } catch { fail(`orphan '${stored.id}' has malformed last range`); }
+    if (savedRange === null) savedRange = [0, 0];
+    if (!Array.isArray(savedRange) || savedRange.length !== 2 || !Number.isSafeInteger(savedRange[0]) || !Number.isSafeInteger(savedRange[1]) || savedRange[0] < 0 || savedRange[1] < savedRange[0]) fail(`orphan '${stored.id}' has malformed last range`);
+    return { id: annotation.id, family: annotation.family, fields: annotation.fields, ...(annotation.owner === undefined ? {} : { owner: annotation.owner }), savedQuote: stored.saved_quote, savedRange };
+  });
+  const orphanIds = new Set(orphans.map((orphan: any) => orphan.id));
+  const measurements = db.prepare(`SELECT id, family, format_version, payload FROM ${prefix}_measurement WHERE document_id = ? ORDER BY id`).all(documentId)
+    .map((measurement: any) => ({ id: measurement.id, family: measurement.family, formatVersion: measurement.format_version, payload: JSON.parse(measurement.payload) }));
+  profile?.('orphan and measurement load', performance.now() - started, { orphans: orphans.length, measurements: measurements.length });
+
+  started = performance.now();
+  const droppedAnnotationIds = new Set<string>();
+  const loadedRanges: Array<{ annotationId: string; rangeId: number }> = [];
+  let membershipCount = 0;
+  for (const membership of iterateArrayRows(db, `
+    SELECT annotation_id, ordinal, range_id
+      FROM ${quotedIdentifier(`${prefix}_membership`)}
+     WHERE document_id = ?
+     ORDER BY annotation_id, ordinal`, documentId)) {
+    const [annotationId, ordinal, rangeId] = membership;
+    if (membership.length !== 3 || typeof annotationId !== 'string' || !Number.isSafeInteger(ordinal) || ordinal < 0 || !Number.isSafeInteger(rangeId)) fail('stored membership row is malformed');
+    const annotation = annotationById.get(annotationId);
+    const range = projectedByRangeId.get(rangeId);
+    if (!annotation || !range) fail('stored membership references missing state');
+    if (!range.projected) {
+      if (Object.hasOwn(meta.protectingFamilies, annotation.family)) fail(`field '${fieldName}' protector '${annotation.id}' has an unprojectable range`);
+      droppedAnnotationIds.add(annotation.id);
+      continue;
+    }
+    loadedRanges.push({ annotationId, rangeId });
+    membershipCount += 1;
+  }
+  profile?.('membership SQL, row load, and source fusion', performance.now() - started, { memberships: membershipCount });
+  const sourceAnnotations = annotations.filter((annotation) => !droppedAnnotationIds.has(annotation.id) && !orphanIds.has(annotation.id));
+  const sourceAnnotationIds = new Set(sourceAnnotations.map((annotation) => annotation.id));
+  const sourceRangeLinks = droppedAnnotationIds.size === 0 && orphanIds.size === 0
+    ? loadedRanges
+    : loadedRanges.filter((range) => sourceAnnotationIds.has(range.annotationId));
+  const sourceFor = (anchored: boolean): AnnotatedTextRecipientSource => {
+    const anchoredByRangeId = new Map<number, { start: StructuralEndpoint; end: StructuralEndpoint }>();
+    const ranges = function* (): Iterable<AnnotatedTextRecipientRange> {
+      for (const link of sourceRangeLinks) {
+        const stored = projectedByRangeId.get(link.rangeId)!;
+        if (!stored.projected) continue;
+        if (!anchored) {
+          yield { annotationId: link.annotationId, start: stored.projected.start, end: stored.projected.end };
+          continue;
+        }
+        let endpoints = anchoredByRangeId.get(link.rangeId);
+        if (!endpoints) {
+          endpoints = { start: parseStoredEndpoint(stored.startText), end: parseStoredEndpoint(stored.endText) };
+          anchoredByRangeId.set(link.rangeId, endpoints);
+        }
+        yield {
+          annotationId: link.annotationId,
+          start: stored.projected.start,
+          end: stored.projected.end,
+          anchoredStart: endpoints.start,
+          anchoredEnd: endpoints.end,
+        };
+      }
+    };
+    return {
+      version: 1,
+      readText: () => text,
+      rangeFormat: () => anchored ? 'anchored' : 'offset',
+      annotations: () => sourceAnnotations,
+      ranges,
+      measurements: () => measurements,
+      orphans: () => orphans,
+    };
+  };
+
+  const relevantIds = new Set<string>();
+  const protectorAnnotations: AnnotatedTextRecipientAnnotation[] = [];
+  for (const annotation of sourceAnnotations) {
+    if (!Object.hasOwn(meta.protectingFamilies, annotation.family) || !annotation.protectedTargetIds?.length) continue;
+    protectorAnnotations.push(annotation);
+    relevantIds.add(annotation.id);
+    for (const targetId of annotation.protectedTargetIds) relevantIds.add(targetId);
+  }
+  const relevantRanges = new Map<string, AnnotatedTextRecipientRange[]>();
+  for (const link of sourceRangeLinks) {
+    if (!relevantIds.has(link.annotationId)) continue;
+    const stored = projectedByRangeId.get(link.rangeId)!;
+    if (!stored.projected) continue;
+    const range = { annotationId: link.annotationId, start: stored.projected.start, end: stored.projected.end };
+    const own = relevantRanges.get(link.annotationId);
+    if (own) own.push(range);
+    else relevantRanges.set(link.annotationId, [range]);
+  }
+  const activeProtectors = protectorAnnotations.filter((annotation) => {
+    const own = relevantRanges.get(annotation.id) ?? [];
+    const wholeDocument = own.some((range) => range.start === 0 && range.end === text.length);
+    return annotation.protectedTargetIds!.some((targetId) => {
+      if (!annotationById.has(targetId)) fail(`protector '${annotation.id}' names an unknown protected target '${targetId}'`);
+      return wholeDocument || rangesIntersect(own, relevantRanges.get(targetId) ?? []);
+    });
+  });
+  return { sourceFor, activeProtectors };
+}
+
 // Reads only Workbench-owned annotated-text relations and projects them before
 // an HTTP snapshot is serialized. Any malformed state or access failure throws;
 // callers deny the entire snapshot rather than falling back to canonical facts.
-async function projectAnnotatedText({ db, entity, row, principal, fieldName, descriptor, caret = null, presence = null, mintBasis = true, authoring = null }: {
+async function projectAnnotatedText({ db, entity, row, principal, fieldName, descriptor, caret = null, presence = null, mintBasis = true, authoring = null, profile }: {
   db: any;
   entity: any;
   row: any;
@@ -162,111 +382,31 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
   presence?: any;
   mintBasis?: boolean;
   authoring?: any;
+  profile?: SnapshotProfile;
 }): Promise<any> {
   const meta = getAnnotatedTextCompiledMetadata(descriptor);
   if (!meta) fail(`field '${fieldName}' is not compiled`);
   const prefix = `${entity.name}_${fieldName}`;
   if (db.prepare(`SELECT 1 FROM ${prefix}_retired WHERE document_id = ?`).get(row.id)) fail(`field '${fieldName}' document is retired`);
+  let started = performance.now();
   const familyCheckpoint = readAnnotatedTextFamilyCheckpoint(db, prefix, row.id);
+  profile?.('family checkpoint SQL read', performance.now() - started, { rows: familyCheckpoint === undefined ? 0 : 1 });
   const state = familyCheckpoint === undefined ? undefined : { family_checkpoint: familyCheckpoint };
   if (!state) fail(`field '${fieldName}' state is missing`);
+  started = performance.now();
   const family = restoreTextFamilySerialized(state.family_checkpoint);
+  profile?.('checkpoint JSON parse and family restore', performance.now() - started);
+  started = performance.now();
   const text = materializeText(family);
+  profile?.('full text materialization', performance.now() - started);
 
-  const annotations = loadAnnotations({ db, prefix, descriptor, documentId: row.id });
-  const annotationById = new Map(annotations.map((annotation) => [annotation.id, annotation]));
-
-  // Document-scoped ranges: project stored historical-basis endpoints to
-  // absolute offsets. An unprojectable PROTECTOR fails the whole document
-  // (fail closed); an unprojectable non-protector is dropped.
-  const rangeRows = annotationRangeRows(db, prefix, row.id);
-  const ranges: any[] = [];
-  const anchoredRanges: Array<{ annotationId: string; start: { point: unknown; basisFrontier: unknown }; end: { point: unknown; basisFrontier: unknown } }> = [];
-  const droppedAnnotationIds = new Set<string>();
-  const rangeProjectionById = new Map<number, {
-    projected: { start: number; end: number } | null;
-    start: StructuralEndpoint;
-    end: StructuralEndpoint;
-  }>();
-  for (const rangeRow of rangeRows) {
-    let rangeProjection = rangeProjectionById.get(rangeRow.range_id);
-    if (!rangeProjection) {
-      const start = parseStoredEndpoint(rangeRow.start_point);
-      const end = parseStoredEndpoint(rangeRow.end_point);
-      rangeProjection = {
-        projected: projectRangeToOffsets(family, start, end, text.length),
-        start,
-        end,
-      };
-      rangeProjectionById.set(rangeRow.range_id, rangeProjection);
-    }
-    const annotation = annotationById.get(rangeRow.annotation_id);
-    if (!annotation) continue;
-    if (!rangeProjection.projected) {
-      if (Object.hasOwn(meta.protectingFamilies, annotation.family)) {
-        fail(`field '${fieldName}' protector '${annotation.id}' has an unprojectable range`);
-      }
-      droppedAnnotationIds.add(annotation.id);
-      continue;
-    }
-    ranges.push({ annotationId: rangeRow.annotation_id, start: rangeProjection.projected.start, end: rangeProjection.projected.end });
-    anchoredRanges.push({
-      annotationId: rangeRow.annotation_id,
-      start: rangeProjection.start,
-      end: rangeProjection.end,
-    });
-  }
-
-  const orphanRows = db.prepare(
-    `SELECT a.id, a.family, a.owner_id, o.saved_quote, o.last_range
-       FROM ${prefix}_annotation AS a
-       JOIN ${prefix}_annotation_orphan_state AS o ON o.annotation_id = a.id
-      WHERE a.document_id = ?
-      ORDER BY a.id`,
-  ).all(row.id);
-  const orphans = orphanRows.map((o: any) => {
-    const declared = descriptor.annotations.find((entry: any) => entry.annotationName === o.family);
-    if (!declared) fail(`orphan '${o.id}' has unknown family`);
-    let savedRange;
-    try {
-      savedRange = JSON.parse(o.last_range ?? 'null');
-    } catch {
-      fail(`orphan '${o.id}' has malformed last range`);
-    }
-    if (savedRange === null) savedRange = [0, 0];
-    if (!Array.isArray(savedRange) || savedRange.length !== 2 || !Number.isSafeInteger(savedRange[0]) || !Number.isSafeInteger(savedRange[1]) || savedRange[0] < 0 || savedRange[1] < savedRange[0]) {
-      fail(`orphan '${o.id}' has malformed last range`);
-    }
-    const fields: Record<string, any> = {};
-    const stored = db.prepare(`SELECT * FROM ${prefix}_annotation_${o.family} WHERE annotation_id = ?`).get(o.id);
-    if (!stored && Object.keys(declared.fields).length !== 0) fail(`orphan '${o.id}' fields are missing`);
-    for (const [name, field] of Object.entries(declared.fields)) fields[name] = deserializeField(field as any, stored[name]);
-    return { id: o.id, family: o.family, fields, owner: o.owner_id, savedQuote: o.saved_quote, savedRange };
+  const { sourceFor, activeProtectors } = loadRecipientProjectionSource({
+    db, prefix, descriptor, documentId: row.id, family, text, fieldName, meta, profile,
   });
 
-  const orphanIds = new Set(orphans.map((orphan: any) => orphan.id));
-  const canonical = {
-    kind: 'workbench.annotatedText.canonical', version: 1,
-    text,
-    annotations: annotations.filter((annotation) => !droppedAnnotationIds.has(annotation.id) && !orphanIds.has(annotation.id)),
-    ranges,
-    orphans,
-    measurements: db.prepare(`SELECT id, family, format_version, payload FROM ${prefix}_measurement WHERE document_id = ? ORDER BY id`).all(row.id)
-      .map((measurement: any) => ({ id: measurement.id, family: measurement.family, formatVersion: measurement.format_version, payload: JSON.parse(measurement.payload) })),
-    capabilityHints: [],
-  };
-
-  // Only canonical arrays and anchored endpoints cross the authorization
-  // boundary. Release SQL rows and lookup buckets before recipient projection
-  // so a large snapshot does not retain two complete indexing representations.
-  rangeRows.length = 0;
-  rangeProjectionById.clear();
-  annotationById.clear();
-  droppedAnnotationIds.clear();
-
-  const active = canonical.annotations.filter((annotation) => Object.hasOwn(meta.protectingFamilies, annotation.family) && annotation.protectedTargetIds?.length);
+  started = performance.now();
   const protectors: any[] = [];
-  for (const annotation of active) {
+  for (const annotation of activeProtectors) {
     const access = meta.protectingFamilies[annotation.family].access;
     const decision = await protectingAnnotationCapabilities(entity, row, annotation, access, principal);
     protectors.push({ protectorId: annotation.id, outcome: decision.capabilities.includes(read) ? 'allow' : 'deny' });
@@ -277,14 +417,26 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
   // or the presence of a live authoring session. The canonical document keeps
   // empty hints; only the recipient decisions carry the granted names.
   const canWrite = principal == null ? false : await mayFieldOp(entity, fieldName, write, row, principal);
+  profile?.('protector and field authorization await', performance.now() - started, { protectors: activeProtectors.length });
   const decisions = {
     version: 1,
     protectors,
     capabilityHints: canWrite ? Object.keys(meta.capabilityHandles ?? {}) : [],
   };
+  const source = sourceFor(protectors.every((protector) => protector.outcome === 'allow'));
+  started = performance.now();
   const recipient = caret === null
-    ? attachAnchoredRanges(projectAnnotatedTextForRecipient(canonical, descriptor, decisions), anchoredRanges)
-    : projectAnnotatedTextCaretForRecipient(canonical, descriptor, decisions, caret, presence);
+    ? projectAnnotatedTextRecipient({ source, descriptor, decisions })
+    : projectAnnotatedTextCaretForRecipient({
+      kind: 'workbench.annotatedText.canonical', version: 1,
+      text,
+      annotations: [...source.annotations()],
+      ranges: [...source.ranges()].map(({ annotationId, start, end }) => ({ annotationId, start, end })),
+      measurements: [...source.measurements()],
+      orphans: [...source.orphans()],
+      capabilityHints: [],
+    }, descriptor, decisions, caret, presence);
+  profile?.('recipient transform and freezing', performance.now() - started);
   if (caret !== null || !mintBasis) return recipient;
 
   const cursor = authoring?.fence ?? readProjectedCursorFence(db, entity.name, fieldName) ?? 0;
