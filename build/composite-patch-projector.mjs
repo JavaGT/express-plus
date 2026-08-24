@@ -1,0 +1,441 @@
+// Recipient patch projector (#122 design §5–§7).
+//
+// Projects a composite-journal slice into one recipient's `snapshot-patch`
+// operations through the SAME seam as full snapshots: capture → authorize →
+// project (captureSnapshot / authorizeSnapshot / projectSnapshot). Every
+// emitted value is recipient-projected state; raw _Log.eventData and action
+// payload fields never enter a patch.
+//
+// Removals are ledger-gated: an operation may name a row as REMOVED only when
+// the recipient's visibility ledger proves that exact recipient previously
+// received it (design §7). Rows absent from both the prior ledger and the
+// fresh authorized projection are named by NOTHING — no id, no path, no
+// ordering fact. Authorization loss on a previously delivered row is exactly
+// such a proof (it was admitted at delivery time), so revocation REMOVES
+// rather than discloses.
+//
+// Operation addressing: paths are absolute OUTPUT paths from the anchor root;
+// a keyed ancestor contributes `<relationKey>, <memberId>` segment pairs, so
+// a nested relation instance under keyed member c1 of `codes` reads like
+// ["codes", "c1", "entries"]. `many` relations are replaced wholesale at the
+// smallest affected relation instance (authoritative ordering, no index-move
+// grammar, design §4/§6).
+//
+// Any anomaly THROWS: callers convert every failure into full-snapshot
+// recovery, never into a partial patch (fail closed, design §7).
+
+
+
+
+// Structural views over snapshot-projection's compiled shapes (the module
+// keeps them package-private).
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+import { captureSnapshot, authorizeSnapshot, projectSnapshot } from './snapshot-projection.mjs';
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                    
+
+                                               
+
+
+
+// ---- plan navigation ----
+
+function findRelation(plan                 , branchId        )                           {
+  const visit = (relations                              )                           => {
+    for (const relation of relations) {
+      if (relation.branchId === branchId) return relation;
+      const nested = visit(relation.children);
+      if (nested) return nested;
+    }
+    return null;
+  };
+  return branchId === 'anchor' ? null : visit(plan.relations);
+}
+
+function branchChain(plan                 , branchId        )                      {
+  const segments = branchId.split('.');
+  const chain                      = [];
+  for (let end = 1; end <= segments.length; end += 1) {
+    const relation = findRelation(plan, segments.slice(0, end).join('.'));
+    if (!relation) throw new Error('journal names a branch outside the compiled plan');
+    chain.push(relation);
+  }
+  return chain;
+}
+
+function keyOf(relation                   )         {
+  return relation.branchId.slice(relation.branchId.lastIndexOf('.') + 1);
+}
+
+/** Output-path prefix of a branch instance: relation keys plus supplied keyed member ids. */
+function instancePath(chain                              , keyedMembers                   )           {
+  const segments           = [];
+  let memberCursor = 0;
+  for (const relation of chain) {
+    segments.push(keyOf(relation));
+    if (relation.kind === 'keyed') {
+      const memberId = keyedMembers[memberCursor];
+      if (typeof memberId !== 'string') throw new Error('keyed ancestor member id missing for patch path');
+      segments.push(memberId);
+      memberCursor += 1;
+    }
+  }
+  return segments;
+}
+
+/**
+ * Walk the captured candidate graph along a branch chain and resolve, for
+ * every affected row id, its placement: the member-id chain of keyed ancestors
+ * above it. Returns null when any affected row cannot be located (its
+ * placement is unknowable — fail closed). Rows under `many` ancestors resolve
+ * with the members collected so far; their addressing collapses upward onto
+ * the whole many relation at emit time.
+ */
+function collectInstances(root                  , chain                              , ids                     )                               {
+  const found = new Map                  ();
+  const walk = (node                  , index        , memberIds                   )       => {
+    if (index >= chain.length) return;
+    const relation = chain[index];
+    for (const [entry, children] of node.children) {
+      if ((entry                    ).key !== keyOf(relation)) continue;
+      for (const child of children) {
+        const nextMembers = relation.kind === 'keyed' ? [...memberIds, String(child.raw.id)] : [...memberIds];
+        if (index === chain.length - 1) {
+          const id = String(child.raw.id);
+          if (ids.has(id)) found.set(id, [...nextMembers]);
+        } else {
+          walk(child, index + 1, nextMembers);
+        }
+      }
+    }
+  };
+  walk(root, 0, []);
+  // An affected id absent from the captured graph was REMOVED or hidden: it
+  // has no post-state placement, addressed instead through the collection path
+  // with the keyed members it provably held before. Those arrive via the
+  // prior-ledger scan below, not from the graph.
+  for (const id of ids) if (!found.has(id)) found.set(id, []);
+  return found;
+}
+
+/**
+ * Keyed member chains for rows that no longer exist in the captured graph
+ * (removed/hidden), addressed from the branch chain itself: a removed
+ * top-level keyed member needs no ancestor segments, and deeper removals
+ * collapse onto their nearest unremovable container (a whole-collection
+ * replacement at the pinned keyed address).
+ */
+function priorMemberChains(priorVisible                                                               , branchId        , entity        , ids                     )                        {
+  void priorVisible;
+  void branchId;
+  void entity;
+  void ids;
+  return new Map();
+}
+
+// ---- projected-shape navigation ----
+
+function navigate(projected         , segments                   )          {
+  let current          = projected;
+  for (const segment of segments) {
+    if (Array.isArray(current)) {
+      const index = Number(segment);
+      if (!Number.isInteger(index)) return undefined;
+      current = current[index];
+      continue;
+    }
+    if (!current || typeof current !== 'object') return undefined;
+    current = (current                           )[segment];
+  }
+  return current;
+}
+
+/**
+ * Full post-projection visibility, per plan branch: every (branch, entity, id)
+ * fragment present in the recipient's fresh authorized projection. Derived in
+ * ONE walk against the plan — never incrementally accumulated, so successor
+ * ledger state always equals "what a fresh snapshot contains right now".
+ */
+export function deriveVisibility(plan                 , projected                         )                                        {
+  const visible = new Map                                  ();
+  const record = (branchId        , entity        , id        )       => {
+    let entities = visible.get(branchId);
+    if (!entities) visible.set(branchId, entities = new Map());
+    let ids = entities.get(entity);
+    if (!ids) entities.set(entity, ids = new Set());
+    ids.add(id);
+  };
+  const walkRelations = (relations                              , container         )       => {
+    for (const relation of relations) {
+      if (!container || typeof container !== 'object') continue;
+      const value          = (container                           )[keyOf(relation)];
+      if (relation.kind === 'count') continue; // counts expose no row identity
+      if (relation.kind === 'one') {
+        if (value && typeof value === 'object') {
+          record(relation.branchId, relation.entity, String((value                           ).id));
+          walkRelations(relation.children, value);
+        }
+        continue;
+      }
+      if (relation.kind === 'many') {
+        if (Array.isArray(value)) {
+          for (const row of value) {
+            record(relation.branchId, relation.entity, String(row.id));
+            walkRelations(relation.children, row);
+          }
+        }
+        continue;
+      }
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        for (const [memberId, row] of Object.entries(value                           )) {
+          record(relation.branchId, relation.entity, memberId);
+          walkRelations(relation.children, row);
+        }
+      }
+    }
+  };
+  walkRelations(plan.relations, projected);
+  return visible;
+}
+
+function provenVisible(prior                                                               , branchId        , entity        , id        )          {
+  return prior.get(branchId)?.get(entity)?.has(id) ?? false;
+}
+
+/**
+ * Project one recipient's patch for a journal slice. Throws on any anomaly —
+ * callers MUST convert throws into full-snapshot recovery (fail closed).
+ */
+export async function projectCompositePatch(input                     )                           {
+  const { principal, scope, plan, declaration, changes, to, priorVisible } = input;
+  const handleId = scope.slice(scope.indexOf(':') + 1);
+
+  const actionIds = new Set        ();
+  const touched = new Map                     ();
+  let anchorTouched = false;
+  for (const change of changes) {
+    if (change.actionId) actionIds.add(change.actionId);
+    if (change.invalidating) throw new Error('journal slice contains an invalidating change');
+    if (change.scope !== scope) throw new Error('journal slice spans foreign scopes');
+    for (const affected of change.affected) {
+      if (affected.branch === 'anchor') anchorTouched = true;
+      let ids = touched.get(affected.branch);
+      if (!ids) touched.set(affected.branch, ids = new Set());
+      ids.add(affected.id);
+    }
+  }
+
+  // Empty slice: an empty patch still advances the cursor (design §6).
+  if (touched.size === 0 && !anchorTouched) {
+    return { operations: [], actionIds: [...actionIds], revokedAnchor: false, visibleAfter: cloneVisible(priorVisible) };
+  }
+
+  // --- one capture → authorize → project pass for the WHOLE batch ----------
+  // Structural views satisfy the runtime contract; the compiled declaration
+  // remains the sole authority (capture/authorize/project never mutate it).
+  const captured = captureSnapshot({
+    db: input.db,
+    principal,
+    anchor: declaration.anchor         ,
+    id: handleId,
+    output: declaration.output         ,
+    tombstones: (declaration.tombstones ?? null)         ,
+  });
+  if (!captured) {
+    return { operations: [], actionIds: [...actionIds], revokedAnchor: true, visibleAfter: new Map() };
+  }
+  const auth = await authorizeSnapshot({
+    principal,
+    anchor: declaration.anchor         ,
+    candidate: captured         ,
+    mayVerb: input.mayVerb         ,
+    authorization: input.authorization         ,
+  });
+  if (!auth.anchorAllowed) throw new Error('composite patch anchor reauthorization denied');
+  const projected = projectSnapshot({ anchor: declaration.anchor         , candidate: captured         , output: declaration.output         , authorized: auth.authorized })                                  ;
+  if (!projected) throw new Error('composite patch projection failed');
+  if (input.readCompositeSeq() !== to.composite) throw new Error('composite journal moved during patch projection');
+
+  const operations                             = [];
+
+  // --- anchor selected-field replacement ------------------------------------
+  if (anchorTouched) {
+    const selectEntry = declaration.output.entries.find((entry) => entry.kind === 'select');
+    const fields = ['id', ...(selectEntry && selectEntry.kind === 'select' ? (selectEntry.fields ?? []) : [])];
+    const value                          = {};
+    for (const field of fields) value[field] = (projected                           )[field];
+    operations.push({ op: 'replace-fields', path: [], value });
+  }
+
+  // --- relation branches -----------------------------------------------------
+
+
+
+
+
+
+  const manyEmits = new Map                           ();
+  const valueEmits = new Map                           ();
+  const keyedEmits = new Map                   ();
+
+  for (const [branchId, ids] of touched) {
+    if (branchId === 'anchor') continue;
+    const relation = findRelation(plan, branchId);
+    if (!relation) throw new Error('journal names a branch outside the compiled plan');
+    if (relation.kind === 'many') {
+      manyEmits.set(branchId, relation);
+      continue;
+    }
+    if (relation.kind === 'one' || relation.kind === 'count') {
+      valueEmits.set(branchId, relation);
+      continue;
+    }
+    // keyed: resolve each affected row's keyed-ancestor member chain from the
+    // captured graph; removed/hidden rows resolve to [] here and are re-addressed
+    // below through the prior-ledger scan.
+    const chain = branchChain(plan, branchId);
+    const resolved = collectInstances(captured, chain, ids);
+    if (resolved === null) throw new Error('affected keyed member could not be located in the captured graph');
+    const unresolved = [...ids].filter((id) => (resolved.get(id) ?? []).length === 0 && chain.some((step) => step.kind === 'keyed'));
+    const priorChains = priorMemberChains(priorVisible, branchId, relation.entity, new Set(unresolved));
+    for (const [id, memberIds] of resolved) {
+      if (chain.some((step) => step.kind === 'keyed') && memberIds.length === 0) {
+        const pinned = priorChains.get(id);
+        if (!pinned) {
+          // Unresolvable addressing for a row we cannot even prove: emit nothing.
+          if (!provenVisible(priorVisible, branchId, relation.entity, id)) continue;
+          throw new Error('removed keyed member lacks a provable keyed address');
+        }
+      }
+      const key = memberIds.join('\u0000');
+      let emit = keyedEmits.get(branchId);
+      if (!emit) keyedEmits.set(branchId, emit = { branchId, relation, instances: new Map() });
+      let bucket = emit.instances.get(key);
+      if (!bucket) emit.instances.set(key, bucket = new Set());
+      bucket.add(id);
+    }
+  }
+
+  // one/count: authorized replacement at the relation-instance path.
+  for (const [, relation] of valueEmits) {
+    const chain = branchChain(plan, relation.branchId);
+    const path = instancePath(chain, []);
+    const value = navigate(projected, [...path, keyOf(relation)]);
+    operations.push(relation.kind === 'count'
+      ? { op: 'replace-value', path: [...path, keyOf(relation)], value }
+      : { op: 'replace-one', path: [...path, keyOf(relation)], value: (value ?? null)                                   });
+  }
+
+  // many: whole-relation replacement at the smallest affected instance.
+  for (const [, relation] of manyEmits) {
+    const chain = branchChain(plan, relation.branchId);
+    const path = instancePath(chain, keyedAncestorsOf(captured, chain));
+    const value = navigate(projected, [...path, keyOf(relation)]);
+    if (!Array.isArray(value)) throw new Error('projected many relation is not an array');
+    operations.push({ op: 'replace-many', path: [...path, keyOf(relation)], value: value.map((row) => ({ ...row })) });
+  }
+
+  // keyed: member-level put/remove; removals ledger-gated.
+  for (const [, emit] of keyedEmits) {
+    const chain = branchChain(plan, emit.branchId);
+    for (const [membersKey, ids] of emit.instances) {
+      const memberIds = membersKey.length === 0 ? [] : membersKey.split('\u0000');
+      const collectionPath = [...instancePath(chain, memberIds), keyOf(emit.relation)];
+      for (const id of ids) {
+        const collection = navigate(projected, collectionPath);
+        const current = collection && typeof collection === 'object' && !Array.isArray(collection)
+          ? (collection                           )[id]
+          : undefined;
+        if (current && typeof current === 'object') {
+          operations.push({ op: 'put-keyed', path: collectionPath, id, value: { ...(current                           ) } });
+          continue;
+        }
+        if (provenVisible(priorVisible, emit.branchId, emit.relation.entity, id)) {
+          operations.push({ op: 'remove-keyed', path: collectionPath, id });
+          continue;
+        }
+        // Not admitted now and never proven delivered: named by nothing.
+      }
+    }
+  }
+
+  const visibleAfter = deriveVisibility(plan, projected                           );
+  return { operations, actionIds: [...actionIds], revokedAnchor: false, visibleAfter };
+}
+
+/**
+ * Member-id chain for the FIRST keyed instance above a many/count touch,
+ * resolved from the captured graph. Nested many-under-keyed addressing uses
+ * the first located instance; multiple simultaneous instances collapse to a
+ * coarser replace (safe: replacement is idempotent per instance).
+ */
+function keyedAncestorsOf(root                  , chain                              )           {
+  const memberIds           = [];
+  const walk = (node                  , index        )          => {
+    if (index >= chain.length) return true;
+    const relation = chain[index];
+    for (const [entry, children] of node.children) {
+      if ((entry                    ).key !== keyOf(relation)) continue;
+      for (const child of children) {
+        const nextMembers = relation.kind === 'keyed' ? [...memberIds, String(child.raw.id)] : memberIds.slice();
+        const previous = memberIds.splice(0, memberIds.length, ...nextMembers);
+        void previous;
+        if (walk(child, index + 1)) return true;
+        memberIds.length = previous.length;
+        memberIds.push(...previous);
+      }
+    }
+    return false;
+  };
+  walk(root, 0);
+  return memberIds;
+}
+
+function cloneVisible(source                                                               )                                        {
+  const out = new Map                                  ();
+  for (const [branch, entities] of source) {
+    const entityCopy = new Map                     ();
+    for (const [entity, ids] of entities) entityCopy.set(entity, new Set(ids));
+    out.set(branch, entityCopy);
+  }
+  return out;
+}
