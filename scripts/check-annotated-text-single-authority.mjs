@@ -34,6 +34,14 @@ function retired(symbol) {
   throw new Error(`retired annotated history symbol remains: ${symbol}`);
 }
 
+function failBoundary(path) {
+  throw new Error(`legacy annotated history privacy crossed read boundary: ${path}`);
+}
+
+function retiredAnnotatedHistory(path) {
+  throw new Error(`retired annotatedHistory classifier surface remains: ${path}`);
+}
+
 const sources = [...walk(srcRoot), ...walk(publicRoot)];
 const straySourceModules = sources.filter((path) => rel(path).startsWith('src/') && path.endsWith('.mjs'));
 if (straySourceModules.length > 0) fail('authored TypeScript source', straySourceModules.map(rel));
@@ -169,13 +177,59 @@ if (legacyRegionEmitters.length > 0) {
 }
 
 const w3Active = byRel.has('src/legacy-annotated-history-read-privacy.ts');
+// Retirement is complete only when the registry module carries the explicit
+// W3 retirement marker (added when the old classifier symbols are actually
+// removed). The marker keeps the gate green across incremental W3 slices and
+// activates the retire/read-privacy rules only at the converged state.
+const W3_RETIRED_MARKER = 'W3_HISTORY_RETIRED';
+const w3Retired = w3Active && (byRel.get('src/history-contribution-policy.ts') ?? '').includes(W3_RETIRED_MARKER);
+
 if (w3Active) {
+  // Active immediately: no module other than the history read boundary may
+  // import the privacy capability. (The broader movement boundary for the
+  // retired receipt/scope scanners activates at retirement completion below,
+  // because durable-history still owns those scanners until then.)
+  for (const [path, source] of byRel) {
+    if (!path.startsWith('src/')) continue;
+    if (path === 'src/legacy-annotated-history-read-privacy.ts' || path === 'src/history-read.ts') continue;
+    for (const match of source.matchAll(/import\s*\{([^}]*)}\s*from\s*['"]([^'"]+)['"]/g)) {
+      const imported = match[1].split(',').map((part) => part.trim().split(/\s+as\s+/)[0]);
+      if (imported.includes('assertLegacyAnnotatedHistoryReadable')) {
+        failBoundary(path);
+      }
+    }
+  }
+
+  void w3Retired;
+}
+
+if (w3Retired) {
+  // rev 3 §3 movement boundary: durable-history, contribution-policy, cursor,
+  // pipeline, and kernel must carry no reference to the privacy capability or
+  // the retired receipt/scope scanners.
+  const movementModules = [
+    'src/durable-history.ts', 'src/history-contribution-policy.ts',
+    'src/pipeline.ts', 'src/kernel.ts', 'src/history-read.ts',
+  ];
+  for (const path of movementModules) {
+    const source = byRel.get(path);
+    if (!source) continue;
+    if (new RegExp(`\\b(assertLegacyAnnotatedHistoryReadable|receiptContainsAnnotatedText|scopeContainsAnnotatedText)\\b`).test(source)) {
+      failBoundary(path);
+    }
+  }
   const banned = ['annotatedMove', 'annotatedMoveActionTypes', 'hasAnnotatedMoveCapability', 'ANNOTATED_TEXT_COMPENSATION'];
   for (const symbol of banned) {
     for (const [path, source] of byRel) {
       if (!path.startsWith('src/') && !path.startsWith('public/')) continue;
       if (new RegExp(`\\b${symbol}\\b`).test(source)) retired(symbol);
     }
+  }
+  // The retired public `annotatedHistory` option surface is forbidden in source
+  // (server.d.ts cover), emitted build, and declarations.
+  for (const [path, source] of byRel) {
+    if (!path.endsWith('.ts') && !path.endsWith('.mjs') && !path.endsWith('.d.ts')) continue;
+    if (/\bannotatedHistory\b/.test(source)) retiredAnnotatedHistory(path);
   }
 }
 

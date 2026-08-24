@@ -171,7 +171,7 @@ test('annotated-text scopes are forbidden', async () => {
     }]]),
     mayVerb: async () => true,
     projectRecipient: simpleProjector,
-    annotatedHistory: { entities: new Set(['AnnotatedDoc']), actionTypes: new Set() },
+    privateHistoryScopes: new Set(['AnnotatedDoc']),
   });
 
   await assert.rejects(
@@ -181,7 +181,7 @@ test('annotated-text scopes are forbidden', async () => {
   db.close();
 });
 
-test('annotated-text scopes are denied structurally without annotatedHistory config', async () => {
+test('annotated-text scopes deny reads from the declaration-derived private scopes set, not field scraping', async () => {
   const db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);
   db.exec('CREATE TABLE AnnotatedDoc (id TEXT PRIMARY KEY, body TEXT)');
@@ -192,13 +192,14 @@ test('annotated-text scopes are denied structurally without annotatedHistory con
     db,
     entities: new Map([['AnnotatedDoc', {
       name: 'AnnotatedDoc',
-      fields: { body: { kind: 'annotatedText' } },
+      fields: { body: { kind: 'value' } }, // NOT an annotatedText field; the declared scope set denies it
       grant: () => [scope(() => true).can(() => grant(read, subscribe))],
       scopeFilter: () => ({ sql: '1=1', params: {} }),
       hydrate: (row) => ({ ...row }),
     }]]),
     mayVerb: async () => true,
     projectRecipient: simpleProjector,
+    privateHistoryScopes: new Set(['AnnotatedDoc']),
   });
 
   await assert.rejects(

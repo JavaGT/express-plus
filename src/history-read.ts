@@ -2,9 +2,12 @@ import { parseEventType } from './event-handle.ts';
 import { rowToEvent, type LogEvent, type LogRowLike } from './committed-log.ts';
 import { mayRow, mayVerb as rowGrantMayVerb, type EntityRecord as RowGrantEntityRecord } from './row-grant.ts';
 import { tryParseScopeKey, type ScopeHandle } from './scope-handle.ts';
-import { hasAnnotatedTextFields, type EntitySnapshotRecord } from './entity-snapshot-projection.ts';
 import { publicEvent } from './event-delivery.ts';
 import type { DbHandle } from './driver.ts';
+// scope#992 rev 3 §3: the legacy annotated read-privacy scanner is imported
+// ONLY here (the history actions()/events() read boundary) and used ONLY from
+// the authorize step. Movement code must not import it.
+import { assertLegacyAnnotatedHistoryReadable } from './legacy-annotated-history-read-privacy.ts';
 
 export interface HistoryReaderPrincipal {
   id: string | number | null;
@@ -97,14 +100,14 @@ export function createHistoryReader({
   db,
   entities,
   mayVerb = null,
-  annotatedHistory = null,
+  privateHistoryScopes = null,
   projectRecipient,
   scopeVisible = () => true,
 }: {
   db: DbHandle | null | undefined;
   entities: ReadonlyMap<string, HistoryEntityRecord> | ((name: string) => HistoryEntityRecord | undefined);
   mayVerb?: AuthorizeVerb | null;
-  annotatedHistory?: { entities?: Set<string>; actionTypes?: Set<string> } | null;
+  privateHistoryScopes?: ReadonlySet<string> | null;
   projectRecipient?: RecipientProjector;
   scopeVisible?: ScopeVisibleCheck;
 }): HistoryReader {
@@ -117,21 +120,13 @@ export function createHistoryReader({
   const authorizeVerb: AuthorizeVerb = typeof mayVerb === 'function' ? mayVerb : (entity, verb, row, principal) => rowGrantMayVerb(entity, verb, row, principal);
 
   const resolveEntity = typeof entities === 'function' ? entities : (name: string) => entities.get(name);
-  const denyEntities = annotatedHistory?.entities ?? new Set<string>();
-
-  function isAnnotatedScope(scope: string, entityRec?: HistoryEntityRecord) {
-    if (!entityRec) {
-      const handle = tryParseScopeKey(scope);
-      if (!handle) return false;
-      entityRec = resolveEntity(handle.entity);
-    }
-    if (!entityRec) return false;
-    if (denyEntities.has(entityRec.name)) return true;
-    return hasAnnotatedTextFields(entityRec as unknown as EntitySnapshotRecord);
-  }
+  const denyScopes = privateHistoryScopes ?? new Set<string>();
 
   async function authorize(scope: string, principal: HistoryReaderPrincipal): Promise<{ entityRec: HistoryEntityRecord; row: Record<string, unknown> }> {
-    if (isAnnotatedScope(scope)) throw forbidden();
+    // scope#992 rev 3 §3: the legacy annotated read-privacy scanner is the
+    // ONLY annotated denial here; it returns void or throws forbidden(). It
+    // has no eligibility/barrier/target/retry/compensation role.
+    assertLegacyAnnotatedHistoryReadable(database, scope, denyScopes);
     const handle = tryParseScopeKey(scope);
     if (!handle) throw forbidden();
     const entityRec = resolveEntity(handle.entity);
