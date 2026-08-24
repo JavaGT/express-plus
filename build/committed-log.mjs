@@ -113,9 +113,10 @@ export function historyOrderCounterTableDDL() {
 }
 
 // Receipt history reads order by historyOrder within a scope (durable-history
-// keyset pagination, cursor reconstruction, erasure census). CREATE INDEX IF
-// NOT EXISTS is itself the migration: a no-op on current databases' first
-// boot after upgrade, then present forever.
+// keyset pagination, cursor reconstruction, erasure census). Declared here so
+// the framework object census sees it; executeFrameworkDDL defers CREATION to
+// ensureActionReceiptColumns, because the historyOrder column only exists on
+// legacy databases after that migration runs.
 export function actionReceiptHistoryIndexDDL() {
   return 'CREATE INDEX IF NOT EXISTS idx__ActionReceipt_scope_history ON _ActionReceipt (scope, historyOrder);';
 }
