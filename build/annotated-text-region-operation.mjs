@@ -186,7 +186,7 @@ export function compileRegionFieldPolicy(
       dbInTxn          ,
       rawDescriptor         ,
       principalInput                                ,
-      owners                   ,
+      owners                                      ,
     ) {
       if (dbInTxn !== (appDb           )) {
         throw new Error('annotatedTextOperation policy bound to a foreign DB handle');
@@ -224,8 +224,17 @@ export function compileRegionFieldPolicy(
       });
       // New region traffic emits ONLY v16 (W1b cutover). The returned nonce
       // capability is the single-use admission proof for committed-log's
-      // append after the pipeline's deep copy strips the brand.
-      const { event: envelope, capability } = constructV16RegionEvent(plan);
+      // append after the pipeline's deep copy strips the brand. The nonce is
+      // bound to owning scope, entity, field, document, canonical bytes, and
+      // the action id — so two distinct identical actions are both admitted,
+      // while replay/reuse of one action's capability fails.
+      const { event: envelope, capability } = constructV16RegionEvent(plan, {
+        owningScope: documentScope,
+        entity: handle.entity,
+        field: handle.field,
+        documentId,
+        actionId: owners.actionId ?? '',
+      });
       return Object.freeze({
         plan,
         envelope: envelope                                                ,

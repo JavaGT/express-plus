@@ -909,7 +909,7 @@ const V16_WITNESS_IMAGE_KEYS = [
  * The text is what `_Log` must store verbatim — appendEvents never re-stringifies
  * a branded v16 event.
  */
-export function constructV16RegionEvent(plan            )
+export function constructV16RegionEvent(plan            , admission                       )
 
 
 
@@ -951,8 +951,9 @@ export function constructV16RegionEvent(plan            )
   // invisible to JSON/enumeration, but must be installed before sealing. The
   // returned nonce capability is the ONLY route for a pipeline-copied (symbol-
   // stripped) envelope to be admitted at append; it is consumed exactly once.
-  const capability = brandV16Event(eventView                     , eventDataText, {
-    documentId: plan.descriptor.id,
+  const capability = brandV16Event(eventView                     , eventDataText, admission ?? {
+    owningScope: '', entity: '', field: '',
+    documentId: plan.descriptor.id, actionId: '',
   });
   const event = Object.freeze(eventView)                                                                                                                                                                                                                             ;
   return Object.freeze({
@@ -993,28 +994,31 @@ export function serializeV16OperatedEvent(event                      )         {
 const V16_BRAND                = Symbol('workbench.annotated-text.v16.brand');
 const V16_BRAND_KEYS = ['after', 'before', 'facts', 'id', 'operation', 'version'];
 
+
+
+
+
+
+
+
+
 /** Install the brand + mint the one-shot nonce capability (sole owner). */
 function brandV16Event(
   event        ,
   eventDataText        ,
-  identity                        ,
+  identity                      ,
 )                    {
-  // Deterministic single-use token bound to (documentId ‖ exact bytes):
-  // committed-log records the consumption durably (_V16CapabilityClaim row,
-  // written inside the append transaction). A rollback removes the claim —
-  // restoring the capability for a legitimate retry — and a commit makes it
-  // permanent, so replay/duplicate/post-restart reuse of the same minting
-  // fails forever. Because the nonce is a pure function of the minting, a
-  // fabricated envelope cannot mint a DIFFERENT claim for the same bytes:
-  // the first append owns them.
-  const nonce = createHash('sha256')
-    .update('workbench.v16.capability\u0000')
-    .update(identity.documentId)
-    .update('\u0000')
-    .update(eventDataText)
-    .digest('hex');
+  // Deterministic single-use token bound to the FULL append identity — owning
+  // scope, entity, field, document, exact canonical bytes, and the canonical
+  // action/append id. Consumption is durable (committed-log's
+  // _V16CapabilityClaim row, written inside the append transaction), so a
+  // rollback removes the claim — restoring the capability for a legitimate
+  // retry of the SAME action — while a commit makes consumption permanent.
+  // Distinct actions with byte-identical envelopes mint distinct nonces and
+  // are both admitted; replay/reuse of one action's nonce fails forever.
+  const nonce = v16AdmissionNonce(identity, eventDataText);
   Object.defineProperty(event, V16_BRAND, {
-    value: Object.freeze({ eventDataText, nonce, documentId: identity.documentId }),
+    value: Object.freeze({ eventDataText, nonce }),
     enumerable: false,
     configurable: false,
     writable: false,
@@ -1047,6 +1051,24 @@ export function readV16Brand(data         )                                     
  * second claim of the same nonce fails (replay/reuse), and claims die with
  * the process (restart safety). Binding fields must match the mint.
  */
+/**
+ * The deterministic single-use admission token: binds owning scope, entity,
+ * field, document, exact canonical bytes, and the canonical action/append id.
+ * Two distinct actions with identical bytes derive distinct nonces; any change
+ * to the binding or the bytes changes the nonce and fails verification.
+ */
+export function v16AdmissionNonce(identity                      , canonicalText        )         {
+  return createHash('sha256')
+    .update('workbench.v16.capability\u0000')
+    .update(identity.owningScope).update('\u0000')
+    .update(identity.entity).update('\u0000')
+    .update(identity.field).update('\u0000')
+    .update(identity.documentId).update('\u0000')
+    .update(identity.actionId).update('\u0000')
+    .update(canonicalText)
+    .digest('hex');
+}
+
 /**
  * The bytes digest recorded with a nonce claim — binds the capability to the
  * exact canonical envelope. Exported for committed-log's durable claim row.

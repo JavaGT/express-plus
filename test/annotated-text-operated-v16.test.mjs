@@ -36,6 +36,10 @@ import {
 } from '../build/annotated-text-region-limits.mjs';
 
 const ACTOR = 'a'.repeat(32);
+// Review round 4: mints for tests carry full admission identity so the brand
+// nonce matches committed-log's re-derivation from the event frame.
+const TEST_ADMISSION = { owningScope: 's', entity: 'ReplayDoc', field: 'body', documentId: 'doc-1', actionId: 'a' };
+
 const EDIT_ACTOR = 'b'.repeat(32);
 const DECLARATIONS = [
   { annotationName: 'note', fields: {}, empty: 'delete', cardinality: 'many' },
@@ -643,10 +647,11 @@ test('appendEvents admits only branded v16 envelopes; fabricated data fails clos
     declarationFingerprint: '0'.repeat(64),
     textOperations: { kind: 'none' },
     contribution: null,
-  });
+  }, { ...TEST_ADMISSION });
   appendEvents(db, [{
-    scope: 's', seq: 1, type: 'ReplayDoc.body.operated',
-    data: minted.event, actionId: 'a', committedAt: 'now',
+    scope: TEST_ADMISSION.owningScope, seq: 1, type: 'ReplayDoc.body.operated',
+    handle: { entity: TEST_ADMISSION.entity, field: TEST_ADMISSION.field },
+    data: minted.event, actionId: TEST_ADMISSION.actionId, committedAt: 'now',
   }]);
   const row = db.prepare('SELECT eventData FROM _Log WHERE seq = 1').get();
   assert.ok(
@@ -687,14 +692,15 @@ test('appendEvents admits only branded v16 envelopes; fabricated data fails clos
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count, 1, 'mutated envelope performed a write');
 });
 
-test('v16 nonce capability is single-use: clone, replay, reuse, and restart all fail', async () => {
+test('v16 nonce capability is bound to full append identity: distinct actions admitted; replay/reuse/cross-binding fail', async () => {
   const { appendEvents } = await import('../build/committed-log.mjs');
   const { constructV16RegionEvent } = await import('../build/annotated-text-operated-event.mjs');
   const db = new DatabaseSync(':memory:');
   db.exec('CREATE TABLE _Log (scope TEXT, seq INTEGER, eventType TEXT, eventData TEXT, actionId TEXT, committedAt TEXT)');
   db.exec('CREATE TABLE _V16CapabilityClaim (nonce TEXT PRIMARY KEY, document_id TEXT NOT NULL, bytes_digest TEXT NOT NULL)');
 
-  const minted = constructV16RegionEvent({
+  // Two DISTINCT legitimate actions produce byte-identical envelopes.
+  const mintFor = (actionId) => constructV16RegionEvent({
     descriptor: { id: 'doc-1', from: 0, to: 0, transitions: [] },
     before: { structuralRevision: 1, frontier: [] },
     after: { structuralRevision: 2, frontier: [] },
@@ -702,66 +708,83 @@ test('v16 nonce capability is single-use: clone, replay, reuse, and restart all 
     declarationFingerprint: '0'.repeat(64),
     textOperations: { kind: 'none' },
     contribution: null,
+  }, {
+    owningScope: 'Project:p1', entity: 'E', field: 'f',
+    documentId: 'doc-1', actionId,
   });
-  // Simulate the pipeline's symbol-stripping deep copy of event data.
-  const copiedData = JSON.parse(JSON.stringify(minted.event));
-  const capability = minted.capability;
+  const mintedA = mintFor('action-A');
+  const mintedB = mintFor('action-B');
+  assert.notEqual(mintedA.capability.nonce, mintedB.capability.nonce, 'distinct actions must derive distinct nonces');
 
-  // First append with the capability: admitted (this is the pipeline path).
+  // Action A appends its (copied) envelope via its capability: admitted.
   appendEvents(db, [{
-    scope: 's', seq: 1, type: 'E.f.operated',
-    data: copiedData, v16Capability: capability, actionId: 'a', committedAt: 'now',
+    scope: 'Project:p1', seq: 1, type: 'E.f.operated', handle: { entity: 'E', field: 'f' },
+    data: JSON.parse(JSON.stringify(mintedA.event)), v16Capability: mintedA.capability,
+    actionId: 'action-A', committedAt: 'now',
   }]);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count, 1);
 
-  // REUSE of the same nonce (duplicate delivery / replay): consumed exactly
-  // once, so the second append fails before insert.
+  // A SECOND DISTINCT action with byte-identical bytes: admitted (its own nonce).
+  appendEvents(db, [{
+    scope: 'Project:p1', seq: 2, type: 'E.f.operated', handle: { entity: 'E', field: 'f' },
+    data: JSON.parse(JSON.stringify(mintedB.event)), v16Capability: mintedB.capability,
+    actionId: 'action-B', committedAt: 'now2',
+  }]);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count, 2);
+
+  // REPLAY of action A's capability (same nonce again): fails — consumed once.
   assert.throws(
     () => appendEvents(db, [{
-      scope: 's', seq: 2, type: 'E.f.operated',
-      data: JSON.parse(JSON.stringify(minted.event)), v16Capability: capability, actionId: 'a', committedAt: 'now',
-    }]),
-    /admission capability was missing, reused, or expired/,
-  );
-  // A CLONE of the first append (same bytes, no capability at all): rejected.
-  assert.throws(
-    () => appendEvents(db, [{
-      scope: 's', seq: 3, type: 'E.f.operated',
-      data: JSON.parse(JSON.stringify(minted.event)), actionId: 'a', committedAt: 'now',
-    }]),
-    /unbranded operated v16 eventData reached _Log|admission capability was missing, reused, or expired/,
-  );
-  // A FORGED nonce (never minted): rejected.
-  assert.throws(
-    () => appendEvents(db, [{
-      scope: 's', seq: 4, type: 'E.f.operated',
-      data: JSON.parse(JSON.stringify(minted.event)),
-      v16Capability: { nonce: 'f'.repeat(64) }, actionId: 'a', committedAt: 'now',
-    }]),
-    /admission capability was missing, reused, or expired/,
-  );
-  // MUTATED bytes with a valid-but-unrelated nonce: binding check rejects.
-  const mutated = JSON.parse(JSON.stringify(minted.event));
-  mutated.id = 'doc-2';
-  assert.throws(
-    () => appendEvents(db, [{
-      scope: 's', seq: 5, type: 'E.f.operated',
-      data: mutated, v16Capability: constructV16RegionEvent({
-        descriptor: { id: 'other-doc', from: 0, to: 0, transitions: [] },
-        before: { structuralRevision: 1, frontier: [] },
-        after: { structuralRevision: 2, frontier: [] },
-        postimage: { affectedIds: [], annotations: [], beforeAnnotations: [], emptied: [], beforeDigest: '0'.repeat(64), afterDigest: '0'.repeat(64) },
-        declarationFingerprint: '0'.repeat(64),
-        textOperations: { kind: 'none' },
-        contribution: null,
-      }).capability,
-      actionId: 'a', committedAt: 'now',
+      scope: 'Project:p1', seq: 3, type: 'E.f.operated', handle: { entity: 'E', field: 'f' },
+      data: JSON.parse(JSON.stringify(mintedA.event)), v16Capability: mintedA.capability,
+      actionId: 'action-A', committedAt: 'now3',
     }]),
     /admission capability was missing, reused, or expired/,
   );
 
-  // Exactly one row landed; every rejection happened before insert.
-  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count, 1);
+  // CROSS-BINDING: action B's capability presented under action A's id/scope.
+  assert.throws(
+    () => appendEvents(db, [{
+      scope: 'Project:p1', seq: 4, type: 'E.f.operated', handle: { entity: 'E', field: 'f' },
+      data: JSON.parse(JSON.stringify(mintedB.event)), v16Capability: mintedB.capability,
+      actionId: 'action-A', committedAt: 'now4',
+    }]),
+    /admission capability was missing, reused, or expired/,
+  );
+
+  // CROSS-SCOPE: same everything but a different owning scope.
+  assert.throws(
+    () => appendEvents(db, [{
+      scope: 'Project:p9', seq: 5, type: 'E.f.operated', handle: { entity: 'E', field: 'f' },
+      data: JSON.parse(JSON.stringify(mintedB.event)), v16Capability: mintedB.capability,
+      actionId: 'action-B', committedAt: 'now5',
+    }]),
+    Error,
+  );
+
+  // FORGED nonce (never derived): rejected.
+  assert.throws(
+    () => appendEvents(db, [{
+      scope: 'Project:p1', seq: 6, type: 'E.f.operated', handle: { entity: 'E', field: 'f' },
+      data: JSON.parse(JSON.stringify(mintedA.event)),
+      v16Capability: { nonce: 'f'.repeat(64) },
+      actionId: 'action-A', committedAt: 'now6',
+    }]),
+    /admission capability was missing, reused, or expired/,
+  );
+
+  // CLONE without any capability: rejected.
+  assert.throws(
+    () => appendEvents(db, [{
+      scope: 'Project:p1', seq: 7, type: 'E.f.operated', handle: { entity: 'E', field: 'f' },
+      data: JSON.parse(JSON.stringify(mintedA.event)),
+      actionId: 'action-A', committedAt: 'now7',
+    }]),
+    /unbranded operated v16 eventData reached _Log|admission capability was missing, reused, or expired/,
+  );
+
+  // Exactly the two legitimate appends landed.
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count, 2);
 });
 
 test('escaped quotes, backslashes, and control characters round-trip through the stored parser', async () => {
@@ -814,9 +837,10 @@ test('tampered _Log eventData fails closed through readSince, rowToEvent, and du
     declarationFingerprint: '0'.repeat(64),
     textOperations: { kind: 'none' },
     contribution: null,
-  });
+  }, { owningScope: 's', entity: 'E', field: 'f', documentId: 'doc-1', actionId: 'a' });
   appendEvents(db, [{
     scope: 's', seq: 1, type: 'E.f.operated',
+    handle: { entity: 'E', field: 'f' },
     data: minted.event, actionId: 'a', committedAt: 'now',
   }]);
   const goodRow = db.prepare('SELECT * FROM _Log WHERE seq = 1').get();
@@ -958,7 +982,7 @@ test('tampered v16 rows fail closed through effect-consumer decoders', async () 
     declarationFingerprint: '0'.repeat(64),
     textOperations: { kind: 'none' },
     contribution: null,
-  });
+  }, { owningScope: 's', entity: 'E', field: 'f', documentId: 'doc-1', actionId: 'a' });
 
   const cleanRow = { scope: 's', seq: 1, eventType: 'E.f.operated', eventData: minted.eventDataText, actionId: 'a', committedAt: 'now' };
   // Clean v16 row decodes to the canonical boundary.
@@ -996,12 +1020,16 @@ test('compound dispatch consumes its nonce capability exactly once (zero-write o
     replacement: 'hallo',
     transitions: [{ kind: 'range.set', annotationId: 'note-1', ranges: [{ start: 0, end: 5 }] }],
   });
-  const minted = constructV16RegionEvent(plan);
+  const minted = constructV16RegionEvent(plan, {
+    owningScope: 'ReplayDoc:p1', entity: 'ReplayDoc', field: 'body',
+    documentId: 'doc-1', actionId: 'a1',
+  });
   const copiedData = JSON.parse(JSON.stringify(minted.event));
 
   const { appendEvents } = await import('../build/committed-log.mjs');
   appendEvents(db, [{
     scope: 'ReplayDoc:p1', seq: 1, type: 'ReplayDoc.body.operated',
+    handle: { entity: 'ReplayDoc', field: 'body' },
     data: copiedData, v16Capability: minted.capability, actionId: 'a1', committedAt: 'now',
   }]);
   const afterFirst = db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count;
@@ -1013,6 +1041,7 @@ test('compound dispatch consumes its nonce capability exactly once (zero-write o
     () => appendEvents(db, [{
       scope: 'ReplayDoc:p1', seq: 2, type: 'ReplayDoc.body.operated',
       data: JSON.parse(JSON.stringify(minted.event)), v16Capability: minted.capability,
+      handle: { entity: 'ReplayDoc', field: 'body' },
       actionId: 'a1', committedAt: 'now',
     }]),
     /admission capability was missing, reused, or expired/,
@@ -1035,12 +1064,13 @@ test('capability claims are durable and bounded by retention: reuse across resta
     declarationFingerprint: '0'.repeat(64),
     textOperations: { kind: 'none' },
     contribution: null,
-  });
+  }, { owningScope: 's', entity: 'E', field: 'f', documentId: id, actionId: 'a' });
 
   // First append consumes the claim durably.
   const minted = mint('doc-1');
   appendEvents(db, [{
     scope: 's', seq: 1, type: 'E.f.operated',
+    handle: { entity: 'E', field: 'f' },
     data: JSON.parse(JSON.stringify(minted.event)), v16Capability: minted.capability,
     actionId: 'a', committedAt: 'now',
   }]);
@@ -1079,7 +1109,7 @@ test('transaction rollback restores the capability so a legitimate retry succeed
     declarationFingerprint: '0'.repeat(64),
     textOperations: { kind: 'none' },
     contribution: null,
-  });
+  }, { owningScope: 's', entity: 'E', field: 'f', documentId: 'doc-1', actionId: 'a' });
   const copiedData = JSON.parse(JSON.stringify(minted.event));
 
   // Attempt #1 inside a transaction that ROLLS BACK after the append (e.g. a
@@ -1088,6 +1118,7 @@ test('transaction rollback restores the capability so a legitimate retry succeed
   await txn(db, () => {
     appendEvents(db, [{
       scope: 's', seq: 1, type: 'E.f.operated',
+      handle: { entity: 'E', field: 'f' },
       data: copiedData, v16Capability: minted.capability, actionId: 'a', committedAt: 'now',
     }]);
     throw new Error('simulated compound failure');
@@ -1101,8 +1132,67 @@ test('transaction rollback restores the capability so a legitimate retry succeed
   // Attempt #2 (the legitimate retry with the SAME envelope + nonce) succeeds.
   appendEvents(db, [{
     scope: 's', seq: 1, type: 'E.f.operated',
+    handle: { entity: 'E', field: 'f' },
     data: JSON.parse(JSON.stringify(minted.event)), v16Capability: minted.capability,
     actionId: 'a', committedAt: 'now2',
   }]);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count, 1);
+});
+
+// ---- Review round 4: remaining persisted-read paths + authority grep ----
+
+test('no raw persisted eventData JSON.parse remains in src (authority grep)', async () => {
+  const { readFileSync, readdirSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const srcRoot = new URL('../src/', import.meta.url).pathname;
+  const offenders = [];
+  const walk = (dir) => {
+    for (const name of readdirSync(dir)) {
+      const p = join(dir, name);
+      const stat = readdirSync(dir, { withFileTypes: true }).find((d) => d.name === name);
+      if (stat.isDirectory()) walk(p);
+      else if (name.endsWith('.ts')) {
+        const text = readFileSync(p, 'utf8');
+        // Direct persisted-eventData parse: the exact bypass pattern.
+        if (/JSON\.parse\([^)]*eventData/.test(text)) offenders.push(p);
+      }
+    }
+  };
+  walk(srcRoot);
+  assert.deepEqual(offenders, [], `raw eventData parse remains in: ${offenders.join(', ')}`);
+});
+
+test('erasure census and private-fact replay reject tampered v16 rows through shared decoder', async () => {
+  const { decodeLogRowData } = await import('../build/committed-log.mjs');
+
+  // A tampered duplicate-key v16 row must throw from the SHARED decoder —
+  // this is exactly what erasure census and post-commit replay call.
+  const tampered = { scope: 's', seq: 1, eventType: 'ReplayDoc.body.operated', eventData: '{"version":17,"version":16}' };
+  assert.throws(() => decodeLogRowData(tampered), Error);
+
+  // Noncanonical bytes: same content, insertion-order keys.
+  const canonicalText = JSON.stringify({
+    after: {}, before: {}, facts: {}, id: 'x',
+    operation: { kind: 'region.edit' }, version: 16,
+  });
+  const noncanonical = '{"version":16,"id":"x","before":{},"after":{},"operation":{"kind":"region.edit"},"facts":{}}';
+  assert.notEqual(canonicalText, noncanonical);
+  assert.throws(
+    () => decodeLogRowData({ scope: 's', seq: 2, eventType: 'ReplayDoc.body.operated', eventData: noncanonical }),
+    /not canonical/,
+    'noncanonical v16 bytes must be rejected by the shared decoder',
+  );
+
+  // A clean canonical v16 row (real mint) decodes with operated identity.
+  const minted = constructV16RegionEvent({
+    descriptor: { id: 'doc-1', from: 0, to: 0, transitions: [] },
+    before: { structuralRevision: 1, frontier: [] },
+    after: { structuralRevision: 2, frontier: [] },
+    postimage: { affectedIds: [], annotations: [], beforeAnnotations: [], emptied: [], beforeDigest: '0'.repeat(64), afterDigest: '0'.repeat(64) },
+    declarationFingerprint: '0'.repeat(64),
+    textOperations: { kind: 'none' },
+    contribution: null,
+  }, { owningScope: 's', entity: 'ReplayDoc', field: 'body', documentId: 'doc-1', actionId: 'a' });
+  const ok = decodeLogRowData({ scope: 's', seq: 3, eventType: 'ReplayDoc.body.operated', eventData: minted.eventDataText });
+  assert.equal(ok.wireVersion, 16);
 });

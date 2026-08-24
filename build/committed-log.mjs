@@ -16,8 +16,7 @@ import { canonicalStringify } from './canonical-json.mjs';
 import { liveRevisionTableDDL } from './live-revision.mjs';
 import { invalidationLedgerTableDDL } from './invalidation-ledger.mjs';
 import { sweepFactDependencies } from './private-action-fact-dependency.mjs';
-import { createHash } from 'node:crypto';
-import { readV16Brand, v16CapabilityBytesDigest, parseStoredV16OperatedEvent, serializeV16OperatedEvent,                           } from './annotated-text-operated-event.mjs';
+import { readV16Brand, v16AdmissionNonce, v16CapabilityBytesDigest, parseStoredV16OperatedEvent, serializeV16OperatedEvent,                           } from './annotated-text-operated-event.mjs';
 
 // The no-history lane (S3/A2) surfaces through this module alongside the
 // durable _Log/_ActionReceipt surfaces, so the boot DDL and the kernel have one
@@ -485,6 +484,7 @@ export function retentionPrune(db          , cutoffIso        ) {
 
 
 
+
 // One durable-bytes decision per appended event. A version-16 operated
 // envelope is admitted ONLY through one of two capability proofs (Finding 3,
 // review round 2):
@@ -505,12 +505,13 @@ function serializeAppendedEventData(db          , event               )         
     const documentId = typeof data.id === 'string' ? data.id : '';
     const bytesDigest = v16CapabilityBytesDigest(canonical);
 
-    // Durable one-shot claim (Findings 3+4, round 3): the claim row is written
-    // in the SAME transaction as the _Log insert. ROLLBACK removes it — a
-    // failed compound action restores the capability so a legitimate retry
-    // succeeds; COMMIT makes consumption permanent, so replay/duplicate/
-    // post-restart reuse of the same nonce fails forever. The claim is taken
-    // BEFORE any write is finalized and bound to document + exact bytes.
+    // Durable one-shot claim (Findings 3+4, review rounds 2-3): the claim row
+    // is written in the SAME transaction as the _Log insert. ROLLBACK removes
+    // it — a failed compound action restores the capability so a legitimate
+    // retry of the SAME action succeeds; COMMIT makes consumption permanent.
+    // Distinct actions with identical bytes carry distinct nonces and are both
+    // admitted; replay/reuse of one action's nonce fails forever. Binding:
+    // owning scope + entity + field + document + exact bytes + action id.
     const nonce = resolveAdmissionNonce(event, data, canonical, documentId);
     let claimChanges        ;
     try {
@@ -543,10 +544,18 @@ function serializeAppendedEventData(db          , event               )         
 //  - capability: a pipeline-copied envelope (brand stripped by Object.keys)
 //    carries the nonce on the appended event frame.
 function resolveAdmissionNonce(event               , data                         , canonical        , documentId        )         {
-  // The nonce is a pure function of the minting (document ‖ exact bytes), so
-  // it can be re-derived and VERIFIED here — a forged/random nonce fails this
-  // equality exactly like a missing one, with no distinguishing oracle.
-  const expected = v16AdmissionNonce(documentId, canonical);
+  const handle = event.handle                                                     ;
+  const identity = {
+    owningScope: typeof event.scope === 'string' ? event.scope : '',
+    entity: typeof handle?.entity === 'string' ? handle.entity : '',
+    field: typeof handle?.field === 'string' ? handle.field : '',
+    documentId,
+    actionId: event.actionId,
+  };
+  // The nonce is a pure function of the FULL append identity, so it can be
+  // re-derived and VERIFIED here — a forged/random nonce fails this equality
+  // exactly like a missing one, with no distinguishing oracle.
+  const expected = v16AdmissionNonce(identity, canonical);
   const branded = readV16Brand(data);
   if (branded !== null) {
     if (canonical !== branded.eventDataText || branded.nonce !== expected) {
@@ -559,16 +568,6 @@ function resolveAdmissionNonce(event               , data                       
     throw new Error('operated v16 admission capability was missing, reused, or expired');
   }
   return expected;
-}
-
-/** Deterministic single-use admission token for a minted envelope. */
-export function v16AdmissionNonce(documentId        , canonicalText        )         {
-  return createHash('sha256')
-    .update('workbench.v16.capability\u0000')
-    .update(documentId)
-    .update('\u0000')
-    .update(canonicalText)
-    .digest('hex');
 }
 
 function v16ClaimMatches(db          , nonce        , documentId        , bytesDigest        )          {
