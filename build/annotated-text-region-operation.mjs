@@ -75,6 +75,12 @@ import { parseRegionEditDescriptor } from './annotated-text-region-descriptor.mj
 
 
 
+
+
+
+
+
+
 /**
  * Declare a closed annotated-text composition capability bound to one
  * entity/field handle. `Entity` carries the compiled `fields`; `field` is the
@@ -216,13 +222,14 @@ export function compileRegionFieldPolicy(
         actor,
         lamport: maxLamport + 1,
       });
-      // New region traffic emits ONLY v16 (W1b cutover). The canonical
-      // eventDataText is stored verbatim in _Log by committed-log's branded
-      // adapter; applications cannot supply the brand or pre-serialized text.
-      const { event: envelope } = constructV16RegionEvent(plan);
+      // New region traffic emits ONLY v16 (W1b cutover). The returned nonce
+      // capability is the single-use admission proof for committed-log's
+      // append after the pipeline's deep copy strips the brand.
+      const { event: envelope, capability } = constructV16RegionEvent(plan);
       return Object.freeze({
         plan,
         envelope: envelope                                                ,
+        v16Capability: capability,
         contribution: plan.contribution,
         entity: handle.entity,
         field: handle.field,

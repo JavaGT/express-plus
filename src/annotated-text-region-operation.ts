@@ -50,6 +50,12 @@ interface DbHandle {
 export interface AdmittedRegionPlan {
   readonly plan: RegionPlan;
   readonly envelope: Readonly<Record<string, unknown>>;
+  /**
+   * Single-use admission capability for the pipeline-copied append (Finding 3
+   * round 2). Opaque nonce minted by constructV16RegionEvent; consumed
+   * exactly once by committed-log and bound to canonical bytes + document.
+   */
+  readonly v16Capability: { nonce: string };
   readonly contribution: DeleteFact | null;
   readonly entity: string;
   readonly field: string;
@@ -216,13 +222,14 @@ export function compileRegionFieldPolicy(
         actor,
         lamport: maxLamport + 1,
       });
-      // New region traffic emits ONLY v16 (W1b cutover). The canonical
-      // eventDataText is stored verbatim in _Log by committed-log's branded
-      // adapter; applications cannot supply the brand or pre-serialized text.
-      const { event: envelope } = constructV16RegionEvent(plan);
+      // New region traffic emits ONLY v16 (W1b cutover). The returned nonce
+      // capability is the single-use admission proof for committed-log's
+      // append after the pipeline's deep copy strips the brand.
+      const { event: envelope, capability } = constructV16RegionEvent(plan);
       return Object.freeze({
         plan,
         envelope: envelope as unknown as Readonly<Record<string, unknown>>,
+        v16Capability: capability,
         contribution: plan.contribution,
         entity: handle.entity,
         field: handle.field,

@@ -16,7 +16,7 @@ import { canonicalStringify } from './canonical-json.mjs';
 import { liveRevisionTableDDL } from './live-revision.mjs';
 import { invalidationLedgerTableDDL } from './invalidation-ledger.mjs';
 import { sweepFactDependencies } from './private-action-fact-dependency.mjs';
-import { readV16Brand, readV16MintedText, parseStoredV16OperatedEvent, serializeV16OperatedEvent,                           } from './annotated-text-operated-event.mjs';
+import { claimV16NonceCapability, readV16Brand, parseStoredV16OperatedEvent, serializeV16OperatedEvent,                           } from './annotated-text-operated-event.mjs';
 
 // The no-history lane (S3/A2) surfaces through this module alongside the
 // durable _Log/_ActionReceipt surfaces, so the boot DDL and the kernel have one
@@ -463,21 +463,28 @@ export function retentionPrune(db          , cutoffIso        ) {
 
 
 
+
+
+
+
+
+
 // One durable-bytes decision per appended event. A version-16 operated
-// envelope is admitted ONLY when it is the constructor's branded result
-// (module-private symbol stamp — Finding 3): the brand carries the exact
-// canonical bytes, stored verbatim after a re-serialization equality check.
-// Fabricated, mutated, or unbranded v16-shaped data is rejected BEFORE
-// append; no second constructor exists to mint the brand. Everything else
-// keeps its stable stringify.
+// envelope is admitted ONLY through one of two capability proofs (Finding 3,
+// review round 2):
+//   1. BRAND — the object is literally the constructor's frozen return
+//      (module-private symbol stamp) and its bytes match the stamp.
+//   2. NONCE CAPABILITY — for the pipeline's symbol-stripping deep copy, the
+//      caller supplies `v16Capability.nonce`; claimV16NonceCapability consumes
+//      it exactly once and binds it to canonical bytes + document identity.
+// Clones, replays, stale/duplicate reuse, mutated bytes, and post-restart
+// tokens all fail BEFORE the _Log insert. Everything else keeps stable
+// stringify.
 function serializeAppendedEventData(event               )         {
   const data = event.data                                       ;
   if (data && typeof data === 'object' && !Array.isArray(data) && data.version === 16) {
     // Canonicalize the incoming datum FIRST (bounded accounting applies to any
-    // claimant), then require an admission proof: either the constructor's
-    // brand on the object itself (direct append) or byte-equality with a
-    // minted envelope (pipeline-copied path). Fabricated or mutated witnesses
-    // match neither and are rejected before the _Log insert.
+    // claimant).
     const canonical = serializeV16OperatedEvent(data                        );
     const branded = readV16Brand(data);
     if (branded !== null) {
@@ -486,8 +493,14 @@ function serializeAppendedEventData(event               )         {
       }
       return canonical;
     }
-    if (!readV16MintedText(canonical)) {
+    const capability = (event                                           ).v16Capability;
+    const nonce = capability?.nonce;
+    if (typeof nonce !== 'string') {
       throw new Error('unbranded operated v16 eventData reached _Log');
+    }
+    const documentId = typeof data.id === 'string' ? data.id : '';
+    if (!claimV16NonceCapability({ nonce, canonicalText: canonical, documentId })) {
+      throw new Error('operated v16 admission capability was missing, reused, or expired');
     }
     return canonical;
   }

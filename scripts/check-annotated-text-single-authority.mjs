@@ -147,7 +147,10 @@ const V16_REGION_POLICY = 'src/annotated-text-region-operation.ts';
 // committed-log is the one _Log write authority and calls the serializer to
 // canonicalize/verify v16 eventData at its single insert point (W1b adapter).
 const V16_LOG_ADAPTER = 'src/committed-log.ts';
-const V16_SOLO_NAMES = ['parseStoredV16OperatedEvent'];
+// post-commit-effects is a sanctioned READER: its private-fact replay path
+// decodes committed v16 rows through the strict stored parser (Finding 1,
+// round 2). It may not re-export or re-implement any v16 authority.
+const V16_FACT_READER = 'src/post-commit-effects.ts';
 const V16_CONSTRUCTOR_NAME = 'constructV16RegionEvent';
 const V16_SERIALIZER_NAME = 'serializeV16OperatedEvent';
 for (const [path, source] of byRel) {
@@ -166,7 +169,13 @@ for (const [path, source] of byRel) {
     }
     continue;
   }
-  for (const name of [...V16_SOLO_NAMES, V16_SERIALIZER_NAME]) {
+  if (path === V16_FACT_READER) {
+    if (/export[^{]*(parseStoredV16OperatedEvent|serializeV16OperatedEvent|constructV16RegionEvent)/.test(source)) {
+      fail('v16 operated authority', [V16_AUTHORITY_OWNER, path]);
+    }
+    continue;
+  }
+  for (const name of ['parseStoredV16OperatedEvent', V16_SERIALIZER_NAME]) {
     if (new RegExp(`\\b${name}\\b`).test(source)) {
       fail('v16 operated authority', [V16_AUTHORITY_OWNER, path]);
     }

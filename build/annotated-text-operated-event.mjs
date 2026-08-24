@@ -3,6 +3,7 @@
 // canonical form and do not branch on a wire version for kind dispatch.
 // Envelope construction lives only in this module.
 
+import { createHash, randomBytes } from 'node:crypto';
 
 
 
@@ -908,7 +909,12 @@ const V16_WITNESS_IMAGE_KEYS = [
  * The text is what `_Log` must store verbatim — appendEvents never re-stringifies
  * a branded v16 event.
  */
-export function constructV16RegionEvent(plan            )                                                                                                                                                                                 {
+export function constructV16RegionEvent(plan            )
+
+
+
+
+  {
   // Bounded canonicalization happens FIRST, on a plain (unfrozen) envelope
   // view: an over-limit witness aborts here before the durable envelope is
   // constructed or frozen. The canonical text is then attached as the
@@ -942,10 +948,18 @@ export function constructV16RegionEvent(plan            )                       
   };
   const eventDataText = canonicalV16Json(eventView, REGION_V16_MAX_EVENT_BYTES, 'operated v16 event');
   // Brand while still extensible, THEN freeze — the stamp is immutable and
-  // invisible to JSON/enumeration, but must be installed before sealing.
-  brandV16Event(eventView                     , eventDataText);
+  // invisible to JSON/enumeration, but must be installed before sealing. The
+  // returned nonce capability is the ONLY route for a pipeline-copied (symbol-
+  // stripped) envelope to be admitted at append; it is consumed exactly once.
+  const capability = brandV16Event(eventView                     , eventDataText, {
+    documentId: plan.descriptor.id,
+  });
   const event = Object.freeze(eventView)                                                                                                                                                                                                                             ;
-  return Object.freeze({ event, eventDataText });
+  return Object.freeze({
+    event,
+    eventDataText,
+    capability: Object.freeze({ nonce: capability.nonce }),
+  });
 }
 /**
  * The ONLY canonical byte serializer for operated events. For a branded v16
@@ -960,38 +974,71 @@ export function serializeV16OperatedEvent(event                      )         {
   return canonicalV16Json(event, REGION_V16_MAX_EVENT_BYTES, 'operated v16 event');
 }
 
-// ---- Unforgeable v16 admission capability (#149 review Finding 3) ----
-// A module-private symbol stamps the constructor's frozen result. The stamp is
-// non-enumerable (invisible to JSON, spreads of enumerable keys, and dedupe
-// comparisons), lives only on the object the constructor returned, and cannot
-// be fabricated outside this module: Symbol.for is NOT used, so a foreign
-// module cannot look the key up.
+// ---- Unforgeable v16 admission capability (#149 review Findings 3+2R) ----
+// Two coordinated mechanisms, both owned exclusively by this module:
 //
-// The pipeline's NOW-token resolution deep-copies event data with Object.keys,
-// which drops symbols; committed-log therefore also consults a process-local
-// mint registry keyed by canonical text. Admission = data canonicalizes to
-// bytes EXACTLY equal to a previously minted envelope. A fabricator can only
-// pass by producing bit-identical bytes of a real constructor output — which
-// carries no new information — and any mutation fails the match. There is no
-// second constructor and no way to register foreign text.
+// 1. BRAND — a module-private Symbol (never Symbol.for) stamped on the
+//    constructor's frozen result. Non-enumerable/non-configurable, invisible
+//    to JSON and dedupe comparisons. Direct appends of the constructor's own
+//    return are admitted through it.
+//
+// 2. NONCE CAPABILITY — for the pipeline's NOW-token deep copy, which rebuilds
+//    event data key-by-key (Object.keys) and therefore drops symbols. The
+//    constructor mints a single-use opaque nonce bound to the canonical bytes
+//    plus document/event identity; `claimV16NonceCapability` consumes it
+//    EXACTLY once inside appendEvents. Replays, stale reuse after consumption,
+//    post-restart tokens (memory-only), and mutated bytes all fail before the
+//    _Log insert. The claim table is a Map keyed by nonce with a hard bound;
+//    every path (success, failure, expiry) removes its entry.
 const V16_BRAND                = Symbol('workbench.annotated-text.v16.brand');
 const V16_BRAND_KEYS = ['after', 'before', 'facts', 'id', 'operation', 'version'];
-const V16_MINTED_TEXTS = new Set        ();
 
-/** Install the admission brand on a v16 envelope (sole owner: the constructor). */
-function brandV16Event(event        , eventDataText        )       {
+/** Hard bound on live nonce capabilities; minting evicts oldest when full. */
+export const REGION_V16_NONCE_CAPABILITY_MAX = 64;
+
+
+
+
+
+
+const V16_NONCE_CLAIMS = new Map                        ();
+
+/** Install the brand + mint the one-shot nonce capability (sole owner). */
+function brandV16Event(
+  event        ,
+  eventDataText        ,
+  identity                        ,
+)                    {
   Object.defineProperty(event, V16_BRAND, {
     value: Object.freeze({ eventDataText }),
     enumerable: false,
     configurable: false,
     writable: false,
   });
-  V16_MINTED_TEXTS.add(eventDataText);
+  // Opaque single-use token: random, so it cannot be guessed or derived from
+  // public envelope content. Bounded FIFO eviction caps memory.
+  const nonce = createHash('sha256')
+    .update(eventDataText)
+    .update(randomBytes(32))
+    .digest('hex');
+  if (!V16_NONCE_CLAIMS.has(nonce)) {
+    while (V16_NONCE_CLAIMS.size >= REGION_V16_NONCE_CAPABILITY_MAX) {
+      const oldest = V16_NONCE_CLAIMS.keys().next().value          ;
+      V16_NONCE_CLAIMS.delete(oldest);
+    }
+  }
+  V16_NONCE_CLAIMS.set(nonce, {
+    eventDataText,
+    documentId: identity.documentId,
+    scope: null,
+  });
+  return { nonce };
 }
 
 /**
- * Read the admission brand off an appended event's data. Returns null unless
- * `data` is exactly the constructor's frozen return carrying a valid stamp.
+ * Read the brand off an appended event's data. Returns null unless `data` is
+ * exactly the constructor's frozen return carrying a valid stamp. (Exported
+ * for the committed-log append authority only.)
  */
 export function readV16Brand(data         )                                   {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
@@ -1008,11 +1055,21 @@ export function readV16Brand(data         )                                   {
 }
 
 /**
- * Admission for a v16-shaped appended datum whose brand was stripped by the
- * pipeline copy: admitted only if its canonical bytes equal a minted envelope.
+ * Claim a minted nonce capability for one append. Consumes the entry — a
+ * second claim of the same nonce fails (replay/reuse), and claims die with
+ * the process (restart safety). Binding fields must match the mint.
  */
-export function readV16MintedText(canonicalText        )          {
-  return V16_MINTED_TEXTS.has(canonicalText);
+export function claimV16NonceCapability(input
+
+
+
+ )          {
+  const record = V16_NONCE_CLAIMS.get(input.nonce);
+  if (!record) return false;
+  // Consume first: exactly-once semantics even under later mismatch.
+  V16_NONCE_CLAIMS.delete(input.nonce);
+  return record.eventDataText === input.canonicalText
+    && record.documentId === input.documentId;
 }
 
 /**

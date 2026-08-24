@@ -217,7 +217,7 @@ export function durableMutationVariant({
         const scope = withHandle.scope;
         const seq = nextSeq(scope);
         const data = resolveNowTokens(withHandle.data ?? {}, now);
-        const ev = { ...withHandle, data, seq, actionId, committedAt: now };
+        const ev = { ...withHandle, data, seq, actionId, committedAt: now, ...(withHandle.v16Capability !== undefined ? { v16Capability: withHandle.v16Capability } : {}) };
         finalizedEvents.push(eventWithHandle(ev, withHandle.handle));
       }
       appendEvents(db as DbHandle, finalizedEvents);
@@ -1001,6 +1001,12 @@ async function commitEvents(db: any, events: any, {
               type: operatedHandle.type,
               scope: plan.owningScope,
               data: Object.freeze(plan.envelope),
+              // W1b (#149 round 2): single-use v16 admission nonce. The
+              // NOW-token deep copy below strips the envelope's symbol brand,
+              // so the capability rides the event frame and is consumed
+              // exactly once by committed-log's append. Opaque; minted only
+              // by the v16 constructor inside admitAndPlan.
+              v16Capability: plan.v16Capability,
             })],
             privateFact: constructCompoundOriginEnvelope({
               application: { before: applicationTransition.before, after: applicationTransition.after },
