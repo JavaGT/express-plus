@@ -10,17 +10,20 @@ import { performance } from 'node:perf_hooks';
 
 import workbench, {
   annotatedText, annotation, entity, everyone, executeDDL, executeFrameworkDDL,
-  grant, read, ref, scope, write,
+  grant, number as numberField, protectingAnnotation, read, ref, scope, write,
 } from '../build/internal.mjs';
 import { defineSqliteSchema } from '../build/server.mjs';
 import { createLiveFanout } from '../build/live-fanout.mjs';
 import { projectAnnotatedTextSnapshot } from '../build/annotated-text-snapshot.mjs';
+import { restoreTextFamilySerialized, resolveOffsetToEndpoint } from '../build/annotated-text-continuous.mjs';
+import { canonicalEndpointJSON } from '../build/annotated-text-storage.mjs';
 import { createLiveDeliverySession } from '../public/workbench-client.mjs';
 
 const RECIPIENTS = 25;
 const CONTROLS = 50;
 const WORDS = Number(process.env.ANNOTATED_TEXT_BENCH_WORDS ?? 36_000);
 const ANNOTATIONS_PER_WORD = Number(process.env.ANNOTATED_TEXT_BENCH_ANNOTATIONS_PER_WORD ?? 2);
+const PROTECTED_WORDS = 100;
 
 function percentile(values, p) {
   if (values.length === 0) return 0;
@@ -59,7 +62,15 @@ function declaredEntity() {
     body: annotatedText({
       project: 'project',
       owner: 'owner',
-      annotations: [annotation('note', { fields: {} })],
+      annotations: [
+        annotation('timing', { fields: { startMs: numberField(), durationMs: numberField() } }),
+        annotation('transcriptionUncertainty', { fields: { uncertainty: numberField() } }),
+        protectingAnnotation('confidential', {
+          protects: 'transcriptionUncertainty',
+          placeholder: '[REDACTED]',
+          access: async ({ is }) => (await is.owner()) ? grant(read) : grant(),
+        }),
+      ],
     }),
     grant: [scope(() => everyone()).can(() => grant(read, write))],
   });
@@ -87,7 +98,6 @@ function wordText(count) {
 async function seedDocument(app, db) {
   const text = wordText(WORDS);
   const annotationCount = WORDS * ANNOTATIONS_PER_WORD;
-  const initialAnnotationCount = Math.min(annotationCount, 4096);
   const words = text.split(' ');
   const offsets = [];
   let offset = 0;
@@ -106,56 +116,103 @@ async function seedDocument(app, db) {
       body: {
         version: 1,
         blocks: [{ text }],
-        ranges: Array.from({ length: initialAnnotationCount }, (_, index) => {
-          const word = index % WORDS;
-          const start = offsets[word];
-          const end = start + `w${word.toString(36)}`.length;
-          return { annotationId: `n${index}`, family: 'note', start, end };
-        }),
+        ranges: [],
       },
     },
     principal: { id: 'u1' },
   });
   if (!created.ok) throw new Error(created.failure?.message ?? 'seed failed');
-  if (annotationCount > initialAnnotationCount) {
-    const ranges = db.prepare('SELECT id FROM BenchDoc_body_range ORDER BY id').all();
-    if (ranges.length === 0) throw new Error('direct annotation seed requires at least one canonical range');
-    const insertAnnotation = db.prepare(
-      'INSERT INTO BenchDoc_body_annotation (id, document_id, project_id, owner_id, family) VALUES (?, ?, ?, ?, ?)',
-    );
-    const insertNote = db.prepare('INSERT INTO BenchDoc_body_annotation_note (annotation_id) VALUES (?)');
-    const insertMembership = db.prepare(
-      'INSERT INTO BenchDoc_body_membership (annotation_id, range_id, document_id, ordinal) VALUES (?, ?, ?, 0)',
-    );
-    db.exec('BEGIN');
-    try {
-      for (let index = initialAnnotationCount; index < annotationCount; index += 1) {
-        const annotationId = `n${index}`;
-        insertAnnotation.run(annotationId, 'd1', 'p1', 'u1', 'note');
-        insertNote.run(annotationId);
-        insertMembership.run(annotationId, ranges[index % ranges.length].id, 'd1');
-      }
-      db.exec('COMMIT');
-    } catch (error) {
-      db.exec('ROLLBACK');
-      throw error;
+  const checkpoint = db.prepare("SELECT family_checkpoint FROM BenchDoc_body_state WHERE document_id = 'd1'").get().family_checkpoint;
+  const family = restoreTextFamilySerialized(checkpoint);
+  const insertAnnotation = db.prepare(
+    'INSERT INTO BenchDoc_body_annotation (id, document_id, project_id, owner_id, family) VALUES (?, ?, ?, ?, ?)',
+  );
+  const insertTiming = db.prepare(
+    'INSERT INTO BenchDoc_body_annotation_timing (annotation_id, startMs, durationMs) VALUES (?, ?, ?)',
+  );
+  const insertUncertainty = db.prepare(
+    'INSERT INTO BenchDoc_body_annotation_transcriptionUncertainty (annotation_id, uncertainty) VALUES (?, ?)',
+  );
+  const insertConfidential = db.prepare('INSERT INTO BenchDoc_body_annotation_confidential (annotation_id) VALUES (?)');
+  const insertRange = db.prepare(
+    'INSERT INTO BenchDoc_body_range (document_id, start_point, end_point) VALUES (?, ?, ?) RETURNING id',
+  );
+  const insertMembership = db.prepare(
+    'INSERT INTO BenchDoc_body_membership (annotation_id, range_id, document_id, ordinal) VALUES (?, ?, ?, 0)',
+  );
+  const insertProtectedTarget = db.prepare(
+    'INSERT INTO BenchDoc_body_annotation_protected_target (annotation_id, target_annotation_id) VALUES (?, ?)',
+  );
+  const rangeIds = [];
+  db.exec('BEGIN');
+  try {
+    for (let index = 0; index < WORDS; index += 1) {
+      const suffix = String(index).padStart(5, '0');
+      const timingId = `timing-${suffix}`;
+      const uncertaintyId = `uncertainty-${suffix}`;
+      const start = offsets[index];
+      const end = start + words[index].length;
+      const startPoint = resolveOffsetToEndpoint(family, start, family.checkpoint.frontier, 'left');
+      const endPoint = resolveOffsetToEndpoint(family, end, family.checkpoint.frontier, 'right');
+      const rangeId = insertRange.get('d1', canonicalEndpointJSON(startPoint), canonicalEndpointJSON(endPoint)).id;
+      rangeIds.push(rangeId);
+      insertAnnotation.run(timingId, 'd1', 'p1', 'u1', 'timing');
+      insertTiming.run(timingId, index * 100, 80);
+      insertMembership.run(timingId, rangeId, 'd1');
+      insertAnnotation.run(uncertaintyId, 'd1', 'p1', 'u1', 'transcriptionUncertainty');
+      insertUncertainty.run(uncertaintyId, index % 10 / 10);
+      insertMembership.run(uncertaintyId, rangeId, 'd1');
     }
+    insertAnnotation.run('confidential-prefix', 'd1', 'p1', 'u1', 'confidential');
+    insertConfidential.run('confidential-prefix');
+    for (let index = 0; index < Math.min(PROTECTED_WORDS, WORDS); index += 1) {
+      insertProtectedTarget.run('confidential-prefix', `uncertainty-${String(index).padStart(5, '0')}`);
+    }
+    const protectedEnd = offsets[Math.min(PROTECTED_WORDS, WORDS)] ?? text.length;
+    const protectorRangeId = insertRange.get(
+      'd1',
+      canonicalEndpointJSON(resolveOffsetToEndpoint(family, 0, family.checkpoint.frontier, 'left')),
+      canonicalEndpointJSON(resolveOffsetToEndpoint(family, protectedEnd, family.checkpoint.frontier, 'right')),
+    ).id;
+    insertMembership.run('confidential-prefix', protectorRangeId, 'd1');
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
   }
-  return db.prepare("SELECT * FROM BenchDoc WHERE id = 'd1'").get();
+  return {
+    row: db.prepare("SELECT * FROM BenchDoc WHERE id = 'd1'").get(),
+    text,
+    protectedText: text.slice(0, offsets[Math.min(PROTECTED_WORDS, WORDS)] ?? text.length),
+    annotationCount,
+    uniqueRanges: rangeIds.length + 1,
+  };
 }
 
-async function measureProjection(db, BenchDoc, row, principal) {
+async function measureProjection(db, BenchDoc, fixture, principal, visible) {
   const started = performance.now();
-  await projectAnnotatedTextSnapshot({
+  const snapshot = await projectAnnotatedTextSnapshot({
     db,
     entity: BenchDoc,
-    row,
+    row: fixture.row,
     principal,
     fieldName: 'body',
     descriptor: BenchDoc.fields.body,
     mintBasis: false,
   });
-  return performance.now() - started;
+  const duration = performance.now() - started;
+  if (visible) {
+    if (snapshot.text !== fixture.text || snapshot.annotations.length !== fixture.annotationCount) {
+      throw new Error('visible recipient did not receive the complete timing/uncertainty state');
+    }
+  } else {
+    if (!Array.isArray(snapshot.redactions) || snapshot.redactions.length !== 1 || snapshot.text.includes(fixture.protectedText)
+      || snapshot.annotations.some((entry) => entry.id === 'uncertainty-00000')
+      || snapshot.annotations.some((entry) => entry.family === 'confidential')) {
+      throw new Error('redacted recipient received protected text or canonical annotation facts');
+    }
+  }
+  return duration;
 }
 
 async function measureFanoutCoalescing() {
@@ -261,7 +318,7 @@ const originalHash = createHash;
 void originalHash;
 
 async function main() {
-  const rssBefore = process.memoryUsage().rss;
+  const rssAtStart = process.memoryUsage().rss;
   const db = new DatabaseSync(':memory:');
   install(db);
   const BenchDoc = declaredEntity();
@@ -272,12 +329,20 @@ async function main() {
   }), entities: [BenchDoc] });
   app.start();
   await app.ready;
-  const row = await seedDocument(app, db);
+  const fixture = await seedDocument(app, db);
+  // The acceptance delta measures projection/recovery over the fully seeded
+  // fixture baseline; fixture construction is reported separately.
+  const rssBefore = process.memoryUsage().rss;
 
   const projectionSamples = [];
+  const visibleSamples = [];
+  const redactedSamples = [];
   for (let i = 0; i < RECIPIENTS; i += 1) {
     if (coordinatorHeld.value) throw new Error('snapshot work held the write coordinator');
-    projectionSamples.push(await measureProjection(db, BenchDoc, row, { id: i < 13 ? 'u1' : `viewer-${i}` }));
+    const visible = i < 13;
+    const duration = await measureProjection(db, BenchDoc, fixture, { id: visible ? 'u1' : `viewer-${i}` }, visible);
+    projectionSamples.push(duration);
+    (visible ? visibleSamples : redactedSamples).push(duration);
   }
 
   const fanout = await measureFanoutCoalescing();
@@ -290,10 +355,21 @@ async function main() {
     recordedAt: new Date().toISOString(),
     node: process.version,
     platform: `${process.platform}/${process.arch}`,
-    fixture: { words: WORDS, annotations: WORDS * ANNOTATIONS_PER_WORD, recipients: RECIPIENTS, controls: CONTROLS },
+    fixture: {
+      words: WORDS,
+      annotations: fixture.annotationCount,
+      uniqueRanges: fixture.uniqueRanges,
+      protectingAnnotations: 1,
+      visibleRecipients: visibleSamples.length,
+      redactedRecipients: redactedSamples.length,
+      recipients: RECIPIENTS,
+      controls: CONTROLS,
+    },
     fanout: { p99LoopDelayMs: Number(fanout.p99.toFixed(3)), coalescedMessages: fanout.messages },
     projections: {
       p95Ms: Number(percentile(projectionSamples, 95).toFixed(3)),
+      visibleP95Ms: Number(percentile(visibleSamples, 95).toFixed(3)),
+      redactedP95Ms: Number(percentile(redactedSamples, 95).toFixed(3)),
       samples: projectionSamples.map((value) => Number(value.toFixed(3))),
     },
     budget: {
@@ -301,6 +377,7 @@ async function main() {
       C1: oneReconnect,
     },
     rssDeltaMiB: Number(rssDeltaMiB.toFixed(2)),
+    fixtureSetupRssMiB: Number(((rssBefore - rssAtStart) / (1024 * 1024)).toFixed(2)),
     writeCoordinatorHeld: coordinatorHeld.value,
   };
 
