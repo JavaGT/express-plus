@@ -850,6 +850,10 @@ export class LiveList {
     this._renderCallbacks = new Set();
     this._ordered = {};             // { [field]: [{id, key, item}] } — internal ordered tracking
     this._textStates = {};          // durable annotated-text reducer state by field
+    // Fields folded since the last render tick whose materialized text is
+    // stale. Rematerialized once per render (see _flushDirtyTextFields) so a
+    // resync replay of N ops costs one tree rebuild, not N.
+    this._dirtyTextFields = new Set();
     this._textReducerReady = Promise.resolve();
     this._removed = false;
 
@@ -936,6 +940,7 @@ export class LiveList {
       this._assertActive(epoch);
 
       // 5. Render initial state, then resolve.
+      this._flushDirtyTextFields();
       this._render();
       this._readyResolve();
     } catch (err) {
@@ -1079,6 +1084,7 @@ export class LiveList {
     this._removed = true;
     this._ordered = {};
     this._textStates = {};
+    this._dirtyTextFields.clear();
     this._textReducerReady = Promise.resolve();
     this._bufferOverflow = false;
     this._snapshotRequiredSeq = 0;
@@ -1116,6 +1122,7 @@ export class LiveList {
     this._installTextReducers(reducers);
     this._applyEvent(event, delta);
     this._cursor = decision.cursor;
+    this._flushDirtyTextFields();
     this._render();
   }
 
@@ -1156,6 +1163,7 @@ export class LiveList {
         this._removed = true;
         this._ordered = {};
         this._textStates = {};
+        this._dirtyTextFields.clear();
         this._textReducerReady = Promise.resolve();
         this._bufferOverflow = false;
         this._queue = [];
@@ -1172,6 +1180,7 @@ export class LiveList {
         this._cursor = seq;
         this._removed = false;
         this._ordered = {};
+        this._dirtyTextFields.clear();
         this._bufferOverflow = false;
         if (this._cursor < this._snapshotRequiredSeq) {
           failed = true;
@@ -1217,6 +1226,9 @@ export class LiveList {
     this._snapshotRecovery = false;
     if (this._closed || epoch !== this._epoch) return;
     if (failed) {
+      // Discard pending rematerializations from a partially-folded batch —
+      // the retry refolds from the cursor, so stale marks must not leak.
+      this._dirtyTextFields.clear();
       this._forceSnapshotRequested = this._forceSnapshotRequested || snapshotRequested;
       this._scheduleResync();
       return;
@@ -1235,6 +1247,7 @@ export class LiveList {
     }
     await this._textReducerReady;
 
+    this._flushDirtyTextFields();
     this._render();
   }
 
@@ -1296,6 +1309,9 @@ export class LiveList {
         this._state = { ...event.data };
         this._removed = false;
         this._ordered = {};
+        // Whole-state replacement: pending rematerializations refer to the
+        // discarded state object and must not overwrite the new one.
+        this._dirtyTextFields.clear();
         break;
 
       case 'updated': {
@@ -1328,6 +1344,8 @@ export class LiveList {
       case 'removed':
         this._state = null;
         this._removed = true;
+        // Nothing may resurrect a field onto a removed row's null state.
+        this._dirtyTextFields.clear();
         break;
     }
   }
@@ -1394,7 +1412,9 @@ export class LiveList {
         const state = this._textStates[field] ?? createTextState();
         const next = applyTextOp(state, operation);
         this._textStates[field] = next;
-        this._state[field] = materializeText(next);
+        // Defer materialization to the render tick — folding N ops before one
+        // render rebuilds the text tree once, not once per op.
+        this._dirtyTextFields.add(field);
         this._observeTextReducer({
           entity: this._entity, id: this._id, field,
           state: next, operation,
@@ -1494,10 +1514,33 @@ export class LiveList {
     this._state[field] = this._ordered[field].map(e => e.item);
   }
 
+  /**
+   * Rebuild materialized text for fields folded since the last render tick.
+   * Called at every point where state becomes observable (before _render), so
+   * observers never see a stale string; between ticks the fold path only marks
+   * fields dirty, which is what makes N-op replays cost one rebuild.
+   */
+  _flushDirtyTextFields() {
+    if (this._state == null || this._dirtyTextFields.size === 0) return;
+    for (const field of this._dirtyTextFields) {
+      this._rematerializeTextField(field);
+    }
+    this._dirtyTextFields.clear();
+  }
+
+  /** Materialize one field's folded text state into public view. */
+  _rematerializeTextField(field) {
+    this._state[field] = materializeText(this._textStates[field]);
+  }
+
   _installTextReducers(reducers) {
     for (const reducer of reducers ?? []) {
       if (reducer?.entity !== this._entity || String(reducer.id) !== String(this._id)
         || reducer.reducer !== 'workbench.text' || reducer.version !== 1) continue;
+      // A reinstalled checkpoint replaces the fold state wholesale; drop any
+      // pending rematerialization so the stale mark can't overwrite the
+      // snapshot's authoritative value for this field.
+      this._dirtyTextFields.delete(reducer.field);
       this._textStates[reducer.field] = restoreTextCheckpoint(reducer.checkpoint);
       this._observeTextReducer({
         entity: this._entity, id: this._id, field: reducer.field,

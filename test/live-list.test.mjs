@@ -2,7 +2,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { LiveList } from '../public/workbench-client.mjs';
-import { applyTextOp, createTextState, textCheckpoint } from '../build/annotated-text.mjs';
+import { applyTextOp, createTextState, materializeText, textCheckpoint } from '../build/annotated-text.mjs';
+import { insertText } from '../public/workbench-text-edit.mjs';
 import { makeFakeChannel, makeFakeFetch } from './fixtures/fake-transport.mjs';
 
 const TEXT_ACTOR = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -367,6 +368,91 @@ describe('LiveList', () => {
     await list.subscribe();
     assert.equal(list.cursor, 2);
     assert.equal(list.state.body, 'hello');
+  });
+
+  // --- 6a-batch (#126): resync catch-up folds every pending applied op before
+  // the render tick, so the text tree is rebuilt once per batch — not once per
+  // row — while publishes and final state stay exactly as before.
+  /** Build N chained append operations ('1'..'N' appended in order) plus the reference fold. */
+  function sequentialInsertOps(count) {
+    let state = createTextState();
+    const ops = [];
+    for (let index = 1; index <= count; index += 1) {
+      const operation = insertText(state, { actor: TEXT_ACTOR, counter: index, lamport: index }, index - 1, String(index));
+      ops.push(operation);
+      state = applyTextOp(state, operation);
+    }
+    return { ops, reference: materializeText(state) };
+  }
+
+  it('resync replay folds N applied ops with one rematerialization and one publish', async () => {
+    const { ops, reference } = sequentialInsertOps(5);
+    const channel = makeFakeChannel();
+    channel._setAck({ currentSeq: ops.length });
+    const fetch = makeFakeFetch([
+      { match: '/snapshot', response: { snapshot: { id: '1', body: '' }, seq: 0 } },
+      { match: '/events', response: {
+        events: ops.map((operation, index) => ({
+          seq: index + 1, type: 'Doc.body.applied', data: { id: '1', operation },
+        })),
+      } },
+    ]);
+
+    // Spy on the rematerialization seam — batching must collapse N folds into
+    // exactly one rebuild for the whole catch-up batch.
+    let rematerializations = 0;
+    const original = LiveList.prototype._rematerializeTextField;
+    LiveList.prototype._rematerializeTextField = function (field) {
+      rematerializations += 1;
+      return original.call(this, field);
+    };
+
+    try {
+      const list = new LiveList({ entity: 'Doc', id: '1', channel, fetchImpl: fetch, snapshotUrl: () => '/snapshot', eventsSinceUrl: () => '/events' });
+      const renders = [];
+      list.onRender((state) => renders.push(state));
+      await list.subscribe();
+
+      assert.equal(rematerializations, 1, `expected one rematerialization for the ${ops.length}-op replay`);
+      assert.equal(renders.length, 2); // resync-completion render + bootstrap render
+      assert.deepEqual(renders.at(-1), { id: '1', body: reference }, 'published state matches the reference fold');
+      assert.equal(list.cursor, ops.length);
+      await list.close();
+    } finally {
+      LiveList.prototype._rematerializeTextField = original;
+    }
+  });
+
+  it('live applied envelopes keep per-event rematerialization and render semantics', async () => {
+    const { ops } = sequentialInsertOps(3);
+    const channel = makeFakeChannel();
+    channel._setAck({ currentSeq: 0 });
+    const fetch = makeFakeFetch([
+      { match: '/snapshot', response: { snapshot: { id: '1', body: '' }, seq: 0 } },
+    ]);
+    const list = new LiveList({ entity: 'Doc', id: '1', channel, fetchImpl: fetch, snapshotUrl: () => '/snapshot', eventsSinceUrl: () => '/events' });
+    await list.subscribe();
+
+    let rematerializations = 0;
+    const renders = [];
+    const original = LiveList.prototype._rematerializeTextField;
+    LiveList.prototype._rematerializeTextField = function (field) {
+      rematerializations += 1;
+      return original.call(this, field);
+    };
+    list.onRender((state) => renders.push(state));
+
+    try {
+      ops.forEach((operation, index) => {
+        channel.emit({ type: 'event', entity: 'Doc', id: '1', seq: index + 1, seqSpan: [index + 1, index + 1], event: { type: 'Doc.body.applied', data: { id: '1', operation } } });
+      });
+      assert.equal(rematerializations, 3, 'one rebuild per live envelope — publish semantics unchanged');
+      assert.equal(renders.length, 3);
+      assert.equal(list.state.body, '123');
+      await list.close();
+    } finally {
+      LiveList.prototype._rematerializeTextField = original;
+    }
   });
 
   // --- 6b. Value-XOR-delta: a field present in delta must NOT ALSO be
