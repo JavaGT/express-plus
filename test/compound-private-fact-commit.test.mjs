@@ -107,7 +107,7 @@ function liveFamily(db) {
 }
 
 // Build a region.edit descriptor against the current live DB state.
-function currentDescriptor(db, { from, to, replacement, transitions = [] }) {
+function currentDescriptor(db, { from, to, replacement, transitions = [], id = 'doc-1' }) {
   const family = liveFamily(db);
   const baseImages = loadAnnotationImages(db, {
     prefix: 'Transcript_body',
@@ -139,7 +139,7 @@ function currentDescriptor(db, { from, to, replacement, transitions = [] }) {
   return {
     version: 10,
     kind: 'region.edit',
-    id: 'doc-1',
+    id,
     basis: textFamilyBasis(family),
     from,
     to,
@@ -323,6 +323,49 @@ test('undeclared operations fail closed at app assembly', async () => {
     }],
   });
   await assert.rejects(app.start(), /annotatedTextOperation handles/);
+  db.close();
+});
+
+test('foreign-field annotated operation is rejected inside the transaction', async () => {
+  // The declared operation binds one entity/field handle. A handler returning
+  // a descriptor bound to a DIFFERENT handle's region grammar must fail closed
+  // inside admitAndPlan — the descriptor's document id does not match the
+  // declared entity's document, so the planner rejects before any write.
+  const db = new DatabaseSync(':memory:');
+  installSchema(db);
+  installCorrectionLedger(db);
+  seedDocument(db, { text: 'hello world', annotations: [] });
+  const region = makeRegionHandle();
+  const app = workbench({
+    db,
+    schema: compoundSchema,
+    entities: [declaredEntity()],
+    actions: [{
+      type: 'correction.apply',
+      authorize: () => true,
+      operations: [region],
+      handler: () => {
+        // A descriptor naming a document that is not a row of the DECLARED
+        // entity (it lives in a foreign entity's table) must fail closed inside
+        // admitAndPlan: the planner reads the declared entity's row and rejects
+        // before any write — no ambient foreign-field authority.
+        const descriptor = currentDescriptor(db, { from: 0, to: 5, replacement: 'hallo', transitions: [], id: 'foreign-doc-9' });
+        return {
+          events: [],
+          annotatedText: [region.region(descriptor)],
+          applicationTransition: { before: null, after: { x: 1 } },
+        };
+      },
+    }],
+  });
+  await app.start();
+  const baseline = tableCounts(db);
+  const result = await app.dispatch({
+    actionId: 'composed-foreign', type: 'correction.apply', scope: 'Project:p1',
+    payload: { id: 'doc-1' }, principal: { type: 'user', id: 'u1', attributes: {} },
+  });
+  assert.equal(result.ok, false, result.failure?.message);
+  assertNoNewWrites(db, baseline);
   db.close();
 });
 
