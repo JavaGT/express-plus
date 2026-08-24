@@ -98,9 +98,7 @@ export function attachApplicationLiveDelivery(app: ApplicationLiveApp, {
   // Composite patch plans (#122) come from the owned delivery's single
   // compilation of the declared snapshots; the commit pipeline routes journal
   // entries from them. No snapshots → undefined → pipeline skips journaling.
-  const compositeJournal = (owned as unknown as { patchPlans?: ReadonlyMap<string, unknown> }).patchPlans?.size
-    ? { plans: (owned as unknown as { patchPlans: ReadonlyMap<string, unknown> }).patchPlans }
-    : undefined;
+  const compositeJournal = owned.patchPlans?.size ? { plans: owned.patchPlans } : undefined;
   app._compositeJournalPlans = compositeJournal?.plans ?? null;
   app._compositePatchLane = createCompositePatchDelivery({
     db: app.db as never,

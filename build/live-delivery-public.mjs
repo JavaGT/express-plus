@@ -13,6 +13,8 @@ import { invalidationRecovery } from './invalidation-ledger.mjs';
 import { readSnapshotTxn } from './driver.mjs';
 import { compileSnapshots, captureSnapshot, authorizeSnapshot, projectSnapshot } from './snapshot-projection.mjs';
 import { compilePatchPlans } from './composite-patch-plan.mjs';
+
+import { createCompositePatchDelivery, parseRequestedCapabilities, SNAPSHOT_PATCH_CAPABILITY } from './composite-patch-delivery.mjs';
 import { hasAnnotatedTextFields, projectEntitySnapshot } from './entity-snapshot-projection.mjs';
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
 import { rawRow } from './entity/query.mjs';
@@ -153,6 +155,12 @@ function jsonSnapshot(value         , path = 'snapshot', ancestors = new Set    
 
 
 
+                                        
+
+
+
+
+
 
 
 
@@ -188,7 +196,7 @@ function jsonSnapshot(value         , path = 'snapshot', ancestors = new Set    
 // factory below deliberately returns only the delivery protocol; application
 // lifecycle wiring retains the committed consumer, the shared core (which the
 // WebSocket transport presents over the same authority), and shutdown.
-export function createOwnedLiveDelivery({ db, entities, mayVerb, authorization, snapshots, principalSnapshots, principalSnapshotAuthorize, schema, log = null, maxCatchupEvents = 1000, includeActionId = true }                          )                                                                                                                                                 {
+export function createOwnedLiveDelivery({ db, entities, mayVerb, authorization, snapshots, principalSnapshots, principalSnapshotAuthorize, schema, log = null, maxCatchupEvents = 1000, includeActionId = true }                          )                                                                                                                                                                                                   {
   if (!Number.isSafeInteger(maxCatchupEvents) || maxCatchupEvents < 1) throw new TypeError('maxCatchupEvents must be a positive safe integer');
   const resolveEntity = typeof entities === 'function' ? entities : (name        ) => entities.get(name);
   const composites = compileSnapshots(snapshots, resolveEntity, db         )                                ;
@@ -202,6 +210,16 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, authorization, 
     ? createPrincipalSnapshotDelivery({ db: db         , declarations: principalSnapshots         , authorize: principalSnapshotAuthorize })
     : null;
   const requiredEntities = composites.requiredEntities ?? new Set();
+  // Composite patch lane (#122): derived from the SAME compiled declarations.
+  // Null without snapshots; engages only for callers presenting the
+  // unadvertised snapshot-patch capability (rollout step 1).
+  const patchDelivery = createCompositePatchDelivery({
+    db: db         ,
+    composites: composites         ,
+    mayVerb,
+    authorization,
+    includeActionId,
+  });
 
   // A composite snapshot output reads a bounded set of member fields. Resync is
   // only warranted when a committed event can change one of those fields (or the
@@ -232,7 +250,7 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, authorization, 
     }
     return mayRow(entity         , 'subscribe', row, principal, mayVerb         );
   }
-  async function aggregateSnapshot({ principal, scope, declaration }                                                                           )                                 {
+  async function aggregateSnapshot({ principal, scope, declaration, patchCapable = false }                                                                                                   )                                 {
     const handle = tryParseScopeKey(scope);
     // No transaction crosses authorization awaits. Each attempt detaches a
     // complete candidate graph and its two committed fences before authorizing.
@@ -257,6 +275,14 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, authorization, 
       if (!auth.anchorAllowed) return { kind: 'revoked' };
       const value = jsonSnapshot(projectSnapshot({ anchor: declaration.anchor         , candidate: captured .candidate         , output: declaration.output         , authorized: auth.authorized }));
       if (readSeq(db, scope) === captured .anchor && aggregateRevision() === captured .aggregate) {
+        // Patch-capable bootstrap (#122 §8): register the recipient visibility
+        // ledger from the projected value and mint the bootstrap token. The
+        // snapshot itself is IDENTICAL to the legacy path — negotiation only
+        // adds the opaque handle.
+        if (patchCapable && patchDelivery) {
+          const patched = await patchDelivery.bootstrapFromSnapshot({ principal, scope, snapshotValue: value                           , anchorCursor: captured .anchor });
+          return patched                                    ;
+        }
         return Object.freeze({ kind: 'snapshot', snapshot: value, cursor: Object.freeze({ anchor: captured .anchor, aggregate: captured .aggregate }) })                                    ;
       }
       await Promise.resolve();
@@ -423,7 +449,7 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, authorization, 
         },
       }));
     },
-    async bootstrap({ principal, scope, document = null }                                                                                  )                                 {
+    async bootstrap({ principal, scope, document = null, capabilities }                                                                                                                    )                                 {
       if (isPrincipalSnapshotScope(scope)) {
         return principalDelivery
           ? principalDelivery.bootstrap({ principal: principal         , scope })
@@ -475,7 +501,7 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, authorization, 
       // The declaration is selected by the package scope grammar, before the
       // core pairs its synchronous result with the committed cursor.
       const aggregate = handle && composites.get(handle.entity);
-      if (aggregate) return aggregateSnapshot({ principal, scope, declaration: aggregate });
+      if (aggregate) return aggregateSnapshot({ principal, scope, declaration: aggregate, patchCapable: parseRequestedCapabilities(capabilities).patchCapable });
       const result = await core.bootstrap({
         principal,
         scope,
@@ -489,7 +515,7 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, authorization, 
       });
        return result;
     },
-    async catchup(input                                                                                                        )                               {
+    async catchup(input                                                                                                                                                                    )                               {
       if (isPrincipalSnapshotScope(input.scope)) {
         return principalDelivery
           ? principalDelivery.catchup(input         )
@@ -526,6 +552,22 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, authorization, 
       const declaration = handle && composites.get(handle.entity);
       if (declaration) {
         const cursor = input.after;
+        // Patch-capable catch-up (#122 §10): token + journal replay. ANY
+        // fallback returns the full authorized snapshot — never a partial.
+        const patchRequest = parseRequestedCapabilities((input                              ).capabilities);
+        if (patchRequest.patchCapable && patchDelivery && cursor && typeof cursor === 'object' && 'composite' in cursor && typeof (cursor                           ).composite === 'number' && typeof input.projectionToken === 'string') {
+          if (typeof cursor.anchor !== 'number') return this.bootstrap({ principal: input.principal, scope: input.scope, capabilities: input.capabilities });
+          const outcome = await patchDelivery.catchupWithPatches({
+            principal: input.principal,
+            scope: input.scope,
+            after: cursor                                         ,
+            projectionToken: input.projectionToken,
+          });
+          if (outcome.kind === 'catchup') return { kind: 'catchup', envelopes: outcome.envelopes, cursor: outcome.cursor }                                  ;
+          if (outcome.kind === 'revoked') return { kind: 'revoked' };
+          void outcome.reason;
+          return this.bootstrap({ principal: input.principal, scope: input.scope, capabilities: input.capabilities });
+        }
         if (!cursor || typeof cursor !== 'object' || cursor.aggregate !== aggregateRevision()) {
           return this.bootstrap({ principal: input.principal, scope: input.scope });
         }
@@ -605,6 +647,7 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, authorization, 
     close()       {
       core.close();
       principalDelivery?.close();
+      patchDelivery?.close();
     },
     // The committed-event core behind the public delivery protocol. The
     // WebSocket transport consumes this SAME authority, so SSE and WebSocket

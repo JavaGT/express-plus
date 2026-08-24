@@ -89,7 +89,8 @@ export class CompositePatchDelivery {
    * its already-authorized snapshot value), then register the visibility
    * ledger and mint the first token.
    */
-  async bootstrapFromSnapshot({ principal, scope, snapshotValue, anchor }
+  async bootstrapFromSnapshot({ principal, scope, snapshotValue, anchorCursor }
+
 
 
 
@@ -97,15 +98,14 @@ export class CompositePatchDelivery {
 
    )                                {
     const handle = tryParseScopeKey(scope);
-    const plan = this.plans.get(handle .entity);
-    const declaration = this.composites.get(handle .entity);
-    if (!plan || !declaration) return { kind: 'revoked' };
+    const plan = handle ? this.plans.get(handle.entity) : null;
+    const declaration = handle ? this.composites.get(handle.entity         ) : undefined;
+    if (!handle || !plan || !declaration) return { kind: 'revoked' };
     // Derive visibility from the projected value itself — one walk against the
     // plan; identical semantics to the projector's post-patch derivation.
     const visible = deriveVisibilityExport(plan, snapshotValue);
-    const cursor                    = Object.freeze({ anchor: readSeq(this.db, scope), composite: currentCompositeSeq(this.db, scope) });
+    const cursor                    = Object.freeze({ anchor: anchorCursor, composite: currentCompositeSeq(this.db, scope) });
     const { projectionToken } = this.ledger.register({ principal, scope, planVersion: plan.version, cursor, visible });
-    void anchor;
     return {
       kind: 'snapshot',
       snapshot: snapshotValue,
