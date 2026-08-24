@@ -317,14 +317,51 @@ function applyAnnotatedTextOperation({ name, fields, handle, event, db }        
     throw new Error(`${name}.${handle.field}.operated event has no data`);
   }
   const canonical = normalizeOperatedEvent(data, { entity: name, field: handle.field });
-  return applyCanonicalAnnotatedTextOperation({ name, handle, db, descriptor, canonical, raw: data                                });
+  return applyCanonicalAnnotatedTextOperation({ name, handle, db, descriptor, canonical });
+}
+
+// Map a normalized canonical event to the loose reducer payload the v13/v14
+// replay reducers consume. The payload is derived ONLY from the canonical
+// boundary produced by normalizeOperatedEvent — the raw wire envelope is never
+// passed to a reducer, so replay has exactly one path. v15 region.edit is
+// applied directly from the canonical event and never goes through this map.
+function canonicalToReplayPayload(canonical                        )                   {
+  const version = canonical.wireVersion === 13 ? 13 : canonical.wireVersion === 14 ? 14 : 15;
+  let operation                               ;
+  switch (canonical.kind) {
+    case 'text.apply':
+      operation = Object.freeze({ kind: 'text.apply', operation: canonical.operation });
+      break;
+    case 'text.replace':
+      operation = Object.freeze({ kind: 'text.replace', operations: [...canonical.operations]                                   });
+      break;
+    case 'annotation.apply-range':
+      operation = Object.freeze({
+        kind: 'annotation.apply-range',
+        annotation: canonical.annotation                                       ,
+        selection: canonical.selection,
+      });
+      break;
+    case 'annotation.remove':
+      operation = Object.freeze({ kind: 'annotation.remove', annotationId: canonical.annotationId });
+      break;
+    default:
+      throw new Error('region.edit replayed events are applied from the canonical event, never through the replay payload');
+  }
+  return Object.freeze({
+    id: canonical.id,
+    version,
+    before: canonical.before                           ,
+    after: canonical.after                           ,
+    operation,
+    facts: canonical.facts                            ,
+  })                    ;
 }
 
 // Reducers consume the canonical event. They do not pick a kind from the wire
 // version — v13/v14 keep their existing family-proof checks, v15 uses the
 // shared region postimage reducer.
-export function applyCanonicalAnnotatedTextOperation({ name, handle, db, descriptor, canonical, raw }
-
+export function applyCanonicalAnnotatedTextOperation({ name, handle, db, descriptor, canonical }
 
 
 
@@ -332,14 +369,33 @@ export function applyCanonicalAnnotatedTextOperation({ name, handle, db, descrip
 
  ) {
   switch (canonical.kind) {
-    case 'text.apply': return projectBlocklessTextApply({ name, handle, db, data: raw });
-    case 'text.replace': return projectBlocklessTextReplace({ name, handle, db, data: raw });
-    case 'annotation.apply-range': return projectBlocklessAnnotationApplyRange({ name, handle, db, descriptor, data: raw });
-    case 'annotation.remove': return projectBlocklessAnnotationRemove({ name, handle, db, data: raw });
+    case 'text.apply':
+    case 'text.replace':
+    case 'annotation.apply-range':
+    case 'annotation.remove':
+      return projectFromCanonical({ name, handle, db, descriptor, canonical });
     case 'region.edit': return projectRegionEdit({ name, handle, db, descriptor, canonical });
     default: throw new Error(`${name}.${handle.field}.operated event has unknown operation kind`);
   }
 }
+
+function projectFromCanonical({ name, handle, db, descriptor, canonical }
+
+
+
+
+
+ ) {
+  const data = canonicalToReplayPayload(canonical);
+  switch (canonical.kind) {
+    case 'text.apply': return projectBlocklessTextApply({ name, handle, db, data });
+    case 'text.replace': return projectBlocklessTextReplace({ name, handle, db, data });
+    case 'annotation.apply-range': return projectBlocklessAnnotationApplyRange({ name, handle, db, descriptor, data });
+    case 'annotation.remove': return projectBlocklessAnnotationRemove({ name, handle, db, data });
+    default: throw new Error(`${name}.${handle.field}.operated event has unknown operation kind`);
+  }
+}
+
 
 function projectBlocklessTextApply({ name, handle, db, data }                                                                             ) {
   const prefix = `${name}_${handle.field}`;
