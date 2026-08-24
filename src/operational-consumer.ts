@@ -171,6 +171,8 @@ export function createOperationalConsumers(consumers: readonly unknown[] = [], {
 
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
   let stopped = false;
+  let reconciling = false;
+  let reconcileAgain = false;
 
   function clearRetryTimer() {
     if (retryTimer) clearTimeout(retryTimer);
@@ -258,6 +260,16 @@ export function createOperationalConsumers(consumers: readonly unknown[] = [], {
   }
 
   async function reconcile(db: DbHandle): Promise<void> {
+    // A consumer may dispatch another Workbench action (for example, a
+    // durable notification) while its current delivery is still in flight.
+    // The nested post-commit hook must not sweep the same cursor row again
+    // before the outer delivery has acknowledged it. Defer one follow-up
+    // sweep until the outer cursor update completes instead.
+    if (reconciling) {
+      reconcileAgain = true;
+      return;
+    }
+    reconciling = true;
     engage(db);
     try {
       for (const consumer of declared) {
@@ -267,7 +279,13 @@ export function createOperationalConsumers(consumers: readonly unknown[] = [], {
         });
       }
     } finally {
+      reconciling = false;
       armRetryScheduler(db);
+      if (reconcileAgain && !stopped) {
+        reconcileAgain = false;
+        const queued = writeQueue ? writeQueue.run(() => reconcile(db)) : Promise.resolve().then(() => reconcile(db));
+        queued.catch(() => {}).finally(() => armRetryScheduler(db));
+      }
     }
   }
 

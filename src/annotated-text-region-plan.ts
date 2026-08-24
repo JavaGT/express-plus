@@ -1,7 +1,8 @@
 // Pure field-owned planner for v10 region.edit (scope#992 W1).
 // Reads live family + complete affected closure, verifies basis/digests/IDs,
 // captures delete-contribution provenance through the existing codec, then
-// builds one v15 operated event via the shared postimage reducer. No DB writes.
+// builds one complete bounded witness via the shared postimage reducer and
+// proves it with assertCompleteRegionWitness BEFORE any commit. No DB writes.
 
 import { canonicalTextOp } from './annotated-text.ts';
 import type { Frontier } from './annotated-text.ts';
@@ -29,6 +30,8 @@ import {
   digestAffectedClosure,
   namedTransitionIds,
   reduceRegionPostimage,
+  regionDeclarationFingerprint,
+  assertCompleteRegionWitness,
   regionImageFromStored,
   type RegionAnnotationImage,
   type RegionDeclaration,
@@ -49,6 +52,8 @@ export type RegionPlan = Readonly<{
   textOperations: RegionTextOperations;
   postimage: RegionPostimage;
   contribution: DeleteFact | null;
+  /** SHA-256 over the compiled annotation declarations (v16 witness). */
+  declarationFingerprint: string;
 }>;
 
 function sameFrontier(left: unknown, right: unknown): boolean {
@@ -177,6 +182,17 @@ export function planRegionEdit({
     declarations,
     expectedBeforeDigest: descriptor.affectedClosureDigest,
   });
+  // One completeness predicate for planning and replay: overflow rejects the
+  // action here BEFORE the compound commit; a valid witness proceeds.
+  assertCompleteRegionWitness({
+    postimage,
+    liveAnnotations: images,
+    family,
+    from: descriptor.from,
+    to: descriptor.to,
+    namedIds: namedTransitionIds(descriptor),
+  });
+  const declarationFingerprint = regionDeclarationFingerprint(declarations);
 
   let contribution: DeleteFact | null = null;
   if (textOperations.kind !== 'none' && descriptor.from < descriptor.to) {
@@ -202,6 +218,7 @@ export function planRegionEdit({
     textOperations,
     postimage,
     contribution,
+    declarationFingerprint,
   });
 }
 

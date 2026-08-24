@@ -490,7 +490,14 @@ test('nested identity permutations have one digest and canonical postimage', () 
   };
   assert.equal(digestAffectedClosure(asImages([left])), digestAffectedClosure(asImages([right])));
 
-  const plan = planOf(family, [left], {
+  // v16 witness completeness requires every edge to resolve inside its own
+  // side's ID set, so the protected targets exist as live annotations here.
+  // They sit outside the edited span so both survive as note-1's targets.
+  const targets = [
+    stored(family, { id: 'target-a', start: 6, end: 8 }),
+    stored(family, { id: 'target-b', start: 9, end: 11 }),
+  ];
+  const plan = planOf(family, [left, ...targets], {
     from: 0,
     to: 5,
     replacement: 'hallo',

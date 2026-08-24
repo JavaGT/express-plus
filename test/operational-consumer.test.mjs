@@ -47,6 +47,47 @@ test('operational consumers receive only declared projected payload and trusted 
   assert.equal(delivered[0].metadata.actionId, 'action-1');
 });
 
+test('nested dispatch does not replay the current operational delivery before its cursor advances', async (t) => {
+  const delivered = [];
+  let app;
+  const nested = operationalConsumer({
+    name: 'nested.dispatch',
+    declarationVersion: 'v1',
+    projectionId: 'nested.v1',
+    effectId: 'nested.index.v1',
+    event: defineOperationalEvent({
+      eventType: 'Note.created',
+      fields: ['id', 'title'],
+      project: (fields, metadata) => ({ id: fields.id, title: fields.title, event: metadata.committedEventId })
+    }),
+    idempotencyKey: ({ metadata }) => `nested:${metadata.committedEventId}`,
+    handle: async (delivery) => {
+      delivered.push(delivery);
+      if (delivered.length === 1) {
+        const result = await app.dispatch({
+          actionId: 'nested-action',
+          type: 'Note.create',
+          payload: { id: 'nested-note', title: 'nested', secret: 'hidden' },
+          principal: principal({ type: 'user', id: 'u1' })
+        });
+        assert.equal(result.ok, true);
+      }
+      return { kind: 'ack' };
+    }
+  });
+  app = await appWith(t, [nested]);
+
+  const outcome = await app.dispatch({
+    actionId: 'outer-action',
+    type: 'Note.create',
+    payload: { id: 'outer-note', title: 'outer', secret: 'hidden' },
+    principal: principal({ type: 'user', id: 'u1' })
+  });
+
+  assert.equal(outcome.ok, true);
+  assert.deepEqual(delivered.map(({ payload }) => payload.id), ['outer-note', 'nested-note']);
+});
+
 test('terminal failures block progress until the sole retryFailure transition', async (t) => {
   const delivered = [];
   const app = await appWith(t, [consumer(delivered, true)]);
