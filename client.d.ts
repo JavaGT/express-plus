@@ -846,6 +846,8 @@ export interface AnnotatedTextHttpSession {
   readonly document: AnnotatedTextDocument | null;
   readonly family: unknown;
   readonly history: LiveDeliveryHistorySession;
+  /** Number of optimistic document operations not yet reconciled by ingest. */
+  pendingCount(): number;
   readonly status: LiveDeliverySession<AnnotatedTextDocument>['status'];
   readonly ready: Promise<void>;
   insert(input: { readonly mutationId?: string; readonly at: AnnotatedTextEditPosition; readonly text: string }): Promise<LiveDeliveryDispatchResult>;
