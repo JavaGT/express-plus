@@ -529,7 +529,7 @@ function assertWitnessSide(images                                  , label      
  * - created/removed IDs explain the set difference exactly;
  * - every edge resolves inside its own side's ID set (no dangling targets).
  * Throws ValidationError (`annotated-text-region-limit`) on overflow and
- * `region postimage disagrees with operated event` on incompleteness.
+ * `region witness disagrees with operated event` on incompleteness.
  */
 export function assertCompleteRegionWitness({
   postimage,
@@ -556,28 +556,31 @@ export function assertCompleteRegionWitness({
     to,
     namedIds,
   });
+  // digestAffectedClosure sorts and hashes every canonical field, so digest
+  // equality here IS exact before-closure equality (content and order).
   if (digestAffectedClosure(expectedBefore) !== postimage.beforeDigest
-    || JSON.stringify(sortAnnotations(expectedBefore)) !== JSON.stringify(postimage.beforeAnnotations)) {
+    || JSON.stringify(postimage.beforeAnnotations.map((image) => image.id))
+      !== JSON.stringify(postimage.affectedIds)) {
     throw new Error('region witness disagrees with operated event');
   }
 
   const beforeIds = new Set(postimage.beforeAnnotations.map((image) => image.id));
-  const afterIds = new Set(postimage.annotations.map((image) => image.id));
+  const afterById = new Map(postimage.annotations.map((image) => [image.id, image]));
   for (const id of postimage.affectedIds) {
     if (!beforeIds.has(id)) throw new Error('region witness disagrees with operated event');
   }
   for (const emptied of postimage.emptied) {
-    if (!beforeIds.has(emptied.annotationId) || afterIds.has(emptied.annotationId)) {
+    if (!beforeIds.has(emptied.annotationId) || afterById.has(emptied.annotationId)) {
       throw new Error('region witness disagrees with operated event');
     }
   }
   for (const image of postimage.beforeAnnotations) {
-    if (!afterIds.has(image.id) && !postimage.emptied.some((entry) => entry.annotationId === image.id)) {
+    if (!afterById.has(image.id) && !postimage.emptied.some((entry) => entry.annotationId === image.id)) {
       throw new Error('region witness disagrees with operated event');
     }
   }
   for (const targetId of postimage.annotations.flatMap((image) => image.protectedTargetIds)) {
-    if (!afterIds.has(targetId)) {
+    if (!afterById.has(targetId)) {
       throw new Error('region witness disagrees with operated event');
     }
   }
