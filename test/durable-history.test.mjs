@@ -7,7 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { durableHistory } from '../build/index.mjs';
 import workbench, { createServer, durableMutationVariant, executeFrameworkDDL } from '../build/internal.mjs';
-import { retentionPrune } from '../build/committed-log.mjs';
+import { retentionPrune, insertReceipt } from '../build/committed-log.mjs';
 
 const principal = Object.freeze({ type: 'user', id: 'u1', attributes: {} });
 const scope = 'Document:1';
@@ -987,4 +987,53 @@ test('malformed persisted cursor fails closed without a history write', async ()
   db.prepare("UPDATE _HistoryCursor SET past = 'not-json'").run();
   await assert.rejects(server.history.cursor({ scope, principal, session: 'tab-a' }));
   assert.equal(db.prepare('SELECT COUNT(*) count FROM _ActionReceipt').get().count, 1);
+});
+
+test('receipt history order is a per-scope monotonic counter that survives erasure (#124)', () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    executeFrameworkDDL(db);
+    // Pre-counter receipt rows — the shape an upgraded database already has.
+    const insertLegacy = db.prepare(
+      "INSERT INTO _ActionReceipt (scope, actionId, committedAt, eventRefs, historyOrder, operation) VALUES (?, ?, ?, '[]', ?, 'action')",
+    );
+    insertLegacy.run(scope, 'legacy-1', '2026-01-01T00:00:00.000Z', 1);
+    insertLegacy.run(scope, 'legacy-2', '2026-01-02T00:00:00.000Z', 2);
+    insertLegacy.run(scope, 'legacy-3', '2026-01-03T00:00:00.000Z', 3);
+
+    // The first post-upgrade commit seeds the counter from the retained maximum.
+    assert.equal(insertReceipt(db, scope, 'next-4', '2026-02-01T00:00:00.000Z', []), 4);
+
+    // Erasure deletes receipt rows outright (applyErasureDirective). Once the
+    // highest orders are gone, MAX+1 would hand their values out again — and
+    // keyset pagination (historyOrder > :after) has already consumed them as
+    // reader cursors. The counter must never reuse an allocated order.
+    db.prepare("DELETE FROM _ActionReceipt WHERE scope = ? AND actionId IN ('legacy-3', 'next-4')").run(scope);
+    assert.equal(insertReceipt(db, scope, 'next-5', '2026-03-01T00:00:00.000Z', []), 5);
+
+    // Scopes allocate independently from their own counter rows.
+    assert.equal(insertReceipt(db, 'Other:1', 'other-1', '2026-03-01T00:00:00.000Z', []), 1);
+
+    // Retained rows keep their allocation order.
+    assert.deepEqual(
+      db.prepare('SELECT actionId FROM _ActionReceipt WHERE scope = ? ORDER BY historyOrder').all(scope).map((row) => row.actionId),
+      ['legacy-1', 'legacy-2', 'next-5'],
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test('framework DDL migrates a (scope, historyOrder) receipt index for ordered history reads (#124)', () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    executeFrameworkDDL(db);
+    const hasScopeHistoryIndex = db.prepare('PRAGMA index_list(_ActionReceipt)').all().some((index) => {
+      const columns = db.prepare(`PRAGMA index_info("${String(index.name).replaceAll('"', '""')}")`).all().map((column) => column.name);
+      return columns.length === 2 && columns[0] === 'scope' && columns[1] === 'historyOrder';
+    });
+    assert.equal(hasScopeHistoryIndex, true);
+  } finally {
+    db.close();
+  }
 });

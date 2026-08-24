@@ -95,6 +95,31 @@ export function actionReceiptTableDDL() {
 );`;
 }
 
+// History-order allocation for _ActionReceipt (#124). A per-scope monotonic
+// counter row replaces SELECT MAX(historyOrder)+1, which read every retained
+// receipt for the scope inside each commit. The counter also preserves an
+// ordering guarantee that MAX()+1 loses under erasure: applyErasureDirective
+// deletes receipt rows, so the maximum can move BACKWARDS and a later commit
+// would reuse an order value already consumed by a reader's keyset pagination
+// cursor (historyOrder > :after). Counter values are strictly increasing over
+// time per scope, so surviving rows keep their relative order and no value is
+// ever reused. The row is seeded lazily from any pre-counter maximum, which
+// upgrades existing databases in place; after seeding, allocation is O(1).
+export function historyOrderCounterTableDDL() {
+  return `CREATE TABLE IF NOT EXISTS _HistoryOrderCounter (
+  scope TEXT PRIMARY KEY,
+  lastOrder INTEGER NOT NULL
+);`;
+}
+
+// Receipt history reads order by historyOrder within a scope (durable-history
+// keyset pagination, cursor reconstruction, erasure census). CREATE INDEX IF
+// NOT EXISTS is itself the migration: a no-op on current databases' first
+// boot after upgrade, then present forever.
+export function actionReceiptHistoryIndexDDL() {
+  return 'CREATE INDEX IF NOT EXISTS idx__ActionReceipt_scope_history ON _ActionReceipt (scope, historyOrder);';
+}
+
 export function committedRevisionTableDDL() {
   return `CREATE TABLE IF NOT EXISTS _CommittedRevision (
    name TEXT PRIMARY KEY,
@@ -120,6 +145,8 @@ export function frameworkLogDDL() {
     logIndexDDL(),
     cursorTableDDL(),
     actionReceiptTableDDL(),
+    actionReceiptHistoryIndexDDL(),
+    historyOrderCounterTableDDL(),
     committedRevisionTableDDL(),
     historyCursorTableDDL(),
     // S3/A2 no-history lane: the minimized receipt + per-resource revision.
@@ -186,11 +213,22 @@ export function eventsFromReceipt(db: DbHandle, receipt: ParsedReceipt, parseEve
 // insertReceipt — record the owning-stream action receipt inside the caller's
 // open transaction, immediately after the same action's events (if any) are
 // appended to _Log. Atomic with the append: both land in the same commit, or
-// neither does.
+// neither does. History order comes from the per-scope monotonic counter row
+// (historyOrderCounterTableDDL), bumped in this same transaction.
 export function insertReceipt(db: DbHandle, scope: string, actionId: string, committedAt: string, events: LogEvent[], metadata: ReceiptMetadata = {}): number {
+  // Seed the counter from any pre-counter receipts so an upgraded database
+  // continues its existing sequence; a no-op once the row exists.
+  prepareCached(db,
+    `INSERT INTO _HistoryOrderCounter (scope, lastOrder)
+     VALUES (:scope, COALESCE((SELECT MAX(historyOrder) FROM _ActionReceipt WHERE scope = :scope), 0))
+     ON CONFLICT(scope) DO NOTHING`,
+  ).run({ scope });
   const historyOrder = prepareCached(db,
-    'SELECT COALESCE(MAX(historyOrder), 0) + 1 AS next FROM _ActionReceipt WHERE scope = :scope',
+    'SELECT lastOrder + 1 AS next FROM _HistoryOrderCounter WHERE scope = :scope',
   ).get({ scope })!.next as number;
+  prepareCached(db,
+    'UPDATE _HistoryOrderCounter SET lastOrder = :next WHERE scope = :scope',
+  ).run({ scope, next: historyOrder });
   prepareCached(db,
     `INSERT INTO _ActionReceipt
        (scope, actionId, committedAt, eventRefs, historyOrder, actionType, actionData, principalKey, sessionId, operation, resultData, historyRootActionId, historyTargetActionId, historyOutcome)

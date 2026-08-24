@@ -18,6 +18,7 @@ test('frameworkTableNames is a frozen, sorted, duplicate-free array of persisten
     '_DeletedRowAnchor',
     '_DerivedResource',
     '_HistoryCursor',
+    '_HistoryOrderCounter',
     '_InvalidationLedger',
     '_Job',
     '_LiveRevision',
