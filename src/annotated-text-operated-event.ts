@@ -696,6 +696,35 @@ export function parseStoredV16OperatedEvent(eventDataText: string, context: { en
   return normalizeOperatedEvent(parsed as OperatedWireEnvelope, context) as CanonicalRegionEdit;
 }
 
+// Escape-aware JSON string-literal scanner. Returns the complete literal
+// INCLUDING quotes, advancing over backslash escapes: `\"` never terminates,
+// `\\` is a literal backslash, and `\uXXXX` must carry exactly four hex digits.
+// A raw control character (< 0x20) inside the literal is invalid JSON. The
+// scanner returns the raw source slice so JSON.parse owns value decoding.
+function scanJsonStringLiteral(text: string, start: number): string {
+  if (text[start] !== '"') throw new Error('expected string');
+  let cursor = start + 1;
+  for (;;) {
+    if (cursor >= text.length) throw new Error('unterminated string');
+    const ch = text[cursor];
+    if (ch === '"') return text.slice(start, cursor + 1);
+    if (ch === '\\') {
+      const escape = text[cursor + 1];
+      if (escape === 'u') {
+        const hex = text.slice(cursor + 2, cursor + 6);
+        if (!/^[0-9a-fA-F]{4}$/.test(hex)) throw new Error('invalid unicode escape');
+        cursor += 6;
+        continue;
+      }
+      if (!'"\\/bfnrt'.includes(escape)) throw new Error('invalid escape');
+      cursor += 2;
+      continue;
+    }
+    if (ch < ' ') throw new Error('raw control character in string');
+    cursor += 1;
+  }
+}
+
 // Strict JSON text scanner: duplicate keys at any depth are rejected before a
 // value is ever produced, so a tampered row cannot rely on last-key-wins.
 function parseCanonicalJsonText(text: string): unknown {
@@ -716,8 +745,14 @@ function parseCanonicalJsonText(text: string): unknown {
       for (;;) {
         skipWhitespace();
         if (text[index] !== '"') fail('expected object key');
-        const key = JSON.parse(text.slice(index, text.indexOf('"', index + 1) + 1)) as string;
-        index += text.indexOf('"', index + 1) + 1 - index;
+        const keyLiteral = scanJsonStringLiteral(text, index);
+        index += keyLiteral.length;
+        let key: string;
+        try {
+          key = JSON.parse(keyLiteral) as string;
+        } catch {
+          return fail('invalid string encoding');
+        }
         if (seen.has(key)) fail('duplicate-key');
         seen.add(key);
         skipWhitespace();
@@ -744,10 +779,8 @@ function parseCanonicalJsonText(text: string): unknown {
       }
     }
     if (ch === '"') {
-      const end = text.indexOf('"', index + 1);
-      if (end === -1) fail('unterminated string');
-      const literal = text.slice(index, end + 1);
-      index = end + 1;
+      const literal = scanJsonStringLiteral(text, index);
+      index += literal.length;
       try {
         return JSON.parse(literal);
       } catch {
@@ -876,29 +909,29 @@ export type RegionWitnessEmptied = RegionPostimage['emptied'];
  * a branded v16 event.
  */
 export function constructV16RegionEvent(plan: RegionPlan): { event: { version: 16; id: string; before: LegacyTextRevision; after: LegacyTextRevision; operation: Record<string, unknown>; facts: OperatedFacts }; eventDataText: string } {
-  // The operation is built extensible and branded with the canonical bytes
-  // BEFORE freezing: the brand is the unforgeable durable-bytes authority that
-  // committed-log stores verbatim, invisible to JSON, delivery, and dedupe.
-  const operation: Record<string, unknown> = {
-    affectedIds: plan.postimage.affectedIds,
-    afterDigest: plan.postimage.afterDigest,
-    beforeDigest: plan.postimage.beforeDigest,
-    declarationFingerprint: plan.declarationFingerprint,
-    emptied: plan.postimage.emptied,
-    from: plan.descriptor.from,
-    kind: 'region.edit',
-    text: plan.textOperations,
-    to: plan.descriptor.to,
-    transitions: plan.descriptor.transitions,
-    witnessAfter: plan.postimage.annotations,
-    witnessBefore: plan.postimage.beforeAnnotations,
-  };
-  const event = Object.freeze({
+  // Bounded canonicalization happens FIRST, on a plain (unfrozen) envelope
+  // view: an over-limit witness aborts here before the durable envelope is
+  // constructed or frozen. The canonical text is then attached as the
+  // unforgeable brand and the frozen result returned.
+  const eventView = {
     version: 16 as const,
     id: plan.descriptor.id,
     before: plan.before,
     after: plan.after,
-    operation,
+    operation: {
+      affectedIds: plan.postimage.affectedIds,
+      afterDigest: plan.postimage.afterDigest,
+      beforeDigest: plan.postimage.beforeDigest,
+      declarationFingerprint: plan.declarationFingerprint,
+      emptied: plan.postimage.emptied,
+      from: plan.descriptor.from,
+      kind: 'region.edit',
+      text: plan.textOperations,
+      to: plan.descriptor.to,
+      transitions: plan.descriptor.transitions,
+      witnessAfter: plan.postimage.annotations,
+      witnessBefore: plan.postimage.beforeAnnotations,
+    },
     facts: packOperatedFacts({
       family: null,
       emptiedAnnotations: plan.postimage.emptied,
@@ -906,11 +939,14 @@ export function constructV16RegionEvent(plan: RegionPlan): { event: { version: 1
         .filter((entry) => entry.disposition.kind === 'deleted')
         .map((entry) => entry.annotationId),
     }),
-  }) as unknown as { version: 16; id: string; before: { structuralRevision: number; frontier: unknown[] }; after: { structuralRevision: number; frontier: unknown[] }; operation: Record<string, unknown>; facts: OperatedFacts };
-  const eventDataText = serializeV16OperatedEvent(event as OperatedWireEnvelope);
+  };
+  const eventDataText = canonicalV16Json(eventView, REGION_V16_MAX_EVENT_BYTES, 'operated v16 event');
+  // Brand while still extensible, THEN freeze — the stamp is immutable and
+  // invisible to JSON/enumeration, but must be installed before sealing.
+  brandV16Event(eventView as unknown as object, eventDataText);
+  const event = Object.freeze(eventView) as unknown as { version: 16; id: string; before: { structuralRevision: number; frontier: unknown[] }; after: { structuralRevision: number; frontier: unknown[] }; operation: Record<string, unknown>; facts: OperatedFacts };
   return Object.freeze({ event, eventDataText });
 }
-
 /**
  * The ONLY canonical byte serializer for operated events. For a branded v16
  * envelope it emits sorted-key canonical UTF-8 JSON under the full 2 MiB
@@ -924,6 +960,61 @@ export function serializeV16OperatedEvent(event: OperatedWireEnvelope): string {
   return canonicalV16Json(event, REGION_V16_MAX_EVENT_BYTES, 'operated v16 event');
 }
 
+// ---- Unforgeable v16 admission capability (#149 review Finding 3) ----
+// A module-private symbol stamps the constructor's frozen result. The stamp is
+// non-enumerable (invisible to JSON, spreads of enumerable keys, and dedupe
+// comparisons), lives only on the object the constructor returned, and cannot
+// be fabricated outside this module: Symbol.for is NOT used, so a foreign
+// module cannot look the key up.
+//
+// The pipeline's NOW-token resolution deep-copies event data with Object.keys,
+// which drops symbols; committed-log therefore also consults a process-local
+// mint registry keyed by canonical text. Admission = data canonicalizes to
+// bytes EXACTLY equal to a previously minted envelope. A fabricator can only
+// pass by producing bit-identical bytes of a real constructor output — which
+// carries no new information — and any mutation fails the match. There is no
+// second constructor and no way to register foreign text.
+const V16_BRAND: unique symbol = Symbol('workbench.annotated-text.v16.brand');
+const V16_BRAND_KEYS = ['after', 'before', 'facts', 'id', 'operation', 'version'];
+const V16_MINTED_TEXTS = new Set<string>();
+
+/** Install the admission brand on a v16 envelope (sole owner: the constructor). */
+function brandV16Event(event: object, eventDataText: string): void {
+  Object.defineProperty(event, V16_BRAND, {
+    value: Object.freeze({ eventDataText }),
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
+  V16_MINTED_TEXTS.add(eventDataText);
+}
+
+/**
+ * Read the admission brand off an appended event's data. Returns null unless
+ * `data` is exactly the constructor's frozen return carrying a valid stamp.
+ */
+export function readV16Brand(data: unknown): { eventDataText: string } | null {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  const record = data as Record<PropertyKey, unknown>;
+  const brand = record[V16_BRAND];
+  if (!brand || typeof brand !== 'object') return null;
+  const keys = Object.keys(record);
+  if (record.version !== 16 || keys.length !== V16_BRAND_KEYS.length
+    || !V16_BRAND_KEYS.every((key) => Object.hasOwn(record, key))) {
+    return null;
+  }
+  const text = (brand as { eventDataText?: unknown }).eventDataText;
+  return typeof text === 'string' ? { eventDataText: text } : null;
+}
+
+/**
+ * Admission for a v16-shaped appended datum whose brand was stripped by the
+ * pipeline copy: admitted only if its canonical bytes equal a minted envelope.
+ */
+export function readV16MintedText(canonicalText: string): boolean {
+  return V16_MINTED_TEXTS.has(canonicalText);
+}
+
 /**
  * Iterative canonical JSON writer and byte/depth accountant. Accepts only the
  * closed scalar/object grammar (null, booleans, finite numbers, well-formed
@@ -933,20 +1024,32 @@ export function serializeV16OperatedEvent(event: OperatedWireEnvelope): string {
  * every check passes.
  */
 function canonicalV16Json(value: unknown, maxBytes: number, label: string): string {
+  // One append primitive owns ALL byte accounting: every token's UTF-8 cost is
+  // charged the moment it is appended, and traversal aborts IMMEDIATELY when
+  // the running total crosses `maxBytes`. No post-traversal pass exists, so an
+  // oversized payload can never be fully materialized before rejection.
   const out: string[] = [];
   let bytes = 0;
+  const append = (token: string): void => {
+    const cost = utf8ByteLength(token);
+    bytes += cost;
+    if (bytes > maxBytes) {
+      throw regionLimitError(`annotated-text-region-limit: operated v16 eventData exceeds ${REGION_V16_MAX_EVENT_BYTES} UTF-8 bytes`);
+    }
+    out.push(token);
+  };
   const visit = (node: unknown, depth: number): void => {
     if (depth > REGION_V16_MAX_DEPTH) {
       throw regionLimitError(`annotated-text-region-limit: operated v16 JSON depth exceeds ${REGION_V16_MAX_DEPTH}`);
     }
-    if (node === null) { out.push('null'); return; }
+    if (node === null) { append('null'); return; }
     switch (typeof node) {
       case 'boolean':
-        out.push(node ? 'true' : 'false');
+        append(node ? 'true' : 'false');
         return;
       case 'number': {
         if (!Number.isFinite(node)) throw regionLimitError(`${label} must be a finite JSON number`);
-        out.push(JSON.stringify(node));
+        append(JSON.stringify(node));
         return;
       }
       case 'string': {
@@ -959,18 +1062,17 @@ function canonicalV16Json(value: unknown, maxBytes: number, label: string): stri
         if (cost > REGION_V16_MAX_STRING_BYTES) {
           throw regionLimitError(`annotated-text-region-limit: operated v16 string exceeds ${REGION_V16_MAX_STRING_BYTES} UTF-8 bytes`);
         }
-        bytes += cost;
-        out.push(encoded);
+        append(encoded);
         return;
       }
       case 'object': {
         if (Array.isArray(node)) {
-          out.push('[');
+          append('[');
           node.forEach((child, index) => {
-            if (index > 0) out.push(',');
+            if (index > 0) append(',');
             visit(child, depth + 1);
           });
-          out.push(']');
+          append(']');
           return;
         }
         const proto = Object.getPrototypeOf(node);
@@ -978,14 +1080,14 @@ function canonicalV16Json(value: unknown, maxBytes: number, label: string): stri
           throw regionLimitError(`${label} must contain only plain objects`);
         }
         const names = Object.keys(node).sort();
-        out.push('{');
+        append('{');
         names.forEach((name, index) => {
-          if (index > 0) out.push(',');
+          if (index > 0) append(',');
           visit(name, depth + 1);
-          out.push(':');
+          append(':');
           visit((node as Record<string, unknown>)[name], depth + 1);
         });
-        out.push('}');
+        append('}');
         return;
       }
       default:
@@ -993,10 +1095,5 @@ function canonicalV16Json(value: unknown, maxBytes: number, label: string): stri
     }
   };
   visit(value, 1);
-  let total = bytes;
-  for (const chunk of out) total += utf8ByteLength(chunk);
-  if (total > maxBytes) {
-    throw regionLimitError(`annotated-text-region-limit: operated v16 eventData exceeds ${REGION_V16_MAX_EVENT_BYTES} UTF-8 bytes`);
-  }
   return out.join('');
 }

@@ -50,8 +50,6 @@ interface DbHandle {
 export interface AdmittedRegionPlan {
   readonly plan: RegionPlan;
   readonly envelope: Readonly<Record<string, unknown>>;
-  /** Canonical v16 `_Log.eventData` bytes for the branded envelope (v16 only). */
-  readonly eventDataText: string | null;
   readonly contribution: DeleteFact | null;
   readonly entity: string;
   readonly field: string;
@@ -208,11 +206,10 @@ export function compileRegionFieldPolicy(
       // New region traffic emits ONLY v16 (W1b cutover). The canonical
       // eventDataText is stored verbatim in _Log by committed-log's branded
       // adapter; applications cannot supply the brand or pre-serialized text.
-      const { event: envelope, eventDataText } = constructV16RegionEvent(plan);
+      const { event: envelope } = constructV16RegionEvent(plan);
       return Object.freeze({
         plan,
         envelope: envelope as unknown as Readonly<Record<string, unknown>>,
-        eventDataText,
         contribution: plan.contribution,
         entity: handle.entity,
         field: handle.field,

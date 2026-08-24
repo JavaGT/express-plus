@@ -6,7 +6,7 @@ import type { DbHandle } from './driver.ts';
 import { txn } from './driver.ts';
 import { getLog } from './log.ts';
 import { tryParseScopeKey } from './scope-handle.ts';
-import type { LogRowLike } from './committed-log.ts';
+import { decodeLogRowData, type LogRowLike } from './committed-log.ts';
 
 const CONSUMER = 'effect.durable';
 
@@ -165,7 +165,9 @@ function rowToEvent(row: LogRowLike): DurableEventLike | (DurableEventLike & { h
     seq: row.seq as number,
     actionId: row.actionId as string,
     committedAt: row.committedAt as string,
-    data: JSON.parse(row.eventData as string),
+    // One log-row decoder (Finding 1): v16 rows go through the strict stored
+    // parser here too — durable-effect recovery never sees last-key-wins data.
+    data: decodeLogRowData(row) as Record<string, unknown> | null,
   };
   return handle ? Object.freeze({ ...ev, handle }) : Object.freeze(ev);
 }

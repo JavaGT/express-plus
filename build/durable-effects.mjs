@@ -6,7 +6,7 @@ import { sweepBehindCursor, upsertConsumerCursor } from './consumer-cursor.mjs';
 import { txn } from './driver.mjs';
 import { getLog } from './log.mjs';
 import { tryParseScopeKey } from './scope-handle.mjs';
-
+import { decodeLogRowData,                 } from './committed-log.mjs';
 
 const CONSUMER = 'effect.durable';
 
@@ -165,7 +165,9 @@ function rowToEvent(row            )                                            
     seq: row.seq          ,
     actionId: row.actionId          ,
     committedAt: row.committedAt          ,
-    data: JSON.parse(row.eventData          ),
+    // One log-row decoder (Finding 1): v16 rows go through the strict stored
+    // parser here too — durable-effect recovery never sees last-key-wins data.
+    data: decodeLogRowData(row)                                  ,
   };
   return handle ? Object.freeze({ ...ev, handle }) : Object.freeze(ev);
 }

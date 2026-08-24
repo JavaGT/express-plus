@@ -9,14 +9,14 @@
 // committedAt (ISO string). Per-scope seq is monotonic; PRIMARY KEY (scope, seq).
 
 import { readSeq as cursorReadSeq,                     } from './cursor.mjs';
-
+import { parseEventType,                          } from './event-handle.mjs';
 import { prepareCached, txn,               } from './driver.mjs';
 import { noHistoryReceiptTableDDL } from './no-history-receipt.mjs';
 import { canonicalStringify } from './canonical-json.mjs';
 import { liveRevisionTableDDL } from './live-revision.mjs';
 import { invalidationLedgerTableDDL } from './invalidation-ledger.mjs';
 import { sweepFactDependencies } from './private-action-fact-dependency.mjs';
-import { serializeV16OperatedEvent,                           } from './annotated-text-operated-event.mjs';
+import { readV16Brand, readV16MintedText, parseStoredV16OperatedEvent, serializeV16OperatedEvent,                           } from './annotated-text-operated-event.mjs';
 
 // The no-history lane (S3/A2) surfaces through this module alongside the
 // durable _Log/_ActionReceipt surfaces, so the boot DDL and the kernel have one
@@ -168,6 +168,45 @@ export function readSeq(db                                   , scope        )   
   return cursorReadSeq(db, scope);
 }
 
+/**
+ * The ONE log-row decoder (Finding 1). Every `_Log.eventData` read goes
+ * through here: version-16 rows are dispatched through the strict stored
+ * parser — duplicate keys, noncanonical bytes, and over-limits fail closed
+ * with fixed opaque signatures BEFORE any value is produced — using the event
+ * handle's entity/field for the error context; every other version keeps its
+ * plain JSON.parse. A v16-looking row whose type is not an operated handle is
+ * rejected: raw v16 bytes may only ride on `<entity>.<field>.operated`.
+ */
+export function decodeLogRowData(row            )          {
+  const text = row.eventData                 ;
+  if (!text) return null;
+  let probe         ;
+  try {
+    probe = JSON.parse(text);
+  } catch {
+    // Even the structural probe must not crash non-v16 readers; strictness
+    // for v16 is enforced below through the strict parser.
+    return JSON.parse(text);
+  }
+  if (probe && typeof probe === 'object' && !Array.isArray(probe) && (probe                         ).version === 16) {
+    let entity = 'Unknown';
+    let field = 'unknown';
+    try {
+      const handle = parseEventType(row.eventType          );
+      if (handle.kind === 'native' && handle.nativeName === 'operated') {
+        entity = handle.entity;
+        field = handle.field;
+      } else {
+        throw new Error('not an operated handle');
+      }
+    } catch {
+      throw new Error('v16 eventData reached a non-operated event type');
+    }
+    return parseStoredV16OperatedEvent(text, { entity, field });
+  }
+  return probe;
+}
+
 // eventsFor — read every event for an actionId (dedupe). Returns raw DB rows
 // with eventData parsed, ordered by scope + seq.
 export function eventsFor(db          , actionId        )             {
@@ -176,7 +215,7 @@ export function eventsFor(db          , actionId        )             {
   ).all({ actionId });
   return rows.map((r) => ({
     ...r,
-    data: JSON.parse(r.eventData          ),
+    data: decodeLogRowData(r                         ),
   })            );
 }
 
@@ -260,14 +299,15 @@ export function insertReceipt(db          , scope        , actionId        , com
 }
 
 // readSince — read events for a scope with seq > cursor, ordered by seq.
-// Returns raw rows with eventData parsed. Used by the resync route.
+// Returns raw rows with eventData decoded through the one log-row decoder.
+// Used by the resync route and live delivery.
 export function readSince(db          , scope        , cursor        )             {
   const rows = prepareCached(db,
     'SELECT * FROM _Log WHERE scope = :scope AND seq > :cursor ORDER BY seq',
   ).all({ scope, cursor });
   return rows.map((r) => ({
     ...r,
-    data: JSON.parse(r.eventData          ),
+    data: decodeLogRowData(r                         ),
   })            );
 }
 
@@ -283,7 +323,8 @@ export function minSeqForScope(db          , scope        )                {
 
 // rowToEvent — rebuild an event object from a durable _Log row. Shared by
 // the dedupe path: a re-sent actionId returns its previously-committed events
-// without re-running the handler. The row→event shape has ONE definition.
+// without re-running the handler. The row→event shape has ONE definition, and
+// v16 rows are strictly decoded (Finding 1).
 export function rowToEvent(row            , parseEventType                 )           {
   let handle                                 ;
   try {
@@ -297,7 +338,7 @@ export function rowToEvent(row            , parseEventType                 )    
     seq: row.seq          ,
     actionId: row.actionId          ,
     committedAt: row.committedAt          ,
-    data: row.eventData ? (typeof row.eventData === 'string' ? JSON.parse(row.eventData) : (row.eventData                           )) : null,
+    data: row.eventData ? decodeLogRowData(row) : null,
   }                       ;
   if (handle) {
     const out = { ...event };
@@ -395,36 +436,33 @@ export function retentionPrune(db          , cutoffIso        ) {
 
 
 
-
-
-
-
-
-// One durable-bytes decision per appended event. A v16 operated envelope is
-// serialized ONLY through the package's canonical writer (sole owner:
-// annotated-text-operated-event.ts) and must arrive already byte-identical to
-// that form — a noncanonical or over-limit v16 payload fails closed here and
-// never reaches _Log. Everything else keeps its stable stringify.
-const V16_ENVELOPE_KEYS = ['after', 'before', 'facts', 'id', 'operation', 'version'];
-
+// One durable-bytes decision per appended event. A version-16 operated
+// envelope is admitted ONLY when it is the constructor's branded result
+// (module-private symbol stamp — Finding 3): the brand carries the exact
+// canonical bytes, stored verbatim after a re-serialization equality check.
+// Fabricated, mutated, or unbranded v16-shaped data is rejected BEFORE
+// append; no second constructor exists to mint the brand. Everything else
+// keeps its stable stringify.
 function serializeAppendedEventData(event               )         {
   const data = event.data                                       ;
   if (data && typeof data === 'object' && !Array.isArray(data) && data.version === 16) {
-    const keys = Object.keys(data);
-    if (keys.length !== V16_ENVELOPE_KEYS.length || !V16_ENVELOPE_KEYS.every((key) => Object.hasOwn(data, key))) {
-      throw new Error('noncanonical operated v16 eventData reached _Log');
-    }
-    // Serialize the ENVELOPE (data), never the whole appended event.
+    // Canonicalize the incoming datum FIRST (bounded accounting applies to any
+    // claimant), then require an admission proof: either the constructor's
+    // brand on the object itself (direct append) or byte-equality with a
+    // minted envelope (pipeline-copied path). Fabricated or mutated witnesses
+    // match neither and are rejected before the _Log insert.
     const canonical = serializeV16OperatedEvent(data                        );
-    if (event.eventDataText !== undefined && event.eventDataText !== canonical) {
-      // The constructor path supplies eventDataText; any other caller must not
-      // smuggle a hand-built v16 envelope through with divergent bytes.
-      throw new Error('noncanonical operated v16 eventData reached _Log');
+    const branded = readV16Brand(data);
+    if (branded !== null) {
+      if (canonical !== branded.eventDataText) {
+        throw new Error('noncanonical operated v16 eventData reached _Log');
+      }
+      return canonical;
+    }
+    if (!readV16MintedText(canonical)) {
+      throw new Error('unbranded operated v16 eventData reached _Log');
     }
     return canonical;
-  }
-  if (event.eventDataText !== undefined) {
-    return event.eventDataText;
   }
   return JSON.stringify(event.data ?? {});
 }
