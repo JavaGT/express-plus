@@ -299,10 +299,12 @@ function compoundHistoryTranslation(type        , input     , direction         
   const fact = (input.fact ?? null)                                  ;
   if (!fact) throw new Error(`compound history translation for '${type}' requires the origin application fact`);
   void direction;
-  void input;
   const origin = input.origin                                     ;
   const payload = origin?.payload ?? {};
-  return { type, payload, input: { version: 1, expected: fact.after ?? null, replacement: fact.before ?? null } };
+  // Undo: expected = head.after, replacement = head.before. Redo mirrors it.
+  const expected = fact.after ?? null;
+  const replacement = fact.before ?? null;
+  return { type, payload, input: { version: 1, expected, replacement } };
 }
 
 function buildEffects(entities                  ) {

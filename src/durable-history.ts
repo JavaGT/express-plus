@@ -575,7 +575,7 @@ export function createDurableHistoryRuntime({
     if (!await authorize({ type: origin.type, payload: origin.payload, principal: args.principal })) throw forbidden();
     const originFact = privateFactFromReceipt(db, originReceipt);
     const targetFact = originReceipt.actionId === receipt.actionId ? originFact : annotatedMove ? privateFactFromReceipt(db, receipt) : originFact;
-    if (!annotatedMove && (!Object.hasOwn(originFact, 'before') || !Object.hasOwn(originFact, 'after'))) {
+    if (!annotatedMove && !compoundKindOf(originFact) && (!Object.hasOwn(originFact, 'before') || !Object.hasOwn(originFact, 'after'))) {
       throw new TypeError('history action private fact is malformed');
     }
     if (annotatedMove && !annotatedCanonicalFact({ type: origin.type, payload: origin.payload, fact: originFact })) throw forbidden();

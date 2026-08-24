@@ -24,7 +24,13 @@ import { failure, failureFromError, failureOutcome } from './outcome.mjs';
 import { principalKeyOf } from './principal.mjs';
 import { applyErasureDirective, isErasureDirective, isErasureDirectivePreparation, prepareErasureDirective } from './erasure-directive.mjs';
 import { declarePostCommitEffectsInTxn } from './post-commit-effects.mjs';
-import { applicationPrivateFactView, canonicalJsonEqual, constructCompoundOriginEnvelope } from './compound-contribution-fact.mjs';
+import {
+  applicationPrivateFactView,
+  canonicalJsonEqual,
+  constructCompoundCompensationEnvelope,
+  constructCompoundOriginEnvelope,
+  parseCompoundApplicationTransition,
+} from './compound-contribution-fact.mjs';
 import * as eventHandles from './event-handle.mjs';
 import { protectedArtefactCapability } from './protected-artefact-store.mjs';
 
@@ -927,47 +933,80 @@ async function commitEvents(db     , events     , {
         if (Array.isArray(payload) || type === '$batch') {
           throw new TypeError(`composed action '${type}' is single-dispatch and batch-forbidden`);
         }
-        const composedKeys = ['events', 'annotatedText', 'applicationTransition'];
-        const ownKeys = Object.keys(commit).filter((key) => !['directive', 'canonicalPayload', 'effects', 'historyOutcome', 'claimedBlobs'].includes(key));
-        if (ownKeys.some((key) => !composedKeys.includes(key)) || !Array.isArray(commit.annotatedText) || commit.annotatedText.length !== 1) {
-          throw new TypeError(`composed action '${type}' must return exactly { events, annotatedText, applicationTransition }`);
-        }
-        if (Object.hasOwn(commit, 'privateFact') && commit.privateFact !== undefined) {
-          throw new TypeError(`composed action '${type}' cannot return a top-level privateFact`);
-        }
-        const applicationTransition = commit.applicationTransition;
-        if (!applicationTransition || typeof applicationTransition !== 'object'
-          || !Object.hasOwn(applicationTransition, 'before') || !Object.hasOwn(applicationTransition, 'after')) {
-          throw new TypeError(`composed action '${type}' applicationTransition must be { before, after }`);
-        }
-        // An applied origin transition must differ by canonical equality (rev 3
-        // rule 8); the full 8-rule semantic validator runs on history moves.
-        {
-          const { before, after } = applicationTransition                                       ;
-          if (canonicalJsonEqual(before, after)) {
-            throw new ValidationError(`composed action '${type}' applicationTransition before and after must differ`);
+        // History moves (durable-history.move re-dispatches the outer composed
+        // action with handler-only compound input). W2 owns the commit-ordering
+        // of the W3 contribution-policy move: this adapter stores the explicit
+        // whole-compound no-op compensation envelope (rev 2 Finding 3 outcome)
+        // with linkage and the target application preserved as lineage evidence,
+        // zero document events, cursor advanced. The applied document
+        // compensation (policy planning + operated contribution) is W3 #145.
+        // No snapshot restore is ever used.
+        if (historyCommit?.handlerInputs && historyCommit.apply) {
+          const moveInput = historyCommit.handlerInputs[0];
+          const applicationRaw = commit.applicationTransition;
+          if (!applicationRaw || typeof applicationRaw !== 'object'
+            || !Object.hasOwn(applicationRaw, 'before') || !Object.hasOwn(applicationRaw, 'after')) {
+            throw new TypeError(`composed action '${type}' history applicationTransition must be { before, after }`);
           }
+          const application = parseCompoundApplicationTransition(applicationRaw, `composed action '${type}' history applicationTransition`);
+          const metadata = historyCommit.metadata ?? {};
+          commit = {
+            events: [],
+            privateFact: constructCompoundCompensationEnvelope({
+              application,
+              contributions: [],
+              linkage: {
+                rootActionId: metadata.historyRootActionId ?? actionId,
+                targetActionId: metadata.historyTargetActionId ?? actionId,
+                direction: moveInput?.operation === 'redo' ? 'redo' : 'undo',
+                outcome: 'noop',
+              },
+            }),
+            historyOutcome: 'noop',
+          };
+        } else {
+          const composedKeys = ['events', 'annotatedText', 'applicationTransition'];
+          const ownKeys = Object.keys(commit).filter((key) => !['directive', 'canonicalPayload', 'effects', 'historyOutcome', 'claimedBlobs'].includes(key));
+          if (ownKeys.some((key) => !composedKeys.includes(key)) || !Array.isArray(commit.annotatedText) || commit.annotatedText.length !== 1) {
+            throw new TypeError(`composed action '${type}' must return exactly { events, annotatedText, applicationTransition }`);
+          }
+          if (Object.hasOwn(commit, 'privateFact') && commit.privateFact !== undefined) {
+            throw new TypeError(`composed action '${type}' cannot return a top-level privateFact`);
+          }
+          const applicationTransition = commit.applicationTransition;
+          if (!applicationTransition || typeof applicationTransition !== 'object'
+            || !Object.hasOwn(applicationTransition, 'before') || !Object.hasOwn(applicationTransition, 'after')) {
+            throw new TypeError(`composed action '${type}' applicationTransition must be { before, after }`);
+          }
+          // An applied origin transition must differ by canonical equality (rev 3
+          // rule 8); the full 8-rule semantic validator runs on history moves.
+          {
+            const { before, after } = applicationTransition                                       ;
+            if (canonicalJsonEqual(before, after)) {
+              throw new ValidationError(`composed action '${type}' applicationTransition before and after must differ`);
+            }
+          }
+          const plan = await composedPolicy.admitAndPlan(db, commit.annotatedText[0], principal, { scope });
+          // Append the package-authored operated event to the handler's domain
+          // events; all commit together under one receipt.
+          const operatedHandle = eventHandles.native(composedPolicy.entity, composedPolicy.field, 'operated');
+          const { annotatedText: _annotatedText, applicationTransition: _transition, ...restCommit } = commit                           ;
+          void _annotatedText;
+          void _transition;
+          commit = {
+            ...restCommit,
+            events: [...(Array.isArray(commit.events) ? commit.events : []), Object.freeze({
+              handle: operatedHandle,
+              type: operatedHandle.type,
+              scope: plan.owningScope,
+              data: Object.freeze(plan.envelope),
+            })],
+            privateFact: constructCompoundOriginEnvelope({
+              application: { before: applicationTransition.before, after: applicationTransition.after },
+              contributions: plan.contribution ? [plan.contribution] : [],
+            }),
+          };
         }
-        const plan = await composedPolicy.admitAndPlan(db, commit.annotatedText[0], principal, { scope });
-        // Append the package-authored operated event to the handler's domain
-        // events; all commit together under one receipt.
-        const operatedHandle = eventHandles.native(composedPolicy.entity, composedPolicy.field, 'operated');
-        const { annotatedText: _annotatedText, applicationTransition: _transition, ...restCommit } = commit                           ;
-        void _annotatedText;
-        void _transition;
-        commit = {
-          ...restCommit,
-          events: [...(Array.isArray(commit.events) ? commit.events : []), Object.freeze({
-            handle: operatedHandle,
-            type: operatedHandle.type,
-            scope: plan.owningScope,
-            data: Object.freeze(plan.envelope),
-          })],
-          privateFact: constructCompoundOriginEnvelope({
-            application: { before: applicationTransition.before, after: applicationTransition.after },
-            contributions: plan.contribution ? [plan.contribution] : [],
-          }),
-        };
       } else if (Object.hasOwn(commit, 'annotatedText') || Object.hasOwn(commit, 'applicationTransition')) {
         // scope#992 W2: a region descriptor is only lawful through a DECLARED
         // annotated operation. Returning one from an undeclared handler would be
