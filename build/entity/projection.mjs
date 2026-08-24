@@ -21,6 +21,7 @@ import {
   computeAffectedClosure,
   digestAffectedClosure,
   reduceRegionPostimage,
+  regionDeclarationFingerprint,
   regionImageFromStored,
   REGION_POSTIMAGE_DISAGREES,
 
@@ -719,6 +720,18 @@ function projectRegionEdit({ name, handle, db, descriptor, canonical }
     || JSON.stringify(closure.map((image) => image.id)) !== JSON.stringify(canonical.affectedIds)) {
     throw new Error(REGION_POSTIMAGE_DISAGREES);
   }
+  // V16 replay: re-derive BOTH witness sides through the sole reducer and
+  // require exact equality with the stored witness — a sparse or tampered
+  // image can never reach projection. V15 rows carry no witness and skip this.
+  if (canonical.wireVersion === 16) {
+    const declarationFingerprint = regionDeclarationFingerprint(declarations);
+    if (canonical.declarationFingerprint !== declarationFingerprint) {
+      throw new Error('region witness disagrees with operated event');
+    }
+    if (JSON.stringify(closure) !== JSON.stringify(canonical.witnessBefore)) {
+      throw new Error('region witness disagrees with operated event');
+    }
+  }
   let afterFamily;
   try {
     afterFamily = applyRegionTextOperations(current, canonical.text);
@@ -743,6 +756,12 @@ function projectRegionEdit({ name, handle, db, descriptor, canonical }
     throw new Error(REGION_POSTIMAGE_DISAGREES);
   }
   if (postimage.afterDigest !== canonical.afterDigest) throw new Error(REGION_POSTIMAGE_DISAGREES);
+  // V16 after-side witness: the replay-derived postimage must equal the stored
+  // complete after closure, image for image (already canonically ordered).
+  if (canonical.wireVersion === 16
+    && JSON.stringify(postimage.annotations) !== JSON.stringify(canonical.witnessAfter)) {
+    throw new Error('region witness disagrees with operated event');
+  }
 
   const beforeById = new Map(closure.map((image) => [image.id, image]));
   const afterById = new Map(postimage.annotations.map((image) => [image.id, image]));
