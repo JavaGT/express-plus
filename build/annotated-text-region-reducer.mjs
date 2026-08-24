@@ -113,8 +113,22 @@ function annotationDigestFields(image                       )           {
   return fields;
 }
 
+// Nested identity sets are canonicalized here so planner and replay hashes do
+// not depend on SQLite row order or caller-provided array order.
+function canonicalImage(image                       )                        {
+  return deepFreeze({
+    ...image,
+    protectedTargetIds: Object.freeze([...image.protectedTargetIds].sort()),
+    prerequisites: Object.freeze([...image.prerequisites].sort((left, right) => (
+      left.entity === right.entity
+        ? left.id.localeCompare(right.id)
+        : left.entity.localeCompare(right.entity)
+    ))),
+  });
+}
+
 export function digestAffectedClosure(annotations                                  )         {
-  const sorted = sortAnnotations(annotations);
+  const sorted = sortAnnotations(annotations.map(canonicalImage));
   const fields           = [String(sorted.length)];
   for (const image of sorted) fields.push(...annotationDigestFields(image));
   return lengthPrefixedUtf8Digest(fields);
@@ -287,7 +301,7 @@ export function reduceRegionPostimage({
 
 
  )                  {
-  const before = sortAnnotations(beforeAnnotations);
+  const before = sortAnnotations(beforeAnnotations.map(canonicalImage));
   assertRegionClosureLimits(before);
   const beforeDigest = digestAffectedClosure(before);
   if (expectedBeforeDigest !== undefined && expectedBeforeDigest !== beforeDigest) {
@@ -298,6 +312,7 @@ export function reduceRegionPostimage({
   const named = new Map                              ();
   for (const transition of transitions) {
     const id = transition.kind === 'create' ? transition.annotation.id : transition.annotationId;
+    if (transition.kind !== 'create' && !byId.has(id)) throw new Error(REGION_POSTIMAGE_DISAGREES);
     named.set(id, transition);
   }
 
@@ -382,7 +397,7 @@ export function reduceRegionPostimage({
     const declaredNames = Object.keys(declared.fields).sort();
     const suppliedNames = Object.keys(transition.annotation.fields).sort();
     if (declaredNames.join('\0') !== suppliedNames.join('\0')) throw new Error(REGION_POSTIMAGE_DISAGREES);
-    next.set(transition.annotation.id, deepFreeze({
+    next.set(transition.annotation.id, canonicalImage({
       id: transition.annotation.id,
       family: transition.annotation.family,
       fields: transition.annotation.fields,
@@ -411,7 +426,7 @@ export function regionImageFromStored(
   image                                                                                                     ,
   declaration                    ,
 )                        {
-  return deepFreeze({
+  return canonicalImage({
     id: image.id,
     family: image.family,
     fields: image.fields,

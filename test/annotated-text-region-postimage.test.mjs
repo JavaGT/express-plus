@@ -464,3 +464,41 @@ test('altered field writes nothing', () => {
     }];
   });
 });
+
+test('unknown range.set target writes nothing', () => {
+  forgeAndReplay((event) => {
+    event.operation.transitions = [{
+      kind: 'range.set',
+      annotationId: 'unknown-note',
+      ranges: [{ start: 0, end: 5 }],
+    }];
+  });
+});
+
+test('nested identity permutations have one digest and canonical postimage', () => {
+  const family = importTextToFamily('doc-1', ACTOR, 'hello world');
+  const base = stored(family, { id: 'note-1', start: 0, end: 5 });
+  const left = {
+    ...base,
+    protectedTargetIds: ['target-b', 'target-a'],
+    prerequisites: [{ entity: 'User', id: 'user-b' }, { entity: 'Code', id: 'code-a' }],
+  };
+  const right = {
+    ...base,
+    protectedTargetIds: [...left.protectedTargetIds].reverse(),
+    prerequisites: [...left.prerequisites].reverse(),
+  };
+  assert.equal(digestAffectedClosure(asImages([left])), digestAffectedClosure(asImages([right])));
+
+  const plan = planOf(family, [left], {
+    from: 0,
+    to: 5,
+    replacement: 'hallo',
+    transitions: [{ kind: 'range.set', annotationId: 'note-1', ranges: [{ start: 0, end: 5 }] }],
+  });
+  assert.deepEqual(plan.postimage.annotations[0].protectedTargetIds, ['target-a', 'target-b']);
+  assert.deepEqual(plan.postimage.annotations[0].prerequisites, [
+    { entity: 'Code', id: 'code-a' },
+    { entity: 'User', id: 'user-b' },
+  ]);
+});
