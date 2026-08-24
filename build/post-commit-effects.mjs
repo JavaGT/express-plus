@@ -5,6 +5,11 @@
 
 import { recordFactDependencies } from './private-action-fact-dependency.mjs';
 import { isDeleteFact } from './annotated-text-delete-history.mjs';
+import {
+  applicationPrivateFactView,
+  compoundKindOf,
+  parseCompoundContributionFact,
+} from './compound-contribution-fact.mjs';
 
 const STATUS_PENDING = 'pending';
 const STATUS_CLAIMED = 'claimed';
@@ -134,6 +139,20 @@ function canonicalPrivateFact(privateFact         , required         )          
   const fact = JSON.parse(factJson);
   if (!fact || typeof fact !== 'object' || Array.isArray(fact)) {
     throw new TypeError('registered action privateFact must be an object');
+  }
+  // scope#992 rev 4: package-constructed compound envelopes are canonicalized
+  // through the exact-key compound parser; the parser result (never the raw
+  // object) is serialized into _PrivateActionFact.fact. Legacy behavior remains
+  // unchanged for every other fact shape.
+  if (compoundKindOf(fact) !== null) {
+    let canonical;
+    try {
+      canonical = parseCompoundContributionFact(fact);
+    } catch (error) {
+      throw new TypeError(`registered action privateFact has invalid compound envelope: ${(error         ).message}`);
+    }
+    const canonicalJsonText = JSON.stringify(canonical);
+    return { fact: deepFreeze(canonical)                                      , factJson: canonicalJsonText };
   }
   if (!annotatedPrivateFact(fact                   ) && (!Object.hasOwn(fact, 'before') || !Object.hasOwn(fact, 'after'))) {
     throw new TypeError('registered action privateFact must have before and after properties');
@@ -296,7 +315,7 @@ export function replayPrivateFactProjections(db          , projections          
         throw new TypeError('private-fact projection requires a matching durable private fact');
       }
       for (const projection of matched) {
-        projection.apply(committed, db, Object.freeze({ privateFact: validated .canonical }));
+        projection.apply(committed, db, Object.freeze({ privateFact: applicationPrivateFactView(validated .canonical) }));
         projected += 1;
       }
     }

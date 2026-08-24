@@ -24,6 +24,8 @@ import { failure, failureFromError, failureOutcome } from './outcome.ts';
 import { principalKeyOf } from './principal.ts';
 import { applyErasureDirective, isErasureDirective, isErasureDirectivePreparation, prepareErasureDirective } from './erasure-directive.ts';
 import { declarePostCommitEffectsInTxn } from './post-commit-effects.ts';
+import { applicationPrivateFactView, canonicalJsonEqual, constructCompoundOriginEnvelope } from './compound-contribution-fact.ts';
+import * as eventHandles from './event-handle.ts';
 import { protectedArtefactCapability } from './protected-artefact-store.ts';
 import type { AuthorizationAdapter } from './authorization-adapter.ts';
 import type { DataTier } from './live-tier.ts';
@@ -897,7 +899,7 @@ async function commitEvents(db: any, events: any, {
           protectedArtefact?.close();
         }
       }
-      const commit = Array.isArray(events) ? { events } : events;
+      let commit = Array.isArray(events) ? { events } : events;
       if (!commit || !Array.isArray(commit.events)) {
         throw new TypeError(`action '${type}' handler must return an event array`);
       }
@@ -911,6 +913,61 @@ async function commitEvents(db: any, events: any, {
       // and provenance needed to reference the protected artefacts.
       if (handler?.protectedArtefactTables?.length && directive === undefined && commit.canonicalPayload === undefined) {
         throw new TypeError(`action '${type}' declares protected artefacts and must return a canonicalPayload without protected payloads`);
+      }
+
+      // Registered-action composition adapter (scope#992 W2 / Finding 3): a
+      // composed action carries a compiled compoundContributionPolicy. Its
+      // handler returns a closed ComposedRegisteredActionCommit (events +
+      // annotatedText + applicationTransition) and never a top-level privateFact.
+      // Inside this coordinated transaction we admit+plan the declared region,
+      // append the operational v15 event, and construct the single compound
+      // private-fact envelope before any fact canonicalization.
+      const composedPolicy = handler?.compoundContributionPolicy;
+      if (composedPolicy) {
+        if (Array.isArray(payload) || type === '$batch') {
+          throw new TypeError(`composed action '${type}' is single-dispatch and batch-forbidden`);
+        }
+        const composedKeys = ['events', 'annotatedText', 'applicationTransition'];
+        const ownKeys = Object.keys(commit).filter((key) => !['directive', 'canonicalPayload', 'effects', 'historyOutcome', 'claimedBlobs'].includes(key));
+        if (ownKeys.some((key) => !composedKeys.includes(key)) || !Array.isArray(commit.annotatedText) || commit.annotatedText.length !== 1) {
+          throw new TypeError(`composed action '${type}' must return exactly { events, annotatedText, applicationTransition }`);
+        }
+        if (Object.hasOwn(commit, 'privateFact') && commit.privateFact !== undefined) {
+          throw new TypeError(`composed action '${type}' cannot return a top-level privateFact`);
+        }
+        const applicationTransition = commit.applicationTransition;
+        if (!applicationTransition || typeof applicationTransition !== 'object'
+          || !Object.hasOwn(applicationTransition, 'before') || !Object.hasOwn(applicationTransition, 'after')) {
+          throw new TypeError(`composed action '${type}' applicationTransition must be { before, after }`);
+        }
+        // An applied origin transition must differ by canonical equality (rev 3
+        // rule 8); the full 8-rule semantic validator runs on history moves.
+        {
+          const { before, after } = applicationTransition as { before: unknown; after: unknown };
+          if (canonicalJsonEqual(before, after)) {
+            throw new ValidationError(`composed action '${type}' applicationTransition before and after must differ`);
+          }
+        }
+        const plan = await composedPolicy.admitAndPlan(db, commit.annotatedText[0], principal, { scope });
+        // Append the package-authored operated event to the handler's domain
+        // events; all commit together under one receipt.
+        const operatedHandle = eventHandles.native(composedPolicy.entity, composedPolicy.field, 'operated');
+        const { annotatedText: _annotatedText, applicationTransition: _transition, ...restCommit } = commit as Record<string, unknown>;
+        void _annotatedText;
+        void _transition;
+        commit = {
+          ...restCommit,
+          events: [...(Array.isArray(commit.events) ? commit.events : []), Object.freeze({
+            handle: operatedHandle,
+            type: operatedHandle.type,
+            scope: plan.owningScope,
+            data: Object.freeze(plan.envelope),
+          })],
+          privateFact: constructCompoundOriginEnvelope({
+            application: { before: applicationTransition.before, after: applicationTransition.after },
+            contributions: plan.contribution ? [plan.contribution] : [],
+          }),
+        };
       }
 
       // S3/A2 tier routing — split the commit's events by resolved entity tier.
@@ -932,23 +989,34 @@ async function commitEvents(db: any, events: any, {
       }
 
       const requirePrivateFact = (pipeline.requiresPrivateFact?.(commit.events, type) ?? false)
-        || (livePipeline?.requiresPrivateFact?.(commit.events, type) ?? false);
+        || (livePipeline?.requiresPrivateFact?.(commit.events, type) ?? false)
+        || Boolean(handler?.compoundContributionPolicy);
       // Canonicalize and persist before any opted-in projection can observe the
-      // fact. All writes remain inside this origin transaction.
+      // fact. All writes remain inside this origin transaction. For a composed
+      // action the adapter has already assigned the package-constructed compound
+      // envelope to commit.privateFact; a missing envelope fails closed even for
+      // a zero-event compensation no-op (scope#992 rev 4).
       const privateFact = declarePostCommitEffectsInTxn(db, {
         scope, actionId, committedAt: now, privateFact: commit.privateFact,
         effects: commit.effects, requirePrivateFact,
       });
+      if (handler?.compoundContributionPolicy && commit.privateFact === undefined) {
+        throw new TypeError('compound registered action requires a canonical private fact');
+      }
+      // Application projections observe only the narrow application view of a
+      // compound envelope (scope#992 rev 4); the full canonical envelope stays
+      // for storage and the package contribution policy.
+      const projectionPrivateFact = privateFact === undefined ? undefined : applicationPrivateFactView(privateFact);
       const canonicalPayload = commit.canonicalPayload ?? payload;
       const durableResult = durableBatch.length > 0
         ? await pipeline.applyInTxn(db, durableBatch, {
-          now, actionId, nextSeq, principal, payload: canonicalPayload, type, scope, privateFact,
+          now, actionId, nextSeq, principal, payload: canonicalPayload, type, scope, privateFact: projectionPrivateFact,
           claimedBlobs: commit.claimedBlobs,
         })
         : [];
       const liveResult = liveBatch.length > 0
         ? await livePipeline.applyInTxn(db, liveBatch, {
-          now, actionId, principal, payload: canonicalPayload, type, scope, privateFact,
+          now, actionId, principal, payload: canonicalPayload, type, scope, privateFact: projectionPrivateFact,
           claimedBlobs: commit.claimedBlobs,
         })
         : [];

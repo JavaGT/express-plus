@@ -22,6 +22,7 @@
 
 
 import { parseDeleteFact } from './annotated-text-delete-history.mjs';
+import { compoundKindOf, parseCompoundContributionFact } from './compound-contribution-fact.mjs';
 
 
 
@@ -39,7 +40,8 @@ function requireText(value         , name        )         {
 
 /**
  * Canonical dependency set of one validated private fact. Only validated v3
- * `annotated-text.delete-contribution` facts carry dependencies today: every
+ * `annotated-text.delete-contribution` facts carry dependencies today, plus
+ * compound envelopes whose nested annotated contributions carry them: every
  * captured annotation prerequisite (the ref rows Undo must find live), plus
  * the owning document itself — transcript retirement must invalidate every
  * delete fact for that document even when the capture carried no ref.
@@ -49,11 +51,32 @@ function requireText(value         , name        )         {
 export function factDependencies(canonicalFact         )                            {
   if (!canonicalFact || typeof canonicalFact !== 'object' || Array.isArray(canonicalFact)) return [];
   const record = canonicalFact                           ;
+  const byKey = new Map                        ();
+  // scope#992 rev 4: a compound envelope's nested annotated contributions feed
+  // the existing delete-contribution dispatcher; the application half contributes
+  // no dependency rows. Unknown nested kinds already fail compound parsing.
+  if (compoundKindOf(record) !== null) {
+    let parsed                                                  ;
+    try {
+      parsed = parseCompoundContributionFact(record);
+    } catch (error) {
+      throw new TypeError(`compound contribution dependency is malformed: ${(error         ).message}`);
+    }
+    for (const contribution of parsed.contributions) {
+      const fact = parseDeleteFact(contribution);
+      for (const image of fact.contribution.annotations) {
+        for (const prerequisite of image.prerequisites) {
+          byKey.set(`${prerequisite.entity}\u0000${prerequisite.id}`, { entity: prerequisite.entity, entityId: prerequisite.id });
+        }
+      }
+      byKey.set(`document\u0000${fact.documentId}`, { entity: 'document', entityId: fact.documentId });
+    }
+    return [...byKey.values()].sort(dependencyOrder);
+  }
   // Only delete-contribution facts carry dependencies; anything CLAIMING that
   // kind must fully validate (fail closed on forged or malformed shapes).
   if (record.kind !== 'annotated-text.delete-contribution') return [];
   const fact = parseDeleteFact(record);
-  const byKey = new Map                        ();
   for (const image of fact.contribution.annotations) {
     for (const prerequisite of image.prerequisites) {
       byKey.set(`${prerequisite.entity}\u0000${prerequisite.id}`, { entity: prerequisite.entity, entityId: prerequisite.id });
@@ -63,9 +86,12 @@ export function factDependencies(canonicalFact         )                        
   // erasing/retiring the document invalidates every captured deletion for it,
   // prerequisite-bearing or not (design §5).
   byKey.set(`document\u0000${fact.documentId}`, { entity: 'document', entityId: fact.documentId });
-  return [...byKey.values()].sort((left, right) =>
-    left.entity < right.entity ? -1 : left.entity > right.entity ? 1
-      : left.entityId < right.entityId ? -1 : left.entityId > right.entityId ? 1 : 0);
+  return [...byKey.values()].sort(dependencyOrder);
+}
+
+function dependencyOrder(left                , right                )         {
+  return left.entity < right.entity ? -1 : left.entity > right.entity ? 1
+    : left.entityId < right.entityId ? -1 : left.entityId > right.entityId ? 1 : 0;
 }
 
 /**

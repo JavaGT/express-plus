@@ -32,6 +32,7 @@ import { readDeletedRowAnchor } from './deleted-row-anchor.mjs';
 import { validateAnnotatedTextEntityActions } from './annotated-text-field.mjs';
 import { createAnnotatedTextKernelSeam } from './annotated-text-kernel.mjs';
 import { validateProtectedArtefactsDeclaration } from './protected-artefact-store.mjs';
+import { compileRegionFieldPolicy,                                   } from './annotated-text-region-operation.mjs';
 
 // Framework auth entities are always-available effect targets (an app's effect
 // may target Inbox without mounting it — auth entities are never request-facing
@@ -81,6 +82,31 @@ function collectAppEntities(app     ) {
     // declaration fails at app assembly, never at dispatch time.
     const protectedArtefactTables = validateProtectedArtefactsDeclaration(declaration.protectedArtefacts, declaration.type);
     if (handlers[declaration.type]) throw new Error(`action '${declaration.type}' is already registered`);
+
+    // Registered-action composition (scope#992 W2): a closed `operations`
+    // declaration of `annotatedTextOperation` handles. Compiled at load time
+    // into a transaction-bound field policy; the declaration is inert until
+    // `commitEvents` calls `admitAndPlan` inside the coordinated transaction.
+    const operations = declaration.operations === undefined ? [] : declaration.operations;
+    if (operations !== undefined && !Array.isArray(operations)) {
+      throw new Error(`registered action '${declaration.type}' operations must be an array`);
+    }
+    let compoundContributionPolicy = null;
+    if (operations.length > 0) {
+      if (operations.length > 1) {
+        throw new Error(`registered action '${declaration.type}' may declare at most one annotated operation (single-dispatch composition)`);
+      }
+      const handle = operations[0]                                ;
+      if (!handle || (handle                         ).__brand !== 'annotatedTextOperation') {
+        throw new Error(`registered action '${declaration.type}' operations must contain annotatedTextOperation handles`);
+      }
+      compoundContributionPolicy = compileRegionFieldPolicy(handle, entities, app.db);
+      // A composed action is single-dispatch and may never return a top-level
+      // privateFact; Workbench constructs the compound envelope.
+      if ((declaration                             ).privateFact === true) {
+        throw new Error(`registered action '${declaration.type}' is composed and cannot return a top-level privateFact`);
+      }
+    }
     const handler = async (context     ) => {
       const lifecycle = app.pendingBlobLifecycle;
       const deletion = lifecycle?.fields.find((field     ) => field.purgeActionName === declaration.type);
@@ -140,6 +166,8 @@ function collectAppEntities(app     ) {
         ...(commit.directive === undefined ? {} : { directive: commit.directive }),
         ...(commit.privateFact === undefined ? {} : { privateFact: commit.privateFact }),
         ...(commit.effects === undefined ? {} : { effects: commit.effects }),
+        ...(commit.annotatedText === undefined ? {} : { annotatedText: commit.annotatedText }),
+        ...(commit.applicationTransition === undefined ? {} : { applicationTransition: commit.applicationTransition }),
       };
       for (const { field, blobId } of claimedFields) {
         const owningEvents = commit.events.filter((event     ) => event?.scope === context.scope && event.data && Object.prototype.hasOwnProperty.call(event.data, field.field));
@@ -168,11 +196,14 @@ function collectAppEntities(app     ) {
         ...(commit.directive === undefined ? {} : { directive: commit.directive }),
         ...(commit.privateFact === undefined ? {} : { privateFact: commit.privateFact }),
         ...(commit.effects === undefined ? {} : { effects: commit.effects }),
+        ...(commit.annotatedText === undefined ? {} : { annotatedText: commit.annotatedText }),
+        ...(commit.applicationTransition === undefined ? {} : { applicationTransition: commit.applicationTransition }),
       };
     };
     Object.defineProperty(handler, 'inTransaction', { value: true });
     Object.defineProperty(handler, 'batchForbidden', {
-      value: (app._blobLifecycleOptions?.fields ?? []).some((field     ) => field.actionName === declaration.type)
+      value: compoundContributionPolicy != null
+        || (app._blobLifecycleOptions?.fields ?? []).some((field     ) => field.actionName === declaration.type)
         || protectedArtefactTables.length > 0,
     });
     Object.defineProperty(handler, 'erasureCapable', { value: Boolean(declaration.erasure) });
@@ -193,6 +224,16 @@ function collectAppEntities(app     ) {
     Object.defineProperty(handler, 'privateFactProjection', {
       value: declaration.projections?.some((projection     ) => projection?.privateFact === true) ?? false,
     });
+    if (compoundContributionPolicy != null) {
+      Object.defineProperty(handler, 'compoundContributionPolicy', { value: compoundContributionPolicy });
+      // A declaration-generated receipt matcher compares the exact canonical
+      // outer payload (scope#992 W2): same actionId plus a different payload is
+      // a conflict, not a replay.
+      Object.defineProperty(handler, 'dedupeReceiptMatches', {
+        value: (receipt     , request     ) =>
+          receipt.actionType === declaration.type && receipt.actionData === JSON.stringify(request.payload),
+      });
+    }
     // An action wrapped by `atomicOperation(...)` (S3/A6) carries its
     // in-transaction read + resolution registration on the raw handler. The
     // wrapper must forward it — commitEvents resolves and field-admits atomic

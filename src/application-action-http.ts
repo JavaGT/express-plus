@@ -261,6 +261,19 @@ function annotatedTextActionIdentity(app: ApplicationApp, request: AdmittableAct
       }
     }
   }
+  // scope#992 W2: a registered composed action derives its document identity
+  // from its declared annotated operation handle (document-local cursor
+  // isolation) — same document identity as the native operation path.
+  for (const action of app.actions ?? []) {
+    const declared = action as { type?: unknown; operations?: Array<{ entity?: unknown; field?: unknown }> };
+    if (declared.type !== request.type) continue;
+    const handle = Array.isArray(declared.operations) ? declared.operations[0] : null;
+    if (!handle || typeof handle.entity !== 'string' || typeof handle.field !== 'string') continue;
+    const entity = app.entities?.get(handle.entity);
+    if (entity?.fields?.[handle.field]?.kind !== 'annotatedText') continue;
+    const row = app.db!.prepare(`SELECT 1 FROM ${handle.entity} WHERE id = ?`).get(id);
+    return row ? { entity: handle.entity, field: handle.field, documentId: id } : null;
+  }
   return null;
 }
 
