@@ -73,3 +73,19 @@ Values are operations per second. The median is the primary reference number; sa
 - Scale note: the specified 36,000-word / 72,000-annotation fixture was not run. This machine run used 360 words / 720 annotations so the projection and RSS numbers are not the acceptance fixture.
 - C=1 note: closing the client transport in this harness did not mint a second snapshot cycle (burst stayed 100, still under the 200 bound). The focused reconnect-generation test covers replacement separately.
 - Thresholds on this scaled fixture: p99 loop 1.1 ms (limit 100), p95 projection 11.1 ms (limit 500), RSS Δ 47 MiB (limit 256), coordinator not held. C=0 burst sat exactly on the 100 bound.
+
+## Annotated-text composite resync
+
+- Recorded at: `2026-08-24T07:45:25.512Z`
+- Node: `v26.7.0`
+- Platform: `darwin/arm64`
+- Fixture: 36000 words, 72000 annotations, 25 recipients, 50 controls
+- C=0 burst projections: 50 (bound 100; including start 75)
+- C=1 burst projections: 100 (bound 200; including start 125)
+- Event-loop delay p99: 1.022 ms
+- Snapshot projection p95: 233936.623 ms / recipient
+- RSS Δ: 383.97 MiB
+- Write coordinator held: false
+- Attempt histogram C=0: `{"2":25}`
+- Attempt histogram C=1: `{"4":25}`
+- Minimum transport generations C=1: 2

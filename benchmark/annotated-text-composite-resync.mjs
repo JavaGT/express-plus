@@ -19,7 +19,7 @@ import { createLiveDeliverySession } from '../public/workbench-client.mjs';
 
 const RECIPIENTS = 25;
 const CONTROLS = 50;
-const WORDS = Number(process.env.ANNOTATED_TEXT_BENCH_WORDS ?? 360);
+const WORDS = Number(process.env.ANNOTATED_TEXT_BENCH_WORDS ?? 36_000);
 const ANNOTATIONS_PER_WORD = Number(process.env.ANNOTATED_TEXT_BENCH_ANNOTATIONS_PER_WORD ?? 2);
 
 function percentile(values, p) {
@@ -86,6 +86,15 @@ function wordText(count) {
 
 async function seedDocument(app, db) {
   const text = wordText(WORDS);
+  const annotationCount = WORDS * ANNOTATIONS_PER_WORD;
+  const initialAnnotationCount = Math.min(annotationCount, 4096);
+  const words = text.split(' ');
+  const offsets = [];
+  let offset = 0;
+  for (const word of words) {
+    offsets.push(offset);
+    offset += word.length + 1;
+  }
   const created = await app.dispatch({
     actionId: 'create',
     type: 'BenchDoc.create',
@@ -97,9 +106,9 @@ async function seedDocument(app, db) {
       body: {
         version: 1,
         blocks: [{ text }],
-        ranges: Array.from({ length: Math.min(WORDS * ANNOTATIONS_PER_WORD, 4096) }, (_, index) => {
+        ranges: Array.from({ length: initialAnnotationCount }, (_, index) => {
           const word = index % WORDS;
-          const start = text.split(' ').slice(0, word).join(' ').length + (word === 0 ? 0 : 1);
+          const start = offsets[word];
           const end = start + `w${word.toString(36)}`.length;
           return { annotationId: `n${index}`, family: 'note', start, end };
         }),
@@ -108,6 +117,30 @@ async function seedDocument(app, db) {
     principal: { id: 'u1' },
   });
   if (!created.ok) throw new Error(created.failure?.message ?? 'seed failed');
+  if (annotationCount > initialAnnotationCount) {
+    const ranges = db.prepare('SELECT id FROM BenchDoc_body_range ORDER BY id').all();
+    if (ranges.length === 0) throw new Error('direct annotation seed requires at least one canonical range');
+    const insertAnnotation = db.prepare(
+      'INSERT INTO BenchDoc_body_annotation (id, document_id, project_id, owner_id, family) VALUES (?, ?, ?, ?, ?)',
+    );
+    const insertNote = db.prepare('INSERT INTO BenchDoc_body_annotation_note (annotation_id) VALUES (?)');
+    const insertMembership = db.prepare(
+      'INSERT INTO BenchDoc_body_membership (annotation_id, range_id, document_id, ordinal) VALUES (?, ?, ?, 0)',
+    );
+    db.exec('BEGIN');
+    try {
+      for (let index = initialAnnotationCount; index < annotationCount; index += 1) {
+        const annotationId = `n${index}`;
+        insertAnnotation.run(annotationId, 'd1', 'p1', 'u1', 'note');
+        insertNote.run(annotationId);
+        insertMembership.run(annotationId, ranges[index % ranges.length].id, 'd1');
+      }
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  }
   return db.prepare("SELECT * FROM BenchDoc WHERE id = 'd1'").get();
 }
 
@@ -164,15 +197,19 @@ async function measureClientBudget({ reconnect }) {
     let bootstraps = 0;
     let deliver;
     let closed;
+    let connections = 0;
+    let snapshotCursor = 0;
     const session = createLiveDeliverySession({
       bootstrap: async ({ mode }) => {
         if (mode === 'snapshot') {
           bootstraps += 1;
           projections.push(1);
+          snapshotCursor = reconnect ? CONTROLS * 2 : CONTROLS;
         }
-        return { kind: 'snapshot', snapshot: { id: 'd1', n: bootstraps }, cursor: bootstraps };
+        return { kind: 'snapshot', snapshot: { id: 'd1', n: bootstraps }, cursor: snapshotCursor };
       },
       subscribe: async ({ deliver: next, closed: closeCb }) => {
+        connections += 1;
         deliver = next;
         closed = closeCb;
         return { close() {} };
@@ -183,19 +220,19 @@ async function measureClientBudget({ reconnect }) {
     });
     await session.ready;
     const afterReady = bootstraps;
-    sessions.push({ session, deliver, closed, bootstraps: () => bootstraps, afterReady });
+    sessions.push({ session, deliver: () => deliver, closed: () => closed, connections: () => connections, bootstraps: () => bootstraps, afterReady });
   }
-  for (const { deliver } of sessions) {
-    await deliver(Array.from({ length: CONTROLS }, (_, index) => ({
+  for (const session of sessions) {
+    await session.deliver()(Array.from({ length: CONTROLS }, (_, index) => ({
       type: 'resync', entity: 'BenchDoc', id: 'd1', seq: index + 1, reason: 'annotated-text-snapshot-required',
     })));
   }
   await flush();
   if (reconnect) {
-    for (const { closed } of sessions) closed?.();
-    await flush();
-    for (const { deliver } of sessions) {
-      await deliver(Array.from({ length: CONTROLS }, (_, index) => ({
+    await Promise.all(sessions.map(({ session }) => session.reconnect()));
+    if (sessions.some(({ connections }) => connections() < 2)) throw new Error('C=1 did not mint a second connection generation');
+    for (const session of sessions) {
+      await session.deliver()(Array.from({ length: CONTROLS }, (_, index) => ({
         type: 'resync', entity: 'BenchDoc', id: 'd1', seq: CONTROLS + index + 1, reason: 'annotated-text-snapshot-required',
       })));
     }
@@ -215,6 +252,7 @@ async function measureClientBudget({ reconnect }) {
         return acc;
       }, {})),
     ),
+    minimumConnections: Math.min(...sessions.map(({ connections }) => connections())),
   };
 }
 
@@ -252,7 +290,7 @@ async function main() {
     recordedAt: new Date().toISOString(),
     node: process.version,
     platform: `${process.platform}/${process.arch}`,
-    fixture: { words: WORDS, annotations: Math.min(WORDS * ANNOTATIONS_PER_WORD, 4096), recipients: RECIPIENTS, controls: CONTROLS },
+    fixture: { words: WORDS, annotations: WORDS * ANNOTATIONS_PER_WORD, recipients: RECIPIENTS, controls: CONTROLS },
     fanout: { p99LoopDelayMs: Number(fanout.p99.toFixed(3)), coalescedMessages: fanout.messages },
     projections: {
       p95Ms: Number(percentile(projectionSamples, 95).toFixed(3)),
@@ -291,6 +329,7 @@ async function main() {
     `- Write coordinator held: ${report.writeCoordinatorHeld}`,
     `- Attempt histogram C=0: \`${JSON.stringify(report.budget.C0.histogram)}\``,
     `- Attempt histogram C=1: \`${JSON.stringify(report.budget.C1.histogram)}\``,
+    `- Minimum transport generations C=1: ${report.budget.C1.minimumConnections}`,
     '',
   ].join('\n');
 
