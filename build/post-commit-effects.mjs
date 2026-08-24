@@ -5,7 +5,7 @@
 
 import { recordFactDependencies } from './private-action-fact-dependency.mjs';
 import { isDeleteFact } from './annotated-text-delete-history.mjs';
-import { parseStoredV16OperatedEvent } from './annotated-text-operated-event.mjs';
+import { decodeLogRowData } from './committed-log.mjs';
 import {
   applicationPrivateFactView,
   compoundKindOf,
@@ -200,15 +200,16 @@ function parseJson(value        , where        )          {
   try { return JSON.parse(value); } catch { throw new TypeError(`${where} must contain valid JSON`); }
 }
 
-// Strict persisted-event decode for the private-fact replay path (Finding 1):
-// v16 rows go through the package's stored parser (duplicate keys,
-// noncanonical bytes, over-limits fail closed); everything else keeps the
-// same valid-JSON TypeError boundary as before.
-function decodeCommittedEventJson(value        , where        )          {
+// Strict persisted-event decode for the private-fact replay path (Finding 2,
+// review round 3): routes through the SHARED log-row decoder so a v16 row's
+// operated-handle identity is verified (entity/field for error context) and
+// duplicate-key/noncanonical/over-limit bytes fail closed. Non-v16 rows keep
+// the same valid-JSON TypeError boundary as before.
+function decodeCommittedEventJson(row                                            , where        )          {
   let probe         ;
-  try { probe = JSON.parse(value); } catch { throw new TypeError(`${where} must contain valid JSON`); }
+  try { probe = JSON.parse(row.eventData          ); } catch { throw new TypeError(`${where} must contain valid JSON`); }
   if (probe && typeof probe === 'object' && !Array.isArray(probe) && (probe                         ).version === 16) {
-    return parseStoredV16OperatedEvent(value, { entity: 'Unknown', field: 'unknown' });
+    return decodeLogRowData(row         );
   }
   return probe;
 }
@@ -322,7 +323,7 @@ export function replayPrivateFactProjections(db          , projections          
         // One strict log-row decoder (Finding 1): v16 rows are validated
         // before reaching private-fact projections; non-v16 rows keep the
         // same valid-JSON error boundary.
-        data: decodeCommittedEventJson(stored.eventData          , 'committed event data'),
+        data: decodeCommittedEventJson(stored                                              , 'committed event data'),
       });
       const matched = projections.filter((projection) =>
         projection.eventTypes.includes(committed.type)

@@ -211,9 +211,15 @@ export function createOperationalConsumers(consumers                     = [], {
       .get(consumer.name, row.scope, `${row.scope}:${row.seq}`);
     if (failed?.status === 'terminal' || (failed?.nextAttemptAt != null && Number(failed.nextAttemptAt) > now())) return false;
     let data                         ;
-    // Strict log-row decode (Finding 1): tampered v16 rows fail closed;
-    // non-v16 malformed rows degrade to {} as before.
-    try { data = decodeConsumerLogRowData(row                         , {}); } catch { data = {}; }
+    // Strict log-row decode (round 3): tampered v16 rows THROW so the failed
+    // row is recorded and no consumer/projection work advances past it; only
+    // malformed legacy (non-v16) rows degrade to {} as before.
+    try {
+      data = decodeConsumerLogRowData(row                         , {});
+    } catch (error) {
+      await recordFailure(db, consumer, row, declarationFingerprint, { kind: 'retry', afterMs: 0 }, String(error));
+      return false;
+    }
     const fields = Object.create(null)                           ;
     for (const field of consumer.event.fields) fields[field] = data[field];
     let payload         ;

@@ -220,9 +220,15 @@ export function createBlobLifecycle({ blobs, entities, declaredBlobFields = [] }
     if (blobFields.size > 0) {
       await sweepBehindCursor(db, CONSUMER, async (row) => {
         let data                         ;
-        // Strict log-row decode (Finding 1): tampered v16 rows fail closed;
-        // non-v16 malformed rows degrade to {} as before.
-        try { data = decodeConsumerLogRowData(row                         , {}); } catch { data = {}; }
+        // Strict log-row decode (round 3): tampered v16 rows BLOCK the cursor
+        // (fail closed — nothing advances past a corrupt row); only malformed
+        // legacy (non-v16) rows degrade to {} as before.
+        try {
+          data = decodeConsumerLogRowData(row                         , {});
+        } catch (err) {
+          getLog().warn('system', 'blob finalize recovery blocked on tampered v16 event', { err, scope: row.scope, seq: row.seq });
+          return 'block';
+        }
         const ids = resolveBlobIds({ type: row.eventType, data });
         if (ids.length === 0) return 'skip';
         try {

@@ -126,9 +126,15 @@ export function emailSeam({ transport = noopTransport }: { transport?: Transport
     let delivered = 0;
     await sweepBehindCursor(db, CONSUMER, async (row) => {
       let data: Record<string, unknown>;
-      // Strict log-row decode (Finding 1): tampered v16 rows fail closed;
-      // non-v16 malformed rows degrade to {} as before.
-      try { data = decodeConsumerLogRowData(row as unknown as LogRowLike, {}); } catch { data = {}; }
+      // Strict log-row decode (round 3): tampered v16 rows BLOCK the cursor
+      // (fail closed — delivery never advances past a corrupt row); only
+      // malformed legacy (non-v16) rows degrade to {} as before.
+      try {
+        data = decodeConsumerLogRowData(row as unknown as LogRowLike, {});
+      } catch (err) {
+        console.error('[email] delivery recovery blocked on tampered v16 event:', (err as Error).message);
+        return 'block';
+      }
       const payload = extractEmailPayload({ type: row.eventType, data });
       try {
         await deliverAndAdvance(db, { scope: row.scope, seq: row.seq }, payload);

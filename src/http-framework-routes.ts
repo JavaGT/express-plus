@@ -16,11 +16,39 @@ import { sendJson, type HttpResponseLike } from './http-response.ts';
 import { failureForHttpError, sendFailure, type SendJson } from './http-failure.ts';
 import { readScopedRow, authorizeRow, type CrudAppLike, type CrudEntity } from './http-crud-dispatch.ts';
 import { rawRow } from './entity/query.ts';
-import { readSeq, readSince, minSeqForScope } from './committed-log.ts';
+import { readSeq, readSince, minSeqForScope, decodeLogRowData } from './committed-log.ts';
 import type { DbHandle } from './driver.ts';
 import { BodyError, readRawBody, readRequestBody } from './http-body.ts';
 import { scopeOf, tryParseScopeKey } from './scope-handle.ts';
 import { createdTextReducerSeeds, textReducerCheckpoints } from './text-reducer-transport.ts';
+
+/**
+ * Locate the owning scope of a deleted annotated-text document by decoding its
+ * committed events through the strict log-row decoder (Finding 2, round 3).
+ * Replaces the previous raw `json_extract(eventData, '$.id')` lookup, which
+ * bypassed v16 validation: a tampered v16 row now throws instead of silently
+ * mismatching. Newest-first, matching the prior query's ordering.
+ */
+function findRetiredAnnotatedDocumentScope(db: { prepare(sql: string): { get(...args: unknown[]): unknown; all(...args: unknown[]): unknown } }, documentId: string): string | undefined {
+  const rows = db.prepare('SELECT scope, seq, eventType, eventData FROM _Log ORDER BY rowid DESC')
+    .all() as Array<{ scope: unknown; seq: unknown; eventType: unknown; eventData: unknown }>;
+  for (const row of rows) {
+    let data: unknown;
+    try {
+      data = decodeLogRowData(row as never);
+    } catch {
+      // A tampered v16 row must not silently mismatch — rethrow so the tamper
+      // surfaces rather than serving a wrong scope for a deleted document.
+      throw new Error('retired annotated document lookup hit a tampered v16 event');
+    }
+    if (data && typeof data === 'object' && !Array.isArray(data)
+      && (data as { id?: unknown }).id === documentId
+      && typeof row.scope === 'string') {
+      return row.scope;
+    }
+  }
+  return undefined;
+}
 import type { TextReducerSeed } from './text-reducer-transport.ts';
 import { publicEvent } from './event-delivery.ts';
 import { parseEventType } from './event-handle.ts';
@@ -154,8 +182,7 @@ export async function handleResyncRoute(
   const annotatedEntry = Object.entries(entity.fields).find(([, field]) => field.kind === 'annotatedText');
   const [, descriptor] = annotatedEntry ?? [];
   const retiredScope = !row && descriptor
-    ? (app.db.prepare("SELECT scope FROM _Log WHERE json_extract(eventData, '$.id') = ? ORDER BY rowid DESC LIMIT 1")
-        .get(id) as { scope?: unknown } | undefined)?.scope
+    ? findRetiredAnnotatedDocumentScope(app.db, id)
     : undefined;
   const scopeKey: string = descriptor
     ? (row ? resolveAnnotatedTextOwningScope(descriptor, entity.fields, row).key : (retiredScope as string | undefined) ?? scopeOf(entityName, id).key)

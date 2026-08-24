@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { type DbHandle } from './driver.ts';
 import { applicationTable as resolveApplicationTable } from './application-table-guard.ts';
 import { invalidateDependencies } from './private-action-fact-dependency.ts';
+import { decodeLogRowData } from './committed-log.ts';
 
 const TOMBSTONE_TYPE = '$workbench.erased';
 const TOMBSTONE_ACTION_ID = '$workbench.erased';
@@ -112,6 +113,19 @@ function digest(value: unknown): string {
 }
 function json(value: unknown, name: string): unknown {
   try { return JSON.parse(value as string); } catch { fail(`${name} must contain JSON`); }
+}
+
+// Strict log-row decode for the erasure census (Finding 2, round 3): a v16
+// row is validated through the package's stored parser BEFORE subject
+// matching, so a tampered row fails the directive instead of silently
+// mismatching identity pointers. Non-v16 rows keep plain parsing.
+function decodeCensusEventData(row: LogRow): unknown {
+  let probe: unknown;
+  try { probe = JSON.parse(row.eventData); } catch { fail(`event ${row.scope}/${row.seq} data must contain JSON`); }
+  if (probe && typeof probe === 'object' && !Array.isArray(probe) && (probe as { version?: unknown }).version === 16) {
+    return decodeLogRowData(row);
+  }
+  return probe;
 }
 function freeze<T>(value: T): T {
   if (value && typeof value === 'object') {
@@ -335,7 +349,7 @@ function censusTargets(db: DbHandle, { owningScope, subject, census }: ErasurePr
   for (const row of rows) {
     const rule = eventRules.get(row.eventType);
     if (!rule) fail(`missing event census rule '${row.eventType}'`);
-    if (matchesSubject(json(row.eventData, `event ${row.scope}/${row.seq} data`), rule, subject)) targetIds.add(row.actionId);
+    if (matchesSubject(decodeCensusEventData(row), rule, subject)) targetIds.add(row.actionId);
   }
   return { receipts, rows, targetIds };
 }

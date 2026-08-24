@@ -16,11 +16,39 @@ import { sendJson,                       } from './http-response.mjs';
 import { failureForHttpError, sendFailure,               } from './http-failure.mjs';
 import { readScopedRow, authorizeRow,                                   } from './http-crud-dispatch.mjs';
 import { rawRow } from './entity/query.mjs';
-import { readSeq, readSince, minSeqForScope } from './committed-log.mjs';
+import { readSeq, readSince, minSeqForScope, decodeLogRowData } from './committed-log.mjs';
 
 import { BodyError, readRawBody, readRequestBody } from './http-body.mjs';
 import { scopeOf, tryParseScopeKey } from './scope-handle.mjs';
 import { createdTextReducerSeeds, textReducerCheckpoints } from './text-reducer-transport.mjs';
+
+/**
+ * Locate the owning scope of a deleted annotated-text document by decoding its
+ * committed events through the strict log-row decoder (Finding 2, round 3).
+ * Replaces the previous raw `json_extract(eventData, '$.id')` lookup, which
+ * bypassed v16 validation: a tampered v16 row now throws instead of silently
+ * mismatching. Newest-first, matching the prior query's ordering.
+ */
+function findRetiredAnnotatedDocumentScope(db                                                                                                  , documentId        )                     {
+  const rows = db.prepare('SELECT scope, seq, eventType, eventData FROM _Log ORDER BY rowid DESC')
+    .all()                                                                                   ;
+  for (const row of rows) {
+    let data         ;
+    try {
+      data = decodeLogRowData(row         );
+    } catch {
+      // A tampered v16 row must not silently mismatch — rethrow so the tamper
+      // surfaces rather than serving a wrong scope for a deleted document.
+      throw new Error('retired annotated document lookup hit a tampered v16 event');
+    }
+    if (data && typeof data === 'object' && !Array.isArray(data)
+      && (data                    ).id === documentId
+      && typeof row.scope === 'string') {
+      return row.scope;
+    }
+  }
+  return undefined;
+}
 
 import { publicEvent } from './event-delivery.mjs';
 import { parseEventType } from './event-handle.mjs';
@@ -154,8 +182,7 @@ export async function handleResyncRoute(
   const annotatedEntry = Object.entries(entity.fields).find(([, field]) => field.kind === 'annotatedText');
   const [, descriptor] = annotatedEntry ?? [];
   const retiredScope = !row && descriptor
-    ? (app.db.prepare("SELECT scope FROM _Log WHERE json_extract(eventData, '$.id') = ? ORDER BY rowid DESC LIMIT 1")
-        .get(id)                                   )?.scope
+    ? findRetiredAnnotatedDocumentScope(app.db, id)
     : undefined;
   const scopeKey         = descriptor
     ? (row ? resolveAnnotatedTextOwningScope(descriptor, entity.fields, row).key : (retiredScope                      ) ?? scopeOf(entityName, id).key)
