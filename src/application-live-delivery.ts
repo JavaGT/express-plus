@@ -6,6 +6,7 @@ import type { IncomingMessage } from 'node:http';
 
 import { createOwnedLiveDelivery } from './live-delivery-public.ts';
 import { createLiveDeliveryHttpHandler } from './live-delivery-http.ts';
+import { createCompositePatchDelivery } from './composite-patch-delivery.ts';
 import { createLiveDeliveryWebSocket } from './live-delivery-websocket.ts';
 import { mayVerb } from './row-grant.ts';
 import type { AuthorizationAdapter } from './authorization-adapter.ts';
@@ -34,6 +35,8 @@ interface ApplicationLiveApp {
   _startupMode?: string;
   _transportAttached?: boolean;
   _applicationLiveDelivery?: unknown;
+  _compositeJournalPlans?: ReadonlyMap<string, unknown> | null;
+  _compositePatchLane?: unknown;
   ready?: Promise<unknown> | null;
   db?: LiveDatabase | null;
   schema?: unknown;
@@ -90,6 +93,20 @@ export function attachApplicationLiveDelivery(app: ApplicationLiveApp, {
     maxCatchupEvents,
     // Ordinary lifecycle envelopes omit actionId (public receipt privacy).
     // Annotated-text fold envelopes attach actionId themselves for own-echo.
+    includeActionId: false,
+  });
+  // Composite patch plans (#122) come from the owned delivery's single
+  // compilation of the declared snapshots; the commit pipeline routes journal
+  // entries from them. No snapshots → undefined → pipeline skips journaling.
+  const compositeJournal = (owned as unknown as { patchPlans?: ReadonlyMap<string, unknown> }).patchPlans?.size
+    ? { plans: (owned as unknown as { patchPlans: ReadonlyMap<string, unknown> }).patchPlans }
+    : undefined;
+  app._compositeJournalPlans = compositeJournal?.plans ?? null;
+  app._compositePatchLane = createCompositePatchDelivery({
+    db: app.db as never,
+    composites: compositeJournal?.plans ?? new Map(),
+    mayVerb: (entity: unknown, verb: string, row: unknown, principal: Principal) => mayVerb(entity as never, verb, row, principal),
+    authorization,
     includeActionId: false,
   });
   const handler = createLiveDeliveryHttpHandler({

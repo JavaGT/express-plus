@@ -12,6 +12,7 @@ import { readSeq } from './committed-log.ts';
 import { invalidationRecovery } from './invalidation-ledger.ts';
 import { readSnapshotTxn } from './driver.ts';
 import { compileSnapshots, captureSnapshot, authorizeSnapshot, projectSnapshot } from './snapshot-projection.ts';
+import { compilePatchPlans } from './composite-patch-plan.ts';
 import { hasAnnotatedTextFields, projectEntitySnapshot } from './entity-snapshot-projection.ts';
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.ts';
 import { rawRow } from './entity/query.ts';
@@ -191,6 +192,11 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, authorization, 
   if (!Number.isSafeInteger(maxCatchupEvents) || maxCatchupEvents < 1) throw new TypeError('maxCatchupEvents must be a positive safe integer');
   const resolveEntity = typeof entities === 'function' ? entities : (name: string) => entities.get(name);
   const composites = compileSnapshots(snapshots, resolveEntity, db as never) as unknown as CompiledSnapshots;
+  // Composite patch plans derive from the SAME compiled declarations (#122):
+  // one structural source for snapshot capture, resync relevance, and patch
+  // projection. Exposed package-internally so the delivery lane and the commit
+  // pipeline's journal router share this exact map.
+  const patchPlans = compilePatchPlans(composites as unknown as Map<string, never>);
   validatePrincipalSnapshotDeclarations(principalSnapshots as never, schema as never);
   const principalDelivery = (principalSnapshots as readonly unknown[] | undefined)?.length
     ? createPrincipalSnapshotDelivery({ db: db as never, declarations: principalSnapshots as never, authorize: principalSnapshotAuthorize })
@@ -565,6 +571,8 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, authorization, 
 
   return {
     delivery,
+    /** Compiled patch plans (#122) — the commit pipeline's journal router consumes these. */
+    patchPlans,
     consumer: async (events: readonly LiveCommittedEvent[]): Promise<void> => {      const scopes = new Set<string>();
       for (const event of events) {
         if (event?.scope) scopes.add(event.scope);

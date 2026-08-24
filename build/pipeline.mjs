@@ -13,6 +13,8 @@
 // Lazy import of effect compiler (avoids circular dependency at module load time).
 import { readSeq } from './committed-log.mjs';
 import { appendEvents, receiptFor, eventsFromReceipt, insertReceipt, noHistoryReceiptFor, insertNoHistoryReceipt, bumpRevision, readRevision as readLiveRevision, guardExpectedRevision } from './committed-log.mjs';
+import { routeCompositeEvent, recordCompositeChanges } from './composite-journal.mjs';
+
 import { lifecycleVerb, parseEventType } from './event-handle.mjs';
 import { prepareCached, txn,                                 } from './driver.mjs';
 import { isPlainObject, ValidationError } from './field-strategy.mjs';
@@ -147,7 +149,10 @@ export function durableMutationVariant({
   executeEffectsForEvent = null,
   postCommitConsumers = [],
   maxEffectDepth = 8,
+  compositeJournal,
 }
+
+
 
 
 
@@ -225,6 +230,33 @@ export function durableMutationVariant({
       }
       appendEvents(db            , finalizedEvents);
 
+      // Composite journal evidence pass 1 (#122): capture private before-images
+      // BEFORE this action's own projection consumers run. Update/remove rows
+      // are still pre-image here; the post-projection pass below supplies
+      // after-images. Identity-only — no recipient value is retained.
+      let compositeEvidence                                                                                                                                 = null;
+      if (compositeJournal !== undefined && finalizedEvents.some((e) => e?.handle)) {
+        compositeEvidence = { before: new Map(), after: new Map() };
+        for (const ev of finalizedEvents) {
+          const entityName                     = ev?.handle?.entity;
+          const rowId          = ev?.data?.id;
+          if (!entityName || typeof rowId !== 'string') continue;
+          if (!/\.updated$|\.removed$/.test(ev.type)) continue;
+          try {
+            const row = (db            ).prepare(`SELECT * FROM ${entityName} WHERE id = ?`).get(rowId)                                       ;
+            if (row) {
+              let rows = compositeEvidence.before.get(entityName);
+              if (!rows) compositeEvidence.before.set(entityName, rows = new Map());
+              rows.set(String(rowId), { ...row });
+            }
+          } catch {
+            // No such table (e.g. tombstone-only entities are real tables, but
+            // foreign event scopes may not be): the router invalidates on the
+            // missing evidence instead of guessing.
+          }
+        }
+      }
+
       // Projection consumers — materialize entity rows from events.
       // Registered-action projections pin actionType to the declaring action.
       // Batch commits use type '$batch'; admit a projection when its action is
@@ -251,6 +283,38 @@ export function durableMutationVariant({
 
       // Blob adoption is in-txn and atomic with the log + projection writes.
       await blobAdapter.adoptInTxn(db, finalizedEvents);
+
+      // Composite journal evidence pass 2 + routing (#122): after projection,
+      // capture after-images, route every finalized event through the compiled
+      // patch plans, and record the entries atomically with _Log and
+      // _ActionReceipt. A journal failure fails the commit — an unrecorded
+      // composite change would be a silent gap in the patch protocol.
+      if (compositeEvidence) {
+        const plans = compositeJournal .plans         ;
+        for (const ev of finalizedEvents) {
+          const entityName                     = ev?.handle?.entity;
+          const rowId          = ev?.data?.id;
+          if (!entityName || typeof rowId !== 'string') continue;
+          if (!/\.created$|\.updated$/.test(ev.type)) continue;
+          try {
+            const row = (db            ).prepare(`SELECT * FROM ${entityName} WHERE id = ?`).get(rowId)                                       ;
+            if (row) {
+              let rows = compositeEvidence.after.get(entityName);
+              if (!rows) compositeEvidence.after.set(entityName, rows = new Map());
+              rows.set(String(rowId), { ...row });
+            }
+          } catch {
+            // Absent table/row: the router invalidates on missing evidence.
+          }
+        }
+        const inputs                         = [];
+        for (const ev of finalizedEvents) {
+          for (const entry of routeCompositeEvent(db            , plans, ev                                                                  , compositeEvidence)) {
+            inputs.push({ ...entry, actionId });
+          }
+        }
+        recordCompositeChanges(db            , inputs, now);
+      }
 
       // Post-projection admission — runs IN-TXN after projection. Create
       // row-grants need this deep visibility: the row exists only after the

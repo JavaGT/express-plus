@@ -17,6 +17,7 @@ import { liveRevisionTableDDL } from './live-revision.mjs';
 import { invalidationLedgerTableDDL } from './invalidation-ledger.mjs';
 import { sweepFactDependencies } from './private-action-fact-dependency.mjs';
 import { readV16Brand, v16AdmissionNonce, v16CapabilityBytesDigest, parseStoredV16OperatedEvent, serializeV16OperatedEvent,                           } from './annotated-text-operated-event.mjs';
+import { compositeJournalDDL, pruneCompositeChanges } from './composite-journal.mjs';
 
 // The no-history lane (S3/A2) surfaces through this module alongside the
 // durable _Log/_ActionReceipt surfaces, so the boot DDL and the kernel have one
@@ -172,6 +173,9 @@ export function frameworkLogDDL() {
     noHistoryReceiptTableDDL(),
     liveRevisionTableDDL(),
     invalidationLedgerTableDDL(),
+    // Composite change journal (#122): per-composite-scope replay authority
+    // for snapshot-patch delivery. Retention prunes alongside _Log.
+    ...compositeJournalDDL(),
   ];
 }
 
@@ -440,6 +444,9 @@ export function retentionPrune(db          , cutoffIso        ) {
     // facts — this sweep runs outside any cascade guarantee (design §5).
     sweepFactDependencies(db);
     db.prepare('DELETE FROM _Log WHERE committedAt < :cutoff').run({ cutoff: cutoffIso });
+    // The composite journal falls back to snapshot recovery together with the
+    // _Log it indexes (#122 design §14, Retention).
+    pruneCompositeChanges(db, cutoffIso);
   });
 }
 
