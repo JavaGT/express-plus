@@ -700,8 +700,8 @@ export interface AnnotatedTextClientEntityHandle {
   readonly name: string;
   readonly fields: Readonly<Record<string, { readonly kind: string }>>;
 }
-export function annotatedTextClientHandle(
-  entity: WorkbenchEntity<any>,
+export function annotatedTextClientHandle<E extends WorkbenchEntity>(
+  entity: E,
   field: AnnotatedTextFieldHandle,
 ): AnnotatedTextClientEntityHandle & Readonly<Record<string, unknown>>;
 
@@ -831,8 +831,8 @@ export interface AnnotatedTextActionRequest<Payload = unknown> {
   readonly type: string;
   readonly payload: Payload;
 }
-export function annotatedTextAction(
-  entity: WorkbenchEntity<any>,
+export function annotatedTextAction<E extends WorkbenchEntity>(
+  entity: E,
   field: AnnotatedTextFieldHandle,
   command: AnnotatedTextOperationCommand,
 ): AnnotatedTextActionRequest<AnnotatedTextOperationPayload>;
@@ -845,8 +845,9 @@ export type AnnotatedTextAnnotationActionValues<
     : never;
 export function annotatedTextAnnotationAction<
   Action extends AnnotatedTextAnnotationEntityActionHandle | AnnotatedTextDomainActionHandle,
+  E extends WorkbenchEntity
 >(
-  entity: WorkbenchEntity<any>,
+  entity: E,
   field: AnnotatedTextFieldHandle,
   actionHandle: Action,
   input: {
@@ -879,12 +880,12 @@ export interface AnnotatedTextCreateInput {
     readonly measurements?: readonly AnnotatedTextCreateSourceMeasurement[];
   };
 }
-export function annotatedTextCreateAction(
-  entity: WorkbenchEntity<any>,
+export function annotatedTextCreateAction<E extends WorkbenchEntity>(
+  entity: E,
   field: AnnotatedTextFieldHandle,
   input: AnnotatedTextCreateInput,
 ): AnnotatedTextActionRequest;
-export function annotatedTextRetireAction(entity: WorkbenchEntity<any>, documentId: string): AnnotatedTextActionRequest<{ readonly id: string }>;
+export function annotatedTextRetireAction<E extends WorkbenchEntity>(entity: E, documentId: string): AnnotatedTextActionRequest<{ readonly id: string }>;
 
 export interface AnnotatedTextAnnotation {
   readonly id: string;
