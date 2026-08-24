@@ -347,11 +347,12 @@ function frontierEqualsValidated(left          , right          )          {
  */
 export function resolveOffsetToEndpoint(family                      , utf16Offset        , basisFrontier          , affinity                  )                     {
   assertTrustedFamily(family);
-  // The checkpoint frontier was validated at admission/restoration; callers
-  // pass it back (or a structurally identical frontier from their own trusted
-  // read). Comparing without re-serializing keeps per-endpoint cost allocation-
-  // free, matching assertDominatingBasis above.
-  if (!frontierEqualsValidated(family.checkpoint.frontier, basisFrontier)) {
+  // Validate the caller-supplied basis at this boundary so a malformed value
+  // fails with the controlled frontier message instead of an incidental
+  // TypeError inside the comparator below; the checkpoint side was validated
+  // at admission/restoration.
+  const trustedBasis = assertFrontier(basisFrontier);
+  if (!frontierEqualsValidated(family.checkpoint.frontier, trustedBasis)) {
     fail('resolveOffsetToEndpoint requires basisFrontier equal to family checkpoint frontier');
   }
   const { order, text, visibleOffsets } = derivedIndex(family);

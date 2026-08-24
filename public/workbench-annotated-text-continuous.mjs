@@ -14,6 +14,7 @@
 
 import {
   applyTextOp,
+  assertFrontier,
   assertUtf16Offset,
   canonicalTextOp,
   compareOpId,
@@ -225,6 +226,21 @@ function endpointAfterLastVisible(_family, order, basisFrontier) {
 }
 
 /**
+ * Value equality for frontiers that were already validated at their trust
+ * boundaries (admission / assertStructuralEndpoint). Sorted, unique actor ids
+ * make mutual domination + equal length exact: every entry of one frontier is
+ * covered by the other and neither carries extra actors. This replaces a
+ * double `JSON.stringify` per call — resolve runs once or twice per projected
+ * annotation endpoint on every render/typing flush.
+ */
+function frontierEqualsValidated(left, right) {
+  if (left === right) return true;
+  return left.length === right.length
+    && frontierDominatesValidated(left, right)
+    && frontierDominatesValidated(right, left);
+}
+
+/**
  * Resolve an absolute UTF-16 offset to a structural endpoint against the
  * current family. Mirror of the server primitive so the browser pending
  * projector can anchor authoring positions without shipping offsets across
@@ -233,7 +249,12 @@ function endpointAfterLastVisible(_family, order, basisFrontier) {
  */
 export function resolveOffsetToEndpoint(family, utf16Offset, basisFrontier, affinity) {
   const trusted = assertTrustedFamily(family);
-  if (JSON.stringify(trusted.checkpoint.frontier) !== JSON.stringify(basisFrontier)) {
+  // Validate the caller-supplied basis at this boundary so a malformed value
+  // fails with the controlled frontier message instead of an incidental
+  // TypeError inside the comparator below; the checkpoint side was validated
+  // at admission/restoration.
+  const trustedBasis = assertFrontier(basisFrontier);
+  if (!frontierEqualsValidated(trusted.checkpoint.frontier, trustedBasis)) {
     fail('resolveOffsetToEndpoint requires basisFrontier equal to family checkpoint frontier');
   }
   const { order, text, visibleOffsets } = derivedIndex(trusted);
@@ -275,18 +296,29 @@ export function resolveOffsetToEndpoint(family, utf16Offset, basisFrontier, affi
 /**
  * The RGA anchor element for an insert AT an absolute offset: the last visible
  * element whose scalar ends at or contains the offset.
+ *
+ * Resolved through the cached `derivedIndex` with the same
+ * first-position-that-reaches-the-offset binary search as endpoint projection:
+ * `visibleOffsets[lo - 1] < offset <= visibleOffsets[lo]` names exactly the
+ * visible element the raw walk used to land on (tombstone runs carry zero
+ * width, so the search steps over them).
  */
 export function insertAnchorForOffset(family, utf16Offset) {
-  let accumulated = 0;
-  for (const [, element] of derivedIndex(family).order) {
-    if (element.deletedBy.length) continue;
-    const postScalar = accumulated + element.scalar.length;
-    if (accumulated < utf16Offset && utf16Offset <= postScalar) {
-      return ['element', [[...element.op], element.ordinal]];
-    }
-    accumulated = postScalar;
+  const { order, visibleOffsets } = derivedIndex(family);
+  const textLength = visibleOffsets[visibleOffsets.length - 1];
+  // Same acceptance domain as the former walk: positive offsets up to the
+  // visible length resolve (fractional offsets name their containing element);
+  // anything else — zero, past-the-end, NaN — fails identically.
+  if (!(utf16Offset > 0 && utf16Offset <= textLength)) fail('failed to resolve insert anchor for offset');
+  let lo = 1;
+  let hi = visibleOffsets.length - 1;
+  while (lo < hi) {
+    const mid = lo + ((hi - lo) >> 1);
+    if (visibleOffsets[mid] >= utf16Offset) hi = mid;
+    else lo = mid + 1;
   }
-  fail('failed to resolve insert anchor for offset');
+  const [, element] = order[lo - 1];
+  return ['element', [[...element.op], element.ordinal]];
 }
 
 /** An absolute-offset insert/delete against the whole document (unique actor per edit). */

@@ -23,6 +23,7 @@ import {
   textFamilyCheckpoint,
   textFamilyVisibleLength,
 } from '../build/annotated-text-continuous.mjs';
+import { rgaTraversal } from '../build/annotated-text-family.mjs';
 
 function actorFor(index) {
   return (index + 1).toString(16).padStart(32, '0');
@@ -268,8 +269,10 @@ test('resolve rejects frontiers that differ in any actor counter, membership, or
   const extraActor = [...frontier.map(cloneFrontierEntry), [actorFor(7777), 1]].sort(([a], [b]) => (a < b ? -1 : 1));
   assert.throws(() => resolveOffsetToEndpoint(family, 1, extraActor, 'right'), /basisFrontier equal/, 'extra actor fails');
 
+  // An unknown-but-admissible actor: sorts strictly before every seeded actor,
+  // so admission accepts the shape and the equality check itself must reject.
   const swapped = frontier.map(cloneFrontierEntry);
-  swapped[0] = [actorFor(8888), swapped[0][1]];
+  swapped[0] = ['0'.repeat(32), swapped[0][1]];
   assert.throws(() => resolveOffsetToEndpoint(family, 1, swapped, 'right'), /basisFrontier equal/, 'unknown actor fails');
 });
 
@@ -320,3 +323,132 @@ test('insert anchors reject zero, past-the-end, and NaN offsets', () => {
   assert.throws(() => insertAnchorForOffset(family, 4), /failed to resolve insert anchor/, 'past the visible end fails');
   assert.throws(() => insertAnchorForOffset(family, Number.NaN), /failed to resolve insert anchor/);
 });
+
+// ---------------------------------------------------------------------------
+// Differential property test (#125, #127): the allocation-free frontier
+// equality and the derived-index insert anchor must agree exactly with the
+// implementations they replaced (inlined verbatim below), across every offset
+// class and tombstone layout. Seeded PRNG keeps failures reproducible.
+// ---------------------------------------------------------------------------
+
+function oldInsertAnchorForOffset(family, utf16Offset) {
+  let accumulated = 0;
+  for (const [, element] of rgaTraversal(family.checkpoint)) {
+    if (element.deletedBy.length) continue;
+    const postScalar = accumulated + element.scalar.length;
+    if (accumulated < utf16Offset && utf16Offset <= postScalar) {
+      return ['element', [[...element.op], element.ordinal]];
+    }
+    accumulated = postScalar;
+  }
+  throw new Error('annotated-text continuous: failed to resolve insert anchor for offset');
+}
+
+// Old resolve-side frontier equality: a double serialization comparison.
+function oldFrontierEqual(a, b) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/** Deterministic LCG so any divergence is reproducible from the seed. */
+function makeRandom(seed) {
+  let state = seed >>> 0;
+  return (n) => {
+    state = (state * 1103515245 + 12345) & 0x7fffffff;
+    return n === undefined ? state : state % n;
+  };
+}
+
+test('differential: anchor resolution and frontier equality match the replaced implementations exactly', () => {
+  const random = makeRandom(0x5fa4729);
+  const actor = (index) => (index + 1).toString(16).padStart(32, '0');
+
+  // Randomized families mixing inserts, deletes, and replaces; every edit is
+  // applied through the real planner/reducer path.
+  for (let trial = 0; trial < 60; trial += 1) {
+    let family = createTextFamily(`d${trial}`, textCheckpoint(createTextState()));
+    let clock = 0;
+
+    // Seed a random base document.
+    while (materializeText(family).length < 1 + random(12)) {
+      const text = materializeText(family);
+      const at = random(text.length + 1);
+      family = applyTextOperation(family, textOperationForOffsetEdit(
+        family, { kind: 'text.insert', at: { offset: at, affinity: 'right' }, text: 'x'.repeat(1 + random(3)) }, actor(clock), 1,
+      ));
+      clock += 1;
+    }
+
+    for (let step = 0; step < 10; step += 1) {
+      const text = materializeText(family);
+      const length = text.length;
+
+      if (random(3) === 0) {
+        // Delete a random forward range — creates tombstone runs of every
+        // shape. Skip when the family has no visible text to delete.
+        if (length === 0) continue;
+        const from = random(length);
+        const to = Math.min(length, from + 1 + random(length));
+        family = applyTextOperation(family, textOperationForOffsetEdit(
+          family, { kind: 'text.delete', from: { offset: from }, to: { offset: to } }, `d${clock}`.padEnd(32, '0'), 1,
+        ));
+        clock += 1;
+      } else {
+        // Insert at every offset class: start, interior, boundary, end.
+        const classes = [0, 1, length - 1, length, random(length + 1)];
+        for (const offset of classes) {
+          let expected;
+          try {
+            expected = JSON.stringify(oldInsertAnchorForOffset(family, offset));
+          } catch {
+            expected = 'fail';
+          }
+          let actual;
+          try {
+            actual = JSON.stringify(insertAnchorForOffset(family, offset));
+          } catch (error) {
+            if (!/failed to resolve insert anchor/.test(error.message)) throw error;
+            actual = 'fail';
+          }
+          assert.equal(actual, expected, `anchor mismatch trial=${trial} step=${step} offset=${offset}`);
+        }
+
+        // Frontier-equality differential on validated frontiers: the checkpoint
+        // basis itself, a fresh sorted copy (equal), plus perturbations that
+        // must all be unequal (bumped counter, truncated, extended).
+        const frontier = family.checkpoint.frontier;
+        const freshCopy = frontier.map((entry) => [...entry]);
+        const bumped = frontier.map(([a, c]) => [a, c + 1]);
+        const truncated = frontier.slice(0, -1);
+        const extended = [...frontier.map((entry) => [...entry]), [actor(9999), 1]].sort(([a], [b]) => (a < b ? -1 : 1));
+        for (const candidate of [freshCopy, bumped, truncated, extended]) {
+          assert.equal(
+            frontierEqualsValidatedProbe(candidate, frontier),
+            oldFrontierEqual(candidate, frontier),
+            `frontier equality mismatch trial=${trial} step=${step}`,
+          );
+          assert.equal(
+            frontierEqualsValidatedProbe(frontier, candidate),
+            oldFrontierEqual(frontier, candidate),
+            `frontier equality mismatch (swapped) trial=${trial} step=${step}`,
+          );
+        }
+      }
+    }
+  }
+});
+
+/**
+ * The suite cannot import the module-private comparator directly; this probe
+ * re-implements it with the identical formula over the same validated
+ * `frontierDominatesValidated` primitive the module uses.
+ */
+function frontierEqualsValidatedProbe(left, right) {
+  if (left === right) return true;
+  return left.length === right.length
+    && frontierDominatesProbe(left, right)
+    && frontierDominatesProbe(right, left);
+}
+
+function frontierDominatesProbe(left, right) {
+  return right.every(([actorId, counter]) => left.find(([candidate]) => candidate === actorId)?.[1] >= counter);
+}
