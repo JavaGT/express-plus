@@ -695,14 +695,19 @@ export async function projectCompositePatch(input                     )         
       return null; // never delivered to this recipient: named by nothing
     };
 
-    const siblingLevels = (entity        )                           => {
+    const siblingLevels = (entity        , expectedDepth        )                           => {
       for (const [otherBranchId, otherFragments] of resolution) {
         if (otherBranchId === branchId) continue;
         const otherRelation = findRelation(plan, otherBranchId);
         if (!otherRelation || otherRelation.entity !== entity) continue;
         for (const otherFragment of otherFragments.values()) {
           if (!otherFragment.row) continue;
-          return otherFragment.levels.map((level) => level.memberId ?? String(level.raw.id));
+          const levels = otherFragment.levels.map((level) => level.memberId ?? String(level.raw.id));
+          // A sibling branch of the same entity may sit at a DIFFERENT
+          // declaration depth; borrowing levels of the wrong shape would
+          // address a foreign path. Fail safe: borrow only depth-matched evidence.
+          if (levels.length !== expectedDepth) continue;
+          return levels;
         }
       }
       return null;
@@ -714,7 +719,7 @@ export async function projectCompositePatch(input                     )         
       const fragment = fragments.get(id);
       if (!fragment) throw new Error('affected fragment unresolved');
       const levels = levelsOf(id, fragment)
-        ?? ((relation.kind !== 'keyed') ? siblingLevels(relation.entity) : null);
+        ?? ((relation.kind !== 'keyed') ? siblingLevels(relation.entity, chain.length - 1) : null);
       if (!levels) continue;
       const key = levels.join('\u0000');
       let group = groups.get(key);
