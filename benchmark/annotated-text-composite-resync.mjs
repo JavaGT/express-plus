@@ -23,6 +23,7 @@ import { restoreTextFamilySerialized, resolveOffsetToEndpoint } from '../build/a
 import { canonicalEndpointJSON } from '../build/annotated-text-storage.mjs';
 import { createLiveDeliverySession } from '../public/workbench-client.mjs';
 import { materializeAnnotatedTextSnapshot } from '../public/workbench-annotated-text-snapshot.mjs';
+import { W1A_LATENCY_GATES } from './annotated-text-composite-resync-contract.mjs';
 
 const RECIPIENTS = Number(process.env.ANNOTATED_TEXT_BENCH_RECIPIENTS ?? 25);
 const VISIBLE_RECIPIENTS = Number(process.env.ANNOTATED_TEXT_BENCH_VISIBLE_RECIPIENTS ?? 13);
@@ -817,6 +818,8 @@ async function main() {
     fallbackRecovery: forcedFallback ? {
       topologyChanged: true,
       visibilityChanged: true,
+      persistedChange: true,
+      requiredAttemptsPerRecipient: 2,
       snapshotCallsBeforeControls: 0,
       snapshotCallsAfterControls: forcedFallback.calls(),
       attemptsPerRecipient: recoveryAttemptSamples,
@@ -832,14 +835,25 @@ async function main() {
     rssWindowPeakMiB: Number(Math.max(...memoryTrail).toFixed(2)),
     fixtureSetupRssMiB: Number(((rssBefore - rssAtStart) / (1024 * 1024)).toFixed(2)),
     writeCoordinatorHeld: coordinatorHeld.value,
+    latencyGate: SCENARIO === 'fallback'
+      ? { name: 'forced fallback cycle', limitMs: W1A_LATENCY_GATES.forcedFallbackCycleP95Ms }
+      : { name: 'initial bootstrap snapshot', limitMs: W1A_LATENCY_GATES.initialBootstrapP95Ms },
   };
 
   const thresholdNotes = [];
   if (fanout.p99 >= 100) thresholdNotes.push(`event-loop delay p99 ${fanout.p99}ms exceeds 100ms`);
-  if (report.projections.endToEndP95Ms >= 500) thresholdNotes.push(`end-to-end snapshot p95 ${report.projections.endToEndP95Ms}ms exceeds 500ms`);
+  if (report.projections.endToEndP95Ms >= report.latencyGate.limitMs) {
+    thresholdNotes.push(`${report.latencyGate.name} p95 ${report.projections.endToEndP95Ms}ms exceeds ${report.latencyGate.limitMs}ms`);
+  }
   if (Math.max(...serializedSizes) >= ENVELOPE_LIMIT_BYTES) thresholdNotes.push(`serialized envelope ${Math.max(...serializedSizes)} bytes exceeds ${ENVELOPE_LIMIT_BYTES} bytes`);
   if (noReconnect.burst > 100 || oneReconnect.burst > 200 || noReconnect.burst > noReconnect.bound || oneReconnect.burst > oneReconnect.bound) {
     thresholdNotes.push('snapshot recovery exceeded cycle budget');
+  }
+  if (noReconnect.minimumConnections !== 1 || oneReconnect.minimumConnections < 2) {
+    thresholdNotes.push('C0/C1 transport generation evidence is incomplete');
+  }
+  if (forcedFallback && recoveryAttemptSamples.some((attempts) => attempts !== 2)) {
+    thresholdNotes.push('forced fallback did not use exactly two recovery attempts per recipient');
   }
   if (coordinatorHeld.value) thresholdNotes.push('snapshot work held the write coordinator');
   report.thresholdNotes = thresholdNotes;
@@ -858,7 +872,7 @@ async function main() {
     `- Snapshot projection p95: ${report.projections.projectionP95Ms} ms / recipient`,
     `- Snapshot serialization p95: ${report.projections.serializationP95Ms} ms / recipient`,
     `- Snapshot parse/validation p95: ${report.projections.validationP95Ms} ms / recipient`,
-    `- Snapshot end-to-end p95 (acceptance gate): ${report.projections.endToEndP95Ms} ms / recipient`,
+    `- ${report.latencyGate.name} p95 (acceptance gate): ${report.projections.endToEndP95Ms} ms / recipient (limit <${report.latencyGate.limitMs} ms)`,
     `- Operational combined-process RSS Δ (reported, not gated): ${report.rssDeltaMiB} MiB`,
     `- Operational combined-process peak RSS Δ (reported, not gated): ${report.peakRssDeltaMiB} MiB`,
     `- Maximum serialized envelope (40 MiB gate): ${Math.max(...report.projections.serializedSizes)} bytes`,

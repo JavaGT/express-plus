@@ -7,7 +7,19 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const SCENARIOS = ['server-peak', 'client-peak', 'retained-growth', 'initial', 'fallback'];
+import {
+  evaluateW1aScaling, W1A_LATENCY_GATES, W1A_SCALING_WORDS,
+} from './annotated-text-composite-resync-contract.mjs';
+
+const SCENARIOS = [
+  { key: 'server-peak', scenario: 'server-peak' },
+  { key: 'client-peak', scenario: 'client-peak' },
+  { key: 'retained-growth', scenario: 'retained-growth' },
+  { key: 'scaling-9000', scenario: 'initial', words: 9_000 },
+  { key: 'scaling-18000', scenario: 'initial', words: 18_000 },
+  { key: 'initial', scenario: 'initial', words: 36_000 },
+  { key: 'fallback', scenario: 'fallback', words: 36_000 },
+];
 const WORKER_PATTERN = /vitest|svelte-check|node --test|annotated-text-composite-resync(?:-runner)?\.mjs|benchmark:annotated-text/i;
 
 function ancestors() {
@@ -46,17 +58,29 @@ const aggregate = {
   command: 'pnpm benchmark:annotated-text-composite-resync:acceptance',
   scenarios: {},
   isolation: {},
+  gates: {
+    initialBootstrap: { status: 'pending', limitMs: W1A_LATENCY_GATES.initialBootstrapP95Ms },
+    forcedFallbackCycle: { status: 'pending', limitMs: W1A_LATENCY_GATES.forcedFallbackCycleP95Ms },
+    interactiveFold: {
+      status: 'skipped',
+      limitMs: W1A_LATENCY_GATES.interactiveFoldP95Ms,
+      activates: 'W1c',
+      reason: 'interactive fold delivery is not implemented until W1c',
+    },
+    scaling: { status: 'pending' },
+  },
   stoppedBefore: null,
 };
 const clientInputDirectory = mkdtempSync(join(tmpdir(), 'workbench-w1a-client-'));
 
 try {
-for (const scenario of SCENARIOS) {
+for (const entry of SCENARIOS) {
+  const { key, scenario, words } = entry;
   let isolation = isolationSnapshot();
-  aggregate.isolation[scenario] = isolation;
+  aggregate.isolation[key] = isolation;
   if (isolation.matches.length > 0) {
-    aggregate.stoppedBefore = scenario;
-    aggregate.failure = `isolation check found active workers before ${scenario}`;
+    aggregate.stoppedBefore = key;
+    aggregate.failure = `isolation check found active workers before ${key}`;
     break;
   }
   if (scenario === 'client-peak') {
@@ -73,32 +97,67 @@ for (const scenario of SCENARIOS) {
       break;
     }
     isolation = isolationSnapshot();
-    aggregate.isolation[scenario] = isolation;
+    aggregate.isolation[key] = isolation;
     if (isolation.matches.length > 0) {
-      aggregate.stoppedBefore = scenario;
-      aggregate.failure = `isolation check found active workers before ${scenario}`;
+      aggregate.stoppedBefore = key;
+      aggregate.failure = `isolation check found active workers before ${key}`;
       break;
     }
   }
   const child = spawnSync(process.execPath, ['--expose-gc', 'benchmark/annotated-text-composite-resync.mjs'], {
     cwd: process.cwd(),
-    env: { ...process.env, ANNOTATED_TEXT_BENCH_SCENARIO: scenario, ANNOTATED_TEXT_BENCH_CLIENT_INPUT: clientInputDirectory },
+    env: {
+      ...process.env,
+      ANNOTATED_TEXT_BENCH_SCENARIO: scenario,
+      ANNOTATED_TEXT_BENCH_CLIENT_INPUT: clientInputDirectory,
+      ...(words ? { ANNOTATED_TEXT_BENCH_WORDS: String(words) } : {}),
+    },
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
   });
   if (child.status !== 0) {
-    aggregate.stoppedBefore = scenario;
-    aggregate.failure = `${scenario} process exited ${child.status}`;
-    aggregate.scenarios[scenario] = { stderr: child.stderr, stdout: child.stdout };
+    aggregate.stoppedBefore = key;
+    aggregate.failure = `${key} process exited ${child.status}`;
+    aggregate.scenarios[key] = { stderr: child.stderr, stdout: child.stdout };
     break;
   }
   const report = JSON.parse(child.stdout);
   report.stderr = child.stderr;
-  aggregate.scenarios[scenario] = report;
+  aggregate.scenarios[key] = report;
   if (report.thresholdNotes?.length) {
-    aggregate.failure = `${scenario} failed: ${report.thresholdNotes.join('; ')}`;
-    aggregate.stoppedBefore = scenario;
+    if (key === 'initial') {
+      aggregate.gates.initialBootstrap = {
+        status: 'failed', limitMs: W1A_LATENCY_GATES.initialBootstrapP95Ms, measuredP95Ms: report.projections?.endToEndP95Ms,
+      };
+    }
+    if (key === 'fallback') {
+      aggregate.gates.forcedFallbackCycle = {
+        status: 'failed', limitMs: W1A_LATENCY_GATES.forcedFallbackCycleP95Ms, measuredP95Ms: report.projections?.endToEndP95Ms,
+      };
+    }
+    aggregate.failure = `${key} failed: ${report.thresholdNotes.join('; ')}`;
+    aggregate.stoppedBefore = key;
     break;
+  }
+  if (key === 'initial') {
+    aggregate.gates.initialBootstrap = {
+      status: 'passed', limitMs: W1A_LATENCY_GATES.initialBootstrapP95Ms, measuredP95Ms: report.projections.endToEndP95Ms,
+    };
+    const scaling = evaluateW1aScaling(new Map(W1A_SCALING_WORDS.map((fixtureWords) => [
+      fixtureWords,
+      aggregate.scenarios[fixtureWords === 36_000 ? 'initial' : `scaling-${fixtureWords}`].projections.endToEndP95Ms,
+    ])));
+    aggregate.gates.scaling = { status: scaling.passed ? 'passed' : 'failed', ...scaling };
+    if (!scaling.passed) {
+      aggregate.failure = 'initial bootstrap scaling check failed';
+      aggregate.stoppedBefore = 'fallback';
+      break;
+    }
+  }
+  if (key === 'fallback') {
+    aggregate.gates.forcedFallbackCycle = {
+      status: 'passed', limitMs: W1A_LATENCY_GATES.forcedFallbackCycleP95Ms, measuredP95Ms: report.projections.endToEndP95Ms,
+    };
   }
 }
 } finally {
