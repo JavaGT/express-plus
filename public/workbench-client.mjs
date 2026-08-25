@@ -2328,6 +2328,11 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl, repli
  * adapters provide atomic snapshots/catch-up and recipient envelopes only;
  * they never provide raw log rows or choose cursor recovery.
  */
+// Unadvertised-capability rollout step 1 (#122 §12): the client offers this
+// capability on every bootstrap/catchup/subscribe; delta ingestion engages
+// only when a bootstrap RESULT echoes the protocol back (response-gated).
+const SNAPSHOT_PATCH_CAPABILITY = 'snapshot-patch/v1';
+
 export function createLiveDeliverySession({
   bootstrap,
   subscribe,
@@ -2352,9 +2357,14 @@ export function createLiveDeliverySession({
   let baseSnapshot = null;
   let visibleSnapshot = null;
   let cursor = 0;
-  // Opaque projection-token ledger handle (#122): rotated by every accepted
-  // snapshot-patch; presented on catch-up so removals stay provable.
+  // Opaque projection-token ledger handle (#122): minted by a patch-capable
+  // bootstrap, rotated by every accepted snapshot-patch; presented on
+  // catch-up so removals stay provable.
   let projectionToken = null;
+  // Response-gated capability (#122 §12): false until a bootstrap result
+  // advertises snapshot-patch back. Legacy servers (no echo) keep the exact
+  // legacy path — advertised capabilities are additive and ignorable.
+  let deltaCapable = false;
   let status = 'bootstrapping';
   let closed = false;
   let initialized = false;
@@ -2803,6 +2813,34 @@ export function createLiveDeliverySession({
     return { status: 'applied' };
   }
 
+  // ---- capability negotiation + projectionToken lifecycle (#156 client) ----
+  //
+  // The session ALWAYS advertises `snapshot-patch/v1` on every
+  // bootstrap/catchup/subscribe call — the arguments are additive, so a host
+  // that predates #122 simply ignores them (byte-identical legacy behavior).
+  // Delta ingestion arms ONLY on a bootstrap RESULT that advertises the
+  // protocol back and mints a projectionToken. From then on:
+  //   - catch-up carries the token so the server can journal-replay patches;
+  //   - any patch envelope whose token does not advance the held one is a
+  //     forgery/replay → resync (fail closed);
+  //   - a fresh full snapshot re-arms or downgrades cleanly.
+
+  function armDeltaMode(result) {
+    const advertised = result?.protocol === SNAPSHOT_PATCH_CAPABILITY
+      && typeof result?.projectionToken === 'string' && result.projectionToken.length > 0;
+    if (!advertised) {
+      deltaCapable = false;
+      return;
+    }
+    deltaCapable = true;
+    projectionToken = result.projectionToken;
+  }
+
+  function disarmDeltaMode() {
+    deltaCapable = false;
+    projectionToken = null;
+  }
+
   function applyAuthoritative(envelope) {
     if (envelope?.type === 'snapshot-patch') return applySnapshotPatch(envelope);
     return envelope?.type === 'state' ? applyState(envelope) : applyEvent(envelope);
@@ -2829,7 +2867,7 @@ export function createLiveDeliverySession({
   // Full envelope validation (cross-exam FIX 5): every field is checked before
   // anything mutates — projectionToken, actionIds, routedInvisibleActionIds,
   // nonnegative from/to cursors, seqSpan agreement, and exact cursor key sets.
-  function validateSnapshotPatchEnvelope(envelope) {
+  function validateSnapshotPatchEnvelope(envelope, previous = null) {
     if (!isPlainObject(envelope)) return null;
     if (envelope.type !== 'snapshot-patch' || envelope.protocol !== 'snapshot-patch/v1') return null;
     if (typeof envelope.declaration !== 'string' || envelope.declaration.length === 0) return null;
@@ -2932,48 +2970,75 @@ export function createLiveDeliverySession({
     }
   }
 
-  function applySnapshotPatch(envelope) {
-    // 1. Grammar + protocol validation before anything mutates.
-    const valid = validateSnapshotPatchEnvelope(envelope);
-    if (!valid) return { status: 'resync' };
+  function applySnapshotPatch(envelopeOrBatch, previous = null) {
+    // 1. Grammar + protocol validation before ANYTHING mutates (#156 edge
+    // coverage): when a coalesced chain of envelopes arrives together, every
+    // envelope is validated — including from==prev.to chain discipline —
+    // BEFORE the first operation applies. One bad link rejects the WHOLE
+    // chain into snapshot recovery; never partial application.
+    const envelopes = Array.isArray(envelopeOrBatch) ? envelopeOrBatch : [envelopeOrBatch];
+    if (envelopes.length === 0) return { status: 'resync' };
+    const valid = [];
+    let previousEnvelope = previous;
+    for (const candidate of envelopes) {
+      const checked = validateSnapshotPatchEnvelope(candidate, previousEnvelope);
+      if (!checked) return { status: 'resync' };
+      valid.push(checked);
+      previousEnvelope = checked;
+    }
+    // Delta ingestion is response-gated (#122 §12): a patch arriving before a
+    // bootstrap advertised the capability back is out-of-grammar for this
+    // session — recover through a snapshot, never apply.
+    if (!deltaCapable) return { status: 'resync' };
     if (!cursor || typeof cursor !== 'object' || cursor.composite === undefined) return { status: 'resync' };
-    // 2. Cursor decisions (design §9): the composite axes must match exactly;
-    // `to` must actually advance the composite sequence. The ANCHOR may jump
-    // FORWARD in `to`: the server projected this state AT its current _Cursor
-    // head (dual-fence enforced server-side), so application lands the
-    // recipient exactly on that anchor — never behind it, never past it.
-    const from = envelope.from;
-    const to = envelope.to;
-    // Composite regression (to.composite < cursor.composite) risks state
-    // divergence — the recipient may hold changes this patch never saw — so it
-    // RECOVERS through a snapshot rather than trusting idempotent replay.
-    if (to.composite < cursor.composite) {
+    // Token lifecycle (#156): an accepted patch ROTATES the ledger handle. An
+    // envelope presenting (or repeating) the currently held token is a replay
+    // or forgery — fail closed through snapshot recovery.
+    if (valid.some((checked) => checked.projectionToken === projectionToken)) return { status: 'resync' };
+    // 2. Cursor decisions (design §9), evaluated against the CHAIN: the first
+    // envelope must continue the recipient's cursor exactly; later links are
+    // already proven contiguous by validation. The ANCHOR may jump FORWARD in
+    // `to`: the server projected this state AT its current _Cursor head
+    // (dual-fence enforced server-side), so application lands the recipient
+    // exactly on that anchor — never behind it, never past it. A composite
+    // regression risks state divergence — the recipient may hold changes this
+    // patch never saw — so it RECOVERS through a snapshot rather than
+    // trusting idempotent replay.
+    const head = valid[0].from;
+    const tail = valid[valid.length - 1].to;
+    if (tail.composite < cursor.composite) {
       return { status: 'resync' };
     }
-    if (cursor.anchor !== from.anchor || cursor.composite !== from.composite) {
+    if (cursor.anchor !== head.anchor || cursor.composite !== head.composite) {
       // duplicate / stale / gap / incomparable all recover through a snapshot.
-      if (cursor.anchor === to.anchor && cursor.composite === to.composite) return { status: 'duplicate' };
+      if (cursor.anchor === tail.anchor && cursor.composite === tail.composite) return { status: 'duplicate' };
       return { status: 'resync' };
     }
-    // 3-4. Apply every operation to a FRESH immutable copy; a throw discards it.
+    // 3-4. Apply EVERY envelope's operations in order to ONE fresh immutable
+    // copy; any throw discards it — the base never lands half-patched.
     let nextSnapshot;
     try {
       nextSnapshot = JSON.parse(JSON.stringify(baseSnapshot));
-      for (const operation of envelope.operations) applyPatchOperation(nextSnapshot, operation);
+      for (const checked of valid) {
+        for (const operation of checked.operations) applyPatchOperation(nextSnapshot, operation);
+      }
       nextSnapshot = validateSnapshot(nextSnapshot);
     } catch {
       return { status: 'resync' };
     }
     if (closed || status === 'revoked') return { status: 'revoked' };
-    // 6. Commit snapshot + cursor + token together. Settlement (7 in §11):
-    // only actions the patch ECHOES (actionIds), or explicitly marks as
+    // 6. Commit snapshot + cursor + token together (token takes the CHAIN's
+    // LAST rotation — the ledger's newest handle). Settlement (7 in §11):
+    // only actions the patches ECHO (actionIds), or explicitly mark as
     // routed-invisible, may reconcile optimistic state — never an empty patch
     // alone (cross-exam 6).
     baseSnapshot = nextSnapshot;
-    cursor = { anchor: to.anchor, composite: to.composite };
-    projectionToken = envelope.projectionToken ?? projectionToken;
-    const echoed = new Set(envelope.actionIds ?? []);
-    const routedInvisible = new Set(envelope.routedInvisibleActionIds ?? []);
+    cursor = { anchor: tail.anchor, composite: tail.composite };
+    projectionToken = valid[valid.length - 1].projectionToken;
+    const echoed = new Set();
+    for (const checked of valid) for (const id of checked.actionIds ?? []) echoed.add(id);
+    const routedInvisible = new Set();
+    for (const checked of valid) for (const id of checked.routedInvisibleActionIds ?? []) routedInvisible.add(id);
     for (const [actionId, operation] of operations) {
       const settleable = echoed.has(actionId) || routedInvisible.has(actionId);
       if (settleable && operation.delivered
@@ -3021,11 +3086,28 @@ export function createLiveDeliverySession({
     if (!Array.isArray(result.envelopes)) throw new Error('catch-up is missing recipient envelopes');
     assertCursor(result.cursor, 'catch-up cursor');
     const initialCursor = cursor;
+    // Coalesced snapshot-patch CHAINS (#156): when a catch-up batch carries
+    // multiple patch envelopes, they are applied as ONE atomic unit with
+    // from==prev.to chain validation. Mixed batches (patches interleaved with
+    // other kinds) cannot be proven contiguous, so they recover via resync.
+    if (result.envelopes.length > 1 && result.envelopes.some((envelope) => envelope?.type === 'snapshot-patch')) {
+      const patchesOnly = result.envelopes.every((envelope) => envelope?.type === 'snapshot-patch');
+      const applied = patchesOnly
+        ? applySnapshotPatch(result.envelopes)
+        : { status: 'resync' };
+      if (applied.status === 'resync') return false;
+      if (!sameCursor(cursor, result.cursor)) throw new Error('catch-up final cursor does not match its recipient envelopes');
+      return true;
+    }
+    let previousPatch = null;
     for (const envelope of result.envelopes) {
       if (!isKnownEnvelopeKind(envelope)) throw new Error('catch-up recipient envelopes are not valid');
       if (envelope.type === 'resync' || envelope.type === 'state-invalidate') return false;
       if (envelope.type === 'notification') continue;
-      const applied = applyAuthoritative(envelope);
+      const applied = envelope.type === 'snapshot-patch'
+        ? applySnapshotPatch(envelope, previousPatch)
+        : applyAuthoritative(envelope);
+      if (envelope.type === 'snapshot-patch') previousPatch = envelope;
       if (applied.status === 'resync') return false;
       if (closed || status === 'revoked') return true;
       if (applied.status === 'gap') throw new Error('catch-up recipient envelopes are not contiguous');
@@ -3080,6 +3162,12 @@ export function createLiveDeliverySession({
       // predates its committed fence, even when reconnect superseded its first
       // request while it was in flight.
       if (snapshotCursorFloor != null && cursorAnchor(result.cursor) < Math.max(snapshotCursorFloor, cursorAnchor(snapshotCursorAtStart))) return;
+      // Capability negotiation (#156 client): the INSTALLED bootstrap result
+      // is the ONLY thing that arms delta mode. A legacy result (no protocol
+      // echo) downgrades cleanly; a patch-capable result re-arms and stores
+      // its freshly minted projectionToken. Arming coincides exactly with
+      // installing this result so the token can never lead its cursor.
+      armDeltaMode(result);
       baseSnapshot = nextSnapshot;
       cursor = result.cursor;
       snapshotGeneration += 1;
@@ -3197,6 +3285,10 @@ export function createLiveDeliverySession({
         if (reconnecting) reconnectRequested = true;
         else reconnect().catch(() => {});
       },
+      // Capability advertisement (#156): the live subscription offers the
+      // capability too, so a patch-capable host can push snapshot-patch
+      // envelopes on the stream. Additive — legacy hosts ignore it.
+      capabilities: [SNAPSHOT_PATCH_CAPABILITY],
     });
     // Delivery can revoke access while transport establishment is pending.
     // Never retain a subscription that became unauthorized before its handle.
@@ -3262,6 +3354,7 @@ export function createLiveDeliverySession({
     if (closed || status === 'revoked') return;
     status = 'revoked';
     cancelSnapshotRecovery();
+    disarmDeltaMode();
     finishRecoveryWarning();
     settleAdmissions(false);
     cancelRecoveryRetries();
@@ -3536,6 +3629,11 @@ export function createLiveDeliverySession({
     get snapshot() { return visibleSnapshot; },
     get cursor() { return cursor; },
     get status() { return status; },
+    // Capability negotiation state (#156): true only while a patch-capable
+    // bootstrap result is installed; hosting code and tests read this to
+    // verify the response-gated handshake.
+    get deltaCapable() { return deltaCapable; },
+    get projectionToken() { return projectionToken; },
     get ready() { return ready; },
     dispatch,
     batch,
@@ -3607,12 +3705,20 @@ export function createLiveDeliveryHttpSession({
   const batchActionEndpoint = new URL('/workbench/actions/batch', new URL(baseUrl, globalThis.location?.href ?? 'http://workbench.local')).toString();
   const historyEndpoint = new URL('/workbench/history', new URL(baseUrl, globalThis.location?.href ?? 'http://workbench.local')).toString();
 
-  async function bootstrap({ after, mode }) {
+  async function bootstrap({ after, mode, projectionToken }) {
     const url = new URL(endpoint, globalThis.location?.href ?? 'http://workbench.local');
     if (!requestIdentity) url.searchParams.set('scope', scope);
     for (const [key, value] of Object.entries(requestIdentity ?? {})) url.searchParams.set(key, value);
     url.searchParams.set('mode', mode);
-    if (mode === 'catchup') url.searchParams.set('after', typeof after === 'object' ? JSON.stringify(after) : String(after));
+    // Capability advertisement (#156): every bootstrap offers snapshot-patch
+    // support. Catch-up presents the held projectionToken so a patch-capable
+    // server can serve journal patches; both fields are additive and ignored
+    // by legacy servers (byte-identical legacy requests otherwise).
+    url.searchParams.set('capabilities', SNAPSHOT_PATCH_CAPABILITY);
+    if (mode === 'catchup') {
+      url.searchParams.set('after', typeof after === 'object' ? JSON.stringify(after) : String(after));
+      if (typeof projectionToken === 'string') url.searchParams.set('projectionToken', projectionToken);
+    }
     let response;
     try {
       response = await fetchImpl(url.toString(), { credentials: 'include' });
@@ -3634,6 +3740,9 @@ export function createLiveDeliveryHttpSession({
     if (!requestIdentity) url.searchParams.set('scope', scope);
     for (const [key, value] of Object.entries(requestIdentity ?? {})) url.searchParams.set(key, value);
     url.searchParams.set('after', typeof after === 'object' ? JSON.stringify(after) : String(after));
+    // Capability advertisement (#156): the stream may carry snapshot-patch
+    // envelopes for a patch-capable server. Additive query parameter.
+    url.searchParams.set('capabilities', SNAPSHOT_PATCH_CAPABILITY);
     const source = eventSourceFactory(url.toString(), { withCredentials: true });
     let open = true;
     source.onmessage = (message) => {
