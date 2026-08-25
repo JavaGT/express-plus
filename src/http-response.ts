@@ -67,7 +67,10 @@ export function sendJson(
   options: SendJsonOptions = {},
 ): boolean {
   if (!canWriteResponse(res, options.operation ?? 'sendJson', options.cause)) return false;
-  const payload = JSON.stringify(body);
+  // JSON.stringify returns the value `undefined` for an `undefined` body —
+  // treat that as an EMPTY response (status only, no payload) instead of
+  // letting Buffer.byteLength(undefined) throw mid-request.
+  const payload = JSON.stringify(body) ?? '';
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
     'content-length': Buffer.byteLength(payload),

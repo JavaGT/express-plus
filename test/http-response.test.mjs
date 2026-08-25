@@ -51,6 +51,28 @@ test('sendJson preserves extra headers', () => {
   assert.equal(res.headers['x-test'], '1');
 });
 
+// #165 — an undefined body is an EMPTY response (status only), not a throw.
+test('sendJson treats an undefined body as an empty payload', () => {
+  const res = makeResponse();
+
+  assert.doesNotThrow(() => sendJson(res, 204, undefined));
+
+  assert.equal(res.status, 204);
+  assert.equal(res.headers['content-type'], 'application/json; charset=utf-8');
+  assert.equal(res.headers['content-length'], 0);
+  assert.equal(res.body, '');
+});
+
+test('sendJson still serializes explicit null as null', () => {
+  const res = makeResponse();
+
+  sendJson(res, 200, null);
+
+  assert.equal(res.status, 200);
+  assert.equal(res.headers['content-length'], Buffer.byteLength('null'));
+  assert.equal(res.body, 'null');
+});
+
 test('committedEventHeaders includes action id and max committed seq', () => {
   assert.deepEqual(
     committedEventHeaders({ events: [{ seq: 1 }, { seq: 4 }, { seq: 2 }] }, 'a1'),
