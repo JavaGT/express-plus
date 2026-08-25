@@ -2352,6 +2352,9 @@ export function createLiveDeliverySession({
   let baseSnapshot = null;
   let visibleSnapshot = null;
   let cursor = 0;
+  // Opaque projection-token ledger handle (#122): rotated by every accepted
+  // snapshot-patch; presented on catch-up so removals stay provable.
+  let projectionToken = null;
   let status = 'bootstrapping';
   let closed = false;
   let initialized = false;
@@ -2673,6 +2676,11 @@ export function createLiveDeliverySession({
       && Number.isSafeInteger(value.anchor) && value.anchor >= 0
       && Number.isSafeInteger(value.aggregate) && value.aggregate >= 0
       && Object.keys(value).length === 2) return;
+    // snapshot-patch composite cursors (#122): {anchor, composite}.
+    if (value && typeof value === 'object'
+      && Number.isSafeInteger(value.anchor) && value.anchor >= 0
+      && Number.isSafeInteger(value.composite) && value.composite >= 0
+      && Object.keys(value).length === 2) return;
     throw new Error(`${label} must be a nonnegative cursor`);
   }
 
@@ -2681,6 +2689,10 @@ export function createLiveDeliverySession({
   }
 
   function sameCursor(left, right) {
+    if (typeof left === 'object' && typeof right === 'object'
+      && left.composite !== undefined && right.composite !== undefined) {
+      return left.anchor === right.anchor && left.composite === right.composite;
+    }
     return cursorAnchor(left) === cursorAnchor(right)
       && (typeof left === 'object') === (typeof right === 'object')
       && (typeof left !== 'object' || left.aggregate === right.aggregate);
@@ -2692,7 +2704,7 @@ export function createLiveDeliverySession({
   // notifications are never authoritative; the client ignores the latter
   // rather than failing the delivery batch (consideration #23). Any other
   // kind is a protocol violation and still rejects the batch.
-  const DELIVERY_ENVELOPE_KINDS = new Set(['event', 'state', 'resync', 'state-invalidate', 'notification']);
+  const DELIVERY_ENVELOPE_KINDS = new Set(['event', 'state', 'resync', 'state-invalidate', 'notification', 'snapshot-patch']);
   function isKnownEnvelopeKind(envelope) {
     return envelope != null && typeof envelope === 'object'
       && typeof envelope.type === 'string' && DELIVERY_ENVELOPE_KINDS.has(envelope.type);
@@ -2792,7 +2804,140 @@ export function createLiveDeliverySession({
   }
 
   function applyAuthoritative(envelope) {
+    if (envelope?.type === 'snapshot-patch') return applySnapshotPatch(envelope);
     return envelope?.type === 'state' ? applyState(envelope) : applyEvent(envelope);
+  }
+
+  // ---- snapshot-patch ingestion (#122, cross-exam step 2) ------------------
+  //
+  // Strict grammar validation, atomic application to a fresh graph, and
+  // cursor decisions per design §9. Any validation or application failure
+  // advances NOTHING and reports `resync` so recovery installs a full
+  // authorized snapshot — fail closed, never partially patched.
+
+  const SNAPSHOT_PATCH_OPERATIONS = new Set(['replace-fields', 'put-keyed', 'remove-keyed', 'replace-many', 'replace-one', 'replace-value']);
+
+  function isPlainObject(value) {
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+      && (value.constructor === undefined || value.constructor === Object);
+  }
+
+  function validateSnapshotPatchEnvelope(envelope) {
+    if (!isPlainObject(envelope)) return null;
+    if (envelope.type !== 'snapshot-patch' || envelope.protocol !== 'snapshot-patch/v1') return null;
+    if (typeof envelope.declaration !== 'string' || envelope.declaration.length === 0) return null;
+    for (const key of ['from', 'to']) {
+      const c = envelope[key];
+      if (!isPlainObject(c)
+        || !Number.isSafeInteger(c.anchor) || !Number.isSafeInteger(c.composite)) return null;
+    }
+    if (!Array.isArray(envelope.operations)) return null;
+    for (const operation of envelope.operations) {
+      if (!isPlainObject(operation) || !SNAPSHOT_PATCH_OPERATIONS.has(operation.op)) return null;
+      if (!Array.isArray(operation.path)
+        || !operation.path.every((segment) => typeof segment === 'string' && segment.length > 0)) return null;
+      switch (operation.op) {
+        case 'put-keyed':
+          if (typeof operation.id !== 'string' || operation.id.length === 0 || !isPlainObject(operation.value)) return null;
+          break;
+        case 'remove-keyed':
+          if (typeof operation.id !== 'string' || operation.id.length === 0) return null;
+          break;
+        case 'replace-many':
+          if (!Array.isArray(operation.value) || !operation.value.every(isPlainObject)) return null;
+          break;
+        case 'replace-one':
+          if (operation.value !== null && !isPlainObject(operation.value)) return null;
+          break;
+      }
+    }
+    return envelope;
+  }
+
+  function navigatePatchPath(root, path) {
+    let current = root;
+    for (const segment of path) {
+      current = current?.[segment];
+    }
+    return current;
+  }
+
+  function applyPatchOperation(state, operation) {
+    const parent = navigatePatchPath(state, operation.path);
+    if (parent == null || typeof parent !== 'object') throw new Error(`patch path resolves to nothing: ${operation.path.join('.')}`);
+    switch (operation.op) {
+      case 'put-keyed':
+        parent[operation.id] = operation.value;
+        return;
+      case 'remove-keyed':
+        delete parent[operation.id];
+        return;
+      case 'replace-many': {
+        const segments = [...operation.path];
+        const last = segments.pop();
+        const holder = navigatePatchPath(state, segments);
+        holder[last] = operation.value;
+        return;
+      }
+      case 'replace-one':
+      case 'replace-value': {
+        const segments = [...operation.path];
+        const last = segments.pop();
+        const holder = navigatePatchPath(state, segments);
+        holder[last] = operation.value;
+        return;
+      }
+      case 'replace-fields':
+        // Selected-field set replacement: relations and identity untouched.
+        Object.assign(parent, operation.value);
+        return;
+      default:
+        throw new Error(`unknown patch op ${operation.op}`);
+    }
+  }
+
+  function applySnapshotPatch(envelope) {
+    // 1. Grammar + protocol validation before anything mutates.
+    const valid = validateSnapshotPatchEnvelope(envelope);
+    if (!valid) return { status: 'resync' };
+    if (!cursor) return { status: 'resync' };
+    // 2. Cursor decisions (design §9): both anchor AND composite must match.
+    const from = envelope.from;
+    const to = envelope.to;
+    if (cursor.anchor !== from.anchor || cursor.composite !== from.composite) {
+      // duplicate / stale / gap / incomparable all recover through a snapshot.
+      if (cursor.anchor === to.anchor && cursor.composite === to.composite) return { status: 'duplicate' };
+      return { status: 'resync' };
+    }
+    // 3-4. Apply every operation to a FRESH immutable copy; a throw discards it.
+    let nextSnapshot;
+    try {
+      nextSnapshot = JSON.parse(JSON.stringify(baseSnapshot));
+      for (const operation of envelope.operations) applyPatchOperation(nextSnapshot, operation);
+      nextSnapshot = validateSnapshot(nextSnapshot);
+    } catch {
+      return { status: 'resync' };
+    }
+    if (closed || status === 'revoked') return { status: 'revoked' };
+    // 6. Commit snapshot + cursor + token together. Settlement (7 in §11):
+    // only actions the patch ECHOES (actionIds), or explicitly marks as
+    // routed-invisible, may reconcile optimistic state — never an empty patch
+    // alone (cross-exam 6).
+    baseSnapshot = nextSnapshot;
+    cursor = { anchor: to.anchor, composite: to.composite };
+    projectionToken = envelope.projectionToken ?? projectionToken;
+    const echoed = new Set(envelope.actionIds ?? []);
+    const routedInvisible = new Set(envelope.routedInvisibleActionIds ?? []);
+    for (const [actionId, operation] of operations) {
+      const settleable = echoed.has(actionId) || routedInvisible.has(actionId);
+      if (settleable && operation.delivered
+        && (operation.confirmedCursor == null || cursorAnchor(cursor) >= operation.confirmedCursor)) {
+        settleOperation(operation, { status: 'reconciled' });
+        operations.delete(actionId);
+      }
+    }
+    publish();
+    return { status: 'applied' };
   }
 
   function settleSnapshotConfirmations(receiptGenerationAtStart) {
