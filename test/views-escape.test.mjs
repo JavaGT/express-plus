@@ -175,13 +175,32 @@ const handler = (root) => serveStatic(root, { prefix: '', precompressed: true })
 test('parseAcceptEncoding: absent header, q parsing, duplicates last-win, case folding', () => {
   assert.deepEqual(parseAcceptEncoding(undefined), {});
   assert.deepEqual(parseAcceptEncoding('gzip'), { gzip: 1 });
-  // malformed/missing q defaults to 1; values clamp to [0,1]
-  assert.deepEqual(parseAcceptEncoding('gzip;q=abc, br;q=2, identity;q=-1'), { gzip: 1, br: 1, identity: 0 });
+  // valid q-values across the grammar: clamped-free, exactly three digits
+  assert.deepEqual(parseAcceptEncoding('gzip;q=0.5'), { gzip: 0.5 });
+  assert.deepEqual(parseAcceptEncoding('br;q=0.000, identity;q=1.000'), { br: 0, identity: 1 });
+  assert.deepEqual(parseAcceptEncoding('GZIP;Q=0.5'), { gzip: 0.5 });
   // duplicate tokens: later entry wins
   assert.deepEqual(parseAcceptEncoding('gzip;q=0, gzip'), { gzip: 1 });
-  assert.deepEqual(parseAcceptEncoding('GZIP;Q=0.5'), { gzip: 0.5 });
-  // garbage entries dropped
-  assert.deepEqual(parseAcceptEncoding(',, ;q=1, br'), { br: 1 });
+});
+
+test('parseAcceptEncoding: malformed q-values default to q=1', () => {
+  // trailing garbage after a valid float must NOT parse as that float
+  assert.deepEqual(parseAcceptEncoding('gzip;q=0.5garbage'), { gzip: 1 });
+  assert.deepEqual(parseAcceptEncoding('gzip;q=abc, br;q=2, identity;q=-1'), { gzip: 1, br: 1, identity: 1 });
+  // grammar violations: missing leading/trailing digits, sign, exponent
+  assert.deepEqual(parseAcceptEncoding('br;q=.5, identity;q=1., zstd;q=+0.5, x-compress;q=1e0'), {
+    br: 1,
+    identity: 1,
+    'x-compress': 1,
+    zstd: 1,
+  });
+});
+
+test('parseAcceptEncoding: entries failing the RFC 7230 token grammar are dropped entirely', () => {
+  assert.deepEqual(parseAcceptEncoding('gzip@invalid, br'), { br: 1 });
+  assert.deepEqual(parseAcceptEncoding('(x), br;q=0.5, "quoted", a/b'), { br: 0.5 });
+  // a dropped token cannot shadow or be shadowed by valid duplicates
+  assert.deepEqual(parseAcceptEncoding('g@p;q=0, gzip;q=0, G@P'), { gzip: 0 });
 });
 
 test('mergeVary: case-insensitive union, dedupe, canonical lowercase', () => {

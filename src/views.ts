@@ -28,12 +28,28 @@ import { sendJson, type HttpResponseLike } from './http-response.ts';
 
 // --- Content negotiation (Accept-Encoding contract) -------------------------
 //
+// RFC 7230 `token` grammar: 1*tchar where tchar is any visible ASCII character
+// except separators ()<>@,;:\"/[]?={} \t. Accept-Encoding codings must match it.
+const TOKEN_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
+// RFC 9110 §12.4.2 weight grammar: "0" [ "." *3DIGIT ] / "1" [ "." *3"0" ] —
+// up to three fractional digits when present, no sign, exponent, or garbage.
+const QVALUE_RE = /^(?:0(?:\.\d{1,3})?|1(?:\.000)?)$/;
+
+function parseQValue(raw: string): number | undefined {
+  const value = raw.trim();
+  if (!QVALUE_RE.test(value)) return undefined;
+  return value === '1' || value === '1.000' ? 1 : Number.parseFloat(value);
+}
+
 // parseAcceptEncoding turns an Accept-Encoding header into a coding→q map per
 // RFC 9110 §12.5.3: absent header → {} (everything acceptable; serveStatic then
 // picks identity for tooling predictability); entries split on ',', token
-// lowercased, `;q=` parsed as float clamped to [0,1] with missing/malformed q
-// defaulting to 1; duplicate tokens last-win; unparseable entries dropped.
-// The wildcard '*' is kept as an ordinary map key.
+// validated against the RFC 7230 token grammar and lowercased; `;q=` requires
+// the complete q-value grammar (0[.ddd] or 1[.000], ddd=000..999) with missing q
+// defaulting to 1 and MALFORMED q defaulting to 1; duplicate tokens last-win;
+// entries whose coding fails the token grammar are dropped entirely. The
+// wildcard '*' is kept as an ordinary map key.
 export function parseAcceptEncoding(headerValue: string | undefined): Record<string, number> {
   if (headerValue === undefined || headerValue === null) return {};
   const prefs: Record<string, number> = {};
@@ -42,16 +58,16 @@ export function parseAcceptEncoding(headerValue: string | undefined): Record<str
     if (!item) continue;
     const semi = item.indexOf(';');
     const token = (semi === -1 ? item : item.slice(0, semi)).trim().toLowerCase();
-    if (!token) continue;
+    if (!TOKEN_RE.test(token)) continue;
     let q = 1;
     if (semi !== -1) {
-      const params = item.slice(semi + 1).split(';');
-      for (const param of params) {
+      for (const param of item.slice(semi + 1).split(';')) {
         const eq = param.indexOf('=');
         if (eq === -1) continue;
         if (param.slice(0, eq).trim().toLowerCase() !== 'q') continue;
-        const parsed = Number.parseFloat(param.slice(eq + 1).trim());
-        q = Number.isFinite(parsed) ? Math.min(1, Math.max(0, parsed)) : 1;
+        // A malformed q-value leaves the RFC 9110 default of 1 in place.
+        const parsed = parseQValue(param.slice(eq + 1));
+        if (parsed !== undefined) q = parsed;
         break;
       }
     }
