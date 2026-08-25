@@ -374,12 +374,12 @@ function fetchAncestorRow(ctx                , entry                   , id     
  * instance — post-state or ledger-addressed — rebuild exactly the ancestor
  * spine nodes the output path needs, then capture the smallest affected
  * content at the final relation: affected keyed members, or the whole
- * instance for wholesale kinds. Fresh admission for every captured row
- * (nothing here is assumed from the ledger: these rows' content or existence
- * just changed — except pure spine rows, which are addressed, not emitted,
- * and therefore skip nothing they would not skip in a full capture).
+ * instance for wholesale kinds. Fresh admission for every captured row.
+ * `into` is the container the branch's TOP-LEVEL entry lives in; deeper
+ * spine levels hang off their parent instance's node, which a previous
+ * group (or the level above, this pass) has already placed.
  */
-function fillAffectedBranch(ctx                , rootRaw                         , entry                   , branchId        , into                                  )       {
+function fillAffectedBranch(ctx                , rootRaw                         , branchId        , into                                  )       {
   const { db, principal, tombstones } = ctx;
   const chain = branchChain(ctx.plan, branchId);
   const groups = ctx.instances.get(branchId);
@@ -387,32 +387,34 @@ function fillAffectedBranch(ctx                , rootRaw                        
   const fragments = ctx.resolution.get(branchId);
   if (!fragments) throw new Error('affected fragments unresolved for a touched branch');
 
-  // Spine nodes are shared across the branch's instances (and re-found when a
-  // second touched branch nests under the same instance).
-  const spineNodes = new Map                          ();
-
   for (const [, group] of groups) {
-    // Build the ancestor spine, outermost first.
-    let parentNode                   = { raw: rootRaw, children: into };
+    // Walk/build the ancestor spine, outermost first. Every level's node is
+    // REUSED when already present in its parent's children (placed by an
+    // earlier group or touched branch) and only read+captured when missing.
+    let parentNode = { raw: rootRaw, children: into }                    ;
     for (let level = 0; level < chain.length - 1; level += 1) {
       const relation = chain[level];
+      if (relation.kind !== 'keyed') {
+        // Grammar boundary already rejects non-keyed ancestors upstream;
+        // reaching here would mean an unnavigable path.
+        throw new Error('targeted capture supports keyed-ancestor spines only');
+      }
       const levelEntry = compiledEntryAt(ctx.declaration.output, relation.path);
-      const spineKey = `${relation.branchId}\u0000${group.levels[level]}`;
-      let node = spineNodes.get(spineKey);
+      if (!levelEntry.entity) throw new Error('ancestor branch lacks a compiled entity');
+      const memberId = group.levels[level];
+      const existing = (parentNode.children.get(levelEntry) ?? [])                      ;
+      let node = existing.find((candidate) => String(candidate.raw.id) === memberId) ?? null;
       if (!node) {
-        const existing = (parentNode.children.get(levelEntry) ?? [])                      ;
-        node = existing.find((candidate) => String(candidate.raw.id) === group.levels[level]) ?? null;
-        if (!node) {
-          // Prefer post-state evidence from any affected fragment at this
-          // level; fall back to a scoped read for ledger-addressed spines.
-          const evidence = [...fragments.values()].find((candidate) => candidate.levels[level]?.raw.id === group.levels[level]);
-          const raw = evidence?.levels[level]?.raw ?? fetchAncestorRow(ctx, levelEntry, group.levels[level]);
-          node = newNode(raw, false);
-          for (const nestedEntry of nestedEntriesOf(levelEntry)) node.children.set(nestedEntry, []);
-          existing.push(Object.freeze(node));
-          parentNode.children.set(levelEntry, existing);
-        }
-        spineNodes.set(spineKey, node);
+        // Prefer post-state evidence from an affected fragment at this level;
+        // fall back to a scoped read (ledger-addressed spine rows).
+        const evidence = [...fragments.values()].find((candidate) => String(candidate.levels[level]?.raw.id) === memberId);
+        const raw = evidence?.levels[level]?.raw ?? fetchAncestorRow(ctx, levelEntry, memberId);
+        node = newNode(raw, false);
+        // Spine rows are addressed, not emitted: nested entries stay empty
+        // unless a later touched branch fills them under this same node.
+        for (const nestedEntry of nestedEntriesOf(levelEntry)) node.children.set(nestedEntry, []);
+        existing.push(Object.freeze(node));
+        parentNode.children.set(levelEntry, existing);
       }
       parentNode = node;
     }
@@ -455,25 +457,47 @@ function captureAffectedGraph(ctx                , handleId        )            
   if (anchorRows.length !== 1) return null;
   const root = newNode(anchorRows[0], false);
   const output = declaration.output;
+
+  // Group the touched branches by their TOP-LEVEL output entry: a touched
+  // `codes.notes` lives under the `codes` entry, which must therefore not be
+  // treated as untouched even though `codes` itself is not in the slice.
+  const touchedUnder = new Map                  ();
+  for (const branchId of ctx.touched.keys()) {
+    const topLevel = branchId.split('.')[0];
+    const existing = touchedUnder.get(topLevel);
+    if (existing) existing.push(branchId);
+    else touchedUnder.set(topLevel, [branchId]);
+  }
+
   for (const entry of output.entries) {
     if (entry.kind === 'select') continue;
-    const touchedIds = ctx.touched.get(entry.key);
-    if (!touchedIds && !ctx.anchorTouched) {
-      // Sparse absence: this branch is untouched and no anchor op is emitted,
-      // so nobody reads its value. Nothing is captured, admitted, hydrated,
-      // or projected for it.
+    const under = touchedUnder.get(entry.key);
+    if (!under && !ctx.anchorTouched) {
+      // Sparse absence: nothing under this branch is touched and no anchor op
+      // is emitted, so nobody reads its value. Nothing is captured, admitted,
+      // hydrated, or projected for it.
       root.children.set(entry, []);
       continue;
     }
-    if (!touchedIds) {
-      // Anchor-op value assembly: the replace-fields value must carry every
-      // branch's current value, so this untouched branch is captured whole —
+    if (!under) {
+      // Anchor-op value assembly for an untouched branch: the replace-fields
+      // value must carry every branch's current value, so capture whole —
       // ledger-admitted (no per-row admit calls) but fully hydrated so the
       // values stay byte-identical to a fresh snapshot.
       root.children.set(entry, fillCompleteEntry(ctx, root.raw, entry, true));
       continue;
     }
-    fillAffectedBranch(ctx, root.raw, entry, entry.key, root.children);
+    if (ctx.anchorTouched) {
+      // Mixed batch (anchor fields AND this branch in one slice): the anchor
+      // op needs the complete branch value anyway, so capture whole with FRESH
+      // admission — touched rows must never ride on the ledger shortcut.
+      root.children.set(entry, fillCompleteEntry(ctx, root.raw, entry, false));
+      continue;
+    }
+    // Sparse path: rebuild only the addressed instances under this entry.
+    for (const branchId of under) {
+      fillAffectedBranch(ctx, root.raw, branchId, root.children);
+    }
   }
   return root;
 }
