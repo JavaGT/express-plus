@@ -259,6 +259,14 @@ test('SSE and WebSocket deliver identical collection `state` and `state-invalida
 
     await sleep(50);
 
+    // #163: the initial-empty subscription first delivers its authoritative
+    // empty baseline (identical on both transports), then the write follows.
+    const sseBaseline = (await nextSseFrame(sseReader))[0];
+    const wsBaseline = await ws.nextMessage();
+    assert.equal(sseBaseline.type, 'state');
+    assert.deepEqual(wsBaseline, sseBaseline, 'SSE and WebSocket deliver the identical empty baseline');
+    assert.deepEqual(sseBaseline.rows, []);
+
     db.exec("INSERT INTO Note (id, title) VALUES ('b', 'B'), ('a', 'A')");
     bumpRevision(db, 'Note', 1);
     owned.delivery.wake('Note');

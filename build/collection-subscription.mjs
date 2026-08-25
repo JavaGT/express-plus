@@ -49,6 +49,7 @@ export function createCollectionSubscription({ db, entity, principal, rule, mayV
   if (typeof deliver !== 'function') throw new Error('collection subscription deliver must be a function.');
   const compiled = isCompiled(rule) ? rule : compileSubscriptionRule(rule, entity);
   let previous                            = [];
+  let baselineDelivered = false;
   let closed = false;
   let pending = 0;
   let tail = Promise.resolve();
@@ -90,7 +91,13 @@ export function createCollectionSubscription({ db, entity, principal, rule, mayV
     });
     const changed = additions.length > 0 || removals.length > 0 || reorderings.length > 0 || JSON.stringify(previous) !== JSON.stringify(rows);
     previous = rows;
-    if (!changed && overflow === null) return null;
+    // The first refresh is an unconditional authoritative baseline (issue #163):
+    // a client must be able to distinguish "empty" from "not yet loaded", so the
+    // initial state envelope is emitted even when nothing matched. Subsequent
+    // refreshes keep reporting real changes only.
+    const emitBaseline = !baselineDelivered;
+    baselineDelivered = true;
+    if (!changed && overflow === null && !emitBaseline) return null;
     return Object.freeze({ type: 'collection', additions: Object.freeze(additions), removals: Object.freeze(removals), reorderings: Object.freeze(reorderings), rows: Object.freeze(rows), overflow });
   }
 

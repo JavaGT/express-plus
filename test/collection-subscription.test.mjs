@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { createCollectionSubscription, createCollectionSubscriptionRegistry, CollectionSubscriptionBackpressureError } from '../build/collection-subscription.mjs';
 import { compileSubscriptionRule } from '../build/subscription-rule.mjs';
+import { collectionDeliveryEnvelope } from '../build/live-delivery-envelope.mjs';
 import { authorizeSubscription } from '../build/live-admission.mjs';
 
 function setup() {
@@ -97,6 +98,38 @@ test('collection bounds only admitted rows and serializes direct refreshes', asy
     assert.deepEqual(first.rows.map((row) => row.id), ['a', 'b']);
     assert.equal(first.overflow, null, 'an inaccessible row neither consumes a slot nor overflows it');
     assert.equal(second, null, 'concurrent refreshes observe a serialized baseline');
+  } finally {
+    db.close();
+  }
+});
+
+test('an initial-empty collection delivers its authoritative empty state without any write (#163)', async () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT, rank INTEGER)');
+  try {
+    const entity = { name: 'Note', fields: { title: {}, rank: {} }, scopeFilter: () => ({ sql: '1=1', params: {} }) };
+    const rule = { resourceKind: 'Note', select: ['title', 'rank'], sort: [{ field: 'rank' }], boundedResultPolicy: { limit: 2 } };
+    const delivered = [];
+    const subscription = createCollectionSubscription({ db, entity, principal: { type: 'user', id: 'u1' }, rule, authorization: { admit: async () => ({ admitted: true }) }, mayVerb: async () => true, deliver: (change) => delivered.push(change) });
+
+    const baseline = await subscription.refresh();
+    assert.deepEqual(baseline.rows, [], 'the first refresh is an authoritative empty snapshot');
+    assert.equal(baseline.overflow, null);
+    assert.deepEqual(baseline.additions, []);
+    assert.deepEqual(baseline.removals, []);
+
+    // Wire contract: the baseline maps to the same `state` envelope shape as a
+    // normal catch-up delivery, and an unchanged later refresh stays silent.
+    assert.deepEqual(collectionDeliveryEnvelope(baseline, { entityName: 'Note', revision: 0 }), { type: 'state', entity: 'Note', id: 'Note', seq: 0, additions: [], removals: [], reorderings: [], rows: [] });
+    assert.equal(await subscription.refresh(), null, 'unchanged refreshes after the baseline stay silent');
+
+    await subscription.notify();
+    assert.equal(delivered.length, 0, 'a wake without writes emits nothing beyond the baseline');
+
+    db.exec("INSERT INTO Note VALUES ('a', 'A', 1)");
+    await subscription.notify();
+    assert.equal(delivered.length, 1);
+    assert.deepEqual(delivered[0].additions.map((row) => row.id), ['a'], 'the subscription still delivers real changes');
   } finally {
     db.close();
   }
