@@ -198,7 +198,7 @@ test('rejects incomplete or non-recipient envelopes', () => {
     null,
   ];
   for (const bad of errors) {
-    assert.throws(() => materializeAnnotatedTextSnapshot(bad), /complete blockless recipient envelope/);
+    assert.throws(() => materializeAnnotatedTextSnapshot(bad), /complete blockless recipient envelope|v3 envelope has invalid shape/);
   }
   assert.throws(() => materializeAnnotatedTextSnapshot(recipient({ orphans: 'nope' })), /orphans must be an array/);
   assert.throws(() => materializeAnnotatedTextSnapshot(recipient({ redactions: 'nope' })), /redactions must be an array/);

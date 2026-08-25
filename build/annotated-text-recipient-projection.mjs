@@ -158,6 +158,29 @@ function freezeArray   (values     )               {
   return Object.freeze(values);
 }
 
+function pointShape(value     )         {
+  const anchor = value[1];
+  return anchor[0] === 'root'
+    ? `r:${value[2]}`
+    : `e:${anchor[1][0][0]}:${anchor[1][0][1]}:${anchor[1][1]}:${value[2]}`;
+}
+
+function internValue(value        , values          , byIdentity                         , byShape                     , shapeOf                        )         {
+  const known = byIdentity.get(value);
+  if (known !== undefined) return known;
+  const shape = shapeOf(value);
+  const matching = byShape.get(shape);
+  if (matching !== undefined) {
+    byIdentity.set(value, matching);
+    return matching;
+  }
+  const index = values.length;
+  values.push(value);
+  byIdentity.set(value, index);
+  byShape.set(shape, index);
+  return index;
+}
+
 export function projectAnnotatedTextRecipient({ source, descriptor, decisions }
 
 
@@ -347,18 +370,36 @@ export function projectAnnotatedTextRecipient({ source, descriptor, decisions }
     for (const targetId of annotations.get(id) .protectedTargetIds ?? []) deniedProtectedTargets.add(targetId);
   }
 
-  const recipientRanges                                                        = [];
+  const recipientRanges                                                                                                   = [];
   const retainedAnnotationIds = new Set        ();
   const offsetsUnchanged = authoring.length === 0;
   const fullyAnchored = authoring.length === 0 && rangeFormat === 'anchored' && anchoredRangeCount === rangeCount;
+  const points           = [];
+  const frontiers           = [];
+  const pointByIdentity = new WeakMap                ();
+  const frontierByIdentity = new WeakMap                ();
+  const pointByShape = new Map                ();
+  const frontierByShape = new Map                ();
   const appendRecipientRange = (annotationId        , range                             ) => {
     const start = visibleOffsetFor(range.start);
     const end = visibleOffsetFor(range.end);
     if (end > start) {
       retainedAnnotationIds.add(annotationId);
-      recipientRanges.push(fullyAnchored
-        ? { annotationId, start: Object.freeze(range.anchoredStart          ), end: Object.freeze(range.anchoredEnd          ) }
-        : (offsetsUnchanged ? { annotationId, start: range.start, end: range.end } : { annotationId, start, end }));
+      if (fullyAnchored) {
+        const anchoredStart = range.anchoredStart                                            ;
+        const anchoredEnd = range.anchoredEnd                                            ;
+        exact(anchoredStart, ['point', 'basisFrontier'], 'anchored range start');
+        exact(anchoredEnd, ['point', 'basisFrontier'], 'anchored range end');
+        recipientRanges.push([
+          annotationId,
+          internValue(anchoredStart.point, points, pointByIdentity, pointByShape, pointShape),
+          internValue(anchoredStart.basisFrontier, frontiers, frontierByIdentity, frontierByShape, JSON.stringify),
+          internValue(anchoredEnd.point, points, pointByIdentity, pointByShape, pointShape),
+          internValue(anchoredEnd.basisFrontier, frontiers, frontierByIdentity, frontierByShape, JSON.stringify),
+        ]);
+      } else {
+        recipientRanges.push(offsetsUnchanged ? { annotationId, start: range.start, end: range.end } : { annotationId, start, end });
+      }
       return;
     }
     // Show-through: an annotation fully inside the redacted union still shows
@@ -380,8 +421,12 @@ export function projectAnnotatedTextRecipient({ source, descriptor, decisions }
   }
 
   const result = {
-    kind: 'workbench.annotatedText.recipient', version: fullyAnchored ? 2 : 1,
+    kind: 'workbench.annotatedText.recipient', version: fullyAnchored ? 3 : 1,
     text,
+    ...(fullyAnchored ? {
+      points: freezeArray(points.map((point) => freeze(point))),
+      frontiers: freezeArray(frontiers.map((frontier) => freeze(frontier))),
+    } : {}),
     ranges: freezeArray(recipientRanges.map((range) => freeze(range))),
     annotations: freezeArray(recipientAnnotations),
     measurements: freezeArray(measurements.map((measurement) => freeze(measurement))),

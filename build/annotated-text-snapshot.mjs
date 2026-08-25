@@ -77,14 +77,18 @@ function projectRangeToOffsets(
   return { start, end };
 }
 
-function parseStoredEndpoint(serialized        )                     {
+function parseStoredEndpoint(serialized        , frontierByShape                                                   )                     {
   let endpoint;
   try {
     endpoint = JSON.parse(serialized);
   } catch {
     fail('stored endpoint is not JSON');
   }
-  return validateStoredEndpoint(endpoint);
+  const validated = validateStoredEndpoint(endpoint);
+  const frontierShape = JSON.stringify(validated.basisFrontier);
+  const basisFrontier = frontierByShape?.get(frontierShape) ?? validated.basisFrontier;
+  frontierByShape?.set(frontierShape, basisFrontier);
+  return { point: validated.point, basisFrontier };
 }
 
 function validateStoredEndpoint(endpoint         )                     {
@@ -241,10 +245,11 @@ function loadRecipientProjectionSource({ db, prefix, descriptor, documentId, fam
      WHERE document_id = ?
      ORDER BY id`;
   const projectedByRangeId = new Map                                                                                                                            ();
+  const frontierByShape = new Map                                             ();
   for (const stored of iterateArrayRows(db, rangeQuery, documentId)) {
     if (stored.length !== 3 || !Number.isSafeInteger(stored[0]) || typeof stored[1] !== 'string' || typeof stored[2] !== 'string') fail('stored range row is malformed');
-    const startPoint = parseStoredEndpoint(stored[1]);
-    const endPoint = parseStoredEndpoint(stored[2]);
+    const startPoint = parseStoredEndpoint(stored[1], frontierByShape);
+    const endPoint = parseStoredEndpoint(stored[2], frontierByShape);
     projectedByRangeId.set(stored[0], {
       projected: projectRangeToOffsets(family, startPoint, endPoint, text.length),
       startPoint,

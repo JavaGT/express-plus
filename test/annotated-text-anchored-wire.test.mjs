@@ -19,7 +19,7 @@ import { projectAnnotatedTextSnapshot } from '../build/annotated-text-snapshot.m
 import { attachAnnotationRange } from '../build/annotated-text-storage.mjs';
 import { tryBuildAnnotatedTextFoldEnvelopes } from '../build/annotated-text-fold-envelope.mjs';
 import { materializeAnnotatedTextSnapshot } from '../public/workbench-annotated-text-snapshot.mjs';
-import { createAnnotatedTextHttpSession } from '../public/workbench-client.mjs';
+import { createAnnotatedTextHttpSession, createLiveDeliverySession } from '../public/workbench-client.mjs';
 import { createTextState, applyTextOp, textCheckpoint } from '../build/annotated-text.mjs';
 import { withAuthoringBinding } from './annotated-text-authoring-fixture.mjs';
 
@@ -75,7 +75,15 @@ function token(label) {
   return `${label}${'x'.repeat(43)}`.slice(0, 43);
 }
 
-test('fully-visible recipient snapshot ships anchored v2 ranges', async () => {
+function expandV3Ranges(snapshot) {
+  return snapshot.ranges.map(([annotationId, startPoint, startFrontier, endPoint, endFrontier]) => ({
+    annotationId,
+    start: { point: snapshot.points[startPoint], basisFrontier: snapshot.frontiers[startFrontier] },
+    end: { point: snapshot.points[endPoint], basisFrontier: snapshot.frontiers[endFrontier] },
+  }));
+}
+
+test('fully-visible recipient snapshot ships compact anchored v3 ranges', async () => {
   const { db, app, Doc } = setup();
   await app.ready;
   const family = seedDocument(db, 'hello world', [{ id: 'a1', family: 'comment', start: 6, end: 11 }]);
@@ -84,14 +92,15 @@ test('fully-visible recipient snapshot ships anchored v2 ranges', async () => {
   const anchored = await projectAnnotatedTextSnapshot({
     db, entity: Doc, row, principal, fieldName: 'body', descriptor: Doc.fields.body, mintBasis: false,
   });
-  assert.equal(anchored.version, 2);
+  assert.equal(anchored.version, 3);
   assert.equal(anchored.ranges.length, 1);
-  assert.equal(anchored.ranges[0].annotationId, 'a1');
-  assert.equal(typeof anchored.ranges[0].start, 'object');
-  assert.ok(Array.isArray(anchored.ranges[0].start.point));
-  assert.ok(Array.isArray(anchored.ranges[0].start.basisFrontier));
-  assert.equal(serverProjectEndpointToOffset(family, anchored.ranges[0].start), 6);
-  assert.equal(serverProjectEndpointToOffset(family, anchored.ranges[0].end), 11);
+  assert.equal(anchored.ranges[0][0], 'a1');
+  assert.equal(anchored.frontiers.length, 1);
+  const [expanded] = expandV3Ranges(anchored);
+  assert.ok(Array.isArray(expanded.start.point));
+  assert.ok(Array.isArray(expanded.start.basisFrontier));
+  assert.equal(serverProjectEndpointToOffset(family, expanded.start), 6);
+  assert.equal(serverProjectEndpointToOffset(family, expanded.end), 11);
   await app.shutdown(); db.close();
 });
 
@@ -138,7 +147,7 @@ test('a whole-document restriction stays offset-empty v1', async () => {
   await app.shutdown(); db.close();
 });
 
-test('materialize keeps v2 endpoints on the document and fails closed without a family replica', async () => {
+test('materialize expands v3 with semantic parity to v2 and fails closed without a family replica', async () => {
   const { db, app, Doc } = setup();
   await app.ready;
   const family = seedDocument(db, 'hello world', [{ id: 'a1', family: 'comment', start: 6, end: 11 }]);
@@ -154,15 +163,63 @@ test('materialize keeps v2 endpoints on the document and fails closed without a 
   );
 
   const publicFamily = restoreTextFamily({ id: family.id, checkpoint: family.checkpoint });
+  const expandedV2 = {
+    ...wire,
+    version: 2,
+    ranges: expandV3Ranges(wire),
+  };
+  delete expandedV2.points;
+  delete expandedV2.frontiers;
+  const previousDocument = materializeAnnotatedTextSnapshot(expandedV2, Doc.body, { family: publicFamily });
   const document = materializeAnnotatedTextSnapshot(wire, Doc.body, { family: publicFamily });
-  assert.equal(document.version, 2);
+  assert.equal(document.version, 3);
   assert.equal(document.ranges.length, 1);
   assert.equal(document.ranges[0].annotationId, 'a1');
   assert.equal(typeof document.ranges[0].start, 'object');
   assert.equal(publicProjectEndpointToOffset(publicFamily, document.ranges[0].start), 6);
   assert.equal(publicProjectEndpointToOffset(publicFamily, document.ranges[0].end), 11);
   assert.equal(document.text, 'hello world');
+  assert.deepEqual({ ...document, version: 2 }, previousDocument);
+  assert.ok(JSON.stringify(wire).length < JSON.stringify(expandedV2).length);
   await app.shutdown(); db.close();
+});
+
+test('v3 compact tables reject malformed, duplicate, non-canonical, and unknown data', () => {
+  const family = importTextToFamily('d1', ACTOR, 'hello world');
+  const point = ['point', ['root'], 'left'];
+  const frontier = [[ACTOR, 1]];
+  const snapshot = {
+    kind: 'workbench.annotatedText.recipient', version: 3, text: 'hello world',
+    points: [point], frontiers: [frontier], ranges: [['a1', 0, 0, 0, 0]],
+    annotations: [{ id: 'a1', family: 'comment', fields: {} }], measurements: [], capabilityHints: [], orphans: [],
+  };
+  const handle = { annotations: { comment: {} } };
+  assert.throws(() => materializeAnnotatedTextSnapshot({ ...structuredClone(snapshot), extra: true }, handle, { family }), /v3 envelope has invalid shape/);
+  assert.throws(() => materializeAnnotatedTextSnapshot({ ...structuredClone(snapshot), points: [point, point] }, handle, { family }), /deduplicated|unused/);
+  assert.throws(() => materializeAnnotatedTextSnapshot({ ...structuredClone(snapshot), ranges: [['a1', 1, 0, 0, 0]] }, handle, { family }), /out of bounds|canonical/);
+  assert.throws(() => materializeAnnotatedTextSnapshot({ ...structuredClone(snapshot), ranges: [['a1', 0, 0, 0, 0, 0]] }, handle, { family }), /compact endpoint references/);
+  assert.throws(() => materializeAnnotatedTextSnapshot({ ...structuredClone(snapshot), frontiers: [[[ACTOR, 0]]] }, handle, { family }), /frontier table entry/);
+});
+
+test('an old v2 client rejects a v3 live replacement and recovers without installing it', async () => {
+  let deliver;
+  let bootstraps = 0;
+  const session = createLiveDeliverySession({
+    validateSnapshot(snapshot) {
+      if (snapshot.version !== 1 && snapshot.version !== 2) throw new Error('unsupported recipient snapshot version');
+      return snapshot;
+    },
+    bootstrap: async () => ({ kind: 'snapshot', snapshot: { version: 2 }, cursor: ++bootstraps }),
+    subscribe: async ({ deliver: next }) => { deliver = next; return { close() {} }; },
+    fold: (snapshot) => snapshot,
+    sendAction: async () => ({ ok: true }),
+  });
+  await session.ready;
+  await deliver([{ type: 'state', seq: 2, state: { version: 3 } }]);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(bootstraps, 2);
+  assert.deepEqual(session.snapshot, { version: 2 });
+  session.close();
 });
 
 test('fail-closed: v1 never accepts endpoint objects and v2 never accepts numeric offsets', () => {

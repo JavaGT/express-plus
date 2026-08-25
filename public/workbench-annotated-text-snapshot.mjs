@@ -3,6 +3,7 @@ import { projectEndpointToOffset, resolveOffsetToEndpoint } from './workbench-an
 
 function deepFreeze(value) {
   if (value === null || typeof value !== 'object') return value;
+  if (Object.isFrozen(value)) return value;
   if (Array.isArray(value)) { for (const child of value) deepFreeze(child); return Object.freeze(value); }
   for (const child of Object.values(value)) deepFreeze(child);
   return Object.freeze(value);
@@ -17,6 +18,108 @@ function hasExactKeys(value, keys) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const own = Object.keys(value);
   return own.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+
+function isClosedArray(value, length) {
+  if (!Array.isArray(value) || value.length !== length) return false;
+  return Object.keys(value).every((key) => /^(0|[1-9][0-9]*)$/.test(key) && Number(key) < length);
+}
+
+function compactPointKey(point) {
+  if (!isClosedArray(point, 3) || point[0] !== 'point' || (point[2] !== 'left' && point[2] !== 'right')) {
+    throw new Error('annotatedText snapshot: v3 point table entry is invalid');
+  }
+  const anchor = point[1];
+  if (isClosedArray(anchor, 1) && anchor[0] === 'root') return `root:${point[2]}`;
+  if (!isClosedArray(anchor, 2) || anchor[0] !== 'element' || !isClosedArray(anchor[1], 2)
+    || !isClosedArray(anchor[1][0], 2) || !/^[0-9a-f]{32}$/.test(anchor[1][0][0])
+    || !Number.isSafeInteger(anchor[1][0][1]) || anchor[1][0][1] < 1
+    || !Number.isSafeInteger(anchor[1][1]) || anchor[1][1] < 0) {
+    throw new Error('annotatedText snapshot: v3 point table entry is invalid');
+  }
+  return `element:${anchor[1][0][0]}:${anchor[1][0][1]}:${anchor[1][1]}:${point[2]}`;
+}
+
+function compactFrontierKey(frontier) {
+  if (!Array.isArray(frontier) || !Object.keys(frontier).every((key) => /^(0|[1-9][0-9]*)$/.test(key) && Number(key) < frontier.length)) {
+    throw new Error('annotatedText snapshot: v3 frontier table entry is invalid');
+  }
+  let previousActor = null;
+  let key = '';
+  for (const entry of frontier) {
+    if (!isClosedArray(entry, 2) || !/^[0-9a-f]{32}$/.test(entry[0])
+      || !Number.isSafeInteger(entry[1]) || entry[1] < 1
+      || (previousActor !== null && previousActor >= entry[0])) {
+      throw new Error('annotatedText snapshot: v3 frontier table entry is invalid');
+    }
+    previousActor = entry[0];
+    key += `${entry[0]}:${entry[1]};`;
+  }
+  return key;
+}
+
+function materializeCompactRecipientRanges(snapshot, family) {
+  if (!family) throw new Error('annotatedText snapshot: v3 endpoints require a family replica');
+  if (!Array.isArray(snapshot.points) || !Array.isArray(snapshot.frontiers)) {
+    throw new Error('annotatedText snapshot: v3 endpoint tables are required');
+  }
+  const pointShapes = new Set();
+  for (const point of snapshot.points) {
+    const shape = compactPointKey(point);
+    if (pointShapes.has(shape)) throw new Error('annotatedText snapshot: v3 point table must be deduplicated');
+    pointShapes.add(shape);
+  }
+  const frontierShapes = new Set();
+  for (const frontier of snapshot.frontiers) {
+    const shape = compactFrontierKey(frontier);
+    if (frontierShapes.has(shape)) throw new Error('annotatedText snapshot: v3 frontier table must be deduplicated');
+    frontierShapes.add(shape);
+  }
+  let nextPoint = 0;
+  let nextFrontier = 0;
+  for (const range of snapshot.ranges) {
+    if (!isClosedArray(range, 5) || typeof range[0] !== 'string') {
+      throw new Error('annotatedText snapshot: v3 ranges must be compact endpoint references');
+    }
+    if (!Number.isSafeInteger(range[1]) || range[1] < 0 || range[1] >= snapshot.points.length
+      || !Number.isSafeInteger(range[3]) || range[3] < 0 || range[3] >= snapshot.points.length) {
+      throw new Error('annotatedText snapshot: v3 range point reference is out of bounds');
+    }
+    if (!Number.isSafeInteger(range[2]) || range[2] < 0 || range[2] >= snapshot.frontiers.length
+      || !Number.isSafeInteger(range[4]) || range[4] < 0 || range[4] >= snapshot.frontiers.length) {
+      throw new Error('annotatedText snapshot: v3 range frontier reference is out of bounds');
+    }
+    if (range[1] > nextPoint) throw new Error('annotatedText snapshot: v3 point table is not in canonical first-use order');
+    if (range[1] === nextPoint) nextPoint += 1;
+    if (range[3] > nextPoint) throw new Error('annotatedText snapshot: v3 point table is not in canonical first-use order');
+    if (range[3] === nextPoint) nextPoint += 1;
+    if (range[2] > nextFrontier) throw new Error('annotatedText snapshot: v3 frontier table is not in canonical first-use order');
+    if (range[2] === nextFrontier) nextFrontier += 1;
+    if (range[4] > nextFrontier) throw new Error('annotatedText snapshot: v3 frontier table is not in canonical first-use order');
+    if (range[4] === nextFrontier) nextFrontier += 1;
+  }
+  if (nextPoint !== snapshot.points.length || nextFrontier !== snapshot.frontiers.length) {
+    throw new Error('annotatedText snapshot: v3 endpoint tables contain unused entries');
+  }
+
+  const ranges = Object.isFrozen(snapshot.ranges) ? new Array(snapshot.ranges.length) : snapshot.ranges;
+  for (const point of snapshot.points) deepFreeze(point);
+  for (const frontier of snapshot.frontiers) deepFreeze(frontier);
+  const endpointByReference = new Map();
+  const endpoint = (point, frontier) => {
+    const key = point * snapshot.frontiers.length + frontier;
+    let value = endpointByReference.get(key);
+    if (!value) {
+      value = { point: snapshot.points[point], basisFrontier: snapshot.frontiers[frontier] };
+      endpointByReference.set(key, value);
+    }
+    return value;
+  };
+  for (let index = 0; index < snapshot.ranges.length; index += 1) {
+    const range = snapshot.ranges[index];
+    ranges[index] = { annotationId: range[0], start: endpoint(range[1], range[2]), end: endpoint(range[3], range[4]) };
+  }
+  return ranges;
 }
 
 function materializeRecipientRanges(snapshot, family) {
@@ -34,6 +137,7 @@ function materializeRecipientRanges(snapshot, family) {
     }
     return snapshot.ranges;
   }
+  if (snapshot.version === 3) return materializeCompactRecipientRanges(snapshot, family);
   if (snapshot.version !== 2) {
     throw new Error('annotatedText snapshot: snapshot must be a complete blockless recipient envelope');
   }
@@ -138,10 +242,15 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options = {})
   const binding = getAnnotatedTextSnapshotSessionBinding(options?.binding ?? options) ?? createAnnotatedTextSnapshotSessionBinding();
   if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot) ||
       snapshot.kind !== 'workbench.annotatedText.recipient' ||
-      (snapshot.version !== 1 && snapshot.version !== 2) ||
+      (snapshot.version !== 1 && snapshot.version !== 2 && snapshot.version !== 3) ||
       typeof snapshot.text !== 'string' || !Array.isArray(snapshot.ranges) ||
       !Array.isArray(snapshot.annotations) || !Array.isArray(snapshot.measurements)) {
     throw new Error('annotatedText snapshot: snapshot must be a complete blockless recipient envelope');
+  }
+  if (snapshot.version === 3) {
+    const keys = ['kind', 'version', 'text', 'points', 'frontiers', 'ranges', 'annotations', 'measurements', 'capabilityHints', 'orphans'];
+    if (Object.hasOwn(snapshot, 'authoring')) keys.push('authoring');
+    if (!hasExactKeys(snapshot, keys)) throw new Error('annotatedText snapshot: v3 envelope has invalid shape');
   }
   if (snapshot.orphans !== undefined && !Array.isArray(snapshot.orphans)) throw new Error('annotatedText snapshot: orphans must be an array');
   if (snapshot.redactions !== undefined && !Array.isArray(snapshot.redactions)) throw new Error('annotatedText snapshot: redactions must be an array');
@@ -235,7 +344,7 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options = {})
 // reconciliation and restores the preimage if the action is rejected.
 //
 // annotation.apply / reapply projects a pending annotation at document-absolute
-// authoring offsets. The projection resolves those offsets to recipient-v2
+// authoring offsets. The projection resolves those offsets to recipient-v2/v3
 // anchored endpoints against the family (holding the historical basis, per
 // Decision 0025) so the placeholder range stays positional across a concurrent
 // foreign text edit instead of bolting an offset range onto the anchored
@@ -288,14 +397,14 @@ export function projectPendingAnnotatedTextDocument(document, action, options) {
   });
 }
 
-// Whether `document` carries recipient-v2 anchored endpoints (the authoring
+// Whether `document` carries recipient-v2/v3 anchored endpoints (the authoring
 // surface) rather than redacted/legacy offset ranges.
 function isAnchoredDocument(document) {
-  return document?.version === 2;
+  return document?.version === 2 || document?.version === 3;
 }
 
 // A document with no ranges array yet is treated as offset-form only when it
-// is not a v2 recipient. This keeps the v1/redacted splice path unchanged.
+// is not an anchored recipient. This keeps the v1/redacted splice path unchanged.
 function projectAnnotationApply(document, edit, options) {
   if (!document || typeof document !== 'object' || Array.isArray(document)) return document;
   const annotation = edit.annotation;

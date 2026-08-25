@@ -774,7 +774,7 @@ export interface AnnotatedTextMeasurement {
  */
 export interface AnnotatedTextDocument {
   readonly kind: 'workbench.annotatedText.recipient';
-  readonly version: 1 | 2;
+  readonly version: 1 | 2 | 3;
   readonly text: string;
   readonly ranges: readonly AnnotatedTextRange[];
   readonly annotations: readonly AnnotatedTextAnnotation[];

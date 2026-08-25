@@ -88,11 +88,13 @@ test('snapshot projects one continuous text plus document ranges', async () => {
   const row = db.prepare('SELECT * FROM Doc WHERE id = ?').get('d1');
   const snap = await projectAnnotatedTextSnapshot({ db, entity: Doc, row, principal, fieldName: 'body', descriptor: Doc.fields.body, mintBasis: false });
   assert.equal(snap.text, 'hello world');
-  assert.equal(snap.version, 2);
+  assert.equal(snap.version, 3);
   assert.equal(snap.ranges.length, 1);
-  assert.equal(snap.ranges[0].annotationId, 'a1');
-  assert.equal(projectEndpointToOffset(family, snap.ranges[0].start), 6);
-  assert.equal(projectEndpointToOffset(family, snap.ranges[0].end), 11);
+  assert.equal(snap.ranges[0][0], 'a1');
+  const [annotationId, startPoint, startFrontier, endPoint, endFrontier] = snap.ranges[0];
+  assert.equal(annotationId, 'a1');
+  assert.equal(projectEndpointToOffset(family, { point: snap.points[startPoint], basisFrontier: snap.frontiers[startFrontier] }), 6);
+  assert.equal(projectEndpointToOffset(family, { point: snap.points[endPoint], basisFrontier: snap.frontiers[endFrontier] }), 11);
   assert.equal(snap.annotations.length, 1);
   await app.shutdown(); db.close();
   void family;

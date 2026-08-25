@@ -298,7 +298,7 @@ function measureClientSnapshot(serialized, snapshotVersion, BenchDoc, fixture) {
   const parsed = JSON.parse(serialized);
   const afterParse = memorySample();
   const recipient = materializeAnnotatedTextSnapshot(parsed, BenchDoc.body, {
-    family: snapshotVersion === 2 ? fixture.family : undefined,
+    family: snapshotVersion === 2 || snapshotVersion === 3 ? fixture.family : undefined,
   });
   const validationDuration = performance.now() - validationStarted;
   const afterValidation = memorySample();
@@ -570,7 +570,7 @@ async function runPreparedClientPeak(BenchDoc, benchmarkBytes, sourceSha256, pro
   const serialized = readFileSync(`${inputDirectory}/snapshot.json`, 'utf8');
   const family = restoreTextFamilySerialized(readFileSync(`${inputDirectory}/family-checkpoint.json`, 'utf8'));
   const serializedBytes = Buffer.byteLength(serialized);
-  const peak = await measurePeakRss(() => measureClientSnapshot(serialized, 2, BenchDoc, { family }));
+  const peak = await measurePeakRss(() => measureClientSnapshot(serialized, 3, BenchDoc, { family }));
   const measured = peak.result;
   if (measured.recipient.text !== wordText(WORDS) || measured.recipient.annotations.length !== WORDS * ANNOTATIONS_PER_WORD) {
     throw new Error('isolated client snapshot parity failed');
