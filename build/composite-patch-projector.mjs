@@ -330,21 +330,21 @@ export async function projectCompositePatch(input                     )         
       continue;
     }
     // keyed: resolve each affected row's keyed-ancestor member chain from the
-    // captured graph; removed/hidden rows resolve to [] here and are re-addressed
-    // below through the prior-ledger scan.
+    // captured graph; rows absent from the captured graph (removed/hidden)
+    // resolve to [] and are addressed below: a TOP-LEVEL keyed removal needs
+    // no ancestor segments, so it is emitted directly when the ledger proves
+    // prior receipt. Deeper keyed-in-keyed removals have no provable address —
+    // throw → snapshot fallback.
     const chain = branchChain(plan, branchId);
     const resolved = collectInstances(captured, chain, ids);
     if (resolved === null) throw new Error('affected keyed member could not be located in the captured graph');
-    const unresolved = [...ids].filter((id) => (resolved.get(id) ?? []).length === 0 && chain.some((step) => step.kind === 'keyed'));
-    const priorChains = priorMemberChains(priorVisible, branchId, relation.entity, new Set(unresolved));
+    const hasKeyedAncestor = chain.slice(0, -1).some((step) => step.kind === 'keyed');
     for (const [id, memberIds] of resolved) {
-      if (chain.some((step) => step.kind === 'keyed') && memberIds.length === 0) {
-        const pinned = priorChains.get(id);
-        if (!pinned) {
-          // Unresolvable addressing for a row we cannot even prove: emit nothing.
-          if (!provenVisible(priorVisible, branchId, relation.entity, id)) continue;
-          throw new Error('removed keyed member lacks a provable keyed address');
-        }
+      if (memberIds.length === 0 && hasKeyedAncestor) {
+        // Removed row under a keyed ancestor: its address is unknowable from
+        // post-state alone. Fail closed — the caller falls back to a full
+        // authorized snapshot, never to a guessed path.
+        throw new Error('removed nested keyed member lacks a provable keyed address');
       }
       const key = memberIds.join('\u0000');
       let emit = keyedEmits.get(branchId);
@@ -377,9 +377,10 @@ export async function projectCompositePatch(input                     )         
   // keyed: member-level put/remove; removals ledger-gated.
   for (const [, emit] of keyedEmits) {
     const chain = branchChain(plan, emit.branchId);
+    const ancestorChain = chain.slice(0, -1);
     for (const [membersKey, ids] of emit.instances) {
       const memberIds = membersKey.length === 0 ? [] : membersKey.split('\u0000');
-      const collectionPath = [...instancePath(chain, memberIds), keyOf(emit.relation)];
+      const collectionPath = [...instancePath(ancestorChain, memberIds), keyOf(emit.relation)];
       for (const id of ids) {
         const collection = navigate(projected, collectionPath);
         const current = collection && typeof collection === 'object' && !Array.isArray(collection)
@@ -408,20 +409,24 @@ export async function projectCompositePatch(input                     )         
  * the first located instance; multiple simultaneous instances collapse to a
  * coarser replace (safe: replacement is idempotent per instance).
  */
+/**
+ * Member-id chain for the FIRST keyed instance above a many/count touch,
+ * resolved from the captured graph. Nested many-under-keyed addressing uses
+ * the first located instance; multiple simultaneous instances collapse to a
+ * coarser replace (safe: replacement is idempotent per instance). The chain
+ * EXCLUDES the final relation itself — only ancestors contribute segments.
+ */
 function keyedAncestorsOf(root                  , chain                              )           {
   const memberIds           = [];
   const walk = (node                  , index        )          => {
-    if (index >= chain.length) return true;
+    if (index >= chain.length - 1) return true; // stop BEFORE the final relation
     const relation = chain[index];
     for (const [entry, children] of node.children) {
       if ((entry                    ).key !== keyOf(relation)) continue;
       for (const child of children) {
-        const nextMembers = relation.kind === 'keyed' ? [...memberIds, String(child.raw.id)] : memberIds.slice();
-        const previous = memberIds.splice(0, memberIds.length, ...nextMembers);
-        void previous;
+        if (relation.kind === 'keyed') memberIds.push(String(child.raw.id));
         if (walk(child, index + 1)) return true;
-        memberIds.length = previous.length;
-        memberIds.push(...previous);
+        if (relation.kind === 'keyed') memberIds.pop();
       }
     }
     return false;

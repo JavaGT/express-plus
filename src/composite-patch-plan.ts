@@ -10,7 +10,6 @@
 // select can never leak into a patch, and a branch the snapshot cannot express
 // is a branch patches can never name.
 
-import { canonicalStringify } from './canonical-json.ts';
 import type { SnapshotDeclaration } from './snapshot-projection.ts';
 
 // A compiled relation branch, flattened depth-first. Paths are OUTPUT paths
@@ -121,7 +120,9 @@ function relationFrom(key: string, entry: PlanEntryLike, parentEntity: string, p
 }
 
 // FNV-1a over the canonical plan description: a stable, dependency-free
-// declaration-version fingerprint for projection-token binding.
+// declaration-version fingerprint for projection-token binding. Uses a
+// self-contained canonicalizer (the shared canonical-json module rejects
+// non-plain values, which hand-bound test entities can legitimately carry).
 function planVersion(plan: Omit<AnchorPatchPlan, 'version'>): string {
   const describe = (relation: PatchPlanRelation): Record<string, unknown> => ({
     branchId: relation.branchId,
@@ -129,20 +130,31 @@ function planVersion(plan: Omit<AnchorPatchPlan, 'version'>): string {
     kind: relation.kind,
     fk: relation.fk,
     inverse: relation.inverse,
-    selected: relation.selected,
-    nestedSelect: relation.nestedSelect,
-    order: relation.order,
-    require: relation.require,
+    selected: [...relation.selected],
+    nestedSelect: [...relation.nestedSelect],
+    order: relation.order ? { ...relation.order } : null,
+    require: relation.require ? { ...relation.require } : null,
     children: relation.children.map(describe),
   });
   const description = {
     declaration: plan.declaration,
-    anchorSelect: plan.anchorSelect,
+    anchorSelect: [...plan.anchorSelect],
     relations: plan.relations.map(describe),
-    tombstone: plan.tombstone,
+    tombstone: plan.tombstone ? { ...plan.tombstone, hidden: [...plan.tombstone.hidden] } : null,
+  };
+  const canonical = (value: unknown): string => {
+    if (value === null || value === undefined) return 'null';
+    if (typeof value === 'string') return JSON.stringify(value);
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+    if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+    if (typeof value === 'object') {
+      const names = Object.keys(value as Record<string, unknown>).sort();
+      return `{${names.map((name) => `${JSON.stringify(name)}:${canonical((value as Record<string, unknown>)[name])}`).join(',')}}`;
+    }
+    return `"${String(value)}"`;
   };
   let hash = 0x811c9dc5;
-  for (const byte of Buffer.from(canonicalStringify(description), 'utf8')) {
+  for (const byte of Buffer.from(canonical(description), 'utf8')) {
     hash ^= byte;
     hash = Math.imul(hash, 0x01000193) >>> 0;
   }

@@ -92,6 +92,12 @@ function rowOf(evidence: RowEvidence, phase: 'before' | 'after', entity: string,
 
 // The router classifies events by the event TYPE suffix — the same contract
 // snapshotEventTouchesComposite already uses.
+/** Entity name from an event type ('Code.updated' -> 'Code'), else null. */
+function classifyEntityName(eventType: string): string | null {
+  const match = /^([A-Za-z_][A-Za-z0-9_]*)\./.exec(eventType);
+  return match ? match[1] : null;
+}
+
 function classify(eventType: string): { phase: 'created' | 'updated' | 'removed' } | { phase: 'native'; field: string } | null {
   if (eventType.endsWith('.created')) return { phase: 'created' };
   if (eventType.endsWith('.updated')) return { phase: 'updated' };
@@ -120,17 +126,67 @@ function branchesForEntity(plan: AnchorPatchPlan, entity: string): PatchPlanRela
  * ('one') relations require a bounded reverse lookup of parent ids. Returns
  * null when the parent linkage cannot be established from the supplied row.
  */
-function parentScopesFor(db: DbHandle, plan: AnchorPatchPlan, relation: PatchPlanRelation, row: Record<string, unknown>): string[] | null {
-  if (relation.inverse) {
-    const parentId = row[relation.fk];
-    if (typeof parentId !== 'string' || parentId.length === 0) return null;
-    return [`${plan.declaration}:${parentId}`];
+/**
+ * Resolve the owning composite scope(s) a member row belongs to, from one plan
+ * branch. Nested branches walk UP their parent chain: the child's fk names its
+ * immediate parent row, the parent's own fk names ITS parent, and so on until
+ * the anchor id is proven (design §3, "nested parent paths"). Returns null
+ * when any hop lacks evidence — the caller invalidates rather than guesses.
+ */
+function parentScopesFor(db: DbHandle, plans: ReadonlyMap<string, AnchorPatchPlan>, plan: AnchorPatchPlan, relation: PatchPlanRelation, row: Record<string, unknown>): string[] | null {
+  // Build the branch chain from root to this relation for upward walking.
+  const chain: PatchPlanRelation[] = [];
+  const segments = relation.branchId.split('.');
+  for (let end = 1; end <= segments.length; end += 1) {
+    const found = findBranch(plans.get(plan.declaration), segments.slice(0, end).join('.'));
+    if (!found) return null;
+    chain.push(found);
   }
-  // Forward relation: the PARENT holds fk = this child row's id.
-  const identifier = relation.fk.replace(/[^A-Za-z0-9_]/g, '');
-  if (!identifier || identifier !== relation.fk) return null;
-  const rows = db.prepare(`SELECT id FROM ${relation.parentEntity} WHERE ${identifier} = ?`).all(row.id);
-  return rows.map((parent) => `${plan.declaration}:${String(parent.id)}`);
+  // The row's id at each chain level; start from the changed row itself.
+  let currentRow = row;
+  let currentEntity = relation.entity;
+  for (let index = chain.length - 1; index >= 0; index -= 1) {
+    const step = chain[index];
+    if (step.entity !== currentEntity) return null;
+    if (step.inverse) {
+      const parentId = currentRow[step.fk];
+      if (typeof parentId !== 'string' || parentId.length === 0) return null;
+      if (index === 0) return [`${plan.declaration}:${parentId}`];
+      // Read the parent row to continue the walk.
+      try {
+        const parentRow = db.prepare(`SELECT * FROM ${step.parentEntity} WHERE id = ?`).get(parentId) as Record<string, unknown> | undefined;
+        if (!parentRow) return null;
+        const parentRelation = chain[index - 1];
+        currentRow = parentRow;
+        currentEntity = step.parentEntity;
+        void parentRelation;
+      } catch {
+        return null;
+      }
+    } else {
+      // Forward step: parent rows holding fk = this row's id. Bounded reverse
+      // lookup; each match is one candidate scope path.
+      const identifier = step.fk.replace(/[^A-Za-z0-9_]/g, '');
+      if (!identifier || identifier !== step.fk || index !== 0) return null;
+      const rows = db.prepare(`SELECT id FROM ${step.parentEntity} WHERE ${identifier} = ?`).all(currentRow.id);
+      return rows.map((parent) => `${plan.declaration}:${String(parent.id)}`);
+    }
+  }
+  return null;
+}
+
+/** Locate a plan branch by id within one plan (or across none). */
+function findBranch(plan: AnchorPatchPlan | undefined, branchId: string): PatchPlanRelation | null {
+  if (!plan) return null;
+  const visit = (relations: readonly PatchPlanRelation[]): PatchPlanRelation | null => {
+    for (const relation of relations) {
+      if (relation.branchId === branchId) return relation;
+      const nested = visit(relation.children);
+      if (nested) return nested;
+    }
+    return null;
+  };
+  return visit(plan.relations);
 }
 
 interface RouterEvent {
@@ -166,8 +222,13 @@ export function routeCompositeEvent(db: DbHandle, plans: ReadonlyMap<string, Anc
   };
 
   // --- anchor events -------------------------------------------------------
+  // The event TYPE names the changed row's entity; the event SCOPE only names
+  // the owning composite scope (member rows inherit it). Route as an anchor
+  // change only when the type's entity IS the declaration anchor.
+  const eventTypeEntity = classifyEntityName(event.type);
   const anchorPlan = plans.get(handle.entity);
-  if (anchorPlan) {
+  const isAnchorEvent = anchorPlan !== undefined && eventTypeEntity === handle.entity;
+  if (anchorPlan && isAnchorEvent) {
     if (classified.phase === 'created') {
       add({ scope: event.scope, declaration: anchorPlan.declaration, actionId: event.actionId, affected: [{ branch: 'anchor', entity: handle.entity, id: handle.id, reason: 'create' }] });
     } else if (classified.phase === 'removed') {
@@ -224,42 +285,46 @@ export function routeCompositeEvent(db: DbHandle, plans: ReadonlyMap<string, Anc
 
   // --- member events -------------------------------------------------------
   for (const plan of plans.values()) {
-    if (plan.declaration === handle.entity) continue; // anchor events routed above
-    const branches = branchesForEntity(plan, handle.entity);
+    if (isAnchorEvent) break; // this event IS the anchor of its own declaration
+    const branches = branchesForEntity(plan, eventTypeEntity ?? '');
     if (branches.length === 0) continue;
-    const id = handle.id;
+    // The changed MEMBER row's identity: the event type names its entity and
+    // the payload names its id — NOT the scope handle's id (which is the
+    // anchor's for inherited scopes).
+    const memberId = typeof (event as { data?: { id?: unknown } }).data?.id === 'string' ? (event as { data: { id: string } }).data.id : null;
+    const id = memberId ?? handle.id;
 
     if (classified.phase === 'removed') {
       // Removal routing needs the pre-image to locate the owning scope; the
       // public event payload ({id}) deliberately cannot provide it.
-      const beforeRow = rowOf(evidence, 'before', handle.entity, id);
+      const beforeRow = rowOf(evidence, 'before', eventTypeEntity ?? '', id);
       if (!beforeRow) {
         add({ scope: '', declaration: plan.declaration, actionId: event.actionId, affected: [], invalidating: true });
         continue;
       }
       for (const branch of branches) {
-        const scopes = parentScopesFor(db, plan, branch, beforeRow);
+        const scopes = parentScopesFor(db, plans, plan, branch, beforeRow);
         if (!scopes) {
           add({ scope: '', declaration: plan.declaration, actionId: event.actionId, affected: [], invalidating: true });
           continue;
         }
         for (const scope of scopes) {
-          add({ scope, declaration: plan.declaration, actionId: event.actionId, affected: [{ branch: branch.branchId, entity: handle.entity, id, reason: 'remove' }] });
+          add({ scope, declaration: plan.declaration, actionId: event.actionId, affected: [{ branch: branch.branchId, entity: eventTypeEntity ?? plan.declaration, id, reason: 'remove' }] });
         }
       }
       continue;
     }
 
-    const afterRow = rowOf(evidence, 'after', handle.entity, id);
+    const afterRow = rowOf(evidence, 'after', eventTypeEntity ?? '', id);
     if (!afterRow) {
       // An upsert/lifecycle mutation whose projected row cannot be read is
       // indistinguishable from a broken projection: invalidate rather than guess.
       const beforeFallback = rowOf(evidence, 'before', handle.entity, id);
       if (beforeFallback) {
         for (const branch of branches) {
-          const scopes = parentScopesFor(db, plan, branch, beforeFallback);
+          const scopes = parentScopesFor(db, plans, plan, branch, beforeFallback);
           for (const scope of scopes ?? []) {
-            add({ scope, declaration: plan.declaration, actionId: event.actionId, affected: [{ branch: branch.branchId, entity: handle.entity, id, reason: 'invalidate' }], invalidating: true });
+            add({ scope, declaration: plan.declaration, actionId: event.actionId, affected: [{ branch: branch.branchId, entity: eventTypeEntity ?? plan.declaration, id, reason: 'invalidate' }], invalidating: true });
           }
         }
       }
@@ -268,7 +333,7 @@ export function routeCompositeEvent(db: DbHandle, plans: ReadonlyMap<string, Anc
     }
 
     for (const branch of branches) {
-      const scopes = parentScopesFor(db, plan, branch, afterRow);
+      const scopes = parentScopesFor(db, plans, plan, branch, afterRow);
       if (!scopes) {
         add({ scope: '', declaration: plan.declaration, actionId: event.actionId, affected: [], invalidating: true });
         continue;
@@ -280,14 +345,18 @@ export function routeCompositeEvent(db: DbHandle, plans: ReadonlyMap<string, Anc
 
       for (const scope of scopes) {
         if (classified.phase === 'created') {
-          add({ scope, declaration: plan.declaration, actionId: event.actionId, affected: [{ branch: branch.branchId, entity: handle.entity, id, reason: 'create' }] });
+          add({ scope, declaration: plan.declaration, actionId: event.actionId, affected: [{ branch: branch.branchId, entity: eventTypeEntity ?? plan.declaration, id, reason: 'create' }] });
           continue;
         }
         // updated / native
         const touched = changed.filter((field) => relevant.has(field));
-        const reparenting = branch.inverse && changed.includes(branch.fk);
+        const beforeRowForCompare = rowOf(evidence, 'before', eventTypeEntity ?? '', id);
+        const reparenting = branch.inverse
+          && changed.includes(branch.fk)
+          && beforeRowForCompare !== null
+          && beforeRowForCompare[branch.fk] !== afterRow[branch.fk];
         if (reparenting) {
-          const beforeRow = rowOf(evidence, 'before', handle.entity, id);
+          const beforeRow = beforeRowForCompare;
           const previousParent = beforeRow ? beforeRow[branch.fk] : undefined;
           if (typeof previousParent !== 'string' || previousParent.length === 0) {
             // The old placement is unknowable from private evidence: the old
@@ -296,18 +365,18 @@ export function routeCompositeEvent(db: DbHandle, plans: ReadonlyMap<string, Anc
             continue;
           }
           const oldScope = `${plan.declaration}:${previousParent}`;
-          add({ scope: oldScope, declaration: plan.declaration, actionId: event.actionId, affected: [{ branch: branch.branchId, entity: handle.entity, id, reason: 'reparent' }] });
+          add({ scope: oldScope, declaration: plan.declaration, actionId: event.actionId, affected: [{ branch: branch.branchId, entity: eventTypeEntity ?? plan.declaration, id, reason: 'reparent' }] });
           if (oldScope !== scope) {
-            add({ scope, declaration: plan.declaration, actionId: event.actionId, affected: [{ branch: branch.branchId, entity: handle.entity, id, reason: 'reparent' }] });
+            add({ scope, declaration: plan.declaration, actionId: event.actionId, affected: [{ branch: branch.branchId, entity: eventTypeEntity ?? plan.declaration, id, reason: 'reparent' }] });
           } else {
             // Same-parent fk rewrite still replaces branch membership ordering.
-            add({ scope, declaration: plan.declaration, actionId: event.actionId, affected: [{ branch: branch.branchId, entity: handle.entity, id, reason: 'order' }] });
+            add({ scope, declaration: plan.declaration, actionId: event.actionId, affected: [{ branch: branch.branchId, entity: eventTypeEntity ?? plan.declaration, id, reason: 'order' }] });
           }
           continue;
         }
         if (touched.length > 0) {
           const reason = branch.order && touched.includes(branch.order.field) ? 'order' : 'update';
-          add({ scope, declaration: plan.declaration, actionId: event.actionId, affected: [{ branch: branch.branchId, entity: handle.entity, id, reason }] });
+          add({ scope, declaration: plan.declaration, actionId: event.actionId, affected: [{ branch: branch.branchId, entity: eventTypeEntity ?? plan.declaration, id, reason }] });
         }
         // Native annotated-text edits touch no selected field of any branch:
         // they produce no entry (the exact gate snapshotEventTouchesComposite

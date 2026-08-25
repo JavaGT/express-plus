@@ -57,7 +57,7 @@ export function createCompositePatchDelivery({ db, composites, mayVerb, authoriz
   // compiled one; the plan compiler reads only the shared structural shape.
   const plans = compilePatchPlans(compiled         );
   const ledger = createProjectionLedger();
-  return new CompositePatchDelivery(db, compiled         , plans, ledger, mayVerb, authorization, includeActionId);
+  return new CompositePatchDelivery(db, new Map(compiled), plans, ledger, mayVerb, authorization, includeActionId);
 }
 
 export class CompositePatchDelivery {

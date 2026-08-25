@@ -726,7 +726,9 @@ export function buildKernel(app     ) {
       // Composite journal routing (#122): compiled patch plans from the
       // attached live delivery. Undefined when no snapshots are declared —
       // journaling is skipped entirely and legacy behavior is unchanged.
-      compositeJournal: ((app                                                                    )._compositeJournalPlans ?? undefined)                                                       ,
+      compositeJournal: ((app                                                                    )._compositeJournalPlans
+        ? { plans: (app                                                            )._compositeJournalPlans }
+        : undefined),
     }),
     // The no-history mutation lane (S3/A2, #100): engaged only when a database
     // exists (createServer fails closed otherwise), always paired with its

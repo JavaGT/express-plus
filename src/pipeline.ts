@@ -289,8 +289,8 @@ export function durableMutationVariant({
       // patch plans, and record the entries atomically with _Log and
       // _ActionReceipt. A journal failure fails the commit — an unrecorded
       // composite change would be a silent gap in the patch protocol.
-      if (compositeEvidence) {
-        const plans = compositeJournal!.plans as never;
+      if (compositeJournal !== undefined && compositeEvidence) {
+        const plans = compositeJournal.plans;
         for (const ev of finalizedEvents) {
           const entityName: string | undefined = ev?.handle?.entity;
           const rowId: unknown = ev?.data?.id;
