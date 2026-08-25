@@ -2914,10 +2914,12 @@ export function createLiveDeliverySession({
         return;
       }
       case 'replace-fields': {
-        // Exact-set replacement (design §4): the patch value carries the
-        // node's complete retained key set minus identity. Every local key
-        // other than `id` and the incoming keys is STALE and is deleted —
-        // redaction or projection changes may have removed it server-side.
+        // Exact-set replacement (design §4): the server emits the node's
+        // COMPLETE retained key set in `value` — selected fields AND current
+        // relation-branch values. Any local key omitted from `value` (except
+        // identity) is stale and deleted: redaction or projection changes may
+        // have removed it server-side. Because the value carries relation
+        // values too, untouched relation branches round-trip unchanged.
         for (const existingKey of Object.keys(parent)) {
           if (existingKey === 'id' || existingKey in operation.value) continue;
           delete parent[existingKey];

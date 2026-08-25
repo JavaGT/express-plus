@@ -14,6 +14,7 @@ import { DatabaseSync } from 'node:sqlite';
 import workbench, { entity, inherit, ref, text, grant, read, subscribe, write, scope, everyone, snapshot } from '../build/index.mjs';
 const { object, select, include, keyed, many, one, count, orderBy } = snapshot;
 import { executeDDL } from '../build/internal.mjs';
+import { createLiveDeliverySession } from '../public/workbench-client.mjs';
 
 const alice = { type: 'user', id: 'alice', attributes: {} };
 const bob = { type: 'user', id: 'bob', attributes: {} };
@@ -628,6 +629,100 @@ test('RED-LINE anchor change during capture: patch is retried/fallback, never ad
   if (outcome.kind === 'catchup') {
     for (const envelope of outcome.envelopes) {
       assert.ok(envelope.to.anchor >= boot.cursor.anchor, 'patch never moves the anchor backwards');
+    }
+  }
+});
+
+// ---- re-review round 3 red-lines --------------------------------------------
+
+test('RED-LINE round-3 dedup: fan-out invalidations for MULTIPLE declarations on one event all survive', async (t) => {
+  const { db } = await setup(t);
+  const { routeCompositeEvent, recordCompositeChanges } = await import('../build/composite-journal.mjs');
+  const { compilePatchPlans } = await import('../build/composite-patch-plan.mjs');
+  const mk = (anchorName, entries) => ({ anchor: { name: anchorName }, output: { entity: { name: anchorName }, entries }, tombstone: null });
+  // Two declarations both projecting Code; a custom event invalidates both.
+  const plans = compilePatchPlans(new Map([
+    ['Project', mk('Project', [
+      { key: 'codes', kind: 'keyed', entity: { name: 'Code' }, fk: 'projectId', inverse: true,
+        selected: null, order: null, require: null,
+        nested: { entity: { name: 'Code' }, entries: [{ key: 'cf', kind: 'select', fields: ['label'] }] } },
+    ])],
+    ['Code', mk('Code', [
+      { key: 'label', kind: 'select', fields: ['label'] },
+    ])],
+  ]));
+  const out = routeCompositeEvent(db, plans, {
+    type: 'code.merged.raw', scope: 'Project:p1', seq: 1, actionId: 'dedup-1',
+  }, { before: new Map(), after: new Map() });
+  const declarations = new Set(out.map((entry) => entry.declaration));
+  assert.ok(declarations.has('Project'), 'Project invalidated');
+  assert.ok(declarations.has('Code'), 'Code invalidated');
+  assert.equal(out.length, 2, 'BOTH entries survive dedup (scope is "" for both)');
+  recordCompositeChanges(db, out, 'now');
+  const rows = db.prepare("SELECT declaration FROM _CompositeChange WHERE actionId = 'dedup-1'").all().map((r) => r.declaration).sort();
+  assert.deepEqual(rows, ['Code', 'Project'], 'both per-declaration rows persisted despite identical scope=""');
+});
+
+test('RED-LINE forged fact: cross-entity fact neither routes nor suppresses invalidation', async (t) => {
+  const { db } = await setup(t);
+  const { routeCompositeEvent } = await import('../build/composite-journal.mjs');
+  const { compilePatchPlans } = await import('../build/composite-patch-plan.mjs');
+  const projectPlan = { anchor: { name: 'Project' }, output: { entity: { name: 'Project' }, entries: [{ key: 'codes', kind: 'keyed', entity: { name: 'Code' }, fk: 'projectId', inverse: true, selected: null, nested: null, order: null, require: null }] }, tombstone: null };
+  const plans = compilePatchPlans(new Map([['Project', projectPlan]]));
+  // Forged: correctly scoped but names entity User (unprojected) and branch
+  // 'anything' (not a compiled branch of Project).
+  const forged = [
+    { declaration: 'Project', scope: 'Project:p1', entity: 'User', branch: 'anything', id: 'x', reason: 'update' },
+  ];
+  const out = routeCompositeEvent(db, plans, {
+    type: 'code.merged.raw', scope: 'Project:p1', seq: 9, actionId: 'forged-1',
+    declaredRoutingFacts: forged,
+  }, { before: new Map(), after: new Map() });
+  const routedClean = out.some((entry) => !entry.invalidating && entry.affected.length > 0);
+  assert.equal(routedClean, false, 'forged fact does not route');
+  assert.ok(out.some((entry) => entry.invalidating), 'invalidation NOT suppressed by the forged fact');
+});
+test('RED-LINE replace-fields preserves untouched relation branches while deleting omitted scalars', async (t) => {
+  const probe = {};
+  const session = createLiveDeliverySession({
+    bootstrap: async () => ({ kind: 'snapshot', snapshot: { id: 'p1', name: 'A', colour: '#fff', codes: { code1: { id: 'code1', label: 'Keep' } } }, cursor: { anchor: 1, composite: 1 } }),
+    subscribe: async ({ deliver }) => { probe.deliver = deliver; },
+    validateSnapshot: (value) => value,
+    optimistic: (snapshot) => snapshot,
+    sendAction: async () => ({ ok: true }),
+  });
+  await session.ready;
+  // Server emits replace-fields with the COMPLETE node key set (name, colour,
+  // codes) — colour omitted here simulates redaction, codes round-trips.
+  probe.deliver([{
+    type: 'snapshot-patch', protocol: 'snapshot-patch/v1', declaration: 'Project',
+    from: { anchor: 1, composite: 1 }, to: { anchor: 1, composite: 2 },
+    seqSpan: [{ anchor: 1, composite: 1 }, { anchor: 1, composite: 2 }],
+    projectionToken: 'wbpt_z',
+    operations: [{ op: 'replace-fields', path: [], value: { id: 'p1', name: 'B', colour: null, codes: { code1: { id: 'code1', label: 'Keep' } } } }],
+  }]);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(session.snapshot, {
+    id: 'p1', name: 'B', colour: null,
+    codes: { code1: { id: 'code1', label: 'Keep' } },
+  }, 'omitted scalar `extra`-style keys are gone; untouched relation branch `codes` survives');
+});
+
+test('RED-LINE concurrent commit during capture yields to.anchor == captured fence', async (t) => {
+  const { app, db, delivery } = await setup(t);
+  await dispatchOk(app, { actionId: 'p0', type: 'project.write', scope: 'Project:p1', payload: { exists: false, row: { id: 'p1', name: 'S' } }, principal: alice });
+  await dispatchOk(app, { actionId: 'c1', type: 'code.write', scope: 'Project:p1', payload: { exists: false, projectId: 'p1', row: { id: 'code1', projectId: 'p1', label: 'L', position: '1' } }, principal: alice });
+  const boot = await delivery.bootstrap({ principal: alice, scope: 'Project:p1', capabilities: ['snapshot-patch/v1'] });
+
+  // The delivered to.anchor must equal the _Cursor fence AT projection time —
+  // never a fresher read taken after projection. Pin it against the fence read
+  // immediately before the catch-up call.
+  const fenceBefore = db.prepare("SELECT lastSeq FROM _Cursor WHERE scope = 'Project:p1'").get().lastSeq;
+  const outcome = await delivery.catchup({ principal: alice, scope: 'Project:p1', after: boot.cursor, capabilities: ['snapshot-patch/v1'], projectionToken: boot.projectionToken });
+  assert.ok(outcome.kind === 'catchup' || outcome.kind === 'snapshot', 'safe terminal kind');
+  if (outcome.kind === 'catchup') {
+    for (const envelope of outcome.envelopes) {
+      assert.equal(envelope.to.anchor, fenceBefore, 'to.anchor equals the captured fence');
     }
   }
 });

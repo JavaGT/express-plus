@@ -225,17 +225,21 @@ function findBranch(plan                             , branchId        )        
 export function routeCompositeEvent(db          , plans                                      , event             , evidence             )                         {
   const entries = new Map                              ();
 
+  // Dedupe key is (scope, declaration) (re-review round 3, GAP 1): fan-out
+  // invalidations all use scope '' and MUST coexist per declaration, and two
+  // declarations can also legitimately target the same concrete scope.
   const add = (input                                         )       => {
-    const existing = entries.get(input.scope);
+    const key = `${input.scope}\u0000${input.declaration}`;
+    const existing = entries.get(key);
     if (!existing) {
-      entries.set(input.scope, { ...input, eventRefs: [{ scope: event.scope, seq: event.seq }] });
+      entries.set(key, { ...input, eventRefs: [{ scope: event.scope, seq: event.seq }] });
       return;
     }
     const merged = [...existing.affected];
     for (const affected of input.affected) {
       if (!merged.some((candidate) => candidate.branch === affected.branch && candidate.id === affected.id && candidate.reason === affected.reason)) merged.push(affected);
     }
-    entries.set(input.scope, { ...existing, affected: merged, invalidating: existing.invalidating || Boolean(input.invalidating) });
+    entries.set(key, { ...existing, affected: merged, invalidating: existing.invalidating || Boolean(input.invalidating) });
   };
 
   // --- anchor events -------------------------------------------------------
@@ -289,6 +293,16 @@ export function routeCompositeEvent(db          , plans                         
       // Project-projected effect into a Code:... scope (or any unrelated
       // scope) would disclose/mutate state outside the declared projection.
       if (!factHandle || factHandle.entity !== fact.declaration) return false;
+      // Entity + branch must exist in the COMPILED plan for that declaration
+      // (re-review GAP 2): a forged fact naming an unprojected entity or an
+      // unknown branch must neither route nor suppress invalidation.
+      const factPlan = plans.get(fact.declaration);
+      if (!factPlan) return false;
+      if (String(fact.entity ?? fact.declaration) !== factPlan.declaration
+        && branchesForEntity(factPlan, String(fact.entity ?? fact.declaration)).length === 0) return false;
+      const branchId = typeof fact.branch === 'string' ? fact.branch : 'anchor';
+      const knownBranch = branchId === 'anchor' || findBranch(factPlan, branchId) !== null;
+      if (!knownBranch) return false;
       return true;
     });
     if (allResolved) {
@@ -303,10 +317,14 @@ export function routeCompositeEvent(db          , plans                         
       factsUsable = true;
     }
   }
+
   // Fan-out helper (re-review GAP 1): EVERY declaration whose compiled plan
   // projects the touched entity — as anchor or as any relation branch — must
   // receive an invalidation, not just the first matching plan.
   const invalidateAllProjectingDeclarations = (touchedEntity               )       => {
+    // Application event types may case-differ from the entity name
+    // ('code.merged' vs entity 'Code'); match case-insensitively.
+    const touchedLower = touchedEntity === null ? null : touchedEntity.toLowerCase();
     for (const plan of plans.values()) {
       // The scope's own anchor declaration is always affected — the event was
       // committed to ITS scope.
@@ -314,8 +332,9 @@ export function routeCompositeEvent(db          , plans                         
         add({ scope: '', declaration: plan.declaration, actionId: event.actionId, affected: [], invalidating: true });
         continue;
       }
-      const projectsIt = touchedEntity !== null
-        && (plan.declaration === touchedEntity || branchesForEntity(plan, touchedEntity).length > 0);
+      const planLower = plan.declaration.toLowerCase();
+      const projectsIt = touchedLower !== null
+        && (planLower === touchedLower || branchesForEntity(plan, touchedEntity).some((branch) => branch.entity.toLowerCase() === touchedLower));
       if (projectsIt) add({ scope: '', declaration: plan.declaration, actionId: event.actionId, affected: [], invalidating: true });
     }
   };
@@ -685,13 +704,13 @@ export function readDeclarationWideChangesSince(db          , declaration       
 }
 
 /**
- * Sequence for declaration-wide entries: a dedicated counter keyed by
- * `'\u0000' + declaration` in the same cursor table, so wide invalidations
- * carry monotonically increasing seqs a recipient cursor can be compared
- * against.
+ * Sequence for declaration-wide entries: ONE global counter (keyed
+ * `'\u0000wide'` in the same cursor table) so wide entries — which all share
+ * the synthetic scope '' — never collide on the (scope, seq) primary key,
+ * while still giving every recipient cursor a monotonic axis to order against.
  */
-function bumpDeclarationWideSeq(db          , declaration        )         {
-  const key = `\u0000${declaration}`;
+function bumpDeclarationWideSeq(db          , _declaration        )         {
+  const key = '\u0000wide';
   prepareCached(db,
     "INSERT INTO _CompositeChangeCursor (scope, lastSeq) VALUES (:scope, 0) ON CONFLICT(scope) DO NOTHING",
   ).run({ scope: key });

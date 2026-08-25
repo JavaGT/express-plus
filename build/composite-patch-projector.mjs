@@ -316,11 +316,16 @@ export async function projectCompositePatch(input                     )         
   const operations                             = [];
 
   // --- anchor selected-field replacement ------------------------------------
+  // The value carries the COMPLETE retained key set of the node — selected
+  // fields AND every current relation-branch value — so the client's
+  // exact-set replacement deletes only genuinely removed keys and untouched
+  // relation branches round-trip unchanged (re-review GAP 3b).
   if (anchorTouched) {
     const selectEntry = declaration.output.entries.find((entry) => entry.kind === 'select');
     const fields = ['id', ...(selectEntry && selectEntry.kind === 'select' ? (selectEntry.fields ?? []) : [])];
+    const relationKeys = declaration.output.entries.filter((entry) => entry.kind !== 'select').map((entry) => entry.key);
     const value                          = {};
-    for (const field of fields) value[field] = (projected                           )[field];
+    for (const field of [...fields, ...relationKeys]) value[field] = (projected                           )[field];
     operations.push({ op: 'replace-fields', path: [], value });
   }
 

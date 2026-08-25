@@ -206,6 +206,7 @@ export class CompositePatchDelivery {
     // retry outcome, not silent success.
     let projection                         = null;
     let lastError          = null;
+    let capturedAnchorFence = input.after.anchor;
     for (let attempt = 0; attempt < COMPOSITE_PATCH_ATTEMPTS; attempt += 1) {
       try {
         const declaration = this.composites.get(handle.entity) ;
@@ -216,6 +217,7 @@ export class CompositePatchDelivery {
         // further. The projector re-reads the fence after projection; any
         // movement throws into the retry below.
         const anchorFenceBeforeCapture = readSeq(this.db, input.scope);
+        capturedAnchorFence = anchorFenceBeforeCapture;
         projection = await projectCompositePatch({
           db: this.db,
           principal: input.principal,
@@ -257,7 +259,9 @@ export class CompositePatchDelivery {
     this.backpressureWarned = false;
     try {
       if (projection.revokedAnchor) return { kind: 'revoked' };
-      const cursorAfter                    = Object.freeze({ anchor: readSeq(this.db, input.scope), composite: toComposite });
+      // GAP 4: the ledger + envelope advance to the SAME fence the state was
+      // projected at — never a fresher readSeq taken after projection.
+      const cursorAfter                    = Object.freeze({ anchor: capturedAnchorFence, composite: toComposite });
       const { projectionToken } = this.ledger.register({
         principal: input.principal,
         scope: input.scope,
