@@ -879,8 +879,9 @@ export interface AnnotatedTextActionRequest<Payload = unknown> {
   readonly type: string;
   readonly payload: Payload;
 }
-export function annotatedTextAction<E extends WorkbenchEntity>(
-  entity: E,
+export function annotatedTextAction(
+  /** Runtime-loose slot: any compiled entity fits; variance-safe by construction. */
+  entity: AnyWorkbenchEntity,
   field: AnnotatedTextFieldHandle,
   command: AnnotatedTextOperationCommand,
 ): AnnotatedTextActionRequest<AnnotatedTextOperationPayload>;
@@ -893,9 +894,9 @@ export type AnnotatedTextAnnotationActionValues<
     : never;
 export function annotatedTextAnnotationAction<
   Action extends AnnotatedTextAnnotationEntityActionHandle | AnnotatedTextDomainActionHandle,
-  E extends WorkbenchEntity
 >(
-  entity: E,
+  /** Runtime-loose slot: any compiled entity fits; variance-safe by construction. */
+  entity: AnyWorkbenchEntity,
   field: AnnotatedTextFieldHandle,
   actionHandle: Action,
   input: {
@@ -928,12 +929,13 @@ export interface AnnotatedTextCreateInput {
     readonly measurements?: readonly AnnotatedTextCreateSourceMeasurement[];
   };
 }
-export function annotatedTextCreateAction<E extends WorkbenchEntity>(
-  entity: E,
+export function annotatedTextCreateAction(
+  /** Runtime-loose slot: any compiled entity fits; variance-safe by construction. */
+  entity: AnyWorkbenchEntity,
   field: AnnotatedTextFieldHandle,
   input: AnnotatedTextCreateInput,
 ): AnnotatedTextActionRequest;
-export function annotatedTextRetireAction<E extends WorkbenchEntity>(entity: E, documentId: string): AnnotatedTextActionRequest<{ readonly id: string }>;
+export function annotatedTextRetireAction(entity: AnyWorkbenchEntity, documentId: string): AnnotatedTextActionRequest<{ readonly id: string }>;
 
 export interface AnnotatedTextAnnotation {
   readonly id: string;
