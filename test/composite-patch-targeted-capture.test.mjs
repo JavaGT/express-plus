@@ -25,6 +25,7 @@ function buildGraph(db) {
     CREATE TABLE IF NOT EXISTS User (id TEXT PRIMARY KEY, name TEXT);
     CREATE TABLE Code (id TEXT PRIMARY KEY, projectId TEXT REFERENCES Project(id), label TEXT, colour TEXT, position INTEGER);
     CREATE TABLE Note (id TEXT PRIMARY KEY, codeId TEXT REFERENCES Code(id), projectId TEXT REFERENCES Project(id), title TEXT);
+    CREATE TABLE Entry (id TEXT PRIMARY KEY, codeId TEXT REFERENCES Code(id), projectId TEXT REFERENCES Project(id), term TEXT);
   `);
 }
 
@@ -51,7 +52,17 @@ function entities() {
     title: text(),
     grant: inherit(Project, { via: 'projectId' }),
   });
-  return { Project, Code, Note, User };
+  // Keyed-under-keyed: Entry is a keyed branch NESTED under the keyed `codes`
+  // branch — the exact shape whose removal used to throw
+  // "removed nested keyed member lacks a provable keyed address" and fall back
+  // to a full snapshot (#157 acceptance 4).
+  const Entry = entity('Entry', {
+    projectId: ref(Project, { immutable: true }),
+    codeId: ref(Code),
+    term: text(),
+    grant: inherit(Code, { via: 'codeId' }),
+  });
+  return { Project, Code, Note, Entry, User };
 }
 
 function rowProjections(record) {
@@ -137,17 +148,19 @@ function installReadCounter(db) {
 async function setup(t, { adapter = null } = {}) {
   const db = new DatabaseSync(':memory:');
   buildGraph(db);
-  const { Project, Code, Note, User } = entities();
+  const { Project, Code, Note, Entry, User } = entities();
   executeDDL(Code, db);
   executeDDL(Note, db);
+  executeDDL(Entry, db);
   const projectScope = (payload) => `Project:${payload.projectId}`;
   const app = workbench({
     db,
-    entities: [Project, Code, Note, User],
+    entities: [Project, Code, Note, Entry, User],
     actions: [
       crudAction('Project', (payload) => `Project:${payload.row.id}`),
       crudAction('Code', projectScope),
       crudAction('Note', projectScope),
+      crudAction('Entry', projectScope),
     ],
   });
   app.attachLiveDelivery({
@@ -166,6 +179,13 @@ async function setup(t, { adapter = null } = {}) {
               orderBy: orderBy(Note.field.id, 'asc'),
               include: object({
                 noteFields: select(Note.field.title),
+              }),
+            }),
+            entries: keyed(Entry, {
+              via: Entry.field.codeId,
+              orderBy: orderBy(Entry.field.id, 'asc'),
+              include: object({
+                entryFields: select(Entry.field.term),
               }),
             }),
           }),
@@ -338,6 +358,7 @@ test('PARITY oracle: mixed mutations (rename, add, nested removal, top-level rem
   await dispatchOk(app, { actionId: 'c0a', type: 'code.write', scope: 'Project:p1', payload: { exists: false, projectId: 'p1', row: { id: 'codeA', projectId: 'p1', label: 'Identity', colour: '#334155', position: '1' } }, principal: alice });
   await dispatchOk(app, { actionId: 'c0b', type: 'code.write', scope: 'Project:p1', payload: { exists: false, projectId: 'p1', row: { id: 'codeB', projectId: 'p1', label: 'Money', position: '2' } }, principal: alice });
   await dispatchOk(app, { actionId: 'n0', type: 'note.write', scope: 'Project:p1', payload: { exists: false, projectId: 'p1', row: { id: 'note1', codeId: 'codeA', projectId: 'p1', title: 'Quote' } }, principal: alice });
+  await dispatchOk(app, { actionId: 'e0', type: 'entry.write', scope: 'Project:p1', payload: { exists: false, projectId: 'p1', row: { id: 'e1', codeId: 'codeA', projectId: 'p1', term: 'gloss' } }, principal: alice });
 
   const boot = await delivery.bootstrap({ principal: alice, scope: 'Project:p1', capabilities: ['snapshot-patch/v1'] });
   assert.equal(boot.kind, 'snapshot');
@@ -350,6 +371,10 @@ test('PARITY oracle: mixed mutations (rename, add, nested removal, top-level rem
     // be an exact patch, not a snapshot fallback (#157).
     { actionId: 'n2', type: 'note.write', scope: 'Project:p1', payload: { exists: true, removed: true, projectId: 'p1', row: { id: 'note1' } } },
     { actionId: 'n3', type: 'note.write', scope: 'Project:p1', payload: { exists: true, removed: true, projectId: 'p1', row: { id: 'note2' } } },
+    // Acceptance 4, literal form: KEYED-under-keyed removal. The ledger holds
+    // e1's keyed ancestor address, so this must be an exact remove-keyed patch
+    // at ['codes','codeA','entries'] — never the legacy fallback throw.
+    { actionId: 'e2', type: 'entry.write', scope: 'Project:p1', payload: { exists: true, removed: true, projectId: 'p1', row: { id: 'e1' } } },
     // Top-level keyed removal (its notes are gone by now).
     { actionId: 'c9', type: 'code.write', scope: 'Project:p1', payload: { exists: true, removed: true, projectId: 'p1', row: { id: 'codeB' } } },
   ];
@@ -381,6 +406,10 @@ test('PARITY oracle: mixed mutations (rename, add, nested removal, top-level rem
   const noteRemovalOp = notesReplace.find((operation) => operation.path.join('.') === 'codes.codeA.notes'
     && !operation.value.some((row) => row.id === 'note1'));
   assert.ok(noteRemovalOp, `notes instance replaced at its ledger-addressed path (ops: ${JSON.stringify(ops.map((operation) => [operation.op, operation.path]))})`);
+  // ...and the KEYED-under-keyed removal is an exact ledger-addressed patch.
+  const entryRemovalOp = ops.find((operation) => operation.op === 'remove-keyed' && operation.id === 'e1');
+  assert.ok(entryRemovalOp, 'keyed-under-keyed removal emitted remove-keyed instead of falling back');
+  assert.deepEqual(entryRemovalOp.path, ['codes', 'codeA', 'entries'], 'remove-keyed addressed through the ledger-held keyed ancestor');
 
   assert.deepEqual(fallbacks, [], `no snapshot fallbacks on any mutation (${JSON.stringify(fallbacks)})`);
 
