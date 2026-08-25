@@ -214,6 +214,24 @@ test('v3 compact tables reject malformed, duplicate, non-canonical, and unknown 
   const hiddenFrontier = structuredClone(snapshot);
   Object.defineProperty(hiddenFrontier.frontiers[0], 'extra', { value: true });
   assert.throws(() => materializeAnnotatedTextSnapshot(hiddenFrontier, handle, { family }), /frontier table entry/);
+  const symbolRange = structuredClone(snapshot);
+  symbolRange.ranges[0][Symbol('extra')] = true;
+  assert.throws(() => materializeAnnotatedTextSnapshot(symbolRange, handle, { family }), /compact endpoint references/);
+  const hiddenRange = structuredClone(snapshot);
+  Object.defineProperty(hiddenRange.ranges[0], 'extra', { value: true });
+  assert.throws(() => materializeAnnotatedTextSnapshot(hiddenRange, handle, { family }), /compact endpoint references/);
+  // Element-form anchors nest a [hash, counter] pair one level deeper than
+  // root anchors; prove that level is also closed to planted properties.
+  const elementPoint = ['point', ['element', [[ACTOR, 1], 0]], 'left'];
+  const elementTemplate = structuredClone(snapshot);
+  elementTemplate.points = [elementPoint];
+  assert.doesNotThrow(() => materializeAnnotatedTextSnapshot(structuredClone(elementTemplate), handle, { family }));
+  const symbolAnchorPair = structuredClone(elementTemplate);
+  symbolAnchorPair.points[0][1][1][Symbol('extra')] = true;
+  assert.throws(() => materializeAnnotatedTextSnapshot(symbolAnchorPair, handle, { family }), /point table entry/);
+  const hiddenAnchorPair = structuredClone(elementTemplate);
+  Object.defineProperty(hiddenAnchorPair.points[0][1][1], 'extra', { value: true });
+  assert.throws(() => materializeAnnotatedTextSnapshot(hiddenAnchorPair, handle, { family }), /point table entry/);
   const hiddenTopLevel = structuredClone(snapshot);
   Object.defineProperty(hiddenTopLevel, 'extra', { value: true });
   assert.throws(() => materializeAnnotatedTextSnapshot(hiddenTopLevel, handle, { family }), /invalid shape/);

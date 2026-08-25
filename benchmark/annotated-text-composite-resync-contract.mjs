@@ -8,6 +8,8 @@ export const W1A_SCALING_WORDS = Object.freeze([9_000, 18_000, 36_000]);
 export const W1A_MIN_HALVING_REDUCTION = 0.4;
 export const W1A_RETAINED_TRAILING_WINDOW = 5;
 export const W1A_RETAINED_TRAILING_MULTIPLIER = 3;
+export const W1A_RETAINED_TOTAL_LIMIT_MIB = 64;
+export const W1A_RETAINED_SLOPE_LIMIT_MIB = 2;
 
 function leastSquaresSlope(values) {
   if (!Array.isArray(values) || values.length < 2 || values.some((value) => !Number.isFinite(value))) {
@@ -39,6 +41,25 @@ export function evaluateW1aRetainedGrowth(heapDeltasMiB) {
     trailingWindowRecipients: W1A_RETAINED_TRAILING_WINDOW,
     trailingMultiplier: W1A_RETAINED_TRAILING_MULTIPLIER,
     trailingPassed: trailingSlope <= trailingSlopeLimit,
+  };
+}
+
+/**
+ * Composite retained-growth acceptance gate: fitted slope, total retained
+ * memory, and the late-leak trailing window must all pass together. The total
+ * defaults to the largest post-GC heap delta but callers measuring additional
+ * components (external/RSS) may supply the authoritative figure.
+ */
+export function evaluateW1aRetainedGate(heapDeltasMiB, totalRetainedMiB = Math.max(0, ...heapDeltasMiB)) {
+  const regression = evaluateW1aRetainedGrowth(heapDeltasMiB);
+  return {
+    ...regression,
+    totalRetainedMiB: totalRetainedMiB,
+    slopePassed: regression.fittedSlopeMiBPerRecipient < W1A_RETAINED_SLOPE_LIMIT_MIB,
+    totalPassed: totalRetainedMiB < W1A_RETAINED_TOTAL_LIMIT_MIB,
+    passed: regression.trailingPassed
+      && regression.fittedSlopeMiBPerRecipient < W1A_RETAINED_SLOPE_LIMIT_MIB
+      && totalRetainedMiB < W1A_RETAINED_TOTAL_LIMIT_MIB,
   };
 }
 

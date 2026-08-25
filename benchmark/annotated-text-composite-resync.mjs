@@ -23,7 +23,7 @@ import { restoreTextFamilySerialized, resolveOffsetToEndpoint } from '../build/a
 import { canonicalEndpointJSON } from '../build/annotated-text-storage.mjs';
 import { createLiveDeliverySession } from '../public/workbench-client.mjs';
 import { materializeAnnotatedTextSnapshot } from '../public/workbench-annotated-text-snapshot.mjs';
-import { evaluateW1aRetainedGrowth, W1A_LATENCY_GATES } from './annotated-text-composite-resync-contract.mjs';
+import { evaluateW1aRetainedGate, W1A_LATENCY_GATES, W1A_RETAINED_SLOPE_LIMIT_MIB, W1A_RETAINED_TOTAL_LIMIT_MIB } from './annotated-text-composite-resync-contract.mjs';
 
 const RECIPIENTS = Number(process.env.ANNOTATED_TEXT_BENCH_RECIPIENTS ?? 25);
 const VISIBLE_RECIPIENTS = Number(process.env.ANNOTATED_TEXT_BENCH_VISIBLE_RECIPIENTS ?? 13);
@@ -38,8 +38,6 @@ if (!SCENARIOS.includes(SCENARIO)) throw new Error(`ANNOTATED_TEXT_BENCH_SCENARI
 const MIB = 1024 * 1024;
 const SERVER_PEAK_LIMIT_MIB = 384;
 const CLIENT_PEAK_LIMIT_MIB = 384;
-const RETAINED_TOTAL_LIMIT_MIB = 64;
-const RETAINED_SLOPE_LIMIT_MIB = 2;
 const ENVELOPE_LIMIT_BYTES = 40 * MIB;
 
 function percentile(values, p) {
@@ -659,11 +657,14 @@ async function runRetainedGrowth(db, BenchDoc, fixture) {
     rss: final.rssMiB - baseline.rssMiB,
   };
   const retainedTotalMiB = Math.max(...Object.values(retainedComponentsMiB));
-  const retainedRegression = evaluateW1aRetainedGrowth(samples.map((sample) => sample.heapUsedDeltaMiB));
+  const retainedRegression = evaluateW1aRetainedGate(
+    samples.map((sample) => sample.heapUsedDeltaMiB),
+    retainedTotalMiB,
+  );
   const retainedSlopeMiBPerRecipient = retainedRegression.fittedSlopeMiBPerRecipient;
   const thresholdNotes = [];
-  if (retainedTotalMiB >= RETAINED_TOTAL_LIMIT_MIB) thresholdNotes.push(`retained heap growth ${retainedTotalMiB}MiB exceeds ${RETAINED_TOTAL_LIMIT_MIB}MiB`);
-  if (retainedSlopeMiBPerRecipient >= RETAINED_SLOPE_LIMIT_MIB) thresholdNotes.push(`retained heap slope ${retainedSlopeMiBPerRecipient}MiB/recipient exceeds ${RETAINED_SLOPE_LIMIT_MIB}MiB/recipient`);
+  if (!retainedRegression.totalPassed) thresholdNotes.push(`retained heap growth ${retainedTotalMiB}MiB exceeds ${W1A_RETAINED_TOTAL_LIMIT_MIB}MiB`);
+  if (!retainedRegression.slopePassed) thresholdNotes.push(`retained heap slope ${retainedSlopeMiBPerRecipient}MiB/recipient exceeds ${W1A_RETAINED_SLOPE_LIMIT_MIB}MiB/recipient`);
   if (!retainedRegression.trailingPassed) {
     thresholdNotes.push(`retained heap trailing-${retainedRegression.trailingWindowRecipients} slope ${retainedRegression.trailingSlopeMiBPerRecipient}MiB/recipient exceeds 3x fitted slope ${retainedRegression.trailingSlopeLimitMiBPerRecipient}MiB/recipient`);
   }
@@ -678,9 +679,10 @@ async function runRetainedGrowth(db, BenchDoc, fixture) {
     retainedTrailingSlopeMiBPerRecipient: Number(retainedRegression.trailingSlopeMiBPerRecipient.toFixed(3)),
     retainedTrailingSlopeLimitMiBPerRecipient: Number(retainedRegression.trailingSlopeLimitMiBPerRecipient.toFixed(3)),
     retainedTrailingWindowRecipients: retainedRegression.trailingWindowRecipients,
+    retainedGatePassed: retainedRegression.passed,
     retainedComponentsMiB: Object.fromEntries(Object.entries(retainedComponentsMiB).map(([key, value]) => [key, Number(value.toFixed(3))])),
     serializedSizes,
-    limits: { retainedTotalMiB: RETAINED_TOTAL_LIMIT_MIB, retainedSlopeMiBPerRecipient: RETAINED_SLOPE_LIMIT_MIB, envelopeBytes: ENVELOPE_LIMIT_BYTES },
+    limits: { retainedTotalMiB: W1A_RETAINED_TOTAL_LIMIT_MIB, retainedSlopeMiBPerRecipient: W1A_RETAINED_SLOPE_LIMIT_MIB, envelopeBytes: ENVELOPE_LIMIT_BYTES },
     thresholdNotes,
   };
 }
