@@ -208,6 +208,9 @@ function makeMountable({
   const declarations                = [];
   const routes                = [];
   let resolution                                = null; // the in-flight/resolved finalization promise (idempotent)
+  // Diagnostic label so cycle errors can name this router even when it was
+  // created bare (no entity name); unique per surface.
+  const routerLabel = `router:${++routerSequence}`;
 
   // When an ENTITY-bound builder mounts a child under a `:<entityName>Id` path
   // segment (doc.mjs: `r.mount('/:docId/shares', ...)` on Doc's builder), the
@@ -263,6 +266,8 @@ function makeMountable({
     declarations,
     mount: recordMount,
     use: recordMount,
+    // Diagnostic-only; read by describeMountTarget for cycle-error chains.
+    _label: routerLabel,
   }             ;
 
   // The per-entity builder also exposes `r.resource()`: expand the five CRUD
@@ -300,35 +305,76 @@ function makeMountable({
   // the synchronous recording above is what keeps the public chain sync.
   surface.resolveRoutes = ()                         => {
     if (resolution) return resolution;
+    // Re-entry while resolving is caught by the shared RESOLUTION_STACK inside
+    // resolveMount (this surface is pushed below before its body runs).
+    RESOLUTION_STACK.push(surface);
+    // Clear this frame whether resolution succeeds or fails so a rejected
+    // resolution doesn't leave stale cycle-detection state behind.
     resolution = (async () => {
-      for (const decl of declarations) {
-        if (decl.kind === 'imperative') {
-          routes.push(rebaseRoute(decl.route, base));
-        } else if (decl.kind === 'resource') {
-          for (const route of resolveResource(entity , joinPath(base, ''))) {
-            routes.push(route);
-          }
-        } else if (decl.kind === 'handler') {
-          // A function-target `use` does not add to the matchRoute table — it
-          // intercepts by prefix before the table is consulted. Collected in
-          // declaration order so the first matching prefix wins.
-          (surface._handlers ??= []).push({ prefix: decl.prefix, fn: decl.fn });
-        } else if (decl.kind === 'mount') {
-          for (const route of await resolveMount(decl.path, decl.target, entityOf)) {
-            const rebased = rebaseRoute(route, base);
-            // Stamp the entity auto-load onto every descendant route so a
-            // handler under `/:docId/shares` finds req.doc regardless of how
-            // deeply the child router nests.
-            routes.push(decl.autoLoad ? Object.freeze({ ...rebased, autoLoad: decl.autoLoad }) : rebased);
+      try {
+        for (const decl of declarations) {
+          if (decl.kind === 'imperative') {
+            routes.push(rebaseRoute(decl.route, base));
+          } else if (decl.kind === 'resource') {
+            for (const route of resolveResource(entity , joinPath(base, ''))) {
+              routes.push(route);
+            }
+          } else if (decl.kind === 'handler') {
+            // A function-target `use` does not add to the matchRoute table — it
+            // intercepts by prefix before the table is consulted. Collected in
+            // declaration order so the first matching prefix wins.
+            (surface._handlers ??= []).push({ prefix: decl.prefix, fn: decl.fn });
+          } else if (decl.kind === 'mount') {
+            for (const route of await resolveMount(decl.path, decl.target, entityOf)) {
+              const rebased = rebaseRoute(route, base);
+              // Stamp the entity auto-load onto every descendant route so a
+              // handler under `/:docId/shares` finds req.doc regardless of how
+              // deeply the child router nests.
+              routes.push(decl.autoLoad ? Object.freeze({ ...rebased, autoLoad: decl.autoLoad }) : rebased);
+            }
           }
         }
+        return routes;
+      } finally {
+        RESOLUTION_STACK.pop();
       }
-      return routes;
     })();
     return resolution;
   };
 
   return surface;
+}
+
+// Cycle detection for mount resolution. Resolution recurses (resolveRoutes →
+// resolveMount → child.resolveRoutes/buildEntityRoutes) and every mountable
+// caches its in-flight resolution promise — so a circular mount graph would
+// await its own never-settling promise forever, deadlocking listen() silently.
+// This stack holds the targets currently resolving; re-entering one turns the
+// deadlock into a loud, descriptive error at assembly time.
+let routerSequence = 0; // diagnostic labels for bare routers in cycle errors
+const RESOLUTION_STACK            = [];
+
+function describeMountTarget(target         )         {
+  const record = target                                                           ;
+  if (typeof record?._label === 'string') return record._label;
+  if (typeof record?.name === 'string') return `entity:${record.name}`;
+  return 'router';
+}
+
+// Build the descriptive error for a detected mount cycle: the chain shows the
+// resolving targets from the outermost resolution down to the re-entered one.
+function mountCycleError(target         , path        )        {
+  const chain = [...RESOLUTION_STACK, target].map(describeMountTarget).join(' → ');
+  return new Error(
+    `circular mount detected: ${chain} — '${describeMountTarget(target)}' at mount path '${path}' is still resolving`,
+  );
+}
+
+// Throw unless `target` is free to resolve (not an ancestor still in flight).
+function assertNotResolving(target         , path        )       {
+  if (target != null && typeof target === 'object' && RESOLUTION_STACK.includes(target)) {
+    throw mountCycleError(target, path);
+  }
 }
 
 // Resolve one `mount(path, target)` declaration into a flat list of route records
@@ -338,14 +384,31 @@ function makeMountable({
 // `routes:(r, Entity)=>...` thunk runs (awaited — it may be async).
 async function resolveMount(path        , target             , entityOf          )                         {
   if (target && typeof (target                            ).resolveFor === 'function') {
-    const resolved = await (target                       ).resolveFor(entityOf);
-    return resolved.map((route) => rebaseRoute(route, path));
+    assertNotResolving(target, path);
+    RESOLUTION_STACK.push(target);
+    try {
+      const resolved = await (target                       ).resolveFor(entityOf);
+      return resolved.map((route) => rebaseRoute(route, path));
+    } finally {
+      RESOLUTION_STACK.pop();
+    }
   }
   if (target && typeof (target                               ).resolveRoutes === 'function' && Array.isArray((target                              ).declarations)) {
+    // The sub-router tracks itself inside its own resolveRoutes(); reaching it
+    // while it is still resolving means the mount graph loops back through it.
+    assertNotResolving(target, path);
     await (target                      ).resolveRoutes();
     return (target                      ).routes.map((route) => rebaseRoute(route, path));
   }
-  return buildEntityRoutes(entityOf(target), path, entityOf);
+  // Compiled entity: its per-entity builder is created fresh per resolution, so
+  // identity is tracked on the entity object itself (stable across resolutions).
+  assertNotResolving(target, path);
+  RESOLUTION_STACK.push(target);
+  try {
+    return await buildEntityRoutes(entityOf(target), path, entityOf);
+  } finally {
+    RESOLUTION_STACK.pop();
+  }
 }
 
 // Expand the five CRUD verbs for `entity` at `base`. The per-verb route gate is
