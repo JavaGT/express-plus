@@ -50,7 +50,7 @@ Action → authorize → handler → `_Log` append → projection (+ in-txn effe
 | `committed-log.mjs` / `cursor.mjs` / `durable-history.mjs` | Log, seq storage, authorized history reads + session undo cursors |
 | `scope-handle.mjs` | Scope key grammar |
 | `write-queue.mjs` | Single-writer serialization |
-| `driver.mjs` / `db.mjs` / `migrations.mjs` | SQLite engagement |
+| `driver.mjs` / `migrations.mjs` | SQLite engagement |
 | `blob-lifecycle.mjs` (in-txn adopt) | Blob adopt atomic with commit |
 | `post-commit-effects.mjs` (declaration) | Immutable private fact + ordered external-work declarations atomic with commit |
 | `action-authorization.mjs` | Multi-row action admission through existing row grants/check registry |
