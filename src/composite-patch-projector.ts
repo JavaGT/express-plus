@@ -6,19 +6,20 @@
 // and action payload fields never enter a patch.
 //
 // #157 targeted branch capture: the candidate graph is SPARSE. It contains the
-// anchor row, the affected fragments of every branch the slice touches (with
-// their nested value subtrees and required-related rows), the keyed-ancestor
-// rows needed for addressing, and the smallest affected `many` instance — plus,
-// only when the anchor op must assemble complete branch values, the untouched
-// branches, whose rows are flagged ledger-admitted so authorizeSnapshot skips
-// their per-row admit call (the recipient's ledger proves prior delivery; grant
+// anchor row plus, per touched branch, exactly the ancestor-instance spine and
+// affected content the patch needs — affected fragments with their nested value
+// subtrees and required-related rows, the smallest affected `many` instance,
+// and ledger-addressed instances whose own rows are already gone. Only when
+// the anchor op must assemble complete branch values are untouched branches
+// captured whole, flagged ledger-admitted so authorizeSnapshot skips their
+// per-row admit call: the recipient's ledger proves prior delivery, and grant
 // or membership flips force a declaration-wide invalidation upstream, so a
-// non-invalidating slice can never move the grant graph). authorizeSnapshot and
-// projectSnapshot then run UNCHANGED on the sparse graph: identical per-row
+// non-invalidating slice can never move the grant graph. authorizeSnapshot and
+// projectSnapshot then run UNCHANGED on the sparse graph — identical per-row
 // admission decisions and identical projection shapes, at O(affected) cost.
-// The one honest residual: an anchor-touched batch still READS its related
-// rows once, because the replace-fields grammar demands the node's complete
-// retained key set — but those reads carry no authorization or admission work.
+// One honest residual: an anchor-touched batch still READS its related rows
+// once, because the replace-fields grammar demands the node's complete
+// retained key set — but those reads carry no authorization work.
 //
 // Successor visibility is likewise incremental: the previous ledger content is
 // patched with the captured post-state of affected fragments instead of
@@ -35,15 +36,15 @@
 // rather than discloses.
 //
 // Operation addressing: paths are absolute OUTPUT paths from the anchor root;
-// a keyed ancestor contributes `<relationKey>, <memberId>` segment pairs, so
-// a nested relation instance under keyed member c1 of `codes` reads like
-// ["codes", "c1", "entries"]. `many` relations are replaced wholesale at the
-// smallest affected relation instance (authoritative ordering, no index-move
-// grammar, design §4/§6) — one operation PER affected instance. The
-// keyed-ancestor address of every delivered fragment is recorded in the
-// recipient's ledger (#157), so a later removal under a keyed ancestor patches
-// exactly instead of falling back to a full snapshot: the prior address IS the
-// provable pre-state placement.
+// every ancestor level contributes `<relationKey>` and, for keyed levels, the
+// `<memberId>` segment, so a nested relation under keyed member c1 of `codes`
+// reads like ["codes", "c1", "entries"]. `many` relations are replaced
+// wholesale at the smallest affected relation instance (authoritative ordering,
+// no index-move grammar, design §4/§6) — one operation PER affected instance.
+// The ancestor-instance address of every delivered fragment is recorded in the
+// recipient's ledger (#157), so a later removal under keyed (or many) ancestors
+// patches exactly instead of falling back to a full snapshot: the prior address
+// IS the provable pre-state placement.
 //
 // Any anomaly THROWS: callers convert every failure into full-snapshot
 // recovery, never into a partial patch (fail closed, design §7).
@@ -109,9 +110,9 @@ export interface PatchProjectorInput {
   /** Proven visibility of THIS recipient before this batch (from the projection ledger). */
   priorVisible: ReadonlyMap<string, ReadonlyMap<string, ReadonlySet<string>>>;
   /**
-   * Keyed-ancestor addresses the ledger proved for THIS recipient before this
-   * batch (#157): addressKey -> keyed member ids above the fragment's own
-   * relation. Removals under keyed ancestors address through this map.
+   * Ancestor-instance addresses the ledger proved for THIS recipient before
+   * this batch (#157): addressKey -> the id of each ancestor instance, aligned
+   * with the branch's ancestor levels. Removals address through this map.
    */
   priorAddresses: ReadonlyMap<string, readonly string[]>;
   /** Re-reads the composite cursor for the stable-read fence check. */
@@ -140,7 +141,7 @@ export interface PatchProjection {
   /** Visibility AFTER this batch, per branch — the successor ledger content. */
   readonly visibleAfter: ReadonlyMap<string, ReadonlyMap<string, ReadonlySet<string>>>;
   /**
-   * Keyed-ancestor addresses AFTER this batch (#157) — the successor ledger
+   * Ancestor-instance addresses AFTER this batch (#157) — the successor ledger
    * addressing content. Untouched fragments keep their prior addresses.
    */
   readonly addressesAfter: ReadonlyMap<string, readonly string[]>;
@@ -175,19 +176,23 @@ function keyOf(relation: PatchPlanRelation): string {
   return relation.branchId.slice(relation.branchId.lastIndexOf('.') + 1);
 }
 
-/** Output-path prefix of a branch instance: relation keys plus supplied keyed member ids. */
-function instancePath(chain: readonly PatchPlanRelation[], keyedMembers: readonly string[]): string[] {
+/**
+ * Output path of a branch instance from its ancestor-instance ids (#157):
+ * every level contributes its relation key; keyed levels additionally insert
+ * the member id at that level. `levels` is aligned with the chain's ancestor
+ * positions (chain minus its final relation).
+ */
+function instancePathFromLevels(chain: readonly PatchPlanRelation[], levels: readonly string[]): string[] {
   const segments: string[] = [];
-  let memberCursor = 0;
-  for (const relation of chain) {
-    segments.push(keyOf(relation));
-    if (relation.kind === 'keyed') {
-      const memberId = keyedMembers[memberCursor];
+  for (let index = 0; index < chain.length - 1; index += 1) {
+    segments.push(keyOf(chain[index]));
+    if (chain[index].kind === 'keyed') {
+      const memberId = levels[index];
       if (typeof memberId !== 'string') throw new Error('keyed ancestor member id missing for patch path');
       segments.push(memberId);
-      memberCursor += 1;
     }
   }
+  segments.push(keyOf(chain[chain.length - 1]));
   return segments;
 }
 
@@ -211,6 +216,13 @@ function compiledEntryAt(output: CompiledBranchLike, path: readonly string[]): C
 
 // ---- affected-fragment resolution -------------------------------------------
 
+/** One ancestor level's placement evidence (aligned with the chain position). */
+interface AncestorLevel {
+  readonly raw: Record<string, unknown>;
+  /** Set when this level's relation is `keyed` (its id addresses the path). */
+  readonly memberId: string | null;
+}
+
 /**
  * One affected row's placement evidence, resolved BEFORE capture from scoped
  * post-state reads alone (never a full-graph walk). `row` is null when the
@@ -219,19 +231,16 @@ function compiledEntryAt(output: CompiledBranchLike, path: readonly string[]): C
  */
 interface AffectedFragment {
   readonly row: Record<string, unknown> | null;
-  /** Keyed-ancestor member ids above the touched relation (outermost first). */
-  readonly members: readonly string[];
-  /** Captured raw rows for each keyed ancestor level (aligned with `members`). */
-  readonly ancestors: readonly Record<string, unknown>[];
+  /** Ancestor rows for every level above the touched relation. */
+  readonly levels: readonly AncestorLevel[];
 }
 
 /**
  * Resolve every affected id of one touched branch: a scoped by-ids read for
- * the rows themselves, then an upward fk-walk (one scoped read per ancestor
- * level) for the keyed-ancestor chain. O(affected × depth) reads — the
- * smallest evidence set that addresses the fragments. Throws (fail closed,
- * snapshot recovery upstream) when a chain step is not an inverse relation,
- * an intermediate step is not keyed, or an ancestor row cannot be read:
+ * the rows themselves, then an upward fk-walk (one scoped read per level) for
+ * the ancestor chain. O(affected × depth) reads — the smallest evidence set
+ * that addresses the fragments. Throws (fail closed, snapshot recovery
+ * upstream) when a step is not an inverse relation or a row cannot be read:
  * placement is then unknowable cheaply.
  */
 function resolveFragments(db: import('./driver.ts').DbHandle, principal: Principal, declaration: SnapshotDeclarationLike, plan: AnchorPatchPlan, branchId: string, ids: ReadonlySet<string>, tombstones: readonly unknown[] | null): Map<string, AffectedFragment> {
@@ -245,11 +254,10 @@ function resolveFragments(db: import('./driver.ts').DbHandle, principal: Princip
   for (const id of ids) {
     const row = byId.get(id);
     if (!row) {
-      found.set(id, { row: null, members: [], ancestors: [] });
+      found.set(id, { row: null, levels: [] });
       continue;
     }
-    const members: string[] = [];
-    const ancestors: Record<string, unknown>[] = [];
+    const levels: AncestorLevel[] = [];
     let current: Record<string, unknown> = row;
     for (let index = chain.length - 1; index >= 1; index -= 1) {
       const step = chain[index];
@@ -257,23 +265,14 @@ function resolveFragments(db: import('./driver.ts').DbHandle, principal: Princip
       const parentId = current[step.fk];
       if (typeof parentId !== 'string' || parentId.length === 0) throw new Error('affected fragment lacks a readable ancestor reference');
       const parentRelation = chain[index - 1];
-      if (index > 1 && parentRelation.kind !== 'keyed') {
-        // Only keyed ancestors contribute path segments; anything else in the
-        // middle of a chain cannot be addressed sparsely — fail closed.
-        throw new Error('targeted capture supports keyed-ancestor chains only');
-      }
       const parentEntry = compiledEntryAt(declaration.output, parentRelation.path);
       if (!parentEntry.entity) throw new Error('ancestor branch lacks a compiled entity');
       const parentRows = readRowsByIds(db, parentEntry.entity as never, principal, [parentId], null, tombstones as never);
       if (parentRows.length !== 1) throw new Error('affected fragment ancestor could not be read');
-      const parentRow = parentRows[0];
-      if (parentRelation.kind === 'keyed') {
-        members.unshift(parentId);
-        ancestors.unshift(parentRow);
-      }
-      current = parentRow;
+      levels.unshift({ raw: parentRows[0], memberId: parentRelation.kind === 'keyed' ? parentId : null });
+      current = parentRows[0];
     }
-    found.set(id, { row, members, ancestors });
+    found.set(id, { row, levels });
   }
   return found;
 }
@@ -289,6 +288,16 @@ interface CaptureContext {
   touched: Map<string, Set<string>>;
   anchorTouched: boolean;
   resolution: Map<string, Map<string, AffectedFragment>>;
+  /** Per touched branch: addressing instances (post-state ∪ ledger-addressed). */
+  instances: Map<string, Map<string, InstanceGroup>>;
+}
+
+/** One addressing instance of one touched branch. */
+interface InstanceGroup {
+  /** Ancestor-instance ids, aligned with the chain's ancestor positions. */
+  readonly levels: readonly string[];
+  /** Affected ids resolved at this instance. */
+  readonly ids: Set<string>;
 }
 
 function newNode(raw: Record<string, unknown>, ledgerAdmitted: boolean): SnapshotNodeLike {
@@ -309,6 +318,10 @@ function attachRequirement(ctx: CaptureContext, entry: CompiledEntryLike, child:
   }
 }
 
+function nestedEntriesOf(entry: CompiledEntryLike): ReadonlyArray<CompiledEntryLike> {
+  return entry.nested ? entry.nested.entries.filter((nested) => nested.kind !== 'select') : [];
+}
+
 /**
  * Capture the COMPLETE value subtree of one compiled entry under one row —
  * every relation level below it, required-related rows included. Used for
@@ -320,126 +333,114 @@ function fillCompleteEntry(ctx: CaptureContext, parentRaw: Record<string, unknow
   const { db, principal, tombstones } = ctx;
   if (entry.kind === 'user') {
     const user = parentRaw[entry.fk as string] == null ? null : readUser(db, parentRaw[entry.fk as string], tombstones as never);
-    return user ? [Object.freeze({ raw: user, children: new Map() })] : [];
+    return user ? [Object.freeze({ raw: user, children: new Map<unknown, SnapshotNodeLike[]>() })] : [];
   }
   if (!entry.entity) throw new Error('captured branch lacks a compiled entity');
   const rows = readRows(db, entry.entity as never, principal, entry.fk as string, entry.inverse ? parentRaw.id : parentRaw[entry.fk as string], entry.inverse === true, entry.order as never, tombstones as never);
   return rows.map((child) => {
     const node = newNode(child, ledgerAdmitted);
     attachRequirement(ctx, entry, child, parentRaw, node, ledgerAdmitted);
-    if (entry.nested) {
-      for (const nestedEntry of entry.nested.entries) {
-        if (nestedEntry.kind === 'select') continue;
-        node.children.set(nestedEntry, fillCompleteEntry(ctx, child, nestedEntry, ledgerAdmitted));
-      }
+    for (const nestedEntry of nestedEntriesOf(entry)) {
+      node.children.set(nestedEntry, fillCompleteEntry(ctx, child, nestedEntry, ledgerAdmitted));
     }
     return Object.freeze(node);
   });
-}
-
-/** Index of a chain level among the KEYED steps only (members[] alignment). */
-function spineKeyIndex(chain: readonly PatchPlanRelation[], level: number): number {
-  let keyed = 0;
-  for (let index = 0; index < level; index += 1) if (chain[index].kind === 'keyed') keyed += 1;
-  return keyed;
 }
 
 /** One captured affected row: fresh admission, complete value subtree, requirement honored. */
 function finishFragmentNode(ctx: CaptureContext, entry: CompiledEntryLike, raw: Record<string, unknown>, holderRaw: Record<string, unknown>): SnapshotNodeLike {
   const node = newNode(raw, false);
   attachRequirement(ctx, entry, raw, holderRaw, node, false);
-  if (entry.nested) {
-    for (const nestedEntry of entry.nested.entries) {
-      if (nestedEntry.kind === 'select') continue;
-      node.children.set(nestedEntry, fillCompleteEntry(ctx, raw, nestedEntry, false));
-    }
+  for (const nestedEntry of nestedEntriesOf(entry)) {
+    node.children.set(nestedEntry, fillCompleteEntry(ctx, raw, nestedEntry, false));
   }
   return Object.freeze(node);
 }
 
 /**
- * Targeted capture of ONE touched top-level-or-deeper branch: only the
- * affected fragments (plus their value subtrees), the keyed-ancestor nodes
- * needed for addressing, and — for wholesale kinds — the smallest affected
- * instance. Fresh admission for every captured row (nothing here is assumed
- * from the ledger: these rows' content or existence just changed).
+ * Read one ancestor instance row by id (scoped, tombstone-aware) — used when
+ * a ledger-addressed instance's spine rows are not part of any surviving
+ * fragment's post-state evidence.
  */
-function fillAffected(ctx: CaptureContext, rootRaw: Record<string, unknown>, entry: CompiledEntryLike, branchId: string, into: Map<unknown, SnapshotNodeLike[]>): void {
+function fetchAncestorRow(ctx: CaptureContext, entry: CompiledEntryLike, id: string): Record<string, unknown> {
+  if (!entry.entity) throw new Error('ancestor branch lacks a compiled entity');
+  const rows = readRowsByIds(ctx.db, entry.entity as never, ctx.principal, [id], null, ctx.tombstones as never);
+  if (rows.length !== 1) throw new Error('ledger-addressed ancestor instance could not be read');
+  return rows[0];
+}
+
+/**
+ * Targeted capture of ONE touched branch (#157): for every addressing
+ * instance — post-state or ledger-addressed — rebuild exactly the ancestor
+ * spine nodes the output path needs, then capture the smallest affected
+ * content at the final relation: affected keyed members, or the whole
+ * instance for wholesale kinds. Fresh admission for every captured row
+ * (nothing here is assumed from the ledger: these rows' content or existence
+ * just changed — except pure spine rows, which are addressed, not emitted,
+ * and therefore skip nothing they would not skip in a full capture).
+ */
+function fillAffectedBranch(ctx: CaptureContext, rootRaw: Record<string, unknown>, entry: CompiledEntryLike, branchId: string, into: Map<unknown, SnapshotNodeLike[]>): void {
   const { db, principal, tombstones } = ctx;
   const chain = branchChain(ctx.plan, branchId);
+  const groups = ctx.instances.get(branchId);
+  if (!groups) throw new Error('addressing instances unresolved for a touched branch');
   const fragments = ctx.resolution.get(branchId);
   if (!fragments) throw new Error('affected fragments unresolved for a touched branch');
-  const present = [...fragments.values()].filter((fragment) => fragment.row !== null);
 
-  if (chain.length === 1) {
-    // Top-level branch directly under the anchor.
-    if (!entry.entity) throw new Error('touched branch lacks a compiled entity');
-    const prefixPath = [entry.key];
-    if (entry.kind === 'keyed') {
-      into.set(entry, present.map((fragment) => Object.freeze(finishFragmentNode(ctx, entry, fragment.row as Record<string, unknown>, rootRaw))));
-      return;
-    }
-    if (entry.kind === 'many' || entry.kind === 'count') {
-      // Wholesale kinds: the smallest affected instance is the whole
-      // anchor-level collection (authoritative ordering).
-      const rows = readRows(db, entry.entity as never, principal, entry.fk as string, rootRaw.id, true, entry.order as never, tombstones as never);
-      into.set(entry, rows.map((child) => Object.freeze(finishFragmentNode(ctx, entry, child, rootRaw))));
-      return;
-    }
-    if (entry.kind === 'one') {
-      const rows = readRows(db, entry.entity as never, principal, entry.fk as string, rootRaw[entry.fk as string], false, entry.order as never, tombstones as never);
-      into.set(entry, rows.map((child) => Object.freeze(finishFragmentNode(ctx, entry, child, rootRaw))));
-      return;
-    }
-    throw new Error(`unsupported top-level touched branch kind '${entry.kind}'`);
-  }
-
-  // Deeper branch: rebuild only the keyed ancestor spine the fragments sit
-  // under (shared across fragments of the same instance), then attach the
-  // smallest affected instance at the final relation.
+  // Spine nodes are shared across the branch's instances (and re-found when a
+  // second touched branch nests under the same instance).
   const spineNodes = new Map<string, SnapshotNodeLike>();
-  for (const fragment of present) {
-    const keyedLevels = chain.slice(0, -1).filter((step) => step.kind === 'keyed').length;
-    if (fragment.members.length !== keyedLevels) {
-      throw new Error('affected fragment ancestor chain does not match the branch shape');
-    }
+
+  for (const [, group] of groups) {
+    // Build the ancestor spine, outermost first.
     let parentNode: SnapshotNodeLike = { raw: rootRaw, children: into };
     for (let level = 0; level < chain.length - 1; level += 1) {
       const relation = chain[level];
-      if (relation.kind !== 'keyed') continue; // only keyed ancestors contribute spine nodes
       const levelEntry = compiledEntryAt(ctx.declaration.output, relation.path);
-      const memberId = fragment.members[spineKeyIndex(chain, level)];
-      const spineKey = `${relation.branchId}\u0000${memberId}`;
+      const spineKey = `${relation.branchId}\u0000${group.levels[level]}`;
       let node = spineNodes.get(spineKey);
       if (!node) {
-        const raw = fragment.ancestors[spineKeyIndex(chain, level)];
-        if (!raw) throw new Error('affected fragment lacks a captured ancestor row');
-        node = newNode(raw, false);
-        spineNodes.set(spineKey, node);
         const existing = (parentNode.children.get(levelEntry) ?? []) as SnapshotNodeLike[];
-        existing.push(Object.freeze(node));
-        parentNode.children.set(levelEntry, existing);
+        node = existing.find((candidate) => String(candidate.raw.id) === group.levels[level]) ?? null;
+        if (!node) {
+          // Prefer post-state evidence from any affected fragment at this
+          // level; fall back to a scoped read for ledger-addressed spines.
+          const evidence = [...fragments.values()].find((candidate) => candidate.levels[level]?.raw.id === group.levels[level]);
+          const raw = evidence?.levels[level]?.raw ?? fetchAncestorRow(ctx, levelEntry, group.levels[level]);
+          node = newNode(raw, false);
+          for (const nestedEntry of nestedEntriesOf(levelEntry)) node.children.set(nestedEntry, []);
+          existing.push(Object.freeze(node));
+          parentNode.children.set(levelEntry, existing);
+        }
+        spineNodes.set(spineKey, node);
       }
       parentNode = node;
     }
-    // Attach the final relation's content under the innermost spine node.
+
     const finalRelation = chain[chain.length - 1];
     const finalEntry = compiledEntryAt(ctx.declaration.output, finalRelation.path);
     if (!finalEntry.entity) throw new Error('touched branch lacks a compiled entity');
+    const holderRaw = parentNode.raw;
+
     if (finalRelation.kind === 'keyed') {
+      // Affected members only — the smallest affected set.
       const existing = (parentNode.children.get(finalEntry) ?? []) as SnapshotNodeLike[];
-      if (!existing.some((candidate) => String(candidate.raw.id) === String(fragment.row!.id))) {
-        existing.push(Object.freeze(finishFragmentNode(ctx, finalEntry, fragment.row as Record<string, unknown>, parentNode.raw)));
-        parentNode.children.set(finalEntry, existing);
+      for (const id of group.ids) {
+        const fragment = fragments.get(id);
+        if (!fragment?.row) continue; // removed: handled as remove-keyed, no node needed
+        if (existing.some((candidate) => String(candidate.raw.id) === id)) continue;
+        existing.push(Object.freeze(finishFragmentNode(ctx, finalEntry, fragment.row, holderRaw)));
       }
+      parentNode.children.set(finalEntry, existing);
       continue;
     }
-    // many/count/one under the spine: the smallest affected instance is the
-    // innermost spine node's own instance — replace it wholesale.
+
+    // many / count / one: wholesale replacement of THIS instance — read the
+    // whole (smallest) instance with authoritative ordering.
     const rows = finalRelation.inverse
-      ? readRows(db, finalEntry.entity as never, principal, finalEntry.fk as string, parentNode.raw.id, true, finalEntry.order as never, tombstones as never)
-      : readRows(db, finalEntry.entity as never, principal, finalEntry.fk as string, parentNode.raw[finalEntry.fk as string], false, finalEntry.order as never, tombstones as never);
-    parentNode.children.set(finalEntry, rows.map((child) => Object.freeze(finishFragmentNode(ctx, finalEntry, child, parentNode.raw))));
+      ? readRows(db, finalEntry.entity as never, principal, finalEntry.fk as string, holderRaw.id, true, finalEntry.order as never, tombstones as never)
+      : readRows(db, finalEntry.entity as never, principal, finalEntry.fk as string, holderRaw[finalEntry.fk as string], false, finalEntry.order as never, tombstones as never);
+    parentNode.children.set(finalEntry, rows.map((child) => Object.freeze(finishFragmentNode(ctx, finalEntry, child, holderRaw))));
   }
 }
 
@@ -472,7 +473,7 @@ function captureAffectedGraph(ctx: CaptureContext, handleId: string): SnapshotNo
       root.children.set(entry, fillCompleteEntry(ctx, root.raw, entry, true));
       continue;
     }
-    fillAffected(ctx, root.raw, entry, entry.key, root.children);
+    fillAffectedBranch(ctx, root.raw, entry, entry.key, root.children);
   }
   return root;
 }
@@ -497,47 +498,47 @@ function navigate(projected: unknown, segments: readonly string[]): unknown {
 /**
  * Full post-projection visibility, per plan branch: every (branch, entity, id)
  * fragment present in the recipient's fresh authorized projection, PLUS the
- * keyed-ancestor address of every fragment (#157). Derived in ONE walk against
- * the plan — never incrementally accumulated, so bootstrap ledger state always
- * equals "what a fresh snapshot contains right now". Steady-state patches
- * update both maps incrementally instead (no walk).
+ * ancestor-instance address of every fragment (#157). Derived in ONE walk
+ * against the plan — never incrementally accumulated, so bootstrap ledger
+ * state always equals "what a fresh snapshot contains right now". Steady-state
+ * patches update both maps incrementally instead (no walk).
  */
 export function deriveVisibilityExtended(plan: AnchorPatchPlan, projected: Record<string, unknown>): { visible: Map<string, Map<string, Set<string>>>; addresses: Map<string, readonly string[]> } {
   const visible = new Map<string, Map<string, Set<string>>>();
   const addresses = new Map<string, readonly string[]>();
-  const record = (branchId: string, entity: string, id: string, members: readonly string[]): void => {
+  const record = (branchId: string, entity: string, id: string, levels: readonly string[]): void => {
     let entities = visible.get(branchId);
     if (!entities) visible.set(branchId, entities = new Map());
     let ids = entities.get(entity);
     if (!ids) entities.set(entity, ids = new Set());
     ids.add(id);
-    addresses.set(compositeFragmentAddressKey(branchId, entity, id), Object.freeze([...members]));
+    addresses.set(compositeFragmentAddressKey(branchId, entity, id), Object.freeze([...levels]));
   };
-  const walkRelations = (relations: readonly PatchPlanRelation[], container: unknown, members: readonly string[]): void => {
+  const walkRelations = (relations: readonly PatchPlanRelation[], container: unknown, levels: readonly string[]): void => {
     for (const relation of relations) {
       if (!container || typeof container !== 'object') continue;
       const value: unknown = (container as Record<string, unknown>)[keyOf(relation)];
       if (relation.kind === 'count') continue; // counts expose no row identity
       if (relation.kind === 'one') {
         if (value && typeof value === 'object') {
-          record(relation.branchId, relation.entity, String((value as Record<string, unknown>).id), members);
-          walkRelations(relation.children, value, members);
+          record(relation.branchId, relation.entity, String((value as Record<string, unknown>).id), levels);
+          walkRelations(relation.children, value, levels);
         }
         continue;
       }
       if (relation.kind === 'many') {
         if (Array.isArray(value)) {
           for (const row of value) {
-            record(relation.branchId, relation.entity, String(row.id), members);
-            walkRelations(relation.children, row, members);
+            record(relation.branchId, relation.entity, String(row.id), levels);
+            walkRelations(relation.children, row, [...levels, String(row.id)]);
           }
         }
         continue;
       }
       if (value && typeof value === 'object' && !Array.isArray(value)) {
         for (const [memberId, row] of Object.entries(value as Record<string, unknown>)) {
-          record(relation.branchId, relation.entity, memberId, members);
-          walkRelations(relation.children, row, [...members, memberId]);
+          record(relation.branchId, relation.entity, memberId, levels);
+          walkRelations(relation.children, row, [...levels, memberId]);
         }
       }
     }
@@ -626,6 +627,66 @@ export async function projectCompositePatch(input: PatchProjectorInput): Promise
     resolution.set(branchId, resolveFragments(input.db, principal, declaration, plan, branchId, ids, tombstones));
   }
 
+  // --- group affected ids per addressing instance ---------------------------
+  // A surviving row addresses through its post-state fk-walk; a removed row
+  // through the LEDGER's provable pre-state address; a wholesale-kind instance
+  // whose own affected row vanished may borrow a SIBLING branch's surviving
+  // fragment of the same entity (routing fans one event onto every branch
+  // projecting that entity). A removed id the ledger proves delivered but
+  // never addressed cannot be placed — fail closed. An id never delivered to
+  // this recipient is simply not ours to name.
+  const instancesByBranch = new Map<string, Map<string, InstanceGroup>>();
+
+  for (const [branchId, ids] of touched) {
+    if (branchId === 'anchor') continue;
+    const relation = findRelation(plan, branchId);
+    if (!relation) throw new Error('journal names a branch outside the compiled plan');
+    const fragments = resolution.get(branchId);
+    if (!fragments) throw new Error('affected fragments unresolved for a touched branch');
+    const chain = branchChain(plan, branchId);
+
+    const levelsOf = (id: string, fragment: AffectedFragment): readonly string[] | null => {
+      if (fragment.row) return fragment.levels.map((level) => level.memberId ?? String(level.raw.id));
+      const addressed = priorAddresses.get(compositeFragmentAddressKey(branchId, relation.entity, id));
+      if (addressed) {
+        // Legacy-address-length guard: addresses must cover every level.
+        if (addressed.length === chain.length - 1) return addressed;
+        throw new Error('ledger address does not match the branch depth');
+      }
+      if (provenVisible(priorVisible, branchId, relation.entity, id)) {
+        throw new Error('removed fragment lacks a provable ancestor address');
+      }
+      return null; // never delivered to this recipient: named by nothing
+    };
+
+    const siblingLevels = (entity: string): readonly string[] | null => {
+      for (const [otherBranchId, otherFragments] of resolution) {
+        if (otherBranchId === branchId) continue;
+        const otherRelation = findRelation(plan, otherBranchId);
+        if (!otherRelation || otherRelation.entity !== entity) continue;
+        for (const otherFragment of otherFragments.values()) {
+          if (!otherFragment.row) continue;
+          return otherFragment.levels.map((level) => level.memberId ?? String(level.raw.id));
+        }
+      }
+      return null;
+    };
+
+    let groups = instancesByBranch.get(branchId);
+    if (!groups) instancesByBranch.set(branchId, groups = new Map());
+    for (const id of ids) {
+      const fragment = fragments.get(id);
+      if (!fragment) throw new Error('affected fragment unresolved');
+      const levels = levelsOf(id, fragment)
+        ?? ((relation.kind !== 'keyed') ? siblingLevels(relation.entity) : null);
+      if (!levels) continue;
+      const key = levels.join('\u0000');
+      let group = groups.get(key);
+      if (!group) groups.set(key, group = { levels, ids: new Set() });
+      group.ids.add(id);
+    }
+  }
+
   // Dual-fence discipline (re-review GAP 4): the anchor fence is read BEFORE
   // capture begins and re-checked after projection. A commit landing between
   // the two reads means the candidate graph spans a commit boundary — the
@@ -634,7 +695,7 @@ export async function projectCompositePatch(input: PatchProjectorInput): Promise
   const anchorFenceBeforeCapture = input.readAnchorSeq();
 
   // --- one TARGETED capture → authorize → project pass for the WHOLE batch --
-  const captured = captureAffectedGraph({ db: input.db, principal, declaration, plan, tombstones, touched, anchorTouched, resolution }, handleId);
+  const captured = captureAffectedGraph({ db: input.db, principal, declaration, plan, tombstones, touched, anchorTouched, resolution, instances: instancesByBranch }, handleId);
   if (!captured) {
     return { operations: [], actionIds: [...actionIds], routedInvisibleActionIds: [...routedInvisible], revokedAnchor: true, visibleAfter: new Map(), addressesAfter: new Map() };
   }
@@ -682,182 +743,71 @@ export async function projectCompositePatch(input: PatchProjectorInput): Promise
   const addressesAfter = cloneAddresses(priorAddresses);
 
   // --- relation branches -----------------------------------------------------
-  interface InstanceEmit {
-    readonly relation: PatchPlanRelation;
-    /** membersKey -> keyed member ids above the relation (addressing). */
-    readonly instances: Map<string, readonly string[]>;
-    /** membersKey -> affected ids resolved at that addressing instance. */
-    readonly ids: Map<string, Set<string>>;
-  }
-  const manyEmits = new Map<string, InstanceEmit>();
-  const valueEmits = new Map<string, InstanceEmit>();
-  const keyedEmits = new Map<string, InstanceEmit>();
-
-  const instanceEmitOf = (store: Map<string, InstanceEmit>, relation: PatchPlanRelation): InstanceEmit => {
-    let emit = store.get(relation.branchId);
-    if (!emit) store.set(relation.branchId, emit = { relation, instances: new Map(), ids: new Map() });
-    return emit;
-  };
-
-  /**
-   * Addressing members for one affected id: post-state fk-walk when the row
-   * survives; otherwise the LEDGER's provable pre-state address. A removed id
-   * the ledger proves delivered but never addressed cannot be placed — fail
-   * closed. An id that was never delivered here is simply not ours to name.
-   */
-  const addressOf = (relation: PatchPlanRelation, id: string, fragment: AffectedFragment): readonly string[] | null => {
-    if (fragment.row) return fragment.members;
-    const addressed = priorAddresses.get(compositeFragmentAddressKey(relation.branchId, relation.entity, id));
-    if (addressed) return addressed;
-    if (provenVisible(priorVisible, relation.branchId, relation.entity, id)) {
-      throw new Error('removed fragment lacks a provable keyed address');
-    }
-    return null; // never delivered to this recipient: named by nothing
-  };
-
-  // A count/many instance whose own affected row vanished can still be
-  // addressed through a SIBLING touched branch of the same entity (routing
-  // fans one event out onto every branch projecting that entity).
-  const siblingAddress = (entity: string, excludeBranchId: string): readonly string[] | null => {
-    for (const [otherBranchId, fragments] of resolution) {
-      if (otherBranchId === excludeBranchId) continue;
-      const relation = findRelation(plan, otherBranchId);
-      if (!relation || relation.entity !== entity) continue;
-      for (const fragment of fragments.values()) {
-        if (fragment.row) return fragment.members;
-      }
-    }
-    return null;
-  };
-
-  for (const [branchId, ids] of touched) {
-    if (branchId === 'anchor') continue;
+  for (const [branchId, groups] of instancesByBranch) {
     const relation = findRelation(plan, branchId);
     if (!relation) throw new Error('journal names a branch outside the compiled plan');
+    const chain = branchChain(plan, branchId);
     const fragments = resolution.get(branchId);
     if (!fragments) throw new Error('affected fragments unresolved for a touched branch');
 
-    if (relation.kind === 'many') {
-      const emit = instanceEmitOf(manyEmits, relation);
-      for (const id of ids) {
-        const fragment = fragments.get(id);
-        if (!fragment) throw new Error('affected fragment unresolved');
-        const members = addressOf(relation, id, fragment) ?? siblingAddress(relation.entity, branchId);
-        if (!members) continue;
-        const key = members.join('\u0000');
-        emit.instances.set(key, members);
-        let bucket = emit.ids.get(key);
-        if (!bucket) emit.ids.set(key, bucket = new Set());
-        bucket.add(id);
-      }
-      continue;
-    }
+    for (const [, group] of groups) {
+      const path = instancePathFromLevels(chain, group.levels);
 
-    if (relation.kind === 'one' || relation.kind === 'count') {
-      const emit = instanceEmitOf(valueEmits, relation);
-      for (const id of ids) {
-        const fragment = fragments.get(id);
-        if (!fragment) throw new Error('affected fragment unresolved');
-        const members = addressOf(relation, id, fragment)
-          ?? (relation.kind === 'count' ? siblingAddress(relation.entity, branchId) : null);
-        if (!members) continue;
-        const key = members.join('\u0000');
-        emit.instances.set(key, members);
-        let bucket = emit.ids.get(key);
-        if (!bucket) emit.ids.set(key, bucket = new Set());
-        bucket.add(id);
-        // Successor visibility for one-relations: the row itself (or none).
+      if (relation.kind === 'one' || relation.kind === 'count') {
+        const value = navigate(projected, path);
+        operations.push(relation.kind === 'count'
+          ? { op: 'replace-value', path, value }
+          : { op: 'replace-one', path, value: (value ?? null) as Record<string, unknown> | null });
         if (relation.kind === 'one') {
           const idSet = visibleBucket(visibleAfter, branchId, relation.entity);
-          if (fragment.row) idSet.add(id);
-          else idSet.delete(id);
+          for (const id of group.ids) {
+            const fragment = fragments.get(id);
+            if (!fragment) throw new Error('affected fragment unresolved');
+            if (fragment.row) idSet.add(id);
+            else idSet.delete(id);
+          }
+          addressesAfter.set(compositeFragmentAddressKey(branchId, relation.entity, [...group.ids][0]), Object.freeze([...group.levels]));
         }
+        continue;
       }
-      continue;
-    }
 
-    // keyed: member-level put/remove; removals ledger-gated.
-    const emit = instanceEmitOf(keyedEmits, relation);
-    for (const id of ids) {
-      const fragment = fragments.get(id);
-      if (!fragment) throw new Error('affected fragment unresolved');
-      const members = addressOf(relation, id, fragment);
-      if (!members) continue;
-      const key = members.join('\u0000');
-      emit.instances.set(key, members);
-      let bucket = emit.ids.get(key);
-      if (!bucket) emit.ids.set(key, bucket = new Set());
-      bucket.add(id);
-      const idSet = visibleBucket(visibleAfter, branchId, relation.entity);
-      if (fragment.row) {
-        addressesAfter.set(compositeFragmentAddressKey(branchId, relation.entity, id), Object.freeze([...members]));
-        idSet.add(id);
-      } else {
-        addressesAfter.delete(compositeFragmentAddressKey(branchId, relation.entity, id));
-        idSet.delete(id);
+      if (relation.kind === 'many') {
+        const value = navigate(projected, path);
+        if (!Array.isArray(value)) throw new Error('projected many relation is not an array');
+        operations.push({ op: 'replace-many', path, value: value.map((row) => ({ ...row })) });
+        // Successor visibility + addresses for the replaced instance's rows.
+        const idSet = visibleBucket(visibleAfter, branchId, relation.entity);
+        const surviving = new Set<string>();
+        for (const row of value) {
+          const rowId = String((row as Record<string, unknown>).id);
+          surviving.add(rowId);
+          idSet.add(rowId);
+          addressesAfter.set(compositeFragmentAddressKey(branchId, relation.entity, rowId), Object.freeze([...group.levels]));
+        }
+        for (const id of group.ids) {
+          // An affected row that vanished from this instance is gone — but
+          // only if THIS recipient was ever proven to see it.
+          if (!surviving.has(id) && idSet.has(id)) idSet.delete(id);
+        }
+        continue;
       }
-    }
-  }
 
-  // one/count: authorized replacement at the relation-instance path.
-  for (const [, emit] of valueEmits) {
-    const chain = branchChain(plan, emit.relation.branchId);
-    const ancestorChain = chain.slice(0, -1);
-    for (const [membersKey, members] of emit.instances) {
-      const path = instancePath(ancestorChain, membersKey.length === 0 ? [] : members.split('\u0000'));
-      const value = navigate(projected, [...path, keyOf(emit.relation)]);
-      operations.push(emit.relation.kind === 'count'
-        ? { op: 'replace-value', path: [...path, keyOf(emit.relation)], value }
-        : { op: 'replace-one', path: [...path, keyOf(emit.relation)], value: (value ?? null) as Record<string, unknown> | null });
-    }
-  }
-
-  // many: whole-relation replacement at the smallest affected instance — one
-  // op PER affected instance (multi-instance batches no longer collapse into
-  // one coarser replace).
-  for (const [, emit] of manyEmits) {
-    const chain = branchChain(plan, emit.relation.branchId);
-    const ancestorChain = chain.slice(0, -1);
-    for (const [membersKey, members] of emit.instances) {
-      const path = instancePath(ancestorChain, membersKey.length === 0 ? [] : members.split('\u0000'));
-      const value = navigate(projected, [...path, keyOf(emit.relation)]);
-      if (!Array.isArray(value)) throw new Error('projected many relation is not an array');
-      operations.push({ op: 'replace-many', path: [...path, keyOf(emit.relation)], value: value.map((row) => ({ ...row })) });
-      // Successor visibility + addresses for the replaced instance's rows.
-      const idSet = visibleBucket(visibleAfter, emit.relation.branchId, emit.relation.entity);
-      const surviving = new Set<string>();
-      for (const row of value) {
-        const rowId = String((row as Record<string, unknown>).id);
-        surviving.add(rowId);
-        idSet.add(rowId);
-        addressesAfter.set(compositeFragmentAddressKey(emit.relation.branchId, emit.relation.entity, rowId), Object.freeze([...members]));
-      }
-      for (const id of emit.ids.get(membersKey) ?? []) {
-        // An affected row that vanished from this instance is gone — but only
-        // if THIS recipient was ever proven to see it.
-        if (!surviving.has(id) && idSet.has(id)) idSet.delete(id);
-      }
-    }
-  }
-
-  // keyed: member-level put/remove; removals ledger-gated.
-  for (const [, emit] of keyedEmits) {
-    const chain = branchChain(plan, emit.relation.branchId);
-    const ancestorChain = chain.slice(0, -1);
-    for (const [membersKey, ids] of emit.ids) {
-      const memberIds = membersKey.length === 0 ? [] : membersKey.split('\u0000');
-      const collectionPath = [...instancePath(ancestorChain, memberIds), keyOf(emit.relation)];
-      for (const id of ids) {
-        const collection = navigate(projected, collectionPath);
+      // keyed: member-level put/remove; removals ledger-gated.
+      for (const id of group.ids) {
+        const collection = navigate(projected, path);
         const current = collection && typeof collection === 'object' && !Array.isArray(collection)
           ? (collection as Record<string, unknown>)[id]
           : undefined;
         if (current && typeof current === 'object') {
-          operations.push({ op: 'put-keyed', path: collectionPath, id, value: { ...(current as Record<string, unknown>) } });
+          operations.push({ op: 'put-keyed', path, id, value: { ...(current as Record<string, unknown>) } });
+          addressesAfter.set(compositeFragmentAddressKey(branchId, relation.entity, id), Object.freeze([...group.levels]));
+          visibleBucket(visibleAfter, branchId, relation.entity).add(id);
           continue;
         }
-        if (provenVisible(priorVisible, emit.relation.branchId, emit.relation.entity, id)) {
-          operations.push({ op: 'remove-keyed', path: collectionPath, id });
+        if (provenVisible(priorVisible, branchId, relation.entity, id)) {
+          operations.push({ op: 'remove-keyed', path, id });
+          addressesAfter.delete(compositeFragmentAddressKey(branchId, relation.entity, id));
+          visibleBucket(visibleAfter, branchId, relation.entity).delete(id);
           continue;
         }
         // Not admitted now and never proven delivered: named by nothing.
