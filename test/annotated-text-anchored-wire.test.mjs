@@ -202,6 +202,9 @@ test('v3 compact tables reject malformed, duplicate, non-canonical, and unknown 
   const symbolRange = structuredClone(snapshot);
   symbolRange.ranges[0][Symbol('extra')] = true;
   assert.throws(() => materializeAnnotatedTextSnapshot(symbolRange, handle, { family }), /compact endpoint references/);
+  const symbolTable = structuredClone(snapshot);
+  symbolTable.points[Symbol('extra')] = true;
+  assert.throws(() => materializeAnnotatedTextSnapshot(symbolTable, handle, { family }), /endpoint tables/);
   const hiddenTopLevel = structuredClone(snapshot);
   Object.defineProperty(hiddenTopLevel, 'extra', { value: true });
   assert.throws(() => materializeAnnotatedTextSnapshot(hiddenTopLevel, handle, { family }), /invalid shape/);

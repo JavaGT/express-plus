@@ -76,7 +76,9 @@ function compactFrontierKey(frontier) {
 
 function materializeCompactRecipientRanges(snapshot, family, consume) {
   if (!family) throw new Error('annotatedText snapshot: v3 endpoints require a family replica');
-  if (!Array.isArray(snapshot.points) || !Array.isArray(snapshot.frontiers)) {
+  if (!Array.isArray(snapshot.points) || !isClosedArray(snapshot.points, snapshot.points.length)
+    || !Array.isArray(snapshot.frontiers) || !isClosedArray(snapshot.frontiers, snapshot.frontiers.length)
+    || !isClosedArray(snapshot.ranges, snapshot.ranges.length)) {
     throw new Error('annotatedText snapshot: v3 endpoint tables are required');
   }
   const pointShapes = new Set();
