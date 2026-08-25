@@ -13,10 +13,17 @@ function isStructuralEndpoint(value) {
     && Object.hasOwn(value, 'point') && Object.hasOwn(value, 'basisFrontier');
 }
 
+function hasExactKeys(value, keys) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const own = Object.keys(value);
+  return own.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+
 function materializeRecipientRanges(snapshot, family) {
   if (snapshot.version === 1) {
-    return snapshot.ranges.map((range) => {
+    for (const range of snapshot.ranges) {
       if (!range || typeof range !== 'object' || Array.isArray(range)
+        || !hasExactKeys(range, ['annotationId', 'start', 'end'])
         || typeof range.annotationId !== 'string'
         || !Number.isSafeInteger(range.start) || !Number.isSafeInteger(range.end)) {
         throw new Error('annotatedText snapshot: v1 ranges must be offset pairs');
@@ -24,8 +31,8 @@ function materializeRecipientRanges(snapshot, family) {
       if (isStructuralEndpoint(range.start) || isStructuralEndpoint(range.end)) {
         throw new Error('annotatedText snapshot: v1 envelope must not carry endpoints');
       }
-      return { annotationId: range.annotationId, start: range.start, end: range.end };
-    });
+    }
+    return snapshot.ranges;
   }
   if (snapshot.version !== 2) {
     throw new Error('annotatedText snapshot: snapshot must be a complete blockless recipient envelope');
@@ -33,14 +40,15 @@ function materializeRecipientRanges(snapshot, family) {
   if (!family) {
     throw new Error('annotatedText snapshot: v2 endpoints require a family replica');
   }
-  return snapshot.ranges.map((range) => {
+  for (const range of snapshot.ranges) {
     if (!range || typeof range !== 'object' || Array.isArray(range)
+      || !hasExactKeys(range, ['annotationId', 'start', 'end'])
       || typeof range.annotationId !== 'string'
       || !isStructuralEndpoint(range.start) || !isStructuralEndpoint(range.end)) {
       throw new Error('annotatedText snapshot: v2 ranges must be structural endpoints');
     }
-    return { annotationId: range.annotationId, start: range.start, end: range.end };
-  });
+  }
+  return snapshot.ranges;
 }
 
 export function isOffsetRange(range) {
@@ -139,6 +147,7 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options = {})
   if (snapshot.redactions !== undefined && !Array.isArray(snapshot.redactions)) throw new Error('annotatedText snapshot: redactions must be an array');
   for (const marker of snapshot.redactions ?? []) {
     if (!marker || typeof marker !== 'object' || Array.isArray(marker)
+      || !hasExactKeys(marker, ['start', 'end', 'placeholder'])
       || !Number.isSafeInteger(marker.start) || !Number.isSafeInteger(marker.end)
       || marker.start < 0 || marker.end < marker.start || marker.end > snapshot.text.length
       || typeof marker.placeholder !== 'string') {
@@ -149,11 +158,32 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options = {})
   // declared families, and a hostile/malformed stream must not smuggle an
   // annotation the application never declared.
   const declaredFamilies = handle?.annotations ? new Set(Object.keys(handle.annotations)) : null;
-  if (declaredFamilies !== null) {
-    for (const annotation of snapshot.annotations) {
-      if (!declaredFamilies.has(annotation.family)) {
-        throw new Error(`annotatedText snapshot: annotation family '${annotation.family}' is not declared`);
-      }
+  for (const annotation of snapshot.annotations) {
+    const keys = annotation?.owner === undefined ? ['id', 'family', 'fields'] : ['id', 'family', 'fields', 'owner'];
+    if (!hasExactKeys(annotation, keys) || typeof annotation.id !== 'string' || typeof annotation.family !== 'string'
+      || !annotation.fields || typeof annotation.fields !== 'object' || Array.isArray(annotation.fields)
+      || (annotation.owner !== undefined && (typeof annotation.owner !== 'string' || annotation.owner.length === 0))) {
+      throw new Error('annotatedText snapshot: annotation is invalid');
+    }
+    if (declaredFamilies !== null && !declaredFamilies.has(annotation.family)) {
+      throw new Error(`annotatedText snapshot: annotation family '${annotation.family}' is not declared`);
+    }
+  }
+  const orphans = snapshot.orphans ?? [];
+  for (const orphan of orphans) {
+    const keys = orphan?.owner === undefined ? ['id', 'family', 'fields', 'savedQuote'] : ['id', 'family', 'fields', 'owner', 'savedQuote'];
+    if (!hasExactKeys(orphan, keys) || typeof orphan.id !== 'string' || typeof orphan.family !== 'string'
+      || !orphan.fields || typeof orphan.fields !== 'object' || Array.isArray(orphan.fields)
+      || typeof orphan.savedQuote !== 'string'
+      || (orphan.owner !== undefined && (typeof orphan.owner !== 'string' || orphan.owner.length === 0))) {
+      throw new Error('annotatedText snapshot: orphan is invalid');
+    }
+  }
+  for (const measurement of snapshot.measurements) {
+    if (!hasExactKeys(measurement, ['id', 'family', 'formatVersion', 'payload'])
+      || typeof measurement.id !== 'string' || typeof measurement.family !== 'string'
+      || !Number.isSafeInteger(measurement.formatVersion) || measurement.formatVersion < 1) {
+      throw new Error('annotatedText snapshot: measurement is invalid');
     }
   }
   // Capability hints are recipient-specific, snapshot-fenced guidance derived
@@ -180,16 +210,16 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options = {})
     kind: 'workbench.annotatedText.recipient', version: snapshot.version,
     text: snapshot.text,
     ranges: materializeRecipientRanges(snapshot, options.family),
-    annotations: snapshot.annotations.map((a) => ({ id: a.id, family: a.family, fields: { ...a.fields }, ...(a.owner ? { owner: a.owner } : {}) })),
-    orphans: (snapshot.orphans ?? []).map((o) => ({ id: o.id, family: o.family, fields: { ...o.fields }, savedQuote: o.savedQuote, ...(o.owner ? { owner: o.owner } : {}) })),
-    measurements: (snapshot.measurements ?? []).map((m) => ({ ...m })),
+    annotations: snapshot.annotations,
+    orphans,
+    measurements: snapshot.measurements,
     // Authoring capability signal: the wire envelope carries `capabilityHints`
     // (granted capability names); project them into the public `capabilities`
     // array the host uses to expose authoring affordances. A restricted
     // recipient is review-only and exposes `capabilities: null`.
     capabilities: snapshot.restricted ? null : capabilities,
     ...(snapshot.restricted ? { restricted: true } : {}),
-    ...(snapshot.redactions?.length ? { redactions: snapshot.redactions.map((r) => ({ start: r.start, end: r.end, placeholder: r.placeholder })) } : {}),
+    ...(snapshot.redactions?.length ? { redactions: snapshot.redactions } : {}),
   });
   binding.document = document;
   binding.generation = (binding.generation ?? 0) + 1;

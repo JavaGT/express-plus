@@ -78,6 +78,30 @@ test('materializes a blockless recipient into public immutable shapes', () => {
   }
 });
 
+test('materialization validates then adopts parsed collections without rebuilding them', () => {
+  const snapshot = recipient();
+  const document = materializeAnnotatedTextSnapshot(snapshot, Doc().body);
+  assert.equal(document.ranges, snapshot.ranges);
+  assert.equal(document.annotations, snapshot.annotations);
+  assert.equal(document.annotations[0].fields, snapshot.annotations[0].fields);
+  assert.equal(document.orphans, snapshot.orphans);
+  assert.equal(document.measurements, snapshot.measurements);
+  assert.ok(Object.isFrozen(snapshot.annotations[0].fields));
+});
+
+test('materialization rejects unknown nested wire keys before installation', () => {
+  const handle = Doc().body;
+  assert.throws(() => materializeAnnotatedTextSnapshot(recipient({
+    ranges: [{ annotationId: 'a1', start: 6, end: 11, hidden: true }],
+  }), handle), /v1 ranges must be offset pairs/);
+  assert.throws(() => materializeAnnotatedTextSnapshot(recipient({
+    annotations: [{ id: 'a1', family: 'coding', fields: {}, hidden: true }],
+  }), handle), /annotation is invalid/);
+  assert.throws(() => materializeAnnotatedTextSnapshot(recipient({
+    measurements: [{ id: 'm1', family: 'words', formatVersion: 1, payload: {}, hidden: true }],
+  }), handle), /measurement is invalid/);
+});
+
 test('projects capabilityHints into the public capabilities array (restricted recipients are review-only)', () => {
   const document = materializeAnnotatedTextSnapshot(recipient({ capabilityHints: ['edit', 'body.read'] }));
   assert.deepEqual(document.capabilities, ['edit', 'body.read']);

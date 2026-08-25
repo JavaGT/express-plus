@@ -277,7 +277,7 @@ function loadRecipientProjectionSource({ db, prefix, descriptor, documentId, fam
 
   started = performance.now();
   const droppedAnnotationIds = new Set        ();
-  const loadedRanges                                                                                                                                                              = [];
+  const loadedRanges                                = [];
   let lastAnnotationId                = null;
   let expectedOrdinal = 0;
   let membershipCount = 0;
@@ -304,7 +304,13 @@ function loadRecipientProjectionSource({ db, prefix, descriptor, documentId, fam
       droppedAnnotationIds.add(annotation.id);
       continue;
     }
-    loadedRanges.push({ annotationId, stored });
+    loadedRanges.push({
+      annotationId,
+      start: stored.projected.start,
+      end: stored.projected.end,
+      anchoredStart: stored.startPoint,
+      anchoredEnd: stored.endPoint,
+    });
     membershipCount += 1;
   }
   profile?.('membership SQL, row load, and source fusion', performance.now() - started, { memberships: membershipCount });
@@ -314,29 +320,16 @@ function loadRecipientProjectionSource({ db, prefix, descriptor, documentId, fam
   }
   const sourceAnnotations = annotations.filter((annotation) => !droppedAnnotationIds.has(annotation.id) && !orphanIds.has(annotation.id));
   const sourceAnnotationIds = new Set(sourceAnnotations.map((annotation) => annotation.id));
-  const sourceRangeLinks = droppedAnnotationIds.size === 0 && orphanIds.size === 0
+  const sourceRanges = droppedAnnotationIds.size === 0 && orphanIds.size === 0
     ? loadedRanges
-    : loadedRanges.filter((link) => sourceAnnotationIds.has(link.annotationId));
+    : loadedRanges.filter((range) => sourceAnnotationIds.has(range.annotationId));
   const sourceFor = (anchored         )                               => {
-    const ranges                                = [];
-    for (const link of sourceRangeLinks) {
-      if (!link.stored.projected) continue;
-      ranges.push(anchored
-        ? {
-          annotationId: link.annotationId,
-          start: link.stored.projected.start,
-          end: link.stored.projected.end,
-          anchoredStart: link.stored.startPoint,
-          anchoredEnd: link.stored.endPoint,
-        }
-        : { annotationId: link.annotationId, start: link.stored.projected.start, end: link.stored.projected.end });
-    }
     return createAnnotatedTextRecipientSource({
       version: 1,
       text,
       rangeFormat: anchored ? 'anchored' : 'offset',
       annotations: sourceAnnotations,
-      ranges,
+      ranges: sourceRanges,
       measurements,
       orphans,
     });
@@ -351,13 +344,11 @@ function loadRecipientProjectionSource({ db, prefix, descriptor, documentId, fam
     for (const targetId of annotation.protectedTargetIds) relevantIds.add(targetId);
   }
   const relevantRanges = new Map                                       ();
-  for (const link of sourceRangeLinks) {
-    if (!relevantIds.has(link.annotationId)) continue;
-    if (!link.stored.projected) continue;
-    const range = { annotationId: link.annotationId, start: link.stored.projected.start, end: link.stored.projected.end };
-    const own = relevantRanges.get(link.annotationId);
+  for (const range of sourceRanges) {
+    if (!relevantIds.has(range.annotationId)) continue;
+    const own = relevantRanges.get(range.annotationId);
     if (own) own.push(range);
-    else relevantRanges.set(link.annotationId, [range]);
+    else relevantRanges.set(range.annotationId, [range]);
   }
   const activeProtectors = protectorAnnotations.filter((annotation) => {
     const own = relevantRanges.get(annotation.id) ?? [];
