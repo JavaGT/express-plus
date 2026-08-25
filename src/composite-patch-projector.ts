@@ -157,21 +157,6 @@ function collectInstances(root: SnapshotNodeLike, chain: readonly PatchPlanRelat
   return found;
 }
 
-/**
- * Keyed member chains for rows that no longer exist in the captured graph
- * (removed/hidden), addressed from the branch chain itself: a removed
- * top-level keyed member needs no ancestor segments, and deeper removals
- * collapse onto their nearest unremovable container (a whole-collection
- * replacement at the pinned keyed address).
- */
-function priorMemberChains(priorVisible: ReadonlyMap<string, ReadonlyMap<string, ReadonlySet<string>>>, branchId: string, entity: string, ids: ReadonlySet<string>): Map<string, string[]> {
-  void priorVisible;
-  void branchId;
-  void entity;
-  void ids;
-  return new Map();
-}
-
 // ---- projected-shape navigation ----
 
 function navigate(projected: unknown, segments: readonly string[]): unknown {

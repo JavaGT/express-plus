@@ -157,21 +157,6 @@ function collectInstances(root                  , chain                         
   return found;
 }
 
-/**
- * Keyed member chains for rows that no longer exist in the captured graph
- * (removed/hidden), addressed from the branch chain itself: a removed
- * top-level keyed member needs no ancestor segments, and deeper removals
- * collapse onto their nearest unremovable container (a whole-collection
- * replacement at the pinned keyed address).
- */
-function priorMemberChains(priorVisible                                                               , branchId        , entity        , ids                     )                        {
-  void priorVisible;
-  void branchId;
-  void entity;
-  void ids;
-  return new Map();
-}
-
 // ---- projected-shape navigation ----
 
 function navigate(projected         , segments                   )          {

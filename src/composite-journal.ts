@@ -291,7 +291,7 @@ export function routeCompositeEvent(db: DbHandle, plans: ReadonlyMap<string, Anc
     // The changed MEMBER row's identity: the event type names its entity and
     // the payload names its id — NOT the scope handle's id (which is the
     // anchor's for inherited scopes).
-    const memberId = typeof (event as { data?: { id?: unknown } }).data?.id === 'string' ? (event as { data: { id: string } }).data.id : null;
+    const memberId = typeof (event as { data?: { id?: unknown } }).data?.id === 'string' ? ((event as unknown as { data: { id: string } }).data.id) : null;
     const id = memberId ?? handle.id;
 
     if (classified.phase === 'removed') {
