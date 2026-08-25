@@ -193,20 +193,17 @@ export function readSeq(db                                   , scope        )   
  * parser — duplicate keys, noncanonical bytes, and over-limits fail closed
  * with fixed opaque signatures BEFORE any value is produced — using the event
  * handle's entity/field for the error context; every other version keeps its
- * plain JSON.parse. A v16-looking row whose type is not an operated handle is
- * rejected: raw v16 bytes may only ride on `<entity>.<field>.operated`.
+ * plain JSON.parse, and a malformed non-v16 row THROWS from here — this
+ * decoder never degrades gracefully. Only `decodeConsumerLogRowData` below
+ * catches plain parse errors for legacy consumers (v16 strictness failures
+ * propagate through it unchanged). A v16-looking row whose type is not an
+ * operated handle is rejected: raw v16 bytes may only ride on
+ * `<entity>.<field>.operated`.
  */
 export function decodeLogRowData(row            )          {
   const text = row.eventData                 ;
   if (!text) return null;
-  let probe         ;
-  try {
-    probe = JSON.parse(text);
-  } catch {
-    // Even the structural probe must not crash non-v16 readers; strictness
-    // for v16 is enforced below through the strict parser.
-    return JSON.parse(text);
-  }
+  const probe          = JSON.parse(text);
   if (probe && typeof probe === 'object' && !Array.isArray(probe) && (probe                         ).version === 16) {
     let entity = 'Unknown';
     let field = 'unknown';

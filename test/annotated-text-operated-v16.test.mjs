@@ -1007,6 +1007,21 @@ test('tampered v16 rows fail closed through effect-consumer decoders', async () 
   assert.deepEqual(decodeConsumerLogRowData(legacyBroken, { degraded: true }), { degraded: true });
 });
 
+test('strict decoder throws on malformed non-v16 rows; only the consumer variant degrades', async () => {
+  const { decodeLogRowData, decodeConsumerLogRowData } = await import('../build/committed-log.mjs');
+  const broken = { scope: 's', seq: 1, eventType: 'E.f.operated', eventData: '{oops' };
+
+  // decodeLogRowData is strict for EVERY row: malformed non-v16 JSON throws
+  // from the shared decoder (there is no probe-and-recover path).
+  assert.throws(() => decodeLogRowData(broken), SyntaxError);
+
+  // The consumer wrapper is the only degrade-to-fallback boundary.
+  assert.deepEqual(decodeConsumerLogRowData(broken, { degraded: true }), { degraded: true });
+
+  // Empty eventData still decodes to null on both paths.
+  assert.equal(decodeLogRowData({ scope: 's', seq: 2, eventType: 'E.f.operated', eventData: null }), null);
+});
+
 test('compound dispatch consumes its nonce capability exactly once (zero-write on reuse)', async () => {
   const db = new DatabaseSync(':memory:');
   installSchema(db);
