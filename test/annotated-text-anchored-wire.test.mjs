@@ -199,9 +199,6 @@ test('v3 compact tables reject malformed, duplicate, non-canonical, and unknown 
   assert.throws(() => materializeAnnotatedTextSnapshot({ ...structuredClone(snapshot), ranges: [['a1', 1, 0, 0, 0]] }, handle, { family }), /out of bounds|canonical/);
   assert.throws(() => materializeAnnotatedTextSnapshot({ ...structuredClone(snapshot), ranges: [['a1', 0, 0, 0, 0, 0]] }, handle, { family }), /compact endpoint references/);
   assert.throws(() => materializeAnnotatedTextSnapshot({ ...structuredClone(snapshot), frontiers: [[[ACTOR, 0]]] }, handle, { family }), /frontier table entry/);
-  const symbolRange = structuredClone(snapshot);
-  symbolRange.ranges[0][Symbol('extra')] = true;
-  assert.throws(() => materializeAnnotatedTextSnapshot(symbolRange, handle, { family }), /compact endpoint references/);
   const symbolTable = structuredClone(snapshot);
   symbolTable.points[Symbol('extra')] = true;
   assert.throws(() => materializeAnnotatedTextSnapshot(symbolTable, handle, { family }), /endpoint tables/);

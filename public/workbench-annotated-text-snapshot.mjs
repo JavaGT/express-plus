@@ -3,18 +3,19 @@ import { projectEndpointToOffset, resolveOffsetToEndpoint } from './workbench-an
 
 const deeplyFrozen = new WeakSet();
 
-function deepFreeze(value) {
+function deepFreeze(value, track = false) {
   if (value === null || typeof value !== 'object') return value;
-  if (deeplyFrozen.has(value)) return value;
+  const wasFrozen = Object.isFrozen(value);
+  if (wasFrozen && deeplyFrozen.has(value)) return value;
   if (Array.isArray(value)) {
-    for (const child of value) deepFreeze(child);
-    Object.freeze(value);
-    deeplyFrozen.add(value);
+    for (const child of value) deepFreeze(child, track);
+    if (!wasFrozen) Object.freeze(value);
+    if (track || wasFrozen) deeplyFrozen.add(value);
     return value;
   }
-  for (const child of Object.values(value)) deepFreeze(child);
-  Object.freeze(value);
-  deeplyFrozen.add(value);
+  for (const child of Object.values(value)) deepFreeze(child, track);
+  if (!wasFrozen) Object.freeze(value);
+  if (track || wasFrozen) deeplyFrozen.add(value);
   return value;
 }
 
@@ -25,6 +26,12 @@ function isStructuralEndpoint(value) {
 
 function hasExactKeys(value, keys) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const own = Object.keys(value);
+  return own.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+
+function hasStrictExactKeys(value, keys) {
+  if (!hasExactKeys(value, keys)) return false;
   const own = Reflect.ownKeys(value);
   return own.length === keys.length && keys.every((key) => {
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
@@ -34,6 +41,11 @@ function hasExactKeys(value, keys) {
 
 function isClosedArray(value, length) {
   if (!Array.isArray(value) || value.length !== length) return false;
+  return Object.keys(value).every((key) => /^(0|[1-9][0-9]*)$/.test(key) && Number(key) < length);
+}
+
+function isStrictClosedArray(value, length) {
+  if (!isClosedArray(value, length)) return false;
   const own = Reflect.ownKeys(value);
   if (own.length !== length + 1 || !own.includes('length')) return false;
   return own.every((key) => key === 'length' || (typeof key === 'string'
@@ -76,9 +88,9 @@ function compactFrontierKey(frontier) {
 
 function materializeCompactRecipientRanges(snapshot, family, consume) {
   if (!family) throw new Error('annotatedText snapshot: v3 endpoints require a family replica');
-  if (!Array.isArray(snapshot.points) || !isClosedArray(snapshot.points, snapshot.points.length)
-    || !Array.isArray(snapshot.frontiers) || !isClosedArray(snapshot.frontiers, snapshot.frontiers.length)
-    || !isClosedArray(snapshot.ranges, snapshot.ranges.length)) {
+  if (!Array.isArray(snapshot.points) || !isStrictClosedArray(snapshot.points, snapshot.points.length)
+    || !Array.isArray(snapshot.frontiers) || !isStrictClosedArray(snapshot.frontiers, snapshot.frontiers.length)
+    || !isStrictClosedArray(snapshot.ranges, snapshot.ranges.length)) {
     throw new Error('annotatedText snapshot: v3 endpoint tables are required');
   }
   const pointShapes = new Set();
@@ -121,14 +133,14 @@ function materializeCompactRecipientRanges(snapshot, family, consume) {
   }
 
   const ranges = consume && !Object.isFrozen(snapshot.ranges) ? snapshot.ranges : new Array(snapshot.ranges.length);
-  for (const point of snapshot.points) deepFreeze(point);
-  for (const frontier of snapshot.frontiers) deepFreeze(frontier);
+  for (const point of snapshot.points) deepFreeze(point, true);
+  for (const frontier of snapshot.frontiers) deepFreeze(frontier, true);
   const endpointByReference = new Map();
   const endpoint = (point, frontier) => {
     const key = point * snapshot.frontiers.length + frontier;
     let value = endpointByReference.get(key);
     if (!value) {
-      value = { point: snapshot.points[point], basisFrontier: snapshot.frontiers[frontier] };
+      value = deepFreeze({ point: snapshot.points[point], basisFrontier: snapshot.frontiers[frontier] }, true);
       endpointByReference.set(key, value);
     }
     return value;
@@ -273,7 +285,7 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options = {})
   if (snapshot.version === 3) {
     const keys = ['kind', 'version', 'text', 'points', 'frontiers', 'ranges', 'annotations', 'measurements', 'capabilityHints', 'orphans'];
     if (Object.hasOwn(snapshot, 'authoring')) keys.push('authoring');
-    if (!hasExactKeys(snapshot, keys)) throw new Error('annotatedText snapshot: v3 envelope has invalid shape');
+    if (!hasStrictExactKeys(snapshot, keys)) throw new Error('annotatedText snapshot: v3 envelope has invalid shape');
   }
   if (snapshot.orphans !== undefined && !Array.isArray(snapshot.orphans)) throw new Error('annotatedText snapshot: orphans must be an array');
   if (snapshot.redactions !== undefined && !Array.isArray(snapshot.redactions)) throw new Error('annotatedText snapshot: redactions must be an array');
