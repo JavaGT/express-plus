@@ -408,3 +408,60 @@ test('DUPLICATE: an already-applied span with a FRESH token is ignored without a
   assert.equal(session.cursor.composite, 2, 'cursor unmoved');
   session.close();
 });
+
+// ---- delivery-batch coalescing (#156 round 2) --------------------------------
+//
+// SSE batches carrying consecutive snapshot-patch envelopes must apply as ONE
+// atomic unit through receive(): one validation pass with from==prev.to chain
+// discipline, one spine build, ONE listener publish. Buffering never crosses
+// deliver() calls — each batch is its own unit.
+
+test('BATCH COALESCE: an SSE batch of 3 contiguous patches applies atomically — exactly ONE publish lands the final cursor', async () => {
+  const { session, probe } = await startSession();
+  const publishes = [];
+  const unsubscribe = session.subscribe((snapshot) => publishes.push({ name: snapshot.name, composite: snapshot.cursor?.composite }));
+  // The subscribe() registration fires once immediately; count only
+  // delivery-driven publications.
+  publishes.length = 0;
+  await probe.deliver([
+    patchEnvelope({ fromComposite: 1, toComposite: 2, token: 'wbpt_s2', operations: renameRoot('S2') }),
+    patchEnvelope({ fromComposite: 2, toComposite: 3, token: 'wbpt_s3', operations: renameRoot('S3') }),
+    patchEnvelope({ fromComposite: 3, toComposite: 4, token: 'wbpt_s4', operations: renameRoot('S4'), actionIds: ['a-s4'] }),
+  ]);
+  assert.equal(publishes.length, 1, `three envelopes produced ${publishes.length} publishes instead of one`);
+  assert.equal(publishes[0].name, 'S4', 'the single publish carries the fully-patched state');
+  assert.equal(session.snapshot.name, 'S4');
+  assert.equal(session.cursor.composite, 4, 'final cursor is the chain tail');
+  assert.equal(session.cursor.anchor, 1);
+  assert.equal(session.projectionToken, 'wbpt_s4', 'held handle is the chain-tail rotation');
+  assert.equal(session.pendingCount(), 0);
+  unsubscribe();
+  session.close();
+});
+
+test('BATCH COALESCE: a broken middle link in a delivered batch resyncs into recovery with ZERO partial application', async () => {
+  const { session, probe } = await startSession();
+  const baseAtStart = structuredClone(session.snapshot);
+  const publishedNames = [];
+  const unsubscribe = session.subscribe((snapshot) => publishedNames.push(snapshot.name));
+  publishedNames.length = 0;
+  await probe.deliver([
+    patchEnvelope({ fromComposite: 1, toComposite: 2, token: 'wbpt_k2', operations: renameRoot('K2') }),
+    patchEnvelope({ fromComposite: 99, toComposite: 100, token: 'wbpt_k3', operations: renameRoot('NEVER') }),
+    patchEnvelope({ fromComposite: 100, toComposite: 101, token: 'wbpt_k4', operations: renameRoot('ALSO-NEVER') }),
+  ]);
+  // Recovery legitimately republishes canonical state; what must NEVER escape
+  // is any publication carrying partially-patched content.
+  assert.ok(publishedNames.length > 0);
+  assert.deepEqual(
+    [...new Set(publishedNames)], ['A'],
+    `every publication stayed canonical, saw: ${JSON.stringify([...new Set(publishedNames)])}`,
+  );
+  assert.equal(session.snapshot.name, 'A', 'baseSnapshot deeply unchanged — first link never landed');
+  assert.deepEqual(session.snapshot, baseAtStart, 'deep equality with the bootstrap snapshot');
+  assert.equal(session.cursor.composite, 1, 'cursor never advanced past the bootstrap');
+  assert.equal(session.projectionToken, 'wbpt_boot', 'token restored by the replacement snapshot');
+  assert.ok(probe.bootstrapCalls.some((call) => call.mode === 'snapshot'), 'broken chain recovered through a full snapshot');
+  unsubscribe();
+  session.close();
+});

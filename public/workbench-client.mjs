@@ -3257,9 +3257,30 @@ export function createLiveDeliverySession({
   async function receive(envelopes, generation) {
     if (!Array.isArray(envelopes)) throw new Error('delivery callback requires an envelope array');
     let recoveryWait = null;
+    // Consecutive snapshot-patch envelopes within ONE delivery batch coalesce
+    // into a single atomic application (#156 round 2): one validation pass
+    // (including from==prev.to chain discipline), one spine build, one
+    // publish. The buffer never crosses receive()/deliver() calls — a batch is
+    // one unit — and any non-patch envelope flushes the run first, so mixed
+    // batches keep their strict processing order. A resync from the batched
+    // apply flows through the same recovery handling as a single patch.
+    let patchRun = null;
+    const flushPatchRun = async () => {
+      if (!patchRun) return;
+      const run = patchRun;
+      patchRun = null;
+      if (applySnapshotPatch(run).status !== 'resync') return;
+      const recovery = requestSnapshotRecovery(undefined, !hasUnknownTransmission(), true);
+      if (!hasUnknownTransmission()) await recovery;
+    };
     for (const envelope of envelopes) {
       if (closed || status === 'revoked' || status === 'unavailable' || generation !== connectionGeneration) return;
       if (!isKnownEnvelopeKind(envelope)) throw new Error('delivery batch contains an invalid recipient envelope');
+      if (envelope.type === 'snapshot-patch') {
+        (patchRun ??= []).push(envelope);
+        continue;
+      }
+      await flushPatchRun();
       // Recovery controls are intentionally opaque to applications: a transport
       // `resync` and a bounded-overflow `state-invalidate` boundary both demand
       // a fresh replacement snapshot rather than in-place reconciliation.
@@ -3298,6 +3319,7 @@ export function createLiveDeliverySession({
         }
       }
     }
+    await flushPatchRun();
     if (recoveryWait && !hasUnknownTransmission()) await recoveryWait;
   }
 
