@@ -15,14 +15,14 @@ export function evaluateW1aScaling(samples) {
   });
   const comparisons = ordered.slice(0, -1).map((smaller, index) => {
     const larger = ordered[index + 1];
-    const reduction = 1 - smaller.p95Ms / larger.p95Ms;
+    const exactReduction = 1 - smaller.p95Ms / larger.p95Ms;
     return {
       smallerWords: smaller.words,
       largerWords: larger.words,
       smallerP95Ms: smaller.p95Ms,
       largerP95Ms: larger.p95Ms,
-      reduction: Number(reduction.toFixed(6)),
-      passed: reduction >= W1A_MIN_HALVING_REDUCTION,
+      reduction: Number(exactReduction.toFixed(6)),
+      passed: exactReduction >= W1A_MIN_HALVING_REDUCTION,
     };
   });
   return {

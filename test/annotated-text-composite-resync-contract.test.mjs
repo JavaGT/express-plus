@@ -18,4 +18,5 @@ test('W1a scaling requires at least a 40% p95 reduction for each halving', () =>
   const failed = evaluateW1aScaling(new Map([[9_000, 260], [18_000, 400], [36_000, 600]]));
   assert.equal(failed.passed, false);
   assert.deepEqual(failed.comparisons.map(({ passed }) => passed), [false, false]);
+  assert.equal(evaluateW1aScaling(new Map([[9_000, 240.00016], [18_000, 400], [36_000, 800]])).passed, false);
 });

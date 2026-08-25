@@ -411,10 +411,24 @@ async function prepareForcedFallbackSessions({ db, BenchDoc, fixture }) {
 }
 
 function forceProtectorVisibilityChange(db, fixture) {
+  const before = {
+    owner: db.prepare("SELECT owner FROM BenchDoc WHERE id = 'd1'").get().owner,
+    protectedTargetEdges: db.prepare("SELECT count(*) AS count FROM BenchDoc_body_annotation_protected_target WHERE annotation_id = 'confidential-prefix'").get().count,
+  };
   db.exec("INSERT INTO User (id) VALUES ('u2')");
   db.prepare("UPDATE BenchDoc SET owner = 'u2' WHERE id = 'd1'").run();
   db.prepare("DELETE FROM BenchDoc_body_annotation_protected_target WHERE annotation_id = 'confidential-prefix' AND target_annotation_id = 'uncertainty-00099'").run();
   fixture.row = db.prepare("SELECT * FROM BenchDoc WHERE id = 'd1'").get();
+  const after = {
+    owner: db.prepare("SELECT owner FROM BenchDoc WHERE id = 'd1'").get().owner,
+    protectedTargetEdges: db.prepare("SELECT count(*) AS count FROM BenchDoc_body_annotation_protected_target WHERE annotation_id = 'confidential-prefix'").get().count,
+  };
+  if (before.owner !== 'u1' || after.owner !== 'u2'
+    || before.protectedTargetEdges !== Math.min(PROTECTED_WORDS, WORDS)
+    || after.protectedTargetEdges !== before.protectedTargetEdges - 1) {
+    throw new Error('forced fallback persisted topology/visibility change was not observed');
+  }
+  return { before, after };
 }
 
 async function measureFanoutCoalescing() {
@@ -751,7 +765,7 @@ async function main() {
   const forcedFallback = SCENARIO === 'fallback'
     ? await prepareForcedFallbackSessions({ db, BenchDoc, fixture })
     : null;
-  if (forcedFallback) forceProtectorVisibilityChange(db, fixture);
+  const fallbackChange = forcedFallback ? forceProtectorVisibilityChange(db, fixture) : null;
 
   const projectionSamples = [];
   const serializationSamples = [];
@@ -816,9 +830,12 @@ async function main() {
       endToEndSamples: endToEndSamples.map((value) => Number(value.toFixed(3))),
     },
     fallbackRecovery: forcedFallback ? {
+      recoverySeam: 'createLiveDeliverySession',
+      transportGenerationEvidence: 'budget.C1',
       topologyChanged: true,
       visibilityChanged: true,
       persistedChange: true,
+      persistedEvidence: fallbackChange,
       requiredAttemptsPerRecipient: 2,
       snapshotCallsBeforeControls: 0,
       snapshotCallsAfterControls: forcedFallback.calls(),

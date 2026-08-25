@@ -3,7 +3,7 @@
 
 import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -21,6 +21,22 @@ const SCENARIOS = [
   { key: 'fallback', scenario: 'fallback', words: 36_000 },
 ];
 const WORKER_PATTERN = /vitest|svelte-check|node --test|annotated-text-composite-resync(?:-runner)?\.mjs|benchmark:annotated-text/i;
+const commit = process.env.ANNOTATED_TEXT_BENCH_COMMIT;
+if (!/^[0-9a-f]{40}$/.test(commit ?? '')) throw new Error('ANNOTATED_TEXT_BENCH_COMMIT must be a full commit SHA');
+let checkoutCommit = null;
+try {
+  checkoutCommit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+} catch {
+  // Clean git archives intentionally have no repository metadata; file hashes
+  // below bind the measured harness while the caller supplies the archive SHA.
+}
+if (checkoutCommit !== null && checkoutCommit !== commit) {
+  throw new Error(`ANNOTATED_TEXT_BENCH_COMMIT ${commit} does not match checkout HEAD ${checkoutCommit}`);
+}
+
+function sha256(path) {
+  return createHash('sha256').update(readFileSync(path)).digest('hex');
+}
 
 function ancestors() {
   const rows = execFileSync('ps', ['-Ao', 'pid=,ppid='], { encoding: 'utf8' })
@@ -54,7 +70,13 @@ function isolationSnapshot() {
 
 const aggregate = {
   recordedAt: new Date().toISOString(),
-  commit: process.env.ANNOTATED_TEXT_BENCH_COMMIT ?? null,
+  commit,
+  checkoutCommit,
+  harnessSha256: {
+    runner: sha256(new URL(import.meta.url)),
+    benchmark: sha256(new URL('./annotated-text-composite-resync.mjs', import.meta.url)),
+    contract: sha256(new URL('./annotated-text-composite-resync-contract.mjs', import.meta.url)),
+  },
   command: 'pnpm benchmark:annotated-text-composite-resync:acceptance',
   scenarios: {},
   isolation: {},
