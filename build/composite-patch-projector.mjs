@@ -644,6 +644,18 @@ export async function projectCompositePatch(input                     )         
     const fragments = resolution.get(branchId);
     if (!fragments) throw new Error('affected fragments unresolved for a touched branch');
     const chain = branchChain(plan, branchId);
+    // Grammar boundary (#157): output paths navigate OBJECTS — keyed levels
+    // contribute `<key>, <memberId>` pairs and one levels contribute objects —
+    // but a many (or count) ANCESTOR leaves an array (or number) in the path
+    // that no patch operation can address. Such branches fail closed here:
+    // the caller recovers through a full snapshot instead of emitting an
+    // unnavigable path. (A many as the FINAL relation is fine — its own emit
+    // path stops before entering the array.)
+    for (let level = 0; level < chain.length - 1; level += 1) {
+      if (chain[level].kind === 'many' || chain[level].kind === 'count') {
+        throw new Error('targeted capture cannot address below a many/count ancestor');
+      }
+    }
 
     const levelsOf = (id        , fragment                  )                           => {
       if (fragment.row) return fragment.levels.map((level) => level.memberId ?? String(level.raw.id));
