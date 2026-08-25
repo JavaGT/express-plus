@@ -299,6 +299,7 @@ function measureClientSnapshot(serialized, snapshotVersion, BenchDoc, fixture) {
   const afterParse = memorySample();
   const recipient = materializeAnnotatedTextSnapshot(parsed, BenchDoc.body, {
     family: snapshotVersion === 2 || snapshotVersion === 3 ? fixture.family : undefined,
+    consume: true,
   });
   const validationDuration = performance.now() - validationStarted;
   const afterValidation = memorySample();

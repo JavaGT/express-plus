@@ -199,6 +199,29 @@ test('v3 compact tables reject malformed, duplicate, non-canonical, and unknown 
   assert.throws(() => materializeAnnotatedTextSnapshot({ ...structuredClone(snapshot), ranges: [['a1', 1, 0, 0, 0]] }, handle, { family }), /out of bounds|canonical/);
   assert.throws(() => materializeAnnotatedTextSnapshot({ ...structuredClone(snapshot), ranges: [['a1', 0, 0, 0, 0, 0]] }, handle, { family }), /compact endpoint references/);
   assert.throws(() => materializeAnnotatedTextSnapshot({ ...structuredClone(snapshot), frontiers: [[[ACTOR, 0]]] }, handle, { family }), /frontier table entry/);
+  const symbolRange = structuredClone(snapshot);
+  symbolRange.ranges[0][Symbol('extra')] = true;
+  assert.throws(() => materializeAnnotatedTextSnapshot(symbolRange, handle, { family }), /compact endpoint references/);
+  const hiddenTopLevel = structuredClone(snapshot);
+  Object.defineProperty(hiddenTopLevel, 'extra', { value: true });
+  assert.throws(() => materializeAnnotatedTextSnapshot(hiddenTopLevel, handle, { family }), /invalid shape/);
+});
+
+test('default v3 materialization leaves its input reusable and deeply freezes shallow-frozen descendants', () => {
+  const family = importTextToFamily('d1', ACTOR, 'hello world');
+  const anchor = ['root'];
+  const point = Object.freeze(['point', anchor, 'left']);
+  const snapshot = {
+    kind: 'workbench.annotatedText.recipient', version: 3, text: 'hello world',
+    points: [point], frontiers: [[]], ranges: [['a1', 0, 0, 0, 0]],
+    annotations: [{ id: 'a1', family: 'comment', fields: {} }], measurements: [], capabilityHints: [], orphans: [],
+  };
+  const before = structuredClone(snapshot.ranges);
+  const document = materializeAnnotatedTextSnapshot(snapshot, { annotations: { comment: {} } }, { family });
+  assert.deepEqual(snapshot.ranges, before);
+  assert.ok(Object.isFrozen(anchor));
+  assert.ok(Object.isFrozen(document.ranges[0].start));
+  assert.equal(document.ranges[0].start, document.ranges[0].end);
 });
 
 test('an old v2 client rejects a v3 live replacement and recovers without installing it', async () => {

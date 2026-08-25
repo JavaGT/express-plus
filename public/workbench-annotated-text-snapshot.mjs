@@ -1,12 +1,21 @@
 import { createAnnotatedTextSnapshotSessionBinding, getAnnotatedTextSnapshotSessionBinding } from './workbench-annotated-text-snapshot-internal.mjs';
 import { projectEndpointToOffset, resolveOffsetToEndpoint } from './workbench-annotated-text-continuous.mjs';
 
+const deeplyFrozen = new WeakSet();
+
 function deepFreeze(value) {
   if (value === null || typeof value !== 'object') return value;
-  if (Object.isFrozen(value)) return value;
-  if (Array.isArray(value)) { for (const child of value) deepFreeze(child); return Object.freeze(value); }
+  if (deeplyFrozen.has(value)) return value;
+  if (Array.isArray(value)) {
+    for (const child of value) deepFreeze(child);
+    Object.freeze(value);
+    deeplyFrozen.add(value);
+    return value;
+  }
   for (const child of Object.values(value)) deepFreeze(child);
-  return Object.freeze(value);
+  Object.freeze(value);
+  deeplyFrozen.add(value);
+  return value;
 }
 
 function isStructuralEndpoint(value) {
@@ -16,13 +25,20 @@ function isStructuralEndpoint(value) {
 
 function hasExactKeys(value, keys) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const own = Object.keys(value);
-  return own.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+  const own = Reflect.ownKeys(value);
+  return own.length === keys.length && keys.every((key) => {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor?.enumerable === true;
+  });
 }
 
 function isClosedArray(value, length) {
   if (!Array.isArray(value) || value.length !== length) return false;
-  return Object.keys(value).every((key) => /^(0|[1-9][0-9]*)$/.test(key) && Number(key) < length);
+  const own = Reflect.ownKeys(value);
+  if (own.length !== length + 1 || !own.includes('length')) return false;
+  return own.every((key) => key === 'length' || (typeof key === 'string'
+    && /^(0|[1-9][0-9]*)$/.test(key) && Number(key) < length
+    && Object.getOwnPropertyDescriptor(value, key)?.enumerable === true));
 }
 
 function compactPointKey(point) {
@@ -41,7 +57,7 @@ function compactPointKey(point) {
 }
 
 function compactFrontierKey(frontier) {
-  if (!Array.isArray(frontier) || !Object.keys(frontier).every((key) => /^(0|[1-9][0-9]*)$/.test(key) && Number(key) < frontier.length)) {
+  if (!Array.isArray(frontier) || !isClosedArray(frontier, frontier.length)) {
     throw new Error('annotatedText snapshot: v3 frontier table entry is invalid');
   }
   let previousActor = null;
@@ -58,7 +74,7 @@ function compactFrontierKey(frontier) {
   return key;
 }
 
-function materializeCompactRecipientRanges(snapshot, family) {
+function materializeCompactRecipientRanges(snapshot, family, consume) {
   if (!family) throw new Error('annotatedText snapshot: v3 endpoints require a family replica');
   if (!Array.isArray(snapshot.points) || !Array.isArray(snapshot.frontiers)) {
     throw new Error('annotatedText snapshot: v3 endpoint tables are required');
@@ -102,7 +118,7 @@ function materializeCompactRecipientRanges(snapshot, family) {
     throw new Error('annotatedText snapshot: v3 endpoint tables contain unused entries');
   }
 
-  const ranges = Object.isFrozen(snapshot.ranges) ? new Array(snapshot.ranges.length) : snapshot.ranges;
+  const ranges = consume && !Object.isFrozen(snapshot.ranges) ? snapshot.ranges : new Array(snapshot.ranges.length);
   for (const point of snapshot.points) deepFreeze(point);
   for (const frontier of snapshot.frontiers) deepFreeze(frontier);
   const endpointByReference = new Map();
@@ -119,10 +135,14 @@ function materializeCompactRecipientRanges(snapshot, family) {
     const range = snapshot.ranges[index];
     ranges[index] = { annotationId: range[0], start: endpoint(range[1], range[2]), end: endpoint(range[3], range[4]) };
   }
+  if (ranges === snapshot.ranges) {
+    delete snapshot.points;
+    delete snapshot.frontiers;
+  }
   return ranges;
 }
 
-function materializeRecipientRanges(snapshot, family) {
+function materializeRecipientRanges(snapshot, family, consume) {
   if (snapshot.version === 1) {
     for (const range of snapshot.ranges) {
       if (!range || typeof range !== 'object' || Array.isArray(range)
@@ -137,7 +157,7 @@ function materializeRecipientRanges(snapshot, family) {
     }
     return snapshot.ranges;
   }
-  if (snapshot.version === 3) return materializeCompactRecipientRanges(snapshot, family);
+  if (snapshot.version === 3) return materializeCompactRecipientRanges(snapshot, family, consume);
   if (snapshot.version !== 2) {
     throw new Error('annotatedText snapshot: snapshot must be a complete blockless recipient envelope');
   }
@@ -239,7 +259,8 @@ export function shiftOffsetRangesOverText(ranges, beforeText, afterText) {
 }
 
 export function materializeAnnotatedTextSnapshot(snapshot, handle, options = {}) {
-  const binding = getAnnotatedTextSnapshotSessionBinding(options?.binding ?? options) ?? createAnnotatedTextSnapshotSessionBinding();
+  const suppliedBinding = getAnnotatedTextSnapshotSessionBinding(options?.binding ?? options);
+  const binding = suppliedBinding ?? createAnnotatedTextSnapshotSessionBinding();
   if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot) ||
       snapshot.kind !== 'workbench.annotatedText.recipient' ||
       (snapshot.version !== 1 && snapshot.version !== 2 && snapshot.version !== 3) ||
@@ -318,7 +339,7 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options = {})
   const document = deepFreeze({
     kind: 'workbench.annotatedText.recipient', version: snapshot.version,
     text: snapshot.text,
-    ranges: materializeRecipientRanges(snapshot, options.family),
+    ranges: materializeRecipientRanges(snapshot, options.family, suppliedBinding !== null || options.consume === true),
     annotations: snapshot.annotations,
     orphans,
     measurements: snapshot.measurements,

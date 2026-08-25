@@ -789,7 +789,7 @@ export interface AnnotatedTextDocument {
 export function materializeAnnotatedTextSnapshot(
   snapshot: Record<string, unknown>,
   declaration: AnnotatedTextFieldHandle,
-  options?: { readonly binding?: unknown; readonly family?: unknown },
+  options?: { readonly binding?: unknown; readonly family?: unknown; readonly consume?: boolean },
 ): AnnotatedTextDocument;
 
 /** Project a historical-basis endpoint to an absolute UTF-16 offset. */
