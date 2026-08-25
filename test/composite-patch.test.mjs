@@ -710,6 +710,51 @@ test('RED-LINE replace-fields preserves untouched relation branches while deleti
   }, 'omitted scalar `extra`-style keys are gone; untouched relation branch `codes` survives');
 });
 
+test('RED-LINE copy-on-write spine: mid-apply throw leaves the shared base byte-identical', async () => {
+  // First operation lands on the spine clone; second resolves to nothing and
+  // throws mid-apply. The whole patch must resync WITHOUT leaking op1's
+  // mutation (or any spine write) into the object the session holds as its
+  // authoritative base — asserted structurally against a pre-call copy.
+  const originalBase = { id: 'p1', name: 'A', colour: '#fff', codes: { code1: { id: 'code1', label: 'Keep' } } };
+  const pristineBeforeAttempt = structuredClone(originalBase);
+  let bootstraps = 0;
+  const probe = {};
+  const session = createLiveDeliverySession({
+    bootstrap: async () => {
+      bootstraps += 1;
+      return { kind: 'snapshot', snapshot: originalBase, cursor: { anchor: 1, composite: 1 }, protocol: 'snapshot-patch/v1', projectionToken: 'wbpt_boot' };
+    },
+    subscribe: async ({ deliver }) => { probe.deliver = deliver; },
+    validateSnapshot: (value) => value,
+    optimistic: (snapshot) => snapshot,
+    sendAction: async () => ({ ok: true }),
+  });
+  await session.ready;
+  assert.equal(bootstraps, 1);
+  await probe.deliver([{
+    type: 'snapshot-patch', protocol: 'snapshot-patch/v1', declaration: 'Project',
+    from: { anchor: 1, composite: 1 }, to: { anchor: 1, composite: 2 },
+    seqSpan: [{ anchor: 1, composite: 1 }, { anchor: 1, composite: 2 }],
+    projectionToken: 'wbpt_z',
+    operations: [
+      // Applies cleanly — onto the private spine, as it turns out.
+      { op: 'put-keyed', path: [], id: 'code9', value: { id: 'code9', label: 'Half-applied' } },
+      // Path resolves to nothing → applyPatchOperation throws mid-apply.
+      { op: 'put-keyed', path: ['ghost'], id: 'x', value: {} },
+    ],
+  }]);
+  assert.deepEqual(
+    originalBase, pristineBeforeAttempt,
+    'the shared base never saw op1\'s write nor any spine clone step',
+  );
+  assert.ok(bootstraps > 1, 'mid-apply throw converged through snapshot recovery');
+  assert.equal(session.status, 'live');
+  assert.deepEqual(session.snapshot, {
+    id: 'p1', name: 'A', colour: '#fff', codes: { code1: { id: 'code1', label: 'Keep' } },
+  }, 'replacement snapshot installed — zero partial application');
+  session.close();
+});
+
 test('RED-LINE concurrent commit during capture yields to.anchor == captured fence', async (t) => {
   const { app, db, delivery } = await setup(t);
   await dispatchOk(app, { actionId: 'p0', type: 'project.write', scope: 'Project:p1', payload: { exists: false, row: { id: 'p1', name: 'S' } }, principal: alice });
