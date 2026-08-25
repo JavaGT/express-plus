@@ -625,4 +625,3 @@ test('CHAIN DUPLICATE TOKEN: two chain links presenting the SAME fresh token res
   unsubscribe();
   session.close();
 });
-
