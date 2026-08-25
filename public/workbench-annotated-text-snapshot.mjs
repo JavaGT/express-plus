@@ -39,28 +39,22 @@ function hasStrictExactKeys(value, keys) {
   });
 }
 
-function isClosedArray(value, length) {
-  if (!Array.isArray(value) || value.length !== length) return false;
-  return Object.keys(value).every((key) => /^(0|[1-9][0-9]*)$/.test(key) && Number(key) < length);
-}
-
 function isStrictClosedArray(value, length) {
-  if (!isClosedArray(value, length)) return false;
-  const own = Reflect.ownKeys(value);
-  if (own.length !== length + 1 || !own.includes('length')) return false;
-  return own.every((key) => key === 'length' || (typeof key === 'string'
-    && /^(0|[1-9][0-9]*)$/.test(key) && Number(key) < length
-    && Object.getOwnPropertyDescriptor(value, key)?.enumerable === true));
+  if (!Array.isArray(value) || value.length !== length || Object.getOwnPropertySymbols(value).length !== 0) return false;
+  const names = Object.getOwnPropertyNames(value);
+  if (names.length !== length + 1 || !names.includes('length')) return false;
+  return names.every((key) => key === 'length' || (/^(0|[1-9][0-9]*)$/.test(key)
+    && Number(key) < length && Object.getOwnPropertyDescriptor(value, key)?.enumerable === true));
 }
 
 function compactPointKey(point) {
-  if (!isClosedArray(point, 3) || point[0] !== 'point' || (point[2] !== 'left' && point[2] !== 'right')) {
+  if (!isStrictClosedArray(point, 3) || point[0] !== 'point' || (point[2] !== 'left' && point[2] !== 'right')) {
     throw new Error('annotatedText snapshot: v3 point table entry is invalid');
   }
   const anchor = point[1];
-  if (isClosedArray(anchor, 1) && anchor[0] === 'root') return `root:${point[2]}`;
-  if (!isClosedArray(anchor, 2) || anchor[0] !== 'element' || !isClosedArray(anchor[1], 2)
-    || !isClosedArray(anchor[1][0], 2) || !/^[0-9a-f]{32}$/.test(anchor[1][0][0])
+  if (isStrictClosedArray(anchor, 1) && anchor[0] === 'root') return `root:${point[2]}`;
+  if (!isStrictClosedArray(anchor, 2) || anchor[0] !== 'element' || !isStrictClosedArray(anchor[1], 2)
+    || !isStrictClosedArray(anchor[1][0], 2) || !/^[0-9a-f]{32}$/.test(anchor[1][0][0])
     || !Number.isSafeInteger(anchor[1][0][1]) || anchor[1][0][1] < 1
     || !Number.isSafeInteger(anchor[1][1]) || anchor[1][1] < 0) {
     throw new Error('annotatedText snapshot: v3 point table entry is invalid');
@@ -69,13 +63,13 @@ function compactPointKey(point) {
 }
 
 function compactFrontierKey(frontier) {
-  if (!Array.isArray(frontier) || !isClosedArray(frontier, frontier.length)) {
+  if (!Array.isArray(frontier) || !isStrictClosedArray(frontier, frontier.length)) {
     throw new Error('annotatedText snapshot: v3 frontier table entry is invalid');
   }
   let previousActor = null;
   let key = '';
   for (const entry of frontier) {
-    if (!isClosedArray(entry, 2) || !/^[0-9a-f]{32}$/.test(entry[0])
+    if (!isStrictClosedArray(entry, 2) || !/^[0-9a-f]{32}$/.test(entry[0])
       || !Number.isSafeInteger(entry[1]) || entry[1] < 1
       || (previousActor !== null && previousActor >= entry[0])) {
       throw new Error('annotatedText snapshot: v3 frontier table entry is invalid');
@@ -108,7 +102,7 @@ function materializeCompactRecipientRanges(snapshot, family, consume) {
   let nextPoint = 0;
   let nextFrontier = 0;
   for (const range of snapshot.ranges) {
-    if (!isClosedArray(range, 5) || typeof range[0] !== 'string') {
+    if (!isStrictClosedArray(range, 5) || typeof range[0] !== 'string') {
       throw new Error('annotatedText snapshot: v3 ranges must be compact endpoint references');
     }
     if (!Number.isSafeInteger(range[1]) || range[1] < 0 || range[1] >= snapshot.points.length

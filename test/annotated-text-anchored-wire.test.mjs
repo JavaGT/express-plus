@@ -202,6 +202,18 @@ test('v3 compact tables reject malformed, duplicate, non-canonical, and unknown 
   const symbolTable = structuredClone(snapshot);
   symbolTable.points[Symbol('extra')] = true;
   assert.throws(() => materializeAnnotatedTextSnapshot(symbolTable, handle, { family }), /endpoint tables/);
+  const symbolPoint = structuredClone(snapshot);
+  symbolPoint.points[0][Symbol('extra')] = true;
+  assert.throws(() => materializeAnnotatedTextSnapshot(symbolPoint, handle, { family }), /point table entry/);
+  const hiddenAnchor = structuredClone(snapshot);
+  Object.defineProperty(hiddenAnchor.points[0][1], 'extra', { value: true });
+  assert.throws(() => materializeAnnotatedTextSnapshot(hiddenAnchor, handle, { family }), /point table entry/);
+  const symbolFrontierEntry = structuredClone(snapshot);
+  symbolFrontierEntry.frontiers[0][0][Symbol('extra')] = true;
+  assert.throws(() => materializeAnnotatedTextSnapshot(symbolFrontierEntry, handle, { family }), /frontier table entry/);
+  const hiddenFrontier = structuredClone(snapshot);
+  Object.defineProperty(hiddenFrontier.frontiers[0], 'extra', { value: true });
+  assert.throws(() => materializeAnnotatedTextSnapshot(hiddenFrontier, handle, { family }), /frontier table entry/);
   const hiddenTopLevel = structuredClone(snapshot);
   Object.defineProperty(hiddenTopLevel, 'extra', { value: true });
   assert.throws(() => materializeAnnotatedTextSnapshot(hiddenTopLevel, handle, { family }), /invalid shape/);
