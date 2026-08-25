@@ -685,7 +685,9 @@ test('RED-LINE forged fact: cross-entity fact neither routes nor suppresses inva
 test('RED-LINE replace-fields preserves untouched relation branches while deleting omitted scalars', async (t) => {
   const probe = {};
   const session = createLiveDeliverySession({
-    bootstrap: async () => ({ kind: 'snapshot', snapshot: { id: 'p1', name: 'A', colour: '#fff', codes: { code1: { id: 'code1', label: 'Keep' } } }, cursor: { anchor: 1, composite: 1 } }),
+    // Response-gated negotiation (#156): the bootstrap result must advertise
+    // snapshot-patch before any delivered patch is ingestible.
+    bootstrap: async () => ({ kind: 'snapshot', snapshot: { id: 'p1', name: 'A', colour: '#fff', codes: { code1: { id: 'code1', label: 'Keep' } } }, cursor: { anchor: 1, composite: 1 }, protocol: 'snapshot-patch/v1', projectionToken: 'wbpt_boot' }),
     subscribe: async ({ deliver }) => { probe.deliver = deliver; },
     validateSnapshot: (value) => value,
     optimistic: (snapshot) => snapshot,
