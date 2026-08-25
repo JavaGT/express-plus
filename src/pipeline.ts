@@ -162,7 +162,15 @@ export function durableMutationVariant({
   postCommitConsumers?: Array<(events: unknown, context: unknown) => Promise<unknown> | unknown>;
   maxEffectDepth?: number;
   /** Compiled patch plans + journal routing (#122). Undefined keeps the pre-patch behavior unchanged. */
-  compositeJournal?: { plans: ReadonlyMap<string, unknown> };
+  compositeJournal?: {
+    plans: ReadonlyMap<string, unknown>;
+    /**
+     * Entity names whose row changes can revoke or admit OTHER rows (grant
+     * dependencies, membership tables — cross-exam 9). A committed change to
+     * any of these invalidates every composite that projects them.
+     */
+    authorizationDependencies?: readonly string[];
+  };
 } = {}) {
   if (!Number.isInteger(maxEffectDepth) || maxEffectDepth < 0) {
     throw new Error('durableMutationVariant: maxEffectDepth must be a non-negative integer');
@@ -290,7 +298,7 @@ export function durableMutationVariant({
       // _ActionReceipt. A journal failure fails the commit — an unrecorded
       // composite change would be a silent gap in the patch protocol.
       if (compositeJournal !== undefined && compositeEvidence) {
-        const plans = compositeJournal.plans as ReadonlyMap<string, Parameters<typeof routeCompositeEvent>[1] extends ReadonlyMap<string, infer P> ? P : never>;
+        const plans = compositeJournal.plans as ReadonlyMap<string, import('./composite-patch-plan.ts').AnchorPatchPlan>;
         for (const ev of finalizedEvents) {
           const entityName: string | undefined = ev?.handle?.entity;
           const rowId: unknown = ev?.data?.id;
@@ -308,9 +316,66 @@ export function durableMutationVariant({
           }
         }
         const inputs: CompositeChangeInput[] = [];
+        // Declared routing facts (cross-exam 2): registered actions may declare
+        // touched rows via a `compositeRouting` block on their private fact.
+        // The application view of compound facts exposes `application`; plain
+        // facts expose themselves. Identity-only — never recipient values.
+        let declaredRoutingFacts: import('./composite-journal.ts').DeclaredRoutingFact[] | undefined;
+        {
+          const fact = privateFact as Record<string, unknown> | undefined;
+          const source = (fact && typeof fact === 'object' && Array.isArray((fact as { contributions?: unknown }).contributions) === false && (fact as { application?: unknown }).application !== undefined)
+            ? (fact as { application?: Record<string, unknown> }).application
+            : fact;
+          const block = source && typeof source === 'object' ? (source as { compositeRouting?: unknown }).compositeRouting : undefined;
+          if (Array.isArray(block)) {
+            declaredRoutingFacts = block.filter((entry) => entry !== null && typeof entry === 'object') as import('./composite-journal.ts').DeclaredRoutingFact[];
+          }
+        }
         for (const ev of finalizedEvents) {
           for (const entry of routeCompositeEvent(db as DbHandle, plans, ev as { type: string; scope: string; seq: number; actionId: string }, compositeEvidence)) {
             inputs.push({ ...entry, actionId });
+          }
+        }
+        // Authorization-dependency invalidation (cross-exam 3/9): a committed
+        // change to a declared grant/membership entity can flip ANY row's
+        // admission in affected scopes — record an explicit invalidating entry.
+        const authDeps = compositeJournal.authorizationDependencies;
+        if (authDeps !== undefined && authDeps.length > 0) {
+          for (const ev of finalizedEvents) {
+            const depEntity: string | undefined = ev?.handle?.entity;
+            if (!depEntity || !authDeps.includes(depEntity)) continue;
+            for (const plan of plans.values()) {
+              const scopeEntityName = plan.declaration;
+              const isAnchorScopeEvent = ev.scope.startsWith(`${scopeEntityName}:`);
+              inputs.push({
+                scope: isAnchorScopeEvent ? ev.scope : '',
+                declaration: scopeEntityName,
+                actionId,
+                eventRefs: [{ scope: ev.scope, seq: ev.seq }],
+                affected: [],
+                invalidating: true,
+              });
+            }
+          }
+        }
+        // Declared facts route once per action (not per event): attach to the
+        // first input's eventRefs context by recording them as their own entry
+        // set against the action id.
+        if (declaredRoutingFacts !== undefined && declaredRoutingFacts.length > 0) {
+          for (const fact of declaredRoutingFacts) {
+            inputs.push({
+              scope: typeof fact.scope === 'string' ? fact.scope : '',
+              declaration: typeof fact.declaration === 'string' ? fact.declaration : '',
+              actionId,
+              eventRefs: finalizedEvents.length > 0 ? [{ scope: finalizedEvents[0].scope, seq: finalizedEvents[0].seq }] : [],
+              affected: [{
+                branch: typeof fact.branch === 'string' ? fact.branch : 'anchor',
+                entity: String(fact.entity ?? fact.declaration ?? ''),
+                id: String(fact.id ?? ''),
+                reason: fact.reason ?? 'update',
+              }],
+              invalidating: fact.invalidating === true || !fact.scope || !fact.declaration || !fact.id,
+            });
           }
         }
         recordCompositeChanges(db as DbHandle, inputs, now);

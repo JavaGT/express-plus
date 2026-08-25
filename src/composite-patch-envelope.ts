@@ -27,6 +27,14 @@ export interface CompositePatchEnvelopeV1 {
   readonly to: CompositeCursorV1;
   readonly seqSpan: readonly [CompositeCursorV1, CompositeCursorV1];
   readonly actionIds?: readonly string[];
+  /**
+   * Action ids whose committed effect was ROUTED but provably INVISIBLE to
+   * this declaration/recipient (empty-patch dispositions — cross-exam 6).
+   * Only these may settle optimistic state on an otherwise empty patch; an
+   * action absent from both `actionIds` and `routedInvisibleActionIds` never
+   * settles from a patch round-trip alone.
+   */
+  readonly routedInvisibleActionIds?: readonly string[];
   readonly operations: readonly SnapshotPatchOperationV1[];
   readonly projectionToken: string;
 }
@@ -64,6 +72,7 @@ export function validateCompositePatchEnvelope(candidate: unknown): CompositePat
   if (candidate.to.composite < candidate.from.composite) return null;
   if (!Array.isArray(candidate.seqSpan) || candidate.seqSpan.length !== 2 || !isValidCursor(candidate.seqSpan[0]) || !isValidCursor(candidate.seqSpan[1])) return null;
   if (candidate.actionIds !== undefined && (!Array.isArray(candidate.actionIds) || candidate.actionIds.some((id) => typeof id !== 'string' || id.length === 0))) return null;
+  if (candidate.routedInvisibleActionIds !== undefined && (!Array.isArray(candidate.routedInvisibleActionIds) || candidate.routedInvisibleActionIds.some((id) => typeof id !== 'string' || id.length === 0))) return null;
   if (typeof candidate.projectionToken !== 'string' || candidate.projectionToken.length === 0) return null;
   if (!Array.isArray(candidate.operations)) return null;
   for (const operation of candidate.operations) {

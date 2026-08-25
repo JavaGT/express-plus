@@ -71,6 +71,13 @@ import { captureSnapshot, authorizeSnapshot, projectSnapshot } from './snapshot-
 
 
 
+
+
+
+                                             
+
+
+
                                     
 
                                                
@@ -235,10 +242,18 @@ export async function projectCompositePatch(input                     )         
   const handleId = scope.slice(scope.indexOf(':') + 1);
 
   const actionIds = new Set        ();
+  const routedInvisible = new Set        ();
   const touched = new Map                     ();
   let anchorTouched = false;
   for (const change of changes) {
-    if (change.actionId) actionIds.add(change.actionId);
+    if (change.actionId && change.affected.length === 0) {
+      // Routed but provably invisible to this declaration/recipient: the ONLY
+      // disposition that may settle an optimistic op on an empty patch
+      // (cross-exam 6).
+      routedInvisible.add(change.actionId);
+    } else if (change.actionId) {
+      actionIds.add(change.actionId);
+    }
     if (change.invalidating) throw new Error('journal slice contains an invalidating change');
     if (change.scope !== scope) throw new Error('journal slice spans foreign scopes');
     for (const affected of change.affected) {
@@ -251,7 +266,7 @@ export async function projectCompositePatch(input                     )         
 
   // Empty slice: an empty patch still advances the cursor (design §6).
   if (touched.size === 0 && !anchorTouched) {
-    return { operations: [], actionIds: [...actionIds], revokedAnchor: false, visibleAfter: cloneVisible(priorVisible) };
+    return { operations: [], actionIds: [...actionIds], routedInvisibleActionIds: [...routedInvisible], revokedAnchor: false, visibleAfter: cloneVisible(priorVisible) };
   }
 
   // --- one capture → authorize → project pass for the WHOLE batch ----------
@@ -266,7 +281,7 @@ export async function projectCompositePatch(input                     )         
     tombstones: (declaration.tombstones ?? null)         ,
   });
   if (!captured) {
-    return { operations: [], actionIds: [...actionIds], revokedAnchor: true, visibleAfter: new Map() };
+    return { operations: [], actionIds: [...actionIds], routedInvisibleActionIds: [...routedInvisible], revokedAnchor: true, visibleAfter: new Map() };
   }
   const auth = await authorizeSnapshot({
     principal,
@@ -385,7 +400,7 @@ export async function projectCompositePatch(input                     )         
   }
 
   const visibleAfter = deriveVisibility(plan, projected                           );
-  return { operations, actionIds: [...actionIds], revokedAnchor: false, visibleAfter };
+  return { operations, actionIds: [...actionIds], routedInvisibleActionIds: [...routedInvisible], revokedAnchor: false, visibleAfter };
 }
 
 /**

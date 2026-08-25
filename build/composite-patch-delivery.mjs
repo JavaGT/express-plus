@@ -50,6 +50,13 @@ export function parseRequestedCapabilities(capabilities         )               
  * composite declarations exist — hosts without snapshots keep today's exact
  * behavior with zero new state.
  */
+// Bounded catch-up (cross-exam 7): max journal rows per patch request.
+const COMPOSITE_PATCH_MAX_CHANGES = 500;
+// Retry symmetry with aggregateSnapshot's 3 attempts (cross-exam 8).
+const COMPOSITE_PATCH_ATTEMPTS = 3;
+// Sustained-failure threshold before the backpressure warning fires.
+const COMPOSITE_PATCH_BACKPRESSURE_THRESHOLD = 10;
+
 export function createCompositePatchDelivery({ db, composites, mayVerb, authorization, includeActionId }                               )                                {
   const compiled = [...composites.entries()]                            ;
   if (compiled.length === 0) return null;
@@ -68,8 +75,12 @@ export class CompositePatchDelivery {
                    mayVerb         ;
                    authorization         ;
                    includeActionId         ;
+                   maxCatchupChanges        ;
+  /** Consecutive fallback outcomes — reset on any successful projection. */
+          fallbackStreak = 0;
+          backpressureWarned = false;
 
-  constructor(db          , composites                              , plans                                      , ledger                  , mayVerb         , authorization         , includeActionId         ) {
+  constructor(db          , composites                              , plans                                      , ledger                  , mayVerb         , authorization         , includeActionId         , maxCatchupChanges = COMPOSITE_PATCH_MAX_CHANGES) {
     this.db = db;
     this.composites = composites;
     this.plans = plans;
@@ -77,6 +88,7 @@ export class CompositePatchDelivery {
     this.mayVerb = mayVerb;
     this.authorization = authorization;
     this.includeActionId = includeActionId;
+    this.maxCatchupChanges = maxCatchupChanges;
   }
 
   planFor(scopeHandle             )                         {
@@ -118,9 +130,14 @@ export class CompositePatchDelivery {
   /**
    * Catch-up for a patch-capable recipient: validate token + cursor, replay
    * the journal slice into ONE coalesced patch envelope, rotate the token.
-   * Any anomaly returns a full-snapshot fallback marker.
+   *
+   * Bounded (cross-exam 7): reads at most `maxChanges` journal rows; overflow
+   * falls back to a snapshot rather than materializing an unbounded slice.
+   * Retry-symmetric (cross-exam 8): the projector's stable-fence check is
+   * retried up to `attempts` times — the same bounded discipline
+   * aggregateSnapshot uses — before any fallback.
    */
-  async catchupWithPatches(input                                                                                                                )
+  async catchupWithPatches(input                                                                                            )
 
 
 
@@ -142,34 +159,63 @@ export class CompositePatchDelivery {
     if (input.after.composite === toComposite) {
       return { kind: 'catchup', envelopes: [], cursor: input.after };
     }
-    const min = minCompositeSeq(this.db, input.scope);
-    const changes = readCompositeChangesSince(this.db, input.scope, input.after.composite);
-    // Journal retention must fall back together with _Log retention (design §14):
-    // a gap below the oldest retained change is unfillable.
-    if (min !== null && min > input.after.composite + 1 && changes.some((change) => change.invalidating)) {
-      return { kind: 'snapshot-fallback', reason: 'journal-invalidating-change' };
+    // Bounded read (cross-exam 7): one row beyond the budget proves overflow.
+    const changes = readCompositeChangesSince(this.db, input.scope, input.after.composite, this.maxCatchupChanges + 1);
+    if (changes.length > this.maxCatchupChanges) {
+      return { kind: 'snapshot-fallback', reason: 'catchup-budget-exceeded' };
     }
+    const min = minCompositeSeq(this.db, input.scope);
     if (changes.length === 0 || (min !== null && min > input.after.composite + 1)) {
       return { kind: 'snapshot-fallback', reason: 'journal-gap' };
     }
+    if (changes.some((change) => change.invalidating)) {
+      return { kind: 'snapshot-fallback', reason: 'journal-invalidating-change' };
+    }
 
+    // Retry symmetry with aggregateSnapshot (cross-exam 8): a moving journal
+    // fence is retried, not immediately failed; contention exhaustion is a
+    // retry outcome, not silent success.
+    let projection                         = null;
+    let lastError          = null;
+    for (let attempt = 0; attempt < COMPOSITE_PATCH_ATTEMPTS; attempt += 1) {
+      try {
+        const declaration = this.composites.get(handle.entity) ;
+        projection = await projectCompositePatch({
+          db: this.db,
+          principal: input.principal,
+          scope: input.scope,
+          plan,
+          declaration: declaration         ,
+          mayVerb: this.mayVerb,
+          authorization: this.authorization,
+          from: input.after,
+          to: { anchor: input.after.anchor, composite: toComposite },
+          changes,
+          includeActionId: this.includeActionId,
+          priorVisible: entry.visible,
+          readCompositeSeq: () => currentCompositeSeq(this.db, input.scope),
+        });
+        lastError = null;
+        break;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (projection === null) {
+      // Backpressure counter (cross-exam 8): sustained failure storms are
+      // surfaced to the host log so chronic token/ledger churn is observable;
+      // the recipient still receives the canonical full snapshot.
+      this.fallbackStreak += 1;
+      if (this.fallbackStreak >= COMPOSITE_PATCH_BACKPRESSURE_THRESHOLD && !this.backpressureWarned) {
+        this.backpressureWarned = true;
+        console.warn('[composite-patch] sustained patch-projection fallback storm', { scope: input.scope, streak: this.fallbackStreak });
+      }
+      void lastError;
+      return { kind: 'snapshot-fallback', reason: lastError instanceof Error ? lastError.message : 'patch-projection-failed' };
+    }
+    this.fallbackStreak = 0;
+    this.backpressureWarned = false;
     try {
-      const declaration = this.composites.get(handle.entity) ;
-      const projection                  = await projectCompositePatch({
-        db: this.db,
-        principal: input.principal,
-        scope: input.scope,
-        plan,
-        declaration: declaration         ,
-        mayVerb: this.mayVerb,
-        authorization: this.authorization,
-        from: input.after,
-        to: { anchor: input.after.anchor, composite: toComposite },
-        changes,
-        includeActionId: this.includeActionId,
-        priorVisible: entry.visible,
-        readCompositeSeq: () => currentCompositeSeq(this.db, input.scope),
-      });
       if (projection.revokedAnchor) return { kind: 'revoked' };
       const cursorAfter                    = Object.freeze({ anchor: readSeq(this.db, input.scope), composite: toComposite });
       const { projectionToken } = this.ledger.register({
@@ -187,6 +233,7 @@ export class CompositePatchDelivery {
         to: cursorAfter,
         seqSpan: [input.after, cursorAfter],
         ...(this.includeActionId && projection.actionIds.length > 0 ? { actionIds: projection.actionIds } : {}),
+        ...(this.includeActionId && projection.routedInvisibleActionIds.length > 0 ? { routedInvisibleActionIds: projection.routedInvisibleActionIds } : {}),
         operations: projection.operations,
         projectionToken,
       };

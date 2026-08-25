@@ -29,6 +29,14 @@
 
 
 
+                                                           
+
+
+
+
+
+
+
 
 
 const OPERATIONS = new Set(['replace-fields', 'put-keyed', 'remove-keyed', 'replace-many', 'replace-one', 'replace-value']);
@@ -64,6 +72,7 @@ export function validateCompositePatchEnvelope(candidate         )              
   if (candidate.to.composite < candidate.from.composite) return null;
   if (!Array.isArray(candidate.seqSpan) || candidate.seqSpan.length !== 2 || !isValidCursor(candidate.seqSpan[0]) || !isValidCursor(candidate.seqSpan[1])) return null;
   if (candidate.actionIds !== undefined && (!Array.isArray(candidate.actionIds) || candidate.actionIds.some((id) => typeof id !== 'string' || id.length === 0))) return null;
+  if (candidate.routedInvisibleActionIds !== undefined && (!Array.isArray(candidate.routedInvisibleActionIds) || candidate.routedInvisibleActionIds.some((id) => typeof id !== 'string' || id.length === 0))) return null;
   if (typeof candidate.projectionToken !== 'string' || candidate.projectionToken.length === 0) return null;
   if (!Array.isArray(candidate.operations)) return null;
   for (const operation of candidate.operations) {

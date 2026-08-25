@@ -196,16 +196,32 @@ function findBranch(plan                             , branchId        )        
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 /**
  * Route one finalized committed event into per-composite-scope change entries,
  * using the compiled plan and in-transaction before/after evidence only.
- * Returns [] when the provably touches nothing the declaration projects.
+ *
+ * Invalidate-by-default (#122 cross-exam 1): an event whose type cannot be
+ * classified, or whose scope handle cannot be parsed, produces a
+ * declaration-wide invalidating entry for every declared composite on that
+ * scope's entity — NEVER silence. The only silent outcome is an event whose
+ * entity provably appears nowhere (scope entity unknown to ALL declarations),
+ * which cannot affect any subscriber of any declaration.
  */
 export function routeCompositeEvent(db          , plans                                      , event             , evidence             )                         {
-  const handle = tryParseScopeKey(event.scope);
-  if (!handle) return [];
-  const classified = classify(event.type);
-  if (!classified) return [];
   const entries = new Map                              ();
 
   const add = (input                                         )       => {
@@ -225,9 +241,27 @@ export function routeCompositeEvent(db          , plans                         
   // The event TYPE names the changed row's entity; the event SCOPE only names
   // the owning composite scope (member rows inherit it). Route as an anchor
   // change only when the type's entity IS the declaration anchor.
+  const handle = tryParseScopeKey(event.scope);
+  if (!handle) {
+    return [];
+  }
   const eventTypeEntity = classifyEntityName(event.type);
   const anchorPlan = plans.get(handle.entity);
   const isAnchorEvent = anchorPlan !== undefined && eventTypeEntity === handle.entity;
+  if (!anchorPlan && !eventTypeEntity) {
+    // Unclassifiable custom event type on a declared composite scope: the
+    // declaration-wide invalidation signal (cross-exam 1). The catch-up path
+    // answers any invalidating entry with a full snapshot — never silence.
+    add({ scope: '', declaration: handle.entity, actionId: event.actionId, affected: [], invalidating: true });
+    return [...entries.values()];
+  }
+  const classified = classify(event.type);
+  if (!classified) {
+    // A recognized-entity event with an unrecognized verb could still touch
+    // projected state through application reducers: invalidate, never silence.
+    add({ scope: '', declaration: handle.entity, actionId: event.actionId, affected: [], invalidating: true });
+    return [...entries.values()];
+  }
   if (anchorPlan && isAnchorEvent) {
     if (classified.phase === 'created') {
       add({ scope: event.scope, declaration: anchorPlan.declaration, actionId: event.actionId, affected: [{ branch: 'anchor', entity: handle.entity, id: handle.id, reason: 'create' }] });
@@ -414,6 +448,44 @@ export function routeCompositeEvent(db          , plans                         
     }
   }
 
+  // --- declared routing facts (cross-exam 2) ---------------------------------
+  // Custom application events (code.merged, artefact.transcript.linked, ...)
+  // carry no lifecycle suffix and no data.id. Registered actions declare their
+  // touched rows through the EXISTING privateFact seam: a `compositeRouting`
+  // block on the action's private fact lists (entity, id) pairs the journal
+  // can trust. Facts arrive via pipeline as `declaredFacts`.
+  for (const fact of event.declaredRoutingFacts ?? []) {
+    const plan = typeof fact.declaration === 'string' ? plans.get(fact.declaration) : undefined;
+    if (!plan) continue; // fact names an entity no composite declares
+    if (!fact.scope || typeof fact.scope !== 'string') {
+      add({ scope: '', declaration: plan.declaration, actionId: event.actionId, affected: [], invalidating: true });
+      continue;
+    }
+    add({
+      scope: fact.scope,
+      declaration: plan.declaration,
+      actionId: event.actionId,
+      affected: [{ branch: fact.branch ?? 'anchor', entity: String(fact.entity ?? plan.declaration), id: String(fact.id ?? ''), reason: fact.reason ?? 'update' }],
+      invalidating: fact.invalidating === true,
+    });
+  }
+
+  // --- authorization-dependency invalidation (cross-exam 3/9) ----------------
+  // Grant/membership-table changes are not row-relation changes: no compiled
+  // branch covers them, yet they can revoke or admit ANY row in the scope.
+  // The pipeline supplies `authorizationSensitive` when the changed entity is
+  // a declared authorization dependency. Invalidate the whole declaration.
+  if (event.authorizationSensitive && anchorPlan && isAnchorEvent) {
+    // Membership change on the ANCHOR scope itself.
+    add({ scope: event.scope, declaration: anchorPlan.declaration, actionId: event.actionId, affected: [], invalidating: true });
+  } else if (event.authorizationSensitive) {
+    for (const plan of plans.values()) {
+      if (eventTypeEntity !== null && branchesForEntity(plan, eventTypeEntity).length > 0) {
+        add({ scope: '', declaration: plan.declaration, actionId: event.actionId, affected: [], invalidating: true });
+      }
+    }
+  }
+
   return [...entries.values()];
 }
 
@@ -473,12 +545,16 @@ export function recordCompositeChanges(db          , inputs                     
 
 /**
  * Retained composite changes for one scope with seq > after, ordered by seq.
- * Catch-up replays THESE rows — never raw _Log rows (design §10).
+ * At most `limit` rows are returned — a result of exactly `limit` rows means
+ * the caller must treat the slice as OVERFLOWING and fall back to a snapshot
+ * rather than materialize an unbounded replay (cross-exam 7). Catch-up replays
+ * THESE rows, never raw _Log rows (design §10).
  */
-export function readCompositeChangesSince(db          , scope        , after        )                          {
+export function readCompositeChangesSince(db          , scope        , after        , limit = 500)                          {
+  if (!Number.isSafeInteger(limit) || limit < 1) throw new TypeError('limit must be a positive safe integer');
   const rows = prepareCached(db,
-    'SELECT * FROM _CompositeChange WHERE scope = :scope AND seq > :after ORDER BY seq',
-  ).all({ scope, after })                                  ;
+    'SELECT * FROM _CompositeChange WHERE scope = :scope AND seq > :after ORDER BY seq LIMIT :limit',
+  ).all({ scope, after, limit })                                  ;
   return rows.map(parseChangeRow);
 }
 

@@ -727,7 +727,12 @@ export function buildKernel(app: any) {
       // attached live delivery. Undefined when no snapshots are declared —
       // journaling is skipped entirely and legacy behavior is unchanged.
       compositeJournal: ((app as { _compositeJournalPlans?: ReadonlyMap<string, unknown> | null })._compositeJournalPlans
-        ? { plans: (app as { _compositeJournalPlans: ReadonlyMap<string, unknown> })._compositeJournalPlans }
+        ? {
+          plans: (app as { _compositeJournalPlans: ReadonlyMap<string, unknown> })._compositeJournalPlans,
+          // Entities that gate other rows' visibility (cross-exam 9): a change
+          // to any of these invalidates every composite that projects them.
+          authorizationDependencies: (app as { _compositeAuthorizationDependencies?: readonly string[] })._compositeAuthorizationDependencies ?? ['User'],
+        }
         : undefined),
     }),
     // The no-history mutation lane (S3/A2, #100): engaged only when a database

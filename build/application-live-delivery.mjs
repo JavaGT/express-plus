@@ -6,13 +6,18 @@
 
 import { createOwnedLiveDelivery } from './live-delivery-public.mjs';
 import { createLiveDeliveryHttpHandler } from './live-delivery-http.mjs';
-import { createCompositePatchDelivery } from './composite-patch-delivery.mjs';
 import { createLiveDeliveryWebSocket } from './live-delivery-websocket.mjs';
 import { mayVerb } from './row-grant.mjs';
 
 import { validatePrincipalSnapshotDeclarations } from './principal-snapshot-delivery.mjs';
 
 import { collapseForAdmission,                } from './principal.mjs';
+
+
+
+
+
+
 
 
 
@@ -59,6 +64,7 @@ export function attachApplicationLiveDelivery(app                    , {
   principalSnapshotAuthorize,
   maxCatchupEvents,
   authorization,
+  authorizationDependencies,
 }                                )                     {
   if (app._startPromise || app._startupMode || app._transportAttached) {
     throw new Error('live delivery must be attached before application startup');
@@ -95,18 +101,12 @@ export function attachApplicationLiveDelivery(app                    , {
     // Annotated-text fold envelopes attach actionId themselves for own-echo.
     includeActionId: false,
   });
-  // Composite patch plans (#122) come from the owned delivery's single
+  // Composite journal plans (#122) come from the owned delivery's single
   // compilation of the declared snapshots; the commit pipeline routes journal
-  // entries from them. No snapshots → undefined → pipeline skips journaling.
-  const compositeJournal = owned.patchPlans?.size ? { plans: owned.patchPlans } : undefined;
-  app._compositeJournalPlans = compositeJournal?.plans ?? null;
-  app._compositePatchLane = createCompositePatchDelivery({
-    db: app.db         ,
-    composites: compositeJournal?.plans ?? new Map(),
-    mayVerb: (entity         , verb        , row         , principal           ) => mayVerb(entity         , verb, row, principal),
-    authorization,
-    includeActionId: false,
-  });
+  // entries from them. The patch lane itself is owned INSIDE the delivery
+  // (one ledger, one compilation); no second lane is created here.
+  app._compositeJournalPlans = owned.patchPlans?.size ? owned.patchPlans : null;
+  app._compositeAuthorizationDependencies = authorizationDependencies ?? null;
   const handler = createLiveDeliveryHttpHandler({
     delivery: owned.delivery,
     principalOf: principalOfAdmitted,
@@ -132,6 +132,10 @@ export function attachApplicationLiveDelivery(app                    , {
     // the app can register S5/A5 onRevocation listeners (e.g. the S4/A2 search
     // staleness bridge) against the SAME core the SSE/WebSocket skins present.
     core: owned.core,
+    // The transport-neutral delivery protocol (#122): hosts and tests may
+    // drive bootstrap/catchup directly, including the unadvertised
+    // snapshot-patch capability lane. Same authority as the HTTP skins.
+    delivery: owned.delivery,
     close: owned.close,
     mountWebSocket: (httpServer                                                   ) => {
       if (!wsTransport) {

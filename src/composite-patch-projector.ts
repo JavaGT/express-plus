@@ -70,7 +70,14 @@ export interface PatchProjectorInput {
 
 export interface PatchProjection {
   readonly operations: readonly SnapshotPatchOperationV1[];
+  /** Actions whose effect is VISIBLE in this patch (put/remove/replace ops). */
   readonly actionIds: readonly string[];
+  /**
+   * Actions routed through the journal whose committed effect is provably
+   * INVISIBLE here (empty-affected entries — cross-exam 6). These, and only
+   * these, may settle optimistic state on an empty patch.
+   */
+  readonly routedInvisibleActionIds: readonly string[];
   /** true: the anchor row is gone — callers run revoke/deleted handling, never a normal patch. */
   readonly revokedAnchor: boolean;
   /** Visibility AFTER this batch, per branch — the successor ledger content. */
@@ -235,10 +242,18 @@ export async function projectCompositePatch(input: PatchProjectorInput): Promise
   const handleId = scope.slice(scope.indexOf(':') + 1);
 
   const actionIds = new Set<string>();
+  const routedInvisible = new Set<string>();
   const touched = new Map<string, Set<string>>();
   let anchorTouched = false;
   for (const change of changes) {
-    if (change.actionId) actionIds.add(change.actionId);
+    if (change.actionId && change.affected.length === 0) {
+      // Routed but provably invisible to this declaration/recipient: the ONLY
+      // disposition that may settle an optimistic op on an empty patch
+      // (cross-exam 6).
+      routedInvisible.add(change.actionId);
+    } else if (change.actionId) {
+      actionIds.add(change.actionId);
+    }
     if (change.invalidating) throw new Error('journal slice contains an invalidating change');
     if (change.scope !== scope) throw new Error('journal slice spans foreign scopes');
     for (const affected of change.affected) {
@@ -251,7 +266,7 @@ export async function projectCompositePatch(input: PatchProjectorInput): Promise
 
   // Empty slice: an empty patch still advances the cursor (design §6).
   if (touched.size === 0 && !anchorTouched) {
-    return { operations: [], actionIds: [...actionIds], revokedAnchor: false, visibleAfter: cloneVisible(priorVisible) };
+    return { operations: [], actionIds: [...actionIds], routedInvisibleActionIds: [...routedInvisible], revokedAnchor: false, visibleAfter: cloneVisible(priorVisible) };
   }
 
   // --- one capture → authorize → project pass for the WHOLE batch ----------
@@ -266,7 +281,7 @@ export async function projectCompositePatch(input: PatchProjectorInput): Promise
     tombstones: (declaration.tombstones ?? null) as never,
   });
   if (!captured) {
-    return { operations: [], actionIds: [...actionIds], revokedAnchor: true, visibleAfter: new Map() };
+    return { operations: [], actionIds: [...actionIds], routedInvisibleActionIds: [...routedInvisible], revokedAnchor: true, visibleAfter: new Map() };
   }
   const auth = await authorizeSnapshot({
     principal,
@@ -385,7 +400,7 @@ export async function projectCompositePatch(input: PatchProjectorInput): Promise
   }
 
   const visibleAfter = deriveVisibility(plan, projected as Record<string, unknown>);
-  return { operations, actionIds: [...actionIds], revokedAnchor: false, visibleAfter };
+  return { operations, actionIds: [...actionIds], routedInvisibleActionIds: [...routedInvisible], revokedAnchor: false, visibleAfter };
 }
 
 /**
