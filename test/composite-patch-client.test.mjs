@@ -25,17 +25,20 @@ function patchEnvelope({
   routedInvisibleActionIds,
   declaration = 'Project',
   anchor = 1,
+  // Per-axis overrides for anchor-jumping chains: `from` must still equal the
+  // predecessor's exact cursor, only `to` may move the anchor forward.
+  fromAnchor,
+  toAnchor,
 }) {
+  const from = { anchor: fromAnchor ?? anchor, composite: fromComposite };
+  const to = { anchor: toAnchor ?? anchor, composite: toComposite };
   return {
     type: 'snapshot-patch',
     protocol: CAP,
     declaration,
-    from: { anchor, composite: fromComposite },
-    to: { anchor, composite: toComposite },
-    seqSpan: [
-      { anchor, composite: fromComposite },
-      { anchor, composite: toComposite },
-    ],
+    from,
+    to,
+    seqSpan: [from, to],
     projectionToken: token,
     ...(actionIds ? { actionIds } : {}),
     ...(routedInvisibleActionIds ? { routedInvisibleActionIds } : {}),
@@ -291,6 +294,73 @@ test('OPTIMISTIC REPLAY: pending ops replay exactly once over each patched base,
   void first;
   void second;
   session.close();
+});
+
+// ---- receipt fence vs patch-stream coverage (3.C, #156 round 2) --------------
+
+test('RECEIPT FENCE: patch stream already past confirmedThrough — successful dispatch triggers ZERO snapshot recovery; legacy still recovers', async () => {
+  // Armed: the patch chain advances the cursor ANCHOR to 3 (fences compare on
+  // the anchor axis). The receipt then names confirmedThrough=2 — already
+  // covered — so the delta-capable guard must skip the bootstrap tax entirely;
+  // the op stays pending until its patch attribution settles it.
+  const { session, probe } = await startSession({
+    sendAction: async () => ({ ok: true, confirmedThrough: 2 }),
+  });
+  await probe.deliver([
+    patchEnvelope({ fromComposite: 1, toComposite: 2, token: 'wbpt_f2', operations: renameRoot('F2') }),
+    patchEnvelope({ fromComposite: 2, toComposite: 3, token: 'wbpt_f3', operations: renameRoot('F3'), toAnchor: 3 }),
+  ]);
+  assert.equal(session.cursor.anchor, 3, 'chain carried the anchor forward');
+  const bootstrapCallsBefore = probe.bootstrapCalls.length;
+  const dispatched = await session.dispatch('code.rename', { codeId: 'c1' });
+  assert.equal(dispatched.ok, true);
+  assert.equal(
+    probe.bootstrapCalls.length, bootstrapCallsBefore,
+    'fence covered by the patch stream — no snapshot recovery',
+  );
+  assert.equal(session.pendingCount(), 1, 'op waits for patch attribution, not a stale bootstrap');
+  await probe.deliver([patchEnvelope({
+    fromComposite: 3,
+    toComposite: 4,
+    token: 'wbpt_f4',
+    anchor: 3,
+    actionIds: [dispatched.opId],
+    operations: renameRoot('F4'),
+  })]);
+  assert.equal(session.pendingCount(), 0, 'attribution settled the skipped op normally');
+  session.close();
+
+  // Legacy complement: a non-armed session (numeric cursor, no echo) with an
+  // UNCOVERED fence still performs receipt recovery exactly as before #156.
+  const legacyProbe = { bootstrapCalls: [], subscribeCalls: [], deliver: null };
+  const legacy = createLiveDeliverySession({
+    bootstrap: async (request) => {
+      legacyProbe.bootstrapCalls.push(request);
+      if (request.mode === 'catchup') return { kind: 'catchup', envelopes: [], cursor: request.after };
+      // Replacement covers the fence (10 >= 9) so recovery converges first try.
+      return { kind: 'snapshot', snapshot: { id: 'd1', title: 'Legacy' }, cursor: 10 };
+    },
+    subscribe: async (input) => {
+      legacyProbe.subscribeCalls.push(input);
+      legacyProbe.deliver = input.deliver;
+      return { close() {} };
+    },
+    validateSnapshot: (value) => value,
+    fold: (snapshot) => snapshot,
+    optimistic: (snapshot) => snapshot,
+    sendAction: async () => ({ ok: true, confirmedThrough: 9 }),
+  });
+  await legacy.ready;
+  assert.equal(legacy.deltaCapable, false, 'legacy host never arms');
+  const legacyBootstrapsBefore = legacyProbe.bootstrapCalls.length;
+  const legacyDispatch = await legacy.dispatch('doc.rename', {});
+  assert.equal(legacyDispatch.ok, true);
+  assert.ok(
+    legacyProbe.bootstrapCalls.length > legacyBootstrapsBefore,
+    'uncovered fence still triggers receipt snapshot recovery on legacy sessions',
+  );
+  assert.equal(legacy.deltaCapable, false, 'recovery stayed legacy');
+  legacy.close();
 });
 
 // ---- edge coverage: coalesced chains + duplicates ----------------------------
