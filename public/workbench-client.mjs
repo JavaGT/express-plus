@@ -2976,6 +2976,36 @@ export function createLiveDeliverySession({
     }
   }
 
+  function shallowCloneNode(value) {
+    return Array.isArray(value) ? value.slice() : { ...value };
+  }
+
+  // Copy-on-write spine (#156 round 2): clone ONLY the nodes along each
+  // operation's path chain; every other subtree stays shared by reference.
+  // Runs for ALL operations BEFORE the first mutation, so the spine is fully
+  // private where writers land — keyed/remove/replace-fields parents and
+  // replace-many/one/value holders are always spine endpoints or prefixes —
+  // and a mid-apply throw simply discards the whole spine, leaving the
+  // shared base byte-identical. Walking stops at a missing/primitive segment:
+  // nothing below it can be cloned, and apply time throws exactly where the
+  // old O(graph) deep clone's navigation did (→ resync, same outcome).
+  function buildPatchSpine(base, envelopes) {
+    const root = base !== null && typeof base === 'object' ? shallowCloneNode(base) : base;
+    for (const checked of envelopes) {
+      for (const operation of checked.operations) {
+        let current = root;
+        for (const segment of operation.path) {
+          if (current === null || typeof current !== 'object') break;
+          const child = current[segment];
+          if (child === null || typeof child !== 'object') break;
+          current[segment] = shallowCloneNode(child);
+          current = current[segment];
+        }
+      }
+    }
+    return root;
+  }
+
   function applySnapshotPatch(envelopeOrBatch, previous = null) {
     // 1. Grammar + protocol validation before ANYTHING mutates (#156 edge
     // coverage): when a coalesced chain of envelopes arrives together, every
@@ -2985,10 +3015,16 @@ export function createLiveDeliverySession({
     const envelopes = Array.isArray(envelopeOrBatch) ? envelopeOrBatch : [envelopeOrBatch];
     if (envelopes.length === 0) return { status: 'resync' };
     const valid = [];
+    // A ledger handle mints exactly once (#156 round 2): the same token twice
+    // within one coalesced chain is a replay/forgery even when neither copy
+    // matches the currently-held handle.
+    const chainTokens = new Set();
     let previousEnvelope = previous;
     for (const candidate of envelopes) {
       const checked = validateSnapshotPatchEnvelope(candidate, previousEnvelope);
       if (!checked) return { status: 'resync' };
+      if (chainTokens.has(checked.projectionToken)) return { status: 'resync' };
+      chainTokens.add(checked.projectionToken);
       valid.push(checked);
       previousEnvelope = checked;
     }
@@ -3022,9 +3058,14 @@ export function createLiveDeliverySession({
     }
     // 3-4. Apply EVERY envelope's operations in order to ONE fresh immutable
     // copy; any throw discards it — the base never lands half-patched.
+    // Copy-on-write spine (#156 round 2): instead of an O(graph) deep clone,
+    // clone only along each operation's path chain and share every other
+    // subtree by reference. The spine is built FULLY before the first target
+    // mutates, so a mid-way applyPatchOperation throw leaves the shared base
+    // untouched and the whole patch resyncs.
     let nextSnapshot;
     try {
-      nextSnapshot = JSON.parse(JSON.stringify(baseSnapshot));
+      nextSnapshot = buildPatchSpine(baseSnapshot, valid);
       for (const checked of valid) {
         for (const operation of checked.operations) applyPatchOperation(nextSnapshot, operation);
       }
@@ -3271,6 +3312,19 @@ export function createLiveDeliverySession({
     requestSnapshotRecovery(operation.confirmedThrough, false);
   }
 
+  // True when the delta patch stream has already advanced to (or past) an
+  // operation's receipt fence (#156 round 2): a full snapshot recovery would
+  // re-install state at least as stale as what is already installed, so the
+  // per-edit bootstrap tax buys nothing. Only ever true in delta-capable
+  // composite mode — legacy numeric cursors and snapshot-only sessions keep
+  // the unconditional recovery behavior.
+  function receiptFenceAlreadyCovered(operation) {
+    return deltaCapable && !snapshotOnly
+      && cursor !== null && typeof cursor === 'object'
+      && Number.isSafeInteger(operation.confirmedThrough)
+      && cursorAnchor(cursor) >= operation.confirmedThrough;
+  }
+
   // A foldable operation's echo is emitted on the SSE immediately after its
   // action commits, but the sender receipt is answered first. Without a grace
   // window the receipt path always wins the race, forcing a full document
@@ -3473,7 +3527,13 @@ export function createLiveDeliverySession({
       // composites and (b) fold-mode actions whose receipt names a fence but
       // whose fold echo has not arrived (non-foldable ops, delayed SSE).
       // Ordinary fold sessions without a confirmation fence keep echo-only settle.
-      if (operation.echoCursor == null
+      // Delta-capable sessions (#156 round 2) skip the recovery entirely when
+      // the patch stream has ALREADY advanced past the receipt fence — the
+      // authoritative base is at least as fresh as the receipt, so a full
+      // snapshot bootstrap would be a pointless per-edit tax. The op stays
+      // pending until its patch attribution (actionIds / routedInvisible)
+      // settles it, exactly like any other unechoed delta-stream action.
+      if (operation.echoCursor == null && !receiptFenceAlreadyCovered(operation)
         && (snapshotOnly || Number.isSafeInteger(operation.confirmedThrough))) {
         if (operation.foldableEcho) recoverFoldableAfterGrace(operation);
         else recoverReceiptSnapshot(operation);
@@ -3544,7 +3604,8 @@ export function createLiveDeliverySession({
       operation.receiptGeneration = ++receiptGeneration;
       operation.receiptSnapshotGeneration = snapshotGeneration;
       settleSnapshotConfirmations(receiptGeneration);
-      if (operation.echoCursor == null
+      // Same delta-capable fence-coverage skip as submitAction (#156 round 2).
+      if (operation.echoCursor == null && !receiptFenceAlreadyCovered(operation)
         && (snapshotOnly || Number.isSafeInteger(operation.confirmedThrough))) {
         if (operation.foldableEcho) recoverFoldableAfterGrace(operation);
         else recoverReceiptSnapshot(operation);
