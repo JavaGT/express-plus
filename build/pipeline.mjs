@@ -297,8 +297,9 @@ export function durableMutationVariant({
       // patch plans, and record the entries atomically with _Log and
       // _ActionReceipt. A journal failure fails the commit — an unrecorded
       // composite change would be a silent gap in the patch protocol.
-      if (compositeJournal !== undefined && compositeEvidence) {
+      if (compositeJournal !== undefined && (compositeEvidence !== null || finalizedEvents.length > 0)) {
         const plans = compositeJournal.plans                                                                            ;
+        const evidence                                                                                                                          = compositeEvidence ??= { before: new Map(), after: new Map() };
         for (const ev of finalizedEvents) {
           const entityName                     = ev?.handle?.entity;
           const rowId          = ev?.data?.id;
@@ -307,8 +308,8 @@ export function durableMutationVariant({
           try {
             const row = (db            ).prepare(`SELECT * FROM ${entityName} WHERE id = ?`).get(rowId)                                       ;
             if (row) {
-              let rows = compositeEvidence.after.get(entityName);
-              if (!rows) compositeEvidence.after.set(entityName, rows = new Map());
+              let rows = evidence.after.get(entityName);
+              if (!rows) evidence.after.set(entityName, rows = new Map());
               rows.set(String(rowId), { ...row });
             }
           } catch {
@@ -317,22 +318,32 @@ export function durableMutationVariant({
         }
         const inputs                         = [];
         // Declared routing facts (cross-exam 2): registered actions may declare
-        // touched rows via a `compositeRouting` block on their private fact.
-        // The application view of compound facts exposes `application`; plain
-        // facts expose themselves. Identity-only — never recipient values.
+        // touched rows via a `compositeRouting` block on their private fact —
+        // at the fact's top level or inside its `after` half (the canonical
+        // {before, after} shape). The application view of compound facts
+        // exposes `application`; plain facts expose themselves. Identity-only.
         let declaredRoutingFacts                                                                    ;
         {
           const fact = privateFact                                       ;
-          const source = (fact && typeof fact === 'object' && Array.isArray((fact                               ).contributions) === false && (fact                             ).application !== undefined)
-            ? (fact                                             ).application
-            : fact;
-          const block = source && typeof source === 'object' ? (source                                  ).compositeRouting : undefined;
-          if (Array.isArray(block)) {
-            declaredRoutingFacts = block.filter((entry) => entry !== null && typeof entry === 'object')                                                          ;
+          const candidates            = [fact];
+          if (fact && typeof fact === 'object') {
+            candidates.push((fact                             ).application);
+            const after = (fact                       ).after;
+            candidates.push(after);
+            if (after && typeof after === 'object' && (after                             ).application !== undefined) {
+              candidates.push((after                             ).application);
+            }
+          }
+          for (const source of candidates) {
+            const block = source && typeof source === 'object' ? (source                                  ).compositeRouting : undefined;
+            if (Array.isArray(block)) {
+              declaredRoutingFacts = block.filter((entry) => entry !== null && typeof entry === 'object')                                                          ;
+              break;
+            }
           }
         }
         for (const ev of finalizedEvents) {
-          for (const entry of routeCompositeEvent(db            , plans, ev                                                                  , compositeEvidence)) {
+          for (const entry of routeCompositeEvent(db            , plans, ev                                                                  , evidence)) {
             inputs.push({ ...entry, actionId });
           }
         }
