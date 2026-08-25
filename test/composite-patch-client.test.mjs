@@ -526,3 +526,103 @@ test('SETTLEMENT RACE: covering patch delivered BEFORE the receipt resolves — 
   session.close();
 });
 
+test('CHAIN SEQUENCE: replace-fields then put-keyed on the SAME node apply strictly in order across one coalesced chain', async () => {
+  const { session, probe } = await startSession();
+  const rename = await session.dispatch('code.rename', { codeId: 'c1' });
+  const attach = await session.dispatch('code.attach', { codeId: 'c9' });
+  const settledRename = rename.settlement.wait();
+  const settledAttach = attach.settlement.wait();
+  await probe.deliver([
+    patchEnvelope({
+      fromComposite: 1,
+      toComposite: 2,
+      token: 'wbpt_seq2',
+      actionIds: [rename.opId],
+      // Complete-key exact-set replacement: any key the NEXT link adds would
+      // be deleted if the order were reversed.
+      operations: renameRoot('SEQ'),
+    }),
+    patchEnvelope({
+      fromComposite: 2,
+      toComposite: 3,
+      token: 'wbpt_seq3',
+      actionIds: [attach.opId],
+      operations: [{ op: 'put-keyed', path: ['codes'], id: 'c9', value: { id: 'c9', label: 'Attached' } }],
+    }),
+  ]);
+  assert.equal(session.snapshot.name, 'SEQ', 'first link applied');
+  assert.deepEqual(
+    session.snapshot.codes.c9,
+    { id: 'c9', label: 'Attached' },
+    'put-keyed survived ON TOP of the exact-set replacement — sequential order proven',
+  );
+  assert.equal((await settledRename).status, 'reconciled');
+  assert.equal((await settledAttach).status, 'reconciled', 'each link settled exactly its own op');
+  assert.equal(session.pendingCount(), 0);
+  session.close();
+});
+
+test('MIXED BATCH: [snapshot-patch, resync-control, snapshot-patch] — first run atomic, control recovers, second run handled POST-recovery', async () => {
+  // First snapshot bootstrap arms the session (A @ composite 1); every LATER
+  // snapshot call is the recovery replacement. It CONTINUES the stream
+  // (composite 2) so the trailing patch run has a legitimate post-recovery
+  // continuation to be evaluated against.
+  let snapshotCalls = 0;
+  const { session, probe } = await startSession({
+    snapshotResult: () => (++snapshotCalls === 1
+      ? patchCapableSnapshot()
+      : patchCapableSnapshot({ token: 'wbpt_canon', composite: 2, name: 'CANON' })),
+  });
+  const publishedNames = [];
+  const unsubscribe = session.subscribe((snapshot) => publishedNames.push(snapshot.name));
+  publishedNames.length = 0;
+  const bootstrapsBefore = probe.bootstrapCalls.length;
+  await probe.deliver([
+    patchEnvelope({ fromComposite: 1, toComposite: 2, token: 'wbpt_m2', operations: renameRoot('M2') }),
+    { type: 'resync' },
+    // Continues the RECOVERED cursor (composite 2), not the pre-recovery one.
+    patchEnvelope({ fromComposite: 2, toComposite: 3, token: 'wbpt_m3', operations: renameRoot('M3') }),
+  ]);
+  // Order proof: run1's publish precedes the recovery replacement, and run2's
+  // publish follows it (pre-round-3 receive() applied run2 BEFORE the
+  // replacement landed — publishing state derived from an untrusted base).
+  const firstCanon = publishedNames.indexOf('CANON');
+  assert.ok(firstCanon > publishedNames.indexOf('M2'), 'run1 published before the replacement');
+  assert.ok(publishedNames.indexOf('M3') > publishedNames.lastIndexOf('CANON'), 'run2 published AFTER the recovery replacement');
+  assert.deepEqual([...new Set(publishedNames)].sort(), ['CANON', 'M2', 'M3']);
+  assert.equal(
+    probe.bootstrapCalls.length - bootstrapsBefore, 1,
+    'the control minted exactly ONE recovery; run2 neither blocked nor re-minted it',
+  );
+  assert.equal(session.snapshot.name, 'M3', 'run2 applied ON TOP of the recovered base');
+  assert.equal(session.cursor.composite, 3);
+  assert.equal(session.projectionToken, 'wbpt_m3', 'run2\'s rotation landed after recovery re-armed');
+  unsubscribe();
+  session.close();
+});
+
+test('CHAIN DUPLICATE TOKEN: two chain links presenting the SAME fresh token resync — rejected even though NEITHER copy equals the held handle', async () => {
+  const { session, probe } = await startSession();
+  const baseAtStart = structuredClone(session.snapshot);
+  const publishedNames = [];
+  const unsubscribe = session.subscribe((snapshot) => publishedNames.push(snapshot.name));
+  publishedNames.length = 0;
+  // Both links carry 'wbpt_twice'; the held handle is 'wbpt_boot'. The
+  // pairwise within-chain check (not the held-handle check) must catch this.
+  await probe.deliver([
+    patchEnvelope({ fromComposite: 1, toComposite: 2, token: 'wbpt_twice', operations: renameRoot('FIRST-LANDS?') }),
+    patchEnvelope({ fromComposite: 2, toComposite: 3, token: 'wbpt_twice', operations: renameRoot('SECOND') }),
+  ]);
+  assert.deepEqual(
+    [...new Set(publishedNames)], ['A'],
+    `every publication stayed canonical, saw: ${JSON.stringify([...new Set(publishedNames)])}`,
+  );
+  assert.equal(session.snapshot.name, 'A', 'zero partial application — first link discarded with the chain');
+  assert.deepEqual(session.snapshot, baseAtStart);
+  assert.equal(session.cursor.composite, 1, 'cursor never advanced');
+  assert.equal(session.projectionToken, 'wbpt_boot', 'held handle untouched by the forged chain');
+  assert.ok(probe.bootstrapCalls.some((call) => call.mode === 'snapshot'), 'failed closed through snapshot recovery');
+  unsubscribe();
+  session.close();
+});
+

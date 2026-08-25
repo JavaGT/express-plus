@@ -3299,12 +3299,16 @@ export function createLiveDeliverySession({
       // Controls in one batch (or while a cycle is already running) only raise
       // that cycle's floor — they do not mint a new budget.
       if (envelope.type === 'resync' || envelope.type === 'state-invalidate') {
-        // Controls coalesce into the current cycle. They raise the coverage
-        // high-water but are not a receipt fence — recover() still installs
-        // any authorized replacement unless a receipt floor was already set.
         const coverage = Number.isSafeInteger(envelope.seq) ? envelope.seq : undefined;
-        if (recoveryWait) requestSnapshotRecovery(coverage, false, true);
-        else recoveryWait = requestSnapshotRecovery(coverage, !hasUnknownTransmission(), true);
+        if (!recoveryWait) recoveryWait = requestSnapshotRecovery(coverage, !hasUnknownTransmission(), true);
+        else requestSnapshotRecovery(coverage, false, true);
+        // A control declares the CURRENT base untrusted (#156 round 3): later
+        // envelopes in the same batch must not derive state from it. Await the
+        // replacement before continuing — subsequent patch runs are then
+        // evaluated against the recovered cursor (continuing links apply;
+        // stale links fail closed as duplicate/resync instead of mutating an
+        // untrusted base and publishing garbage ahead of the replacement).
+        if (!hasUnknownTransmission()) await recoveryWait;
         continue;
       }
       // Derived/operational notifications are never authoritative domain
