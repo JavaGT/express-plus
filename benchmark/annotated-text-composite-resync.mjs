@@ -31,13 +31,36 @@ const ANNOTATIONS_PER_WORD = Number(process.env.ANNOTATED_TEXT_BENCH_ANNOTATIONS
 const PROTECTED_WORDS = 100;
 const PROFILE_PHASES = process.env.ANNOTATED_TEXT_BENCH_PROFILE === '1';
 const SCENARIO = process.env.ANNOTATED_TEXT_BENCH_SCENARIO ?? 'initial';
-if (!['initial', 'fallback'].includes(SCENARIO)) throw new Error('ANNOTATED_TEXT_BENCH_SCENARIO must be initial or fallback');
+const SCENARIOS = ['initial', 'fallback', 'server-peak', 'client-peak', 'retained-growth'];
+if (!SCENARIOS.includes(SCENARIO)) throw new Error(`ANNOTATED_TEXT_BENCH_SCENARIO must be one of ${SCENARIOS.join(', ')}`);
+const MIB = 1024 * 1024;
+const SERVER_PEAK_LIMIT_MIB = 384;
+const CLIENT_PEAK_LIMIT_MIB = 384;
+const RETAINED_TOTAL_LIMIT_MIB = 64;
+const RETAINED_SLOPE_LIMIT_MIB = 2;
+const ENVELOPE_LIMIT_BYTES = 40 * MIB;
 
 function percentile(values, p) {
   if (values.length === 0) return 0;
   const sorted = [...values].sort((a, b) => a - b);
   const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
   return sorted[index];
+}
+
+function memorySample() {
+  const memory = process.memoryUsage();
+  return {
+    rssMiB: memory.rss / MIB,
+    heapUsedMiB: memory.heapUsed / MIB,
+    heapTotalMiB: memory.heapTotal / MIB,
+    externalMiB: memory.external / MIB,
+  };
+}
+
+function forceGc() {
+  if (typeof global.gc !== 'function') throw new Error(`${SCENARIO} requires node --expose-gc`);
+  global.gc();
+  global.gc();
 }
 
 function makeConn(id) {
@@ -198,7 +221,7 @@ async function seedDocument(app, db) {
   };
 }
 
-async function measureSnapshot(db, BenchDoc, fixture, principal, visible) {
+async function measureServerSnapshot(db, BenchDoc, fixture, principal) {
   const phases = [];
   const started = performance.now();
   const input = {
@@ -213,34 +236,67 @@ async function measureSnapshot(db, BenchDoc, fixture, principal, visible) {
   };
   const snapshot = await projectAnnotatedTextSnapshot(input);
   const projectionDuration = performance.now() - started;
+  const afterProjection = memorySample();
   const serializationStarted = performance.now();
   const serialized = JSON.stringify(snapshot);
   const serializationDuration = performance.now() - serializationStarted;
   const serializedBytes = Buffer.byteLength(serialized);
+  const afterSerialization = memorySample();
+  if (PROFILE_PHASES) phases.push({ phase: 'serialization', durationMs: serializationDuration, details: { bytes: serializedBytes } });
+  return {
+    snapshot,
+    serialized,
+    projectionDuration,
+    serializationDuration,
+    serializedBytes,
+    phases,
+    memory: { afterProjection, afterSerialization },
+  };
+}
+
+function measureClientSnapshot(serialized, snapshotVersion, BenchDoc, fixture) {
   const validationStarted = performance.now();
-  const recipient = materializeAnnotatedTextSnapshot(JSON.parse(serialized), BenchDoc.body, {
-    family: snapshot.version === 2 ? fixture.family : undefined,
+  const parsed = JSON.parse(serialized);
+  const afterParse = memorySample();
+  const recipient = materializeAnnotatedTextSnapshot(parsed, BenchDoc.body, {
+    family: snapshotVersion === 2 ? fixture.family : undefined,
   });
   const validationDuration = performance.now() - validationStarted;
-  if (PROFILE_PHASES) {
-    phases.push({ phase: 'serialization', durationMs: serializationDuration, details: { bytes: serializedBytes } });
-    phases.push({ phase: 'parse and recipient validation', durationMs: validationDuration, details: { bytes: serializedBytes } });
-  }
+  const afterValidation = memorySample();
+  return { recipient, validationDuration, memory: { afterParse, afterValidation } };
+}
+
+async function measureSnapshot(db, BenchDoc, fixture, principal, visible) {
+  const started = performance.now();
+  const server = await measureServerSnapshot(db, BenchDoc, fixture, principal);
+  const client = measureClientSnapshot(server.serialized, server.snapshot.version, BenchDoc, fixture);
   const endToEndDuration = performance.now() - started;
   if (visible) {
-    if (recipient.text !== fixture.text || recipient.annotations.length !== fixture.annotationCount) {
+    if (client.recipient.text !== fixture.text || client.recipient.annotations.length !== fixture.annotationCount) {
       throw new Error('visible recipient did not receive the complete timing/uncertainty state');
     }
   } else {
     const wholeDocumentProtected = WORDS <= PROTECTED_WORDS;
-    if ((wholeDocumentProtected ? recipient.restricted !== true : !Array.isArray(recipient.redactions) || recipient.redactions.length !== 1)
-      || recipient.text.includes(fixture.protectedText)
-      || recipient.annotations.some((entry) => entry.id === 'uncertainty-00000')
-      || recipient.annotations.some((entry) => entry.family === 'confidential')) {
+    if ((wholeDocumentProtected ? client.recipient.restricted !== true : !Array.isArray(client.recipient.redactions) || client.recipient.redactions.length !== 1)
+      || client.recipient.text.includes(fixture.protectedText)
+      || client.recipient.annotations.some((entry) => entry.id === 'uncertainty-00000')
+      || client.recipient.annotations.some((entry) => entry.family === 'confidential')) {
       throw new Error('redacted recipient received protected text or canonical annotation facts');
     }
   }
-  return { snapshot: recipient, projectionDuration, serializationDuration, validationDuration, endToEndDuration, phases, serializedBytes };
+  const phases = PROFILE_PHASES
+    ? [...server.phases, { phase: 'parse and recipient validation', durationMs: client.validationDuration, details: { bytes: server.serializedBytes } }]
+    : [];
+  return {
+    snapshot: client.recipient,
+    projectionDuration: server.projectionDuration,
+    serializationDuration: server.serializationDuration,
+    validationDuration: client.validationDuration,
+    endToEndDuration,
+    phases,
+    serializedBytes: server.serializedBytes,
+    memory: { server: server.memory, client: client.memory },
+  };
 }
 
 async function prepareForcedFallbackSessions({ db, BenchDoc, fixture }) {
@@ -418,6 +474,125 @@ async function measureClientBudget({ reconnect }) {
   };
 }
 
+function maxRssMiB(...samples) {
+  return Math.max(...samples.map((sample) => sample.rssMiB));
+}
+
+function assertServerRecipient(snapshot, fixture, visible) {
+  if (visible) {
+    if (snapshot.text !== fixture.text || snapshot.annotations.length !== fixture.annotationCount) {
+      throw new Error('visible server snapshot parity failed');
+    }
+    return;
+  }
+  if (snapshot.text.includes(fixture.protectedText)
+      || snapshot.annotations.some((entry) => entry.id === 'uncertainty-00000')
+      || snapshot.annotations.some((entry) => entry.family === 'confidential')) {
+    throw new Error('redacted server snapshot confidentiality/parity failed');
+  }
+}
+
+async function serverScalarSample(db, BenchDoc, fixture, principal, visible) {
+  const measured = await measureServerSnapshot(db, BenchDoc, fixture, principal);
+  assertServerRecipient(measured.snapshot, fixture, visible);
+  return {
+    projectionDuration: measured.projectionDuration,
+    serializationDuration: measured.serializationDuration,
+    serializedBytes: measured.serializedBytes,
+    memory: measured.memory,
+  };
+}
+
+async function runServerPeak(db, BenchDoc, fixture) {
+  forceGc();
+  const baseline = memorySample();
+  const measured = await serverScalarSample(db, BenchDoc, fixture, { id: 'u1' }, true);
+  const peakRssDeltaMiB = maxRssMiB(measured.memory.afterProjection, measured.memory.afterSerialization) - baseline.rssMiB;
+  const thresholdNotes = [];
+  if (peakRssDeltaMiB >= SERVER_PEAK_LIMIT_MIB) thresholdNotes.push(`isolated server peak ${peakRssDeltaMiB}MiB exceeds ${SERVER_PEAK_LIMIT_MIB}MiB`);
+  if (measured.serializedBytes >= ENVELOPE_LIMIT_BYTES) thresholdNotes.push(`serialized envelope ${measured.serializedBytes} bytes exceeds ${ENVELOPE_LIMIT_BYTES} bytes`);
+  return {
+    scenario: SCENARIO,
+    baseline,
+    memory: measured.memory,
+    peakRssDeltaMiB: Number(peakRssDeltaMiB.toFixed(2)),
+    projectionMs: Number(measured.projectionDuration.toFixed(3)),
+    serializationMs: Number(measured.serializationDuration.toFixed(3)),
+    serializedBytes: measured.serializedBytes,
+    limits: { peakRssMiB: SERVER_PEAK_LIMIT_MIB, envelopeBytes: ENVELOPE_LIMIT_BYTES },
+    thresholdNotes,
+  };
+}
+
+async function runClientPeak(db, BenchDoc, fixture) {
+  let prepared = await measureServerSnapshot(db, BenchDoc, fixture, { id: 'u1' });
+  assertServerRecipient(prepared.snapshot, fixture, true);
+  const serialized = prepared.serialized;
+  const snapshotVersion = prepared.snapshot.version;
+  const serializedBytes = prepared.serializedBytes;
+  prepared = null;
+  forceGc();
+  const baseline = memorySample();
+  const measured = measureClientSnapshot(serialized, snapshotVersion, BenchDoc, fixture);
+  if (measured.recipient.text !== fixture.text || measured.recipient.annotations.length !== fixture.annotationCount) {
+    throw new Error('isolated client snapshot parity failed');
+  }
+  const peakRssDeltaMiB = maxRssMiB(measured.memory.afterParse, measured.memory.afterValidation) - baseline.rssMiB;
+  const thresholdNotes = [];
+  if (peakRssDeltaMiB >= CLIENT_PEAK_LIMIT_MIB) thresholdNotes.push(`isolated client peak ${peakRssDeltaMiB}MiB exceeds ${CLIENT_PEAK_LIMIT_MIB}MiB`);
+  if (serializedBytes >= ENVELOPE_LIMIT_BYTES) thresholdNotes.push(`serialized envelope ${serializedBytes} bytes exceeds ${ENVELOPE_LIMIT_BYTES} bytes`);
+  return {
+    scenario: SCENARIO,
+    baseline,
+    memory: measured.memory,
+    peakRssDeltaMiB: Number(peakRssDeltaMiB.toFixed(2)),
+    parseAndValidationMs: Number(measured.validationDuration.toFixed(3)),
+    serializedBytes,
+    limits: { peakRssMiB: CLIENT_PEAK_LIMIT_MIB, envelopeBytes: ENVELOPE_LIMIT_BYTES },
+    thresholdNotes,
+  };
+}
+
+async function runRetainedGrowth(db, BenchDoc, fixture) {
+  await serverScalarSample(db, BenchDoc, fixture, { id: 'u1' }, true);
+  forceGc();
+  const baseline = memorySample();
+  const samples = [];
+  const serializedSizes = [];
+  for (let index = 0; index < RECIPIENTS; index += 1) {
+    const visible = index < VISIBLE_RECIPIENTS;
+    const measured = await serverScalarSample(db, BenchDoc, fixture, { id: visible ? 'u1' : `viewer-${index}` }, visible);
+    serializedSizes.push(measured.serializedBytes);
+    forceGc();
+    const retained = memorySample();
+    samples.push({
+      recipient: index + 1,
+      cohort: visible ? 'visible' : 'denied',
+      heapUsedDeltaMiB: Number((retained.heapUsedMiB - baseline.heapUsedMiB).toFixed(3)),
+      rssDeltaMiB: Number((retained.rssMiB - baseline.rssMiB).toFixed(3)),
+    });
+  }
+  const final = memorySample();
+  const retainedTotalMiB = final.heapUsedMiB - baseline.heapUsedMiB;
+  const retainedSlopeMiBPerRecipient = retainedTotalMiB / RECIPIENTS;
+  const thresholdNotes = [];
+  if (retainedTotalMiB >= RETAINED_TOTAL_LIMIT_MIB) thresholdNotes.push(`retained heap growth ${retainedTotalMiB}MiB exceeds ${RETAINED_TOTAL_LIMIT_MIB}MiB`);
+  if (retainedSlopeMiBPerRecipient >= RETAINED_SLOPE_LIMIT_MIB) thresholdNotes.push(`retained heap slope ${retainedSlopeMiBPerRecipient}MiB/recipient exceeds ${RETAINED_SLOPE_LIMIT_MIB}MiB/recipient`);
+  if (Math.max(...serializedSizes) >= ENVELOPE_LIMIT_BYTES) thresholdNotes.push(`serialized envelope ${Math.max(...serializedSizes)} bytes exceeds ${ENVELOPE_LIMIT_BYTES} bytes`);
+  return {
+    scenario: SCENARIO,
+    baseline,
+    final,
+    samples,
+    retainedTotalMiB: Number(retainedTotalMiB.toFixed(3)),
+    retainedSlopeMiBPerRecipient: Number(retainedSlopeMiBPerRecipient.toFixed(3)),
+    operationalRssDeltaMiB: Number((final.rssMiB - baseline.rssMiB).toFixed(2)),
+    serializedSizes,
+    limits: { retainedTotalMiB: RETAINED_TOTAL_LIMIT_MIB, retainedSlopeMiBPerRecipient: RETAINED_SLOPE_LIMIT_MIB, envelopeBytes: ENVELOPE_LIMIT_BYTES },
+    thresholdNotes,
+  };
+}
+
 const coordinatorHeld = { value: false };
 const originalHash = createHash;
 void originalHash;
@@ -443,6 +618,48 @@ async function main() {
   app.start();
   await app.ready;
   const fixture = await seedDocument(app, db);
+  const commonReport = {
+    recordedAt: new Date().toISOString(),
+    provenance: {
+      commit: process.env.ANNOTATED_TEXT_BENCH_COMMIT ?? null,
+      benchmarkSha256: createHash('sha256').update(benchmarkBytes).digest('hex'),
+      sourceSha256,
+      command: `ANNOTATED_TEXT_BENCH_SCENARIO=${SCENARIO} ANNOTATED_TEXT_BENCH_COMMIT=${process.env.ANNOTATED_TEXT_BENCH_COMMIT ?? ''} node ${process.execArgv.join(' ')} benchmark/annotated-text-composite-resync.mjs`,
+      environment: {
+        ANNOTATED_TEXT_BENCH_WORDS: String(WORDS),
+        ANNOTATED_TEXT_BENCH_ANNOTATIONS_PER_WORD: String(ANNOTATIONS_PER_WORD),
+        ANNOTATED_TEXT_BENCH_RECIPIENTS: String(RECIPIENTS),
+        ANNOTATED_TEXT_BENCH_VISIBLE_RECIPIENTS: String(VISIBLE_RECIPIENTS),
+      },
+      cpu: cpus()[0]?.model ?? 'unknown',
+      logicalCpuCount: cpus().length,
+      totalMemoryMiB: Number((totalmem() / MIB).toFixed(2)),
+      processList,
+    },
+    node: process.version,
+    platform: `${process.platform}/${process.arch}`,
+    fixture: {
+      words: WORDS,
+      annotations: fixture.annotationCount,
+      uniqueRanges: fixture.uniqueRanges,
+      protectingAnnotations: 1,
+      visibleRecipients: VISIBLE_RECIPIENTS,
+      redactedRecipients: RECIPIENTS - VISIBLE_RECIPIENTS,
+      recipients: RECIPIENTS,
+      controls: CONTROLS,
+    },
+  };
+  if (SCENARIO === 'server-peak' || SCENARIO === 'client-peak' || SCENARIO === 'retained-growth') {
+    const scenarioReport = SCENARIO === 'server-peak'
+      ? await runServerPeak(db, BenchDoc, fixture)
+      : SCENARIO === 'client-peak'
+        ? await runClientPeak(db, BenchDoc, fixture)
+        : await runRetainedGrowth(db, BenchDoc, fixture);
+    console.log(JSON.stringify({ ...commonReport, ...scenarioReport, writeCoordinatorHeld: coordinatorHeld.value }, null, 2));
+    await app.shutdown().catch(() => {});
+    db.close();
+    return;
+  }
   // The acceptance delta measures projection/recovery over the fully seeded
   // fixture baseline; fixture construction is reported separately.
   const rssBefore = process.memoryUsage().rss;
@@ -493,37 +710,9 @@ async function main() {
   const peakRssDeltaMiB = (peakRss - rssBefore) / (1024 * 1024);
 
   const report = {
-    recordedAt: new Date().toISOString(),
+    ...commonReport,
     scenario: SCENARIO,
     profiling: PROFILE_PHASES,
-    provenance: {
-      commit: process.env.ANNOTATED_TEXT_BENCH_COMMIT ?? null,
-      benchmarkSha256: createHash('sha256').update(benchmarkBytes).digest('hex'),
-      sourceSha256,
-      command: `ANNOTATED_TEXT_BENCH_SCENARIO=${SCENARIO} ANNOTATED_TEXT_BENCH_COMMIT=${process.env.ANNOTATED_TEXT_BENCH_COMMIT ?? ''} pnpm benchmark:annotated-text-composite-resync`,
-      environment: {
-        ANNOTATED_TEXT_BENCH_WORDS: String(WORDS),
-        ANNOTATED_TEXT_BENCH_ANNOTATIONS_PER_WORD: String(ANNOTATIONS_PER_WORD),
-        ANNOTATED_TEXT_BENCH_RECIPIENTS: String(RECIPIENTS),
-        ANNOTATED_TEXT_BENCH_VISIBLE_RECIPIENTS: String(VISIBLE_RECIPIENTS),
-      },
-      cpu: cpus()[0]?.model ?? 'unknown',
-      logicalCpuCount: cpus().length,
-      totalMemoryMiB: Number((totalmem() / (1024 * 1024)).toFixed(2)),
-      processList,
-    },
-    node: process.version,
-    platform: `${process.platform}/${process.arch}`,
-    fixture: {
-      words: WORDS,
-      annotations: fixture.annotationCount,
-      uniqueRanges: fixture.uniqueRanges,
-      protectingAnnotations: 1,
-      visibleRecipients: visibleSamples.length,
-      redactedRecipients: redactedSamples.length,
-      recipients: RECIPIENTS,
-      controls: CONTROLS,
-    },
     fanout: { p99LoopDelayMs: Number(fanout.p99.toFixed(3)), coalescedMessages: fanout.messages },
     projections: {
       acceptanceBoundary: 'projection + JSON.stringify + JSON.parse + public snapshot validation',
@@ -554,6 +743,7 @@ async function main() {
     },
     rssDeltaMiB: Number(rssDeltaMiB.toFixed(2)),
     peakRssDeltaMiB: Number(peakRssDeltaMiB.toFixed(2)),
+    operationalCombinedRss: true,
     rssWindowMiB: memoryTrail.map((value) => Number(value.toFixed(2))),
     rssWindowPeakMiB: Number(Math.max(...memoryTrail).toFixed(2)),
     fixtureSetupRssMiB: Number(((rssBefore - rssAtStart) / (1024 * 1024)).toFixed(2)),
@@ -563,14 +753,11 @@ async function main() {
   const thresholdNotes = [];
   if (fanout.p99 >= 100) thresholdNotes.push(`event-loop delay p99 ${fanout.p99}ms exceeds 100ms`);
   if (report.projections.endToEndP95Ms >= 500) thresholdNotes.push(`end-to-end snapshot p95 ${report.projections.endToEndP95Ms}ms exceeds 500ms`);
-  // RSS growth is judged per fresh snapshot window (memory a single projection
-  // needs), not by total process RSS across 25 sequential recipients: V8 heap
-  // expansion between projections is reclaimable GC lag, not retention (a
-  // forced-GC probe returns the process to below its pre-loop baseline).
-  if (report.rssWindowPeakMiB >= 256) thresholdNotes.push(`peak per-recipient RSS window ${report.rssWindowPeakMiB}MiB exceeds 256MiB`);
-  if (noReconnect.burst > noReconnect.bound || oneReconnect.burst > oneReconnect.bound) {
+  if (Math.max(...serializedSizes) >= ENVELOPE_LIMIT_BYTES) thresholdNotes.push(`serialized envelope ${Math.max(...serializedSizes)} bytes exceeds ${ENVELOPE_LIMIT_BYTES} bytes`);
+  if (noReconnect.burst > 100 || oneReconnect.burst > 200 || noReconnect.burst > noReconnect.bound || oneReconnect.burst > oneReconnect.bound) {
     thresholdNotes.push('snapshot recovery exceeded cycle budget');
   }
+  if (coordinatorHeld.value) thresholdNotes.push('snapshot work held the write coordinator');
   report.thresholdNotes = thresholdNotes;
 
   const markdown = [
@@ -588,9 +775,9 @@ async function main() {
     `- Snapshot serialization p95: ${report.projections.serializationP95Ms} ms / recipient`,
     `- Snapshot parse/validation p95: ${report.projections.validationP95Ms} ms / recipient`,
     `- Snapshot end-to-end p95 (acceptance gate): ${report.projections.endToEndP95Ms} ms / recipient`,
-    `- RSS Δ: ${report.rssDeltaMiB} MiB`,
-    `- Peak RSS Δ: ${report.peakRssDeltaMiB} MiB`,
-    `- Per-recipient RSS window peak (gate): ${report.rssWindowPeakMiB} MiB`,
+    `- Operational combined-process RSS Δ (reported, not gated): ${report.rssDeltaMiB} MiB`,
+    `- Operational combined-process peak RSS Δ (reported, not gated): ${report.peakRssDeltaMiB} MiB`,
+    `- Maximum serialized envelope (40 MiB gate): ${Math.max(...report.projections.serializedSizes)} bytes`,
     `- Write coordinator held: ${report.writeCoordinatorHeld}`,
     `- Attempt histogram C=0: \`${JSON.stringify(report.budget.C0.histogram)}\``,
     `- Attempt histogram C=1: \`${JSON.stringify(report.budget.C1.histogram)}\``,
