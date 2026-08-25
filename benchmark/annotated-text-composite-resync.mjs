@@ -10,6 +10,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { cpus, totalmem } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
+import { Worker } from 'node:worker_threads';
 
 import workbench, {
   annotatedText, annotation, entity, everyone, executeDDL, executeFrameworkDDL,
@@ -61,6 +62,43 @@ function forceGc() {
   if (typeof global.gc !== 'function') throw new Error(`${SCENARIO} requires node --expose-gc`);
   global.gc();
   global.gc();
+}
+
+async function measurePeakRss(task) {
+  const state = new BigInt64Array(new SharedArrayBuffer(BigInt64Array.BYTES_PER_ELEMENT * 2));
+  const worker = new Worker(`
+    const { parentPort, workerData } = require('node:worker_threads');
+    const state = new BigInt64Array(workerData);
+    function sample() {
+      const rss = BigInt(process.memoryUsage().rss);
+      let seen = Atomics.load(state, 0);
+      while (rss > seen) {
+        const prior = Atomics.compareExchange(state, 0, seen, rss);
+        if (prior === seen) break;
+        seen = prior;
+      }
+      if (Atomics.load(state, 1) === 0n) setImmediate(sample);
+      else parentPort.postMessage('stopped');
+    }
+    parentPort.postMessage('ready');
+    sample();
+  `, { eval: true, workerData: state.buffer });
+  await new Promise((resolve, reject) => {
+    worker.once('message', resolve);
+    worker.once('error', reject);
+  });
+  forceGc();
+  const baseline = memorySample();
+  Atomics.store(state, 0, BigInt(Math.round(baseline.rssMiB * MIB)));
+  try {
+    const result = await task();
+    await new Promise((resolve) => setImmediate(resolve));
+    const peakRssMiB = Number(Atomics.load(state, 0)) / MIB;
+    return { result, baseline, peakRssMiB };
+  } finally {
+    Atomics.store(state, 1, 1n);
+    await worker.terminate();
+  }
 }
 
 function makeConn(id) {
@@ -474,10 +512,6 @@ async function measureClientBudget({ reconnect }) {
   };
 }
 
-function maxRssMiB(...samples) {
-  return Math.max(...samples.map((sample) => sample.rssMiB));
-}
-
 function assertServerRecipient(snapshot, fixture, visible) {
   if (visible) {
     if (snapshot.text !== fixture.text || snapshot.annotations.length !== fixture.annotationCount) {
@@ -485,8 +519,13 @@ function assertServerRecipient(snapshot, fixture, visible) {
     }
     return;
   }
-  if (snapshot.text.includes(fixture.protectedText)
-      || snapshot.annotations.some((entry) => entry.id === 'uncertainty-00000')
+  const wholeDocumentProtected = WORDS <= PROTECTED_WORDS;
+  const expectedText = wholeDocumentProtected ? '' : fixture.text.slice(fixture.protectedText.length);
+  const expectedRedactions = wholeDocumentProtected ? undefined : [{ start: 0, end: 0, placeholder: '[REDACTED]' }];
+  if ((wholeDocumentProtected && snapshot.restricted !== true)
+      || snapshot.text !== expectedText
+      || JSON.stringify(snapshot.redactions) !== JSON.stringify(expectedRedactions)
+      || snapshot.annotations.some((entry) => entry.family === 'transcriptionUncertainty' && Number(entry.id.slice('uncertainty-'.length)) < PROTECTED_WORDS)
       || snapshot.annotations.some((entry) => entry.family === 'confidential')) {
     throw new Error('redacted server snapshot confidentiality/parity failed');
   }
@@ -504,17 +543,17 @@ async function serverScalarSample(db, BenchDoc, fixture, principal, visible) {
 }
 
 async function runServerPeak(db, BenchDoc, fixture) {
-  forceGc();
-  const baseline = memorySample();
-  const measured = await serverScalarSample(db, BenchDoc, fixture, { id: 'u1' }, true);
-  const peakRssDeltaMiB = maxRssMiB(measured.memory.afterProjection, measured.memory.afterSerialization) - baseline.rssMiB;
+  const peak = await measurePeakRss(() => serverScalarSample(db, BenchDoc, fixture, { id: 'u1' }, true));
+  const measured = peak.result;
+  const peakRssDeltaMiB = peak.peakRssMiB - peak.baseline.rssMiB;
   const thresholdNotes = [];
   if (peakRssDeltaMiB >= SERVER_PEAK_LIMIT_MIB) thresholdNotes.push(`isolated server peak ${peakRssDeltaMiB}MiB exceeds ${SERVER_PEAK_LIMIT_MIB}MiB`);
   if (measured.serializedBytes >= ENVELOPE_LIMIT_BYTES) thresholdNotes.push(`serialized envelope ${measured.serializedBytes} bytes exceeds ${ENVELOPE_LIMIT_BYTES} bytes`);
   return {
     scenario: SCENARIO,
-    baseline,
+    baseline: peak.baseline,
     memory: measured.memory,
+    sampledPeakRssMiB: Number(peak.peakRssMiB.toFixed(2)),
     peakRssDeltaMiB: Number(peakRssDeltaMiB.toFixed(2)),
     projectionMs: Number(measured.projectionDuration.toFixed(3)),
     serializationMs: Number(measured.serializationDuration.toFixed(3)),
@@ -531,20 +570,20 @@ async function runClientPeak(db, BenchDoc, fixture) {
   const snapshotVersion = prepared.snapshot.version;
   const serializedBytes = prepared.serializedBytes;
   prepared = null;
-  forceGc();
-  const baseline = memorySample();
-  const measured = measureClientSnapshot(serialized, snapshotVersion, BenchDoc, fixture);
+  const peak = await measurePeakRss(() => measureClientSnapshot(serialized, snapshotVersion, BenchDoc, fixture));
+  const measured = peak.result;
   if (measured.recipient.text !== fixture.text || measured.recipient.annotations.length !== fixture.annotationCount) {
     throw new Error('isolated client snapshot parity failed');
   }
-  const peakRssDeltaMiB = maxRssMiB(measured.memory.afterParse, measured.memory.afterValidation) - baseline.rssMiB;
+  const peakRssDeltaMiB = peak.peakRssMiB - peak.baseline.rssMiB;
   const thresholdNotes = [];
   if (peakRssDeltaMiB >= CLIENT_PEAK_LIMIT_MIB) thresholdNotes.push(`isolated client peak ${peakRssDeltaMiB}MiB exceeds ${CLIENT_PEAK_LIMIT_MIB}MiB`);
   if (serializedBytes >= ENVELOPE_LIMIT_BYTES) thresholdNotes.push(`serialized envelope ${serializedBytes} bytes exceeds ${ENVELOPE_LIMIT_BYTES} bytes`);
   return {
     scenario: SCENARIO,
-    baseline,
+    baseline: peak.baseline,
     memory: measured.memory,
+    sampledPeakRssMiB: Number(peak.peakRssMiB.toFixed(2)),
     peakRssDeltaMiB: Number(peakRssDeltaMiB.toFixed(2)),
     parseAndValidationMs: Number(measured.validationDuration.toFixed(3)),
     serializedBytes,
@@ -573,7 +612,12 @@ async function runRetainedGrowth(db, BenchDoc, fixture) {
     });
   }
   const final = memorySample();
-  const retainedTotalMiB = final.heapUsedMiB - baseline.heapUsedMiB;
+  const retainedComponentsMiB = {
+    heapUsed: final.heapUsedMiB - baseline.heapUsedMiB,
+    external: final.externalMiB - baseline.externalMiB,
+    rss: final.rssMiB - baseline.rssMiB,
+  };
+  const retainedTotalMiB = Math.max(...Object.values(retainedComponentsMiB));
   const retainedSlopeMiBPerRecipient = retainedTotalMiB / RECIPIENTS;
   const thresholdNotes = [];
   if (retainedTotalMiB >= RETAINED_TOTAL_LIMIT_MIB) thresholdNotes.push(`retained heap growth ${retainedTotalMiB}MiB exceeds ${RETAINED_TOTAL_LIMIT_MIB}MiB`);
@@ -586,7 +630,7 @@ async function runRetainedGrowth(db, BenchDoc, fixture) {
     samples,
     retainedTotalMiB: Number(retainedTotalMiB.toFixed(3)),
     retainedSlopeMiBPerRecipient: Number(retainedSlopeMiBPerRecipient.toFixed(3)),
-    operationalRssDeltaMiB: Number((final.rssMiB - baseline.rssMiB).toFixed(2)),
+    retainedComponentsMiB: Object.fromEntries(Object.entries(retainedComponentsMiB).map(([key, value]) => [key, Number(value.toFixed(3))])),
     serializedSizes,
     limits: { retainedTotalMiB: RETAINED_TOTAL_LIMIT_MIB, retainedSlopeMiBPerRecipient: RETAINED_SLOPE_LIMIT_MIB, envelopeBytes: ENVELOPE_LIMIT_BYTES },
     thresholdNotes,

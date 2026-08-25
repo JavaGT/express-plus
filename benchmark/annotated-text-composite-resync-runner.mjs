@@ -61,7 +61,7 @@ for (const scenario of SCENARIOS) {
     maxBuffer: 64 * 1024 * 1024,
   });
   if (child.status !== 0) {
-    aggregate.stoppedBefore = scenario === 'fallback' ? null : SCENARIOS[SCENARIOS.indexOf(scenario) + 1] ?? null;
+    aggregate.stoppedBefore = scenario;
     aggregate.failure = `${scenario} process exited ${child.status}`;
     aggregate.scenarios[scenario] = { stderr: child.stderr, stdout: child.stdout };
     break;
@@ -71,7 +71,7 @@ for (const scenario of SCENARIOS) {
   aggregate.scenarios[scenario] = report;
   if (report.thresholdNotes?.length) {
     aggregate.failure = `${scenario} failed: ${report.thresholdNotes.join('; ')}`;
-    aggregate.stoppedBefore = SCENARIOS[SCENARIOS.indexOf(scenario) + 1] ?? null;
+    aggregate.stoppedBefore = scenario;
     break;
   }
 }
