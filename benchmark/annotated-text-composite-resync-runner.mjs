@@ -3,6 +3,9 @@
 
 import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const SCENARIOS = ['server-peak', 'client-peak', 'retained-growth', 'initial', 'fallback'];
 const WORKER_PATTERN = /vitest|svelte-check|node --test|annotated-text-composite-resync(?:-runner)?\.mjs|benchmark:annotated-text/i;
@@ -45,18 +48,41 @@ const aggregate = {
   isolation: {},
   stoppedBefore: null,
 };
+const clientInputDirectory = mkdtempSync(join(tmpdir(), 'workbench-w1a-client-'));
 
+try {
 for (const scenario of SCENARIOS) {
-  const isolation = isolationSnapshot();
+  let isolation = isolationSnapshot();
   aggregate.isolation[scenario] = isolation;
   if (isolation.matches.length > 0) {
     aggregate.stoppedBefore = scenario;
     aggregate.failure = `isolation check found active workers before ${scenario}`;
     break;
   }
+  if (scenario === 'client-peak') {
+    const preparation = spawnSync(process.execPath, ['benchmark/annotated-text-composite-resync.mjs'], {
+      cwd: process.cwd(),
+      env: { ...process.env, ANNOTATED_TEXT_BENCH_SCENARIO: 'client-prepare', ANNOTATED_TEXT_BENCH_CLIENT_INPUT: clientInputDirectory },
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    if (preparation.status !== 0) {
+      aggregate.stoppedBefore = scenario;
+      aggregate.failure = `client-peak preparation exited ${preparation.status}`;
+      aggregate.scenarios[scenario] = { stderr: preparation.stderr, stdout: preparation.stdout };
+      break;
+    }
+    isolation = isolationSnapshot();
+    aggregate.isolation[scenario] = isolation;
+    if (isolation.matches.length > 0) {
+      aggregate.stoppedBefore = scenario;
+      aggregate.failure = `isolation check found active workers before ${scenario}`;
+      break;
+    }
+  }
   const child = spawnSync(process.execPath, ['--expose-gc', 'benchmark/annotated-text-composite-resync.mjs'], {
     cwd: process.cwd(),
-    env: { ...process.env, ANNOTATED_TEXT_BENCH_SCENARIO: scenario },
+    env: { ...process.env, ANNOTATED_TEXT_BENCH_SCENARIO: scenario, ANNOTATED_TEXT_BENCH_CLIENT_INPUT: clientInputDirectory },
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
   });
@@ -74,6 +100,9 @@ for (const scenario of SCENARIOS) {
     aggregate.stoppedBefore = scenario;
     break;
   }
+}
+} finally {
+  rmSync(clientInputDirectory, { recursive: true, force: true });
 }
 
 aggregate.passed = !aggregate.failure && Object.keys(aggregate.scenarios).length === SCENARIOS.length;

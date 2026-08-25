@@ -32,7 +32,7 @@ const ANNOTATIONS_PER_WORD = Number(process.env.ANNOTATED_TEXT_BENCH_ANNOTATIONS
 const PROTECTED_WORDS = 100;
 const PROFILE_PHASES = process.env.ANNOTATED_TEXT_BENCH_PROFILE === '1';
 const SCENARIO = process.env.ANNOTATED_TEXT_BENCH_SCENARIO ?? 'initial';
-const SCENARIOS = ['initial', 'fallback', 'server-peak', 'client-peak', 'retained-growth'];
+const SCENARIOS = ['initial', 'fallback', 'server-peak', 'client-prepare', 'client-peak', 'retained-growth'];
 if (!SCENARIOS.includes(SCENARIO)) throw new Error(`ANNOTATED_TEXT_BENCH_SCENARIO must be one of ${SCENARIOS.join(', ')}`);
 const MIB = 1024 * 1024;
 const SERVER_PEAK_LIMIT_MIB = 384;
@@ -251,6 +251,7 @@ async function seedDocument(app, db) {
   }
   return {
     row: db.prepare("SELECT * FROM BenchDoc WHERE id = 'd1'").get(),
+    checkpoint,
     family,
     text,
     protectedText: text.slice(0, offsets[Math.min(PROTECTED_WORDS, WORDS)] ?? text.length),
@@ -563,16 +564,15 @@ async function runServerPeak(db, BenchDoc, fixture) {
   };
 }
 
-async function runClientPeak(db, BenchDoc, fixture) {
-  let prepared = await measureServerSnapshot(db, BenchDoc, fixture, { id: 'u1' });
-  assertServerRecipient(prepared.snapshot, fixture, true);
-  const serialized = prepared.serialized;
-  const snapshotVersion = prepared.snapshot.version;
-  const serializedBytes = prepared.serializedBytes;
-  prepared = null;
-  const peak = await measurePeakRss(() => measureClientSnapshot(serialized, snapshotVersion, BenchDoc, fixture));
+async function runPreparedClientPeak(BenchDoc, benchmarkBytes, sourceSha256, processList) {
+  const inputDirectory = process.env.ANNOTATED_TEXT_BENCH_CLIENT_INPUT;
+  if (!inputDirectory) throw new Error('client-peak requires ANNOTATED_TEXT_BENCH_CLIENT_INPUT');
+  const serialized = readFileSync(`${inputDirectory}/snapshot.json`, 'utf8');
+  const family = restoreTextFamilySerialized(readFileSync(`${inputDirectory}/family-checkpoint.json`, 'utf8'));
+  const serializedBytes = Buffer.byteLength(serialized);
+  const peak = await measurePeakRss(() => measureClientSnapshot(serialized, 2, BenchDoc, { family }));
   const measured = peak.result;
-  if (measured.recipient.text !== fixture.text || measured.recipient.annotations.length !== fixture.annotationCount) {
+  if (measured.recipient.text !== wordText(WORDS) || measured.recipient.annotations.length !== WORDS * ANNOTATIONS_PER_WORD) {
     throw new Error('isolated client snapshot parity failed');
   }
   const peakRssDeltaMiB = peak.peakRssMiB - peak.baseline.rssMiB;
@@ -580,6 +580,30 @@ async function runClientPeak(db, BenchDoc, fixture) {
   if (peakRssDeltaMiB >= CLIENT_PEAK_LIMIT_MIB) thresholdNotes.push(`isolated client peak ${peakRssDeltaMiB}MiB exceeds ${CLIENT_PEAK_LIMIT_MIB}MiB`);
   if (serializedBytes >= ENVELOPE_LIMIT_BYTES) thresholdNotes.push(`serialized envelope ${serializedBytes} bytes exceeds ${ENVELOPE_LIMIT_BYTES} bytes`);
   return {
+    recordedAt: new Date().toISOString(),
+    provenance: {
+      commit: process.env.ANNOTATED_TEXT_BENCH_COMMIT ?? null,
+      benchmarkSha256: createHash('sha256').update(benchmarkBytes).digest('hex'),
+      sourceSha256,
+      clientInputSha256: createHash('sha256').update(serialized).digest('hex'),
+      command: `ANNOTATED_TEXT_BENCH_SCENARIO=client-peak ANNOTATED_TEXT_BENCH_COMMIT=${process.env.ANNOTATED_TEXT_BENCH_COMMIT ?? ''} node ${process.execArgv.join(' ')} benchmark/annotated-text-composite-resync.mjs`,
+      cpu: cpus()[0]?.model ?? 'unknown',
+      logicalCpuCount: cpus().length,
+      totalMemoryMiB: Number((totalmem() / MIB).toFixed(2)),
+      processList,
+    },
+    node: process.version,
+    platform: `${process.platform}/${process.arch}`,
+    fixture: {
+      words: WORDS,
+      annotations: WORDS * ANNOTATIONS_PER_WORD,
+      uniqueRanges: WORDS + 1,
+      protectingAnnotations: 1,
+      visibleRecipients: VISIBLE_RECIPIENTS,
+      redactedRecipients: RECIPIENTS - VISIBLE_RECIPIENTS,
+      recipients: RECIPIENTS,
+      controls: CONTROLS,
+    },
     scenario: SCENARIO,
     baseline: peak.baseline,
     memory: measured.memory,
@@ -589,6 +613,7 @@ async function runClientPeak(db, BenchDoc, fixture) {
     serializedBytes,
     limits: { peakRssMiB: CLIENT_PEAK_LIMIT_MIB, envelopeBytes: ENVELOPE_LIMIT_BYTES },
     thresholdNotes,
+    writeCoordinatorHeld: false,
   };
 }
 
@@ -650,6 +675,10 @@ async function main() {
     'public/workbench-annotated-text-snapshot.mjs',
   ].map((path) => [path, createHash('sha256').update(readFileSync(new URL(`../${path}`, import.meta.url))).digest('hex')]));
   const processList = execFileSync('ps', ['-Ao', 'pid,pcpu,rss,command'], { encoding: 'utf8' });
+  if (SCENARIO === 'client-peak') {
+    console.log(JSON.stringify(await runPreparedClientPeak(declaredEntity(), benchmarkBytes, sourceSha256, processList), null, 2));
+    return;
+  }
   const rssAtStart = process.memoryUsage().rss;
   const db = new DatabaseSync(':memory:');
   install(db);
@@ -662,6 +691,18 @@ async function main() {
   app.start();
   await app.ready;
   const fixture = await seedDocument(app, db);
+  if (SCENARIO === 'client-prepare') {
+    const outputDirectory = process.env.ANNOTATED_TEXT_BENCH_CLIENT_INPUT;
+    if (!outputDirectory) throw new Error('client-prepare requires ANNOTATED_TEXT_BENCH_CLIENT_INPUT');
+    const prepared = await measureServerSnapshot(db, BenchDoc, fixture, { id: 'u1' });
+    assertServerRecipient(prepared.snapshot, fixture, true);
+    writeFileSync(`${outputDirectory}/snapshot.json`, prepared.serialized);
+    writeFileSync(`${outputDirectory}/family-checkpoint.json`, fixture.checkpoint);
+    console.log(JSON.stringify({ scenario: SCENARIO, serializedBytes: prepared.serializedBytes }));
+    await app.shutdown().catch(() => {});
+    db.close();
+    return;
+  }
   const commonReport = {
     recordedAt: new Date().toISOString(),
     provenance: {
@@ -693,12 +734,10 @@ async function main() {
       controls: CONTROLS,
     },
   };
-  if (SCENARIO === 'server-peak' || SCENARIO === 'client-peak' || SCENARIO === 'retained-growth') {
+  if (SCENARIO === 'server-peak' || SCENARIO === 'retained-growth') {
     const scenarioReport = SCENARIO === 'server-peak'
       ? await runServerPeak(db, BenchDoc, fixture)
-      : SCENARIO === 'client-peak'
-        ? await runClientPeak(db, BenchDoc, fixture)
-        : await runRetainedGrowth(db, BenchDoc, fixture);
+      : await runRetainedGrowth(db, BenchDoc, fixture);
     console.log(JSON.stringify({ ...commonReport, ...scenarioReport, writeCoordinatorHeld: coordinatorHeld.value }, null, 2));
     await app.shutdown().catch(() => {});
     db.close();
