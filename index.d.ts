@@ -1602,7 +1602,12 @@ export interface ListenOptions {
   principalOf?: (request: IncomingMessage) => Principal;
   onListening?: () => void;
   env?: string;
-  rateLimit?: { ip: RateLimitWindow; session?: RateLimitWindow };
+  rateLimit?: {
+    ip: RateLimitWindow;
+    session?: RateLimitWindow;
+    /** Optional raised window for trusted local peers (loopback/private-network addresses — the operator's own machine). When present, loopback/private peers are capped by `local` instead of `ip`/`session`, so self-hosted / dev traffic (e.g. Vite's per-module asset fetches) does not trip the production edge budget. Remote (public) peers ALWAYS use `ip`/`session`. */
+    local?: RateLimitWindow;
+  };
   csp?: string;
   hsts?: boolean;
   cors?: { origins: readonly string[] };

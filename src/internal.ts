@@ -41,7 +41,7 @@ export { mayVerb, mayFieldOp, mayRow } from './row-grant.ts';
 export { createAuthorizationAdapter, type AuthorizationAdapter, type AdmitInput, type AdmissionDecision, type AdmissionReasonCode, type ResourceCategory, type ResourceRegistration } from './authorization-adapter.ts';
 export { createAuditor, noopAuditSink, isOpaqueId, sanitizeOpaqueId, type OpaqueId, type Auditor, type AuditorOptions, type AuditActor, type AuditClassification, type AuditEvent, type AuditInput, type AuditOutcome, type AuditRetention, type AuditSink, type RetentionConfig } from './audit.ts';
 export { createDenialAuditor, type DenialAuditor, type DenialAuditorOptions, type DenialInput } from './denial-log.ts';
-export { createRateLimiter, createKeyedRateLimiter, type KeyedRateLimiter, type KeyedRateLimitOptions, type KeyedRateLimitResult, type RateLimitOptions, type RateLimitResult, type RateLimitScope } from './rate-limit.ts';
+export { createRateLimiter, createKeyedRateLimiter, isTrustedLocalPeer, type KeyedRateLimiter, type KeyedRateLimitOptions, type KeyedRateLimitResult, type RateLimitOptions, type RateLimitResult, type RateLimitScope } from './rate-limit.ts';
 export { generateDDL, executeDDL, generateFrameworkDDL, executeFrameworkDDL, frameworkCursorSchema } from './ddl.ts';
 export { authRoutes } from './auth/routes.ts';
 export { config, resolveConfig } from './config.ts';

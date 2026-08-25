@@ -166,3 +166,103 @@ test('session and IP windows roll independently', async () => {
   const after = limiter.check({ ip, sessionId });
   assert.equal(after.allowed, true, 'session budget reset');
 });
+
+test('isTrustedLocalPeer classifies loopback/private addresses; remote stays remote', async () => {
+  const { isTrustedLocalPeer } = await import('../build/rate-limit.mjs');
+  // Trusted: loopback + IPv4-mapped + RFC1918 + IPv6 local
+  assert.equal(isTrustedLocalPeer('127.0.0.1'), true, 'IPv4 loopback');
+  assert.equal(isTrustedLocalPeer('::1'), true, 'IPv6 loopback');
+  assert.equal(isTrustedLocalPeer('::ffff:127.0.0.1'), true, 'IPv4-mapped loopback');
+  assert.equal(isTrustedLocalPeer('10.1.2.3'), true, 'RFC1918 10/8');
+  assert.equal(isTrustedLocalPeer('172.16.0.1'), true, 'RFC1918 172.16/12');
+  assert.equal(isTrustedLocalPeer('172.31.255.255'), true, 'RFC1918 172.31');
+  assert.equal(isTrustedLocalPeer('192.168.1.5'), true, 'RFC1918 192.168');
+  assert.equal(isTrustedLocalPeer('169.254.0.1'), true, 'link-local');
+  assert.equal(isTrustedLocalPeer('fc00::1'), true, 'IPv6 unique-local');
+  assert.equal(isTrustedLocalPeer('fd12::1'), true, 'IPv6 unique-local fd');
+  assert.equal(isTrustedLocalPeer('fe80::1'), true, 'IPv6 link-local');
+
+  // Remote: public addresses stay remote (production edge budget untouched)
+  assert.equal(isTrustedLocalPeer('8.8.8.8'), false, 'public IPv4');
+  assert.equal(isTrustedLocalPeer('203.0.113.7'), false, 'TEST-NET IPv4');
+  assert.equal(isTrustedLocalPeer('172.32.0.1'), false, 'just above 172.16/12');
+  assert.equal(isTrustedLocalPeer('2001:4860:4860::8888'), false, 'public IPv6 (Google DNS)');
+  assert.equal(isTrustedLocalPeer(''), false, 'empty string');
+  assert.equal(isTrustedLocalPeer(undefined), false, 'undefined');
+});
+
+test('trusted local peer with a `local` window exceeds the remote cap without 429', async () => {
+  let t = 1000;
+  const now = () => t;
+
+  // Remote cap of 3; local (trusted) cap of 1000.
+  const limiter = await createLimiter(
+    { windowMs: 1000, max: 3 },
+    null,
+    now,
+  );
+  // Inject `local` via the options shape the loader passes through.
+  // (createLimiter above passes only {ip, session, now}; build a limiter with
+  // local explicitly.)
+  const { createRateLimiter } = await import('../build/rate-limit.mjs');
+  const localLimiter = createRateLimiter({
+    ip: { windowMs: 1000, max: 3 },
+    local: { windowMs: 1000, max: 1000 },
+    now,
+  });
+
+  // Trusted peer loops far above the remote cap of 3 — never denied.
+  for (let i = 0; i < 50; i++) {
+    const r = localLimiter.check({ ip: '127.0.0.1' });
+    assert.equal(r.allowed, true, `trusted local request ${i} allowed`);
+  }
+
+  // Remote peer on the same limiter still hits the configured cap (3).
+  const remoteResults = Array.from({ length: 4 }, () => localLimiter.check({ ip: '8.8.8.8' }));
+  assert.deepEqual(remoteResults.map((r) => r.allowed), [true, true, true, false], 'remote peer capped at 3');
+});
+
+test('trusted local peer with a `local` window also lifts the session cap', async () => {
+  let t = 1000;
+  const now = () => t;
+  const { createRateLimiter } = await import('../build/rate-limit.mjs');
+
+  const limiter = createRateLimiter({
+    ip: { windowMs: 1000, max: 1000 },
+    session: { windowMs: 1000, max: 2 },
+    local: { windowMs: 1000, max: 1000 },
+    now,
+  });
+
+  // Trusted local peer + one session: session cap of 2 is lifted to local 1000.
+  for (let i = 0; i < 10; i++) {
+    const r = limiter.check({ ip: '127.0.0.1', sessionId: 'dev-session' });
+    assert.equal(r.allowed, true, `trusted session request ${i} allowed`);
+  }
+
+  // Remote peer + same low session cap is still capped at 2.
+  const rr = [
+    limiter.check({ ip: '8.8.8.8', sessionId: 'remote-session' }),
+    limiter.check({ ip: '8.8.8.8', sessionId: 'remote-session' }),
+    limiter.check({ ip: '8.8.8.8', sessionId: 'remote-session' }),
+  ];
+  assert.deepEqual(rr.map((r) => r.allowed), [true, true, false], 'remote session still capped at 2');
+});
+
+test('without a `local` window configured, trusted peers keep the ip cap (backward compatible)', async () => {
+  let t = 1000;
+  const now = () => t;
+  const { createRateLimiter } = await import('../build/rate-limit.mjs');
+
+  const limiter = createRateLimiter({
+    ip: { windowMs: 1000, max: 2 },
+    now,
+  });
+
+  const results = [
+    limiter.check({ ip: '127.0.0.1' }),
+    limiter.check({ ip: '127.0.0.1' }),
+    limiter.check({ ip: '127.0.0.1' }),
+  ];
+  assert.deepEqual(results.map((r) => r.allowed), [true, true, false], 'no local window → ip cap applies even for 127.0.0.1');
+});

@@ -41,7 +41,7 @@ export { mayVerb, mayFieldOp, mayRow } from './row-grant.mjs';
 export { createAuthorizationAdapter,                                                                                                                                                } from './authorization-adapter.mjs';
 export { createAuditor, noopAuditSink, isOpaqueId, sanitizeOpaqueId,                                                                                                                                                                                                             } from './audit.mjs';
 export { createDenialAuditor,                                                                 } from './denial-log.mjs';
-export { createRateLimiter, createKeyedRateLimiter,                                                                                                                                                } from './rate-limit.mjs';
+export { createRateLimiter, createKeyedRateLimiter, isTrustedLocalPeer,                                                                                                                                                } from './rate-limit.mjs';
 export { generateDDL, executeDDL, generateFrameworkDDL, executeFrameworkDDL, frameworkCursorSchema } from './ddl.mjs';
 export { authRoutes } from './auth/routes.mjs';
 export { config, resolveConfig } from './config.mjs';

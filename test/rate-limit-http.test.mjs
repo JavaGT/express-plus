@@ -98,3 +98,39 @@ test('rate-limit: a configured per-session window is enforced against the sessio
   // A different session token has its own bucket (not a global counter).
   assert.equal((await postCookie('tokB')).status, 201, 'session B #1 allowed (independent bucket)');
 });
+
+test('rate-limit: a `local` window exempts loopback peers from the per-IP cap', async (t) => {
+  // RFC-1156 fix: dev/Vite module loads are hundreds of per-module requests from
+  // the operator's own machine (loopback). With a `local` window configured,
+  // loopback/private peers are capped by the raised local budget instead of the
+  // per-IP cap, so interactive dev never 429s. Remote/public peers are untouched.
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db });
+  app.mount('/notes', ownedNote());
+  await app.ddl();
+  app.listen(0, {
+    principalOf: () => ({ id: 'u1' }),
+    rateLimit: {
+      ip: { windowMs: 60_000, max: 3 },
+      local: { windowMs: 60_000, max: 1000 },
+    },
+  });
+  await app.ready;
+  const port = app.httpServer.address().port;
+  const base = `http://127.0.0.1:${port}`;
+  t.after(() => { app.httpServer.close(); db.close(); });
+
+  async function post() {
+    return fetch(`${base}/notes`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ body: 'x' }),
+    });
+  }
+
+  // Loopback burst far above the configured per-IP cap of 3 (Vite dev pattern).
+  const burst = await Promise.all(Array.from({ length: 50 }, () => post()));
+  for (const r of burst) {
+    assert.equal(r.status, 201, `loopback burst request allowed (${r.status})`);
+  }
+});
