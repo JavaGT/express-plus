@@ -465,3 +465,64 @@ test('BATCH COALESCE: a broken middle link in a delivered batch resyncs into rec
   unsubscribe();
   session.close();
 });
+
+// ---- settlement strand: the patch wins the race (#156 round 3) ---------------
+//
+// Ordering that stranded ops before round 3: dispatch → covering patch
+// DELIVERED+APPLIED (its actionIds attribute the op) WHILE the sendAction HTTP
+// receipt is still in flight → at patch-commit the settlement loop required
+// operation.delivered and SKIPPED the op → the receipt resolved fence-covered
+// (or was suppressed outright) → the actionId was never echoed again → the op
+// NEVER settled: promise unresolved, pendingCount stuck, optimistic ghost
+// re-projected on every publish.
+
+test('SETTLEMENT RACE: covering patch delivered BEFORE the receipt resolves — op settles exactly once, overlay drains', async () => {
+  let releaseReceipt;
+  const receiptGate = new Promise((resolve) => { releaseReceipt = resolve; });
+  const { session, probe } = await startSession({
+    // Uncovered-by-the-cursor fence: without the patchAttributed suppression
+    // this receipt would ALSO spend a pointless recovery bootstrap.
+    sendAction: async () => { const receipt = { ok: true, confirmedThrough: 9 }; await receiptGate; return receipt; },
+    optimistic: (snapshot, action) => ({ ...snapshot, edits: [...(snapshot.edits ?? []), action.type] }),
+  });
+  const publishes = [];
+  const unsubscribe = session.subscribe((snapshot) => publishes.push({ name: snapshot.name, edits: snapshot.edits }));
+  // sendAction is invoked synchronously inside dispatch; its receipt stays
+  // gated while we deliver the covering patch first.
+  const dispatched = session.dispatch('code.rename', { codeId: 'c1' });
+  assert.equal(session.pendingCount(), 1, 'op pending while the receipt is in flight');
+  publishes.length = 0;
+  const opId = session.operations()[0]?.opId;
+  assert.ok(opId, 'the in-flight op is observable through the public surface');
+
+  const bootstrapCallsBefore = probe.bootstrapCalls.length;
+  await probe.deliver([patchEnvelope({
+    fromComposite: 1,
+    toComposite: 2,
+    token: 'wbpt_race',
+    actionIds: [opId],
+    operations: renameRoot('RACE'),
+  })]);
+  // THE fix: attribution by an ACCEPTED patch settles the op even though its
+  // receipt has not resolved (delivered=false at patch-commit time).
+  assert.equal(session.pendingCount(), 0, 'patch attribution settled the not-yet-delivered op');
+  assert.equal(
+    probe.bootstrapCalls.length, bootstrapCallsBefore,
+    'settled op spends no recovery bootstrap',
+  );
+  assert.deepEqual(publishes.at(-1), { name: 'RACE', edits: undefined }, 'the settling publish cleared the optimistic ghost');
+
+  // Now release the fence-covered receipt: it must be a silent no-op for the
+  // already-settled op — no failure report, no recovery, no double settlement.
+  releaseReceipt();
+  const result = await dispatched;
+  assert.equal(result.ok, true, 'late receipt reports the committed truth, not a spurious failure');
+  assert.equal(result.status, 'committed');
+  const outcome = await result.settlement.wait();
+  assert.equal(outcome.status, 'reconciled', 'exactly-once: final outcome stays reconciled');
+  assert.equal(session.pendingCount(), 0);
+  assert.deepEqual(session.operations(), [], 'op removed from the live map — nothing left to strand');
+  unsubscribe();
+  session.close();
+});
+

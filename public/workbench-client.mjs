@@ -3086,10 +3086,22 @@ export function createLiveDeliverySession({
     for (const checked of valid) for (const id of checked.actionIds ?? []) echoed.add(id);
     const routedInvisible = new Set();
     for (const checked of valid) for (const id of checked.routedInvisibleActionIds ?? []) routedInvisible.add(id);
+    // Attribution by an ACCEPTED patch proves the server committed the action
+    // (#156 round 3), so settlement must not care whether the sender's HTTP
+    // receipt has resolved yet: requiring `delivered` here strands the op when
+    // the patch wins the race (patch settles nothing → fence-covered receipt
+    // suppresses recovery → the actionId is never echoed again). The
+    // confirmedCursor guard still refuses to declare victory over state older
+    // than the receipt's own confirmation.
     for (const [actionId, operation] of operations) {
       const settleable = echoed.has(actionId) || routedInvisible.has(actionId);
-      if (settleable && operation.delivered
+      if (settleable
         && (operation.confirmedCursor == null || cursorAnchor(cursor) >= operation.confirmedCursor)) {
+        // Mark the commit proof for the late receipt path: it must take the
+        // committed escape (never report a spurious failure) and skip the
+        // now-pointless recovery bootstrap. resolveSettlement is idempotent,
+        // so a receipt that raced ahead cannot double-settle.
+        operation.patchAttributed = true;
         settleOperation(operation, { status: 'reconciled' });
         operations.delete(actionId);
       }
@@ -3519,7 +3531,9 @@ export function createLiveDeliverySession({
         kickSnapshotRecovery();
         // The matching committed envelope is authoritative when a request
         // failure races its delivery; never tell callers to retry that action.
-        if (operation.echoCursor != null) {
+        // A patch attribution (#156 round 3) is the same commit proof: the
+        // accepted patch already settled and removed the op.
+        if (operation.echoCursor != null || operation.patchAttributed) {
           operations.delete(operation.actionId);
           publish();
           settleOperation(operation, { status: 'reconciled' });
@@ -3555,7 +3569,10 @@ export function createLiveDeliverySession({
       // snapshot bootstrap would be a pointless per-edit tax. The op stays
       // pending until its patch attribution (actionIds / routedInvisible)
       // settles it, exactly like any other unechoed delta-stream action.
-      if (operation.echoCursor == null && !receiptFenceAlreadyCovered(operation)
+      // An op the patch ALREADY attributed and removed (#156 round 3) skips
+      // recovery too — it is settled; there is nothing left to recover for.
+      if (operation.echoCursor == null && !operation.patchAttributed
+        && !receiptFenceAlreadyCovered(operation)
         && (snapshotOnly || Number.isSafeInteger(operation.confirmedThrough))) {
         if (operation.foldableEcho) recoverFoldableAfterGrace(operation);
         else recoverReceiptSnapshot(operation);
@@ -3598,7 +3615,10 @@ export function createLiveDeliverySession({
       if (receipt?.ok === false) {
         operation.outcome = 'rejected';
         kickSnapshotRecovery();
-        if (operation.echoCursor != null) {
+        // Same commit-proof escapes as submitAction: a fold echo or an
+        // accepted-patch attribution (#156 round 3) means the batch committed
+        // even when its request failed.
+        if (operation.echoCursor != null || operation.patchAttributed) {
           settleOperation(operation, { status: 'reconciled' });
           operations.delete(operation.actionId);
           publish();
@@ -3626,8 +3646,10 @@ export function createLiveDeliverySession({
       operation.receiptGeneration = ++receiptGeneration;
       operation.receiptSnapshotGeneration = snapshotGeneration;
       settleSnapshotConfirmations(receiptGeneration);
-      // Same delta-capable fence-coverage skip as submitAction (#156 round 2).
-      if (operation.echoCursor == null && !receiptFenceAlreadyCovered(operation)
+      // Same delta-capable fence-coverage skip as submitAction (#156 round 2);
+      // patch-attributed ops skip recovery too (#156 round 3).
+      if (operation.echoCursor == null && !operation.patchAttributed
+        && !receiptFenceAlreadyCovered(operation)
         && (snapshotOnly || Number.isSafeInteger(operation.confirmedThrough))) {
         if (operation.foldableEcho) recoverFoldableAfterGrace(operation);
         else recoverReceiptSnapshot(operation);
