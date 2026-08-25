@@ -91,7 +91,7 @@ function relationFrom(key        , entry               , parentEntity        , p
         nestedEntry,
         entry.entity?.name          ,
         branchId,
-        [...path, key],
+        [...path, nestedEntry.key          ],
         `${branchId}.${nestedEntry.key          }`,
       ));
     }
