@@ -209,6 +209,13 @@ export class CompositePatchDelivery {
     for (let attempt = 0; attempt < COMPOSITE_PATCH_ATTEMPTS; attempt += 1) {
       try {
         const declaration = this.composites.get(handle.entity) ;
+        // The anchor fence is captured BEFORE each capture pass begins
+        // (re-review GAP 4) and delivered as `to.anchor` — identical semantics
+        // to aggregateSnapshot's captured.anchor: the patch's state was read
+        // AT this anchor, so the recipient advances exactly there and never
+        // further. The projector re-reads the fence after projection; any
+        // movement throws into the retry below.
+        const anchorFenceBeforeCapture = readSeq(this.db, input.scope);
         projection = await projectCompositePatch({
           db: this.db,
           principal: input.principal,
@@ -218,17 +225,16 @@ export class CompositePatchDelivery {
           mayVerb: this.mayVerb,
           authorization: this.authorization,
           from: input.after,
-          to: { anchor: readSeq(this.db, input.scope), composite: toComposite },
+          to: { anchor: anchorFenceBeforeCapture, composite: toComposite },
           changes,
           includeActionId: this.includeActionId,
           priorVisible: entry.visible,
           readCompositeSeq: () => currentCompositeSeq(this.db, input.scope),
-          // The anchor fence is captured HERE and re-checked after projection:
-          // any commit in between throws → retry → fallback. The envelope's
-          // to.anchor equals this fence, so a recipient never advances to an
-          // anchor newer than the snapshot the patch was projected from.
           readAnchorSeq: () => readSeq(this.db, input.scope),
         });
+        if (projection.revokedAnchor === false && projection.operations.length >= 0 && input.after.composite > toComposite) {
+          throw new Error('journal moved during patch projection');
+        }
         lastError = null;
         break;
       } catch (error) {

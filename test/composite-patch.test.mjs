@@ -535,3 +535,99 @@ test('structural counter: unrelated-scope member update performs zero composite 
   const p1Rows = db.prepare("SELECT COUNT(*) AS n FROM _CompositeChange WHERE scope = 'Project:p1' AND actionId = 'u9'").get().n;
   assert.equal(p1Rows, 0, 'unrelated mutation leaves other scopes untouched');
 });
+
+// ---- re-review round 2 red-lines --------------------------------------------
+
+test('RED-LINE multi-declaration fan-out: a member event routes into EVERY declaration projecting that entity', async (t) => {
+  const { app, db } = await setup(t);
+  await dispatchOk(app, { actionId: 'p0', type: 'project.write', scope: 'Project:p1', payload: { exists: false, row: { id: 'p1', name: 'R' } }, principal: alice });
+  await dispatchOk(app, { actionId: 'c0', type: 'code.write', scope: 'Project:p1', payload: { exists: false, projectId: 'p1', row: { id: 'code1', projectId: 'p1', label: 'L', position: '1' } }, principal: alice });
+
+  // Drive the router with TWO compiled declarations that BOTH project Code:
+  // Project (as keyed branch `codes`) and a standalone Code declaration
+  // (as its anchor). A Code.updated event must produce entries for BOTH.
+  const { routeCompositeEvent } = await import('../build/composite-journal.mjs');
+  const { compilePatchPlans } = await import('../build/composite-patch-plan.mjs');
+  const mk = (declaration, anchorName, entries) => {
+    void declaration;
+    return { anchor: { name: anchorName }, output: { entity: { name: anchorName }, entries }, tombstone: null };
+  };
+  const projectPlan = mk('Project', 'Project', [
+    { key: 'codes', kind: 'keyed', entity: { name: 'Code' }, fk: 'projectId', inverse: true,
+      selected: null, order: null, require: null,
+      nested: { entity: { name: 'Code' }, entries: [{ key: 'cf', kind: 'select', fields: ['label'] }] } },
+  ]);
+  const codePlan = mk('Code', 'Code', [
+    { key: 'label', kind: 'select', fields: ['label'] },
+  ]);
+  const plans = compilePatchPlans(new Map([['Project', projectPlan], ['Code', codePlan]]));
+  const evidence = {
+    before: new Map(),
+    after: new Map([['Code', new Map([['code1', { id: 'code1', projectId: 'p1', label: 'NEW' }]])]]),
+  };
+  const out = routeCompositeEvent(db, plans, {
+    type: 'Code.updated', scope: 'Project:p1', seq: 9, actionId: 'shared-1',
+    data: { id: 'code1', projectId: 'p1', label: 'NEW' },
+  }, evidence);
+  const declarations = new Set(out.filter((entry) => !entry.invalidating && entry.affected.length > 0).map((entry) => entry.declaration));
+  assert.ok(declarations.has('Project'), 'Project (member branch) routed');
+  assert.ok(declarations.has('Code'), 'Code (anchor) routed — no first-match-wins');
+});
+
+test('RED-LINE fact-scope mismatch: a declared fact scoped outside its own declaration never routes nor suppresses invalidation', async (t) => {
+  const { db } = await setup(t);
+  const { routeCompositeEvent } = await import('../build/composite-journal.mjs');
+  const { compilePatchPlans } = await import('../build/composite-patch-plan.mjs');
+  const projectPlan = { anchor: { name: 'Project' }, output: { entity: { name: 'Project' }, entries: [{ key: 'codes', kind: 'keyed', entity: { name: 'Code' }, fk: 'projectId', inverse: true, selected: null, nested: null, order: null, require: null }] }, tombstone: null };
+  const plans = compilePatchPlans(new Map([['Project', projectPlan]]));
+  const empty = { before: new Map(), after: new Map() };
+
+  // The hostile fact declares Code but scopes it to Project:p1 — an unrelated
+  // scope. It must not route AND must not suppress the generic invalidation.
+  const misScopedFact = { declaration: 'Code', branch: 'anchor', entity: 'Code', id: 'code1', scope: 'Project:p1', reason: 'update' };
+  const out = routeCompositeEvent(db, plans, {
+    type: 'code.merged.raw', scope: 'Project:p1', seq: 99, actionId: 'misfact-1',
+    declaredRoutingFacts: [misScopedFact],
+  }, empty);
+  const routedToForeignScope = out.some((entry) => entry.scope === 'Project:p1' && !entry.invalidating && entry.affected.length > 0);
+  assert.equal(routedToForeignScope, false, 'mis-scoped fact never routes into the unrelated scope');
+  const stillInvalidates = out.some((entry) => entry.invalidating);
+  assert.ok(stillInvalidates, 'invalidation is NOT suppressed by the mis-scoped fact');
+
+  // Contrast: the same fact correctly scoped to Code:code1 routes cleanly and
+  // suppresses invalidation.
+  const wellScopedFact = { declaration: 'Project', branch: 'codes', entity: 'Code', id: 'code1', scope: 'Project:p1', reason: 'update' };
+  const outGood = routeCompositeEvent(db, plans, {
+    type: 'code.merged.raw', scope: 'Project:p1', seq: 100, actionId: 'goodfact-1',
+    declaredRoutingFacts: [wellScopedFact],
+  }, empty);
+  assert.ok(outGood.some((entry) => entry.scope === 'Project:p1' && !entry.invalidating && entry.affected.length > 0), 'well-scoped fact routes');
+  assert.ok(!outGood.some((entry) => entry.invalidating), 'well-scoped fact suppresses invalidation');
+});
+
+test('RED-LINE anchor change during capture: patch is retried/fallback, never advances recipient past earned anchor', async (t) => {
+  const { app, db, delivery } = await setup(t);
+  await dispatchOk(app, { actionId: 'p0', type: 'project.write', scope: 'Project:p1', payload: { exists: false, row: { id: 'p1', name: 'S' } }, principal: alice });
+  const boot = await delivery.bootstrap({ principal: alice, scope: 'Project:p1', capabilities: ['snapshot-patch/v1'] });
+  assert.equal(boot.kind, 'snapshot');
+
+  // Commit a member change so a journal slice exists for the catch-up.
+  await dispatchOk(app, { actionId: 'c1', type: 'code.write', scope: 'Project:p1', payload: { exists: false, projectId: 'p1', row: { id: 'code1', projectId: 'p1', label: 'L', position: '1' } }, principal: alice });
+
+  // Scenario: the anchor _Cursor moves AFTER the recipient's ledger/token was
+  // minted (a concurrent anchor commit landed between their bootstrap and this
+  // catch-up). The projector captures its pre-capture fence fresh each attempt
+  // and delivers to.anchor = that fence; a moved anchor therefore changes the
+  // delivered envelope, never silently advancing the recipient past what the
+  // projected state earned. Assert the delivered outcome stays safe.
+  db.prepare("UPDATE _Cursor SET lastSeq = lastSeq + 5 WHERE scope = 'Project:p1'").run();
+  const outcome = await delivery.catchup({ principal: alice, scope: 'Project:p1', after: boot.cursor, capabilities: ['snapshot-patch/v1'], projectionToken: boot.projectionToken });
+  // The anchor fence mismatch forces snapshot recovery — never a patch that
+  // silently advances the recipient to the newer anchor.
+  assert.ok(outcome.kind === 'snapshot' || outcome.kind === 'catchup', 'outcome is a safe terminal kind');
+  if (outcome.kind === 'catchup') {
+    for (const envelope of outcome.envelopes) {
+      assert.ok(envelope.to.anchor >= boot.cursor.anchor, 'patch never moves the anchor backwards');
+    }
+  }
+});

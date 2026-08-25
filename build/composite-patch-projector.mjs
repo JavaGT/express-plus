@@ -277,8 +277,12 @@ export async function projectCompositePatch(input                     )         
   }
 
   // --- one capture → authorize → project pass for the WHOLE batch ----------
-  // Structural views satisfy the runtime contract; the compiled declaration
-  // remains the sole authority (capture/authorize/project never mutate it).
+  // Dual-fence discipline (re-review GAP 4): the anchor fence is read BEFORE
+  // capture begins and re-checked after projection. A commit landing between
+  // the two reads means the candidate graph spans a commit boundary — the
+  // throw routes through the caller's retry/snapshot recovery instead of
+  // emitting a patch that would advance the recipient to an unearned anchor.
+  const anchorFenceBeforeCapture = input.readAnchorSeq();
   const captured = captureSnapshot({
     db: input.db,
     principal,
@@ -305,10 +309,9 @@ export async function projectCompositePatch(input                     )         
   // across a commit (retry/fallback upstream). The delivered to.anchor is the
   // CURRENT head, so the patch leaves the recipient exactly at the anchor its
   // new state was projected from — never past it, never behind it.
-  const anchorHead = input.readAnchorSeq();
-  if (anchorHead < from.anchor) throw new Error('anchor cursor moved backwards during patch projection');
+  if (input.readAnchorSeq() !== anchorFenceBeforeCapture) throw new Error('anchor cursor moved during patch capture');
+  if (anchorFenceBeforeCapture < from.anchor) throw new Error('anchor cursor moved backwards during patch projection');
   if (input.readCompositeSeq() !== to.composite) throw new Error('composite journal moved during patch projection');
-  if (input.readAnchorSeq() !== anchorHead) throw new Error('anchor cursor moved during patch projection');
 
   const operations                             = [];
 

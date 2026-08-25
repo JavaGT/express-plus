@@ -275,10 +275,20 @@ export function routeCompositeEvent(db: DbHandle, plans: ReadonlyMap<string, Anc
   // is worse than undeclared, because it looks authoritative while guessing.
   let factsUsable = false;
   if (!isAnchorEvent && event.declaredRoutingFacts !== undefined && event.declaredRoutingFacts.length > 0) {
+    // Scope-membership check (re-review GAP 2): every fact's scope must
+    // resolve to a scope of ITS OWN declared declaration — otherwise the fact
+    // routes a custom event to an unrelated composite while suppressing the
+    // generic invalidation. A fact scoped to another declaration is valid ONLY
+    // when that declaration genuinely owns the scope.
     const allResolved = event.declaredRoutingFacts.every((fact) => {
       if (typeof fact.declaration !== 'string' || !plans.has(fact.declaration)) return false;
       if (typeof fact.scope !== 'string' || fact.scope.length === 0) return false;
       if (typeof fact.id !== 'string' || fact.id.length === 0) return false;
+      const factHandle = tryParseScopeKey(fact.scope);
+      // The fact's scope MUST belong to the fact's own declaration: routing a
+      // Project-projected effect into a Code:... scope (or any unrelated
+      // scope) would disclose/mutate state outside the declared projection.
+      if (!factHandle || factHandle.entity !== fact.declaration) return false;
       return true;
     });
     if (allResolved) {
@@ -293,20 +303,39 @@ export function routeCompositeEvent(db: DbHandle, plans: ReadonlyMap<string, Anc
       factsUsable = true;
     }
   }
+  // Fan-out helper (re-review GAP 1): EVERY declaration whose compiled plan
+  // projects the touched entity — as anchor or as any relation branch — must
+  // receive an invalidation, not just the first matching plan.
+  const invalidateAllProjectingDeclarations = (touchedEntity: string | null): void => {
+    for (const plan of plans.values()) {
+      // The scope's own anchor declaration is always affected — the event was
+      // committed to ITS scope.
+      if (plan.declaration === handle.entity) {
+        add({ scope: '', declaration: plan.declaration, actionId: event.actionId, affected: [], invalidating: true });
+        continue;
+      }
+      const projectsIt = touchedEntity !== null
+        && (plan.declaration === touchedEntity || branchesForEntity(plan, touchedEntity).length > 0);
+      if (projectsIt) add({ scope: '', declaration: plan.declaration, actionId: event.actionId, affected: [], invalidating: true });
+    }
+  };
+
   if (!anchorPlan && !eventTypeEntity && !factsUsable) {
     // Unclassifiable custom event type on a declared composite scope: the
     // declaration-wide invalidation signal (cross-exam 1). The catch-up path
     // answers any invalidating entry with a full snapshot — never silence —
     // UNLESS fully-validated declared routing facts already routed it (FIX 2).
-    add({ scope: '', declaration: handle.entity, actionId: event.actionId, affected: [], invalidating: true });
+    // Fan-out covers every declaration projecting this entity.
+    invalidateAllProjectingDeclarations(handle.entity);
     return [...entries.values()];
   }
   const classified = classify(event.type);
   if (!classified && !factsUsable) {
     // A recognized-entity event with an unrecognized verb could still touch
-    // projected state through application reducers: invalidate, never silence,
-    // unless validated declared routing facts covered this exact effect.
-    add({ scope: '', declaration: handle.entity, actionId: event.actionId, affected: [], invalidating: true });
+    // projected state through application reducers: invalidate every
+    // declaration that projects it, never silence, unless validated declared
+    // routing facts covered this exact effect.
+    invalidateAllProjectingDeclarations(eventTypeEntity ?? handle.entity);
     return [...entries.values()];
   }
   if (!classified) {
@@ -370,7 +399,34 @@ export function routeCompositeEvent(db: DbHandle, plans: ReadonlyMap<string, Anc
 
   // --- member events -------------------------------------------------------
   for (const plan of plans.values()) {
-    if (isAnchorEvent) break; // this event IS the anchor of its own declaration
+    // Skip only the declaration whose ANCHOR is this event's entity — its
+    // anchor routing already happened above. Other declarations that project
+    // this entity as a MEMBER branch still get routed here (re-review GAP 1:
+    // first-match-wins abolished).
+    if (isAnchorEvent && plan.declaration === handle.entity) continue;
+    // A DIFFERENT declaration anchored on this same entity: its anchor is
+    // touched by this event (re-review GAP 1).
+    if (eventTypeEntity !== null && plan.declaration === eventTypeEntity) {
+      // The event's OWN row is this plan's anchor row; its identity comes from
+      // the payload id and its scope from that same id.
+      const rowId = typeof (event as { data?: { id?: unknown } }).data?.id === 'string'
+        ? (event as unknown as { data: { id: string } }).data.id
+        : null;
+      const changed = Object.keys((event as { data?: Record<string, unknown> }).data ?? {}).filter((field) => field !== 'id');
+      const selectedChanged = changed.filter((field) => plan.anchorSelect.includes(field));
+      if (rowId !== null) {
+        add({
+          scope: `${plan.declaration}:${rowId}`,
+          declaration: plan.declaration,
+          actionId: event.actionId,
+          affected: [{ branch: 'anchor', entity: eventTypeEntity, id: rowId, reason: classified.phase === 'created' ? 'create' : classified.phase === 'removed' ? 'remove' : selectedChanged.length > 0 ? 'update' : 'invalidate' }],
+          invalidating: classified.phase === 'updated' && selectedChanged.length === 0,
+        });
+      } else {
+        add({ scope: '', declaration: plan.declaration, actionId: event.actionId, affected: [], invalidating: true });
+      }
+      continue;
+    }
     const branches = branchesForEntity(plan, eventTypeEntity ?? '');
     if (branches.length === 0) continue;
     // The changed MEMBER row's identity: the event type names its entity and

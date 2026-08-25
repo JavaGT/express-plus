@@ -2914,17 +2914,13 @@ export function createLiveDeliverySession({
         return;
       }
       case 'replace-fields': {
-        // Selected-field set replacement: the value carries the COMPLETE
-        // declared selected set at this node. Fields present locally but
-        // omitted from the value are removed (stale values may not survive
-        // redaction or projection changes); relation branches are untouched.
-        const selectedFields = Object.keys(operation.value);
+        // Exact-set replacement (design §4): the patch value carries the
+        // node's complete retained key set minus identity. Every local key
+        // other than `id` and the incoming keys is STALE and is deleted —
+        // redaction or projection changes may have removed it server-side.
         for (const existingKey of Object.keys(parent)) {
-          if (existingKey === 'id') continue;
-          const isRelationBranch = !selectedFields.includes(existingKey)
-            && parent[existingKey] != null
-            && typeof parent[existingKey] === 'object';
-          if (!selectedFields.includes(existingKey) && !isRelationBranch) delete parent[existingKey];
+          if (existingKey === 'id' || existingKey in operation.value) continue;
+          delete parent[existingKey];
         }
         Object.assign(parent, JSON.parse(JSON.stringify(operation.value)));
         return;
@@ -2946,10 +2942,12 @@ export function createLiveDeliverySession({
     // recipient exactly on that anchor — never behind it, never past it.
     const from = envelope.from;
     const to = envelope.to;
-    if (to.composite <= cursor.composite && !(to.composite === cursor.composite)) {
-      return { status: 'duplicate' };
+    // Composite regression (to.composite < cursor.composite) risks state
+    // divergence — the recipient may hold changes this patch never saw — so it
+    // RECOVERS through a snapshot rather than trusting idempotent replay.
+    if (to.composite < cursor.composite) {
+      return { status: 'resync' };
     }
-    if (to.anchor < cursor.anchor) return { status: 'resync' };
     if (cursor.anchor !== from.anchor || cursor.composite !== from.composite) {
       // duplicate / stale / gap / incomparable all recover through a snapshot.
       if (cursor.anchor === to.anchor && cursor.composite === to.composite) return { status: 'duplicate' };
