@@ -466,7 +466,10 @@ interface SnapshotOrder {
   direction: string;
 }
 
-function readRows(db: DbHandle, entity: SnapshotEntity, principal: unknown, fk: string, value: unknown, inverse: boolean, order: SnapshotOrder | null, tombstones: readonly TombstoneRule[] | null | undefined): Record<string, unknown>[] {
+// #157: exported as the targeted-capture read primitives. captureAffected
+// (composite-patch-projector) issues the SAME scope-filtered, tombstone-aware,
+// ordered reads per affected fragment instead of walking every collection.
+export function readRows(db: DbHandle, entity: SnapshotEntity, principal: unknown, fk: string, value: unknown, inverse: boolean, order: SnapshotOrder | null, tombstones: readonly TombstoneRule[] | null | undefined): Record<string, unknown>[] {
   const filter = entity.scopeFilter!(principal);
   const rule = tombstones?.find((candidate) => entity === candidate.target);
   const scopeVisibility = rule?.scopeId ? ` AND tombstone.${identifier(rule.scopeId, 'snapshot tombstone scopeId')} = t0.${identifier(rule.targetScopeId as string, 'snapshot tombstone target scope')}` : '';
@@ -485,7 +488,32 @@ function readRows(db: DbHandle, entity: SnapshotEntity, principal: unknown, fk: 
   return db.prepare(sql + suffix).all(params).map(detached);
 }
 
-function readUser(db: DbHandle, id: unknown, tombstones: readonly TombstoneRule[] | null | undefined): Record<string, unknown> | null {
+/**
+ * #157 targeted branch capture: the same scope-filtered, tombstone-aware,
+ * deterministically ordered read as readRows, restricted to explicit row ids —
+ * the smallest possible affected-member set. Never reads rows outside the ids.
+ */
+export function readRowsByIds(db: DbHandle, entity: SnapshotEntity, principal: unknown, ids: readonly string[], order: SnapshotOrder | null, tombstones: readonly TombstoneRule[] | null | undefined): Record<string, unknown>[] {
+  if (ids.length === 0) return [];
+  const filter = entity.scopeFilter!(principal);
+  const rule = tombstones?.find((candidate) => entity === candidate.target);
+  const scopeVisibility = rule?.scopeId ? ` AND tombstone.${identifier(rule.scopeId, 'snapshot tombstone scopeId')} = t0.${identifier(rule.targetScopeId as string, 'snapshot tombstone target scope')}` : '';
+  const visibility = rule
+    ? ` AND NOT EXISTS (SELECT 1 FROM ${identifier(rule.entity.name, 'snapshot tombstone entity')} AS tombstone WHERE tombstone.${identifier(rule.entityId, 'snapshot tombstone entityId')} = t0.id${scopeVisibility} AND tombstone.${identifier(rule.kind, 'snapshot tombstone kind')} = :snapshot_tombstone_kind AND tombstone.${identifier(rule.state, 'snapshot tombstone state')} IN (${rule.hidden.map((_, index) => `:snapshot_tombstone_hidden_${index}`).join(', ')}))`
+    : '';
+  const placeholders = ids.map((_, index) => `:snapshot_target_${index}`).join(', ');
+  const sql = `SELECT * FROM ${identifier(entity.name, 'snapshot entity')} AS t0 WHERE (${filter.sql}) AND t0.id IN (${placeholders})${visibility}`;
+  const suffix = order ? ` ORDER BY t0.${identifier(order.field, 'snapshot order field')} ${order.direction.toUpperCase()}, t0.id ASC` : ' ORDER BY t0.id ASC';
+  const params: Record<string, unknown> = { ...filter.params };
+  ids.forEach((id, index) => { params[`snapshot_target_${index}`] = id; });
+  if (visibility && rule) {
+    params.snapshot_tombstone_kind = rule.kindValue;
+    rule.hidden.forEach((state, index) => { params[`snapshot_tombstone_hidden_${index}`] = state; });
+  }
+  return db.prepare(sql + suffix).all(params).map(detached);
+}
+
+export function readUser(db: DbHandle, id: unknown, tombstones: readonly TombstoneRule[] | null | undefined): Record<string, unknown> | null {
   try {
     const columns = db.prepare('PRAGMA table_info(User)').all().map((column) => column.name);
     for (const required of ['id', 'name', 'displayName', 'image']) {
@@ -518,12 +546,24 @@ interface SnapshotNode {
   raw: Record<string, unknown>;
   required?: RequireNode | false | null;
   children: Map<SnapshotEntry, SnapshotNode[]>;
+  /**
+   * #157 targeted branch capture: true when the recipient's visibility ledger
+   * PROVES this exact fragment was delivered before the current journal slice,
+   * and nothing in the slice could flip its admission (grant/membership
+   * changes force declaration-wide invalidation upstream, so a non-invalidating
+   * slice cannot move the grant graph). authorizeSnapshot then skips the
+   * per-row admit call but STILL hydrates — projected values must remain
+   * byte-identical to a fresh snapshot. Absent on every full-snapshot path.
+   */
+  ledgerAdmitted?: boolean;
 }
 
 interface RequireNode {
   entity: SnapshotEntity;
   raw: Record<string, unknown>;
   children: Map<SnapshotEntry, SnapshotNode[]>;
+  /** Same ledger-proven-admission shortcut as SnapshotNode (#157). */
+  ledgerAdmitted?: boolean;
 }
 
 export function captureSnapshot({ db, principal, anchor, id, output, tombstones = null }: {
@@ -585,15 +625,20 @@ export async function authorizeSnapshot({ principal, anchor, candidate, mayVerb,
       if (!entityRows) rowAuthorization.set(entity, entityRows = new Map());
       let decision = entityRows.get(node.raw.id);
       if (!decision) {
-        if ('hydrate' in entity && typeof entity.hydrate !== 'function') return false;
+        // #157: ledger-proven fragments skip the admit call (the decision the
+        // recipient already received), never the hydrate — projected values
+        // must equal what a fresh snapshot projects for the same row.
+        const ledgerAdmitted = node.ledgerAdmitted === true;
+        if (!ledgerAdmitted && 'hydrate' in entity && typeof entity.hydrate !== 'function') return false;
         // Capture freezes detached SQL rows so the authorization fence cannot
         // mutate the candidate graph. Entity hydrate still deserializes in place
         // (members handles, stored codecs), so hand it a mutable copy.
         const row = typeof entity.hydrate === 'function' ? entity.hydrate({ ...node.raw }, principal) : node.raw;
         // A composite snapshot admission is a per-row subscribe admission. An
         // injected adapter is THE authority (S5/A2 single path); without one the
-        // framework mayVerb engine runs, unchanged.
-        const allowed = row != null && await admitSnapshotRow(authorization, entity, row, principal, mayVerb);
+        // framework mayVerb engine runs, unchanged. A hydrate that yields or
+        // throws nothing admits nothing, exactly as before (#157 keeps this).
+        const allowed = row != null && (ledgerAdmitted || await admitSnapshotRow(authorization, entity, row, principal, mayVerb));
         decision = Object.freeze({ row, allowed });
         entityRows.set(node.raw.id, decision);
       }

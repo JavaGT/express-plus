@@ -199,3 +199,13 @@ export function compilePatchPlans(composites: Iterable<[string, SnapshotDeclarat
   for (const [name, declaration] of composites) plans.set(name, compileAnchorPatchPlan(declaration));
   return plans;
 }
+
+/**
+ * Ledger address key for one delivered fragment (#157): branch identity plus
+ * entity plus row id. The value is the fragment's keyed-ancestor member chain
+ * — the provable pre-state placement removals under keyed ancestors need.
+ * Shared by the projector (writer + reader) so the encoding has one home.
+ */
+export function compositeFragmentAddressKey(branchId: string, entity: string, id: string): string {
+  return `${branchId}\u0000${entity}\u0000${id}`;
+}

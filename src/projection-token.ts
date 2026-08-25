@@ -33,6 +33,14 @@ export interface LedgerEntry {
   readonly cursor: CompositeCursorV1;
   /** Proven-received fragments: branchId -> entity -> Set<id>. */
   readonly visible: ReadonlyMap<string, ReadonlyMap<string, ReadonlySet<string>>>;
+  /**
+   * Proven keyed-ancestor addresses (#157): compositeFragmentAddressKey ->
+   * keyed member ids above the fragment's own relation. Lets a later removal
+   * under a keyed ancestor patch exactly instead of falling back to a full
+   * snapshot. Empty for legacy entries; absence degrades to the old
+   * fail-closed behavior, never to a guessed path.
+   */
+  readonly addresses?: ReadonlyMap<string, readonly string[]>;
 }
 
 export interface ProjectionLedger {
@@ -48,6 +56,8 @@ export interface ProjectionLedger {
     planVersion: string;
     cursor: CompositeCursorV1;
     visible: ReadonlyMap<string, ReadonlyMap<string, ReadonlySet<string>>>;
+    /** Keyed-ancestor addresses of the projected fragments (#157). */
+    addresses?: ReadonlyMap<string, readonly string[]>;
   }): { projectionToken: string };
   /**
    * Resolve a presented token. Returns the entry only when it exists, is
@@ -119,7 +129,7 @@ export function createProjectionLedger({ maxEntries = DEFAULT_MAX_ENTRIES, ttlMs
     while (byToken.size > maxEntries) dropToken(byToken.keys().next().value as string);
   }
 
-  function register({ principal, scope, planVersion, cursor, visible }: Parameters<ProjectionLedger['register']>[0]): { projectionToken: string } {
+  function register({ principal, scope, planVersion, cursor, visible, addresses }: Parameters<ProjectionLedger['register']>[0]): { projectionToken: string } {
     if (!Number.isSafeInteger(cursor.anchor) || !Number.isSafeInteger(cursor.composite)) throw new TypeError('ledger cursor must be safe integers');
     evictExpired();
     const holderKey = holderKeyOf(principal, scope, planVersion);
@@ -128,6 +138,7 @@ export function createProjectionLedger({ maxEntries = DEFAULT_MAX_ENTRIES, ttlMs
       token, holderKey, scope, planVersion,
       cursor: Object.freeze({ ...cursor }),
       visible,
+      ...(addresses ? { addresses } : {}),
       expiresAt: now() + ttlMs,
     });
     let chain = chains.get(holderKey);

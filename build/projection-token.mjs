@@ -73,6 +73,16 @@ import { randomUUID } from 'node:crypto';
 
 
 
+
+
+
+
+
+
+
+
+
+
 const DEFAULT_MAX_ENTRIES = 5_000;
 const DEFAULT_TTL_MS = 30 * 60 * 1_000;
 const DEFAULT_CHAIN_LENGTH = 3;
@@ -119,7 +129,7 @@ export function createProjectionLedger({ maxEntries = DEFAULT_MAX_ENTRIES, ttlMs
     while (byToken.size > maxEntries) dropToken(byToken.keys().next().value          );
   }
 
-  function register({ principal, scope, planVersion, cursor, visible }                                             )                              {
+  function register({ principal, scope, planVersion, cursor, visible, addresses }                                             )                              {
     if (!Number.isSafeInteger(cursor.anchor) || !Number.isSafeInteger(cursor.composite)) throw new TypeError('ledger cursor must be safe integers');
     evictExpired();
     const holderKey = holderKeyOf(principal, scope, planVersion);
@@ -128,6 +138,7 @@ export function createProjectionLedger({ maxEntries = DEFAULT_MAX_ENTRIES, ttlMs
       token, holderKey, scope, planVersion,
       cursor: Object.freeze({ ...cursor }),
       visible,
+      ...(addresses ? { addresses } : {}),
       expiresAt: now() + ttlMs,
     });
     let chain = chains.get(holderKey);

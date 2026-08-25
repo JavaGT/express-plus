@@ -113,11 +113,12 @@ export class CompositePatchDelivery {
     const plan = handle ? this.plans.get(handle.entity) : null;
     const declaration = handle ? this.composites.get(handle.entity         ) : undefined;
     if (!handle || !plan || !declaration) return { kind: 'revoked' };
-    // Derive visibility from the projected value itself — one walk against the
-    // plan; identical semantics to the projector's post-patch derivation.
-    const visible = deriveVisibilityExport(plan, snapshotValue);
+    // Derive visibility AND keyed-ancestor addresses from the projected value
+    // itself — one walk against the plan (#157); the patch lane updates both
+    // incrementally afterwards, so bootstrap is their only full derivation.
+    const { visible, addresses } = deriveVisibilityExtendedExport(plan, snapshotValue);
     const cursor                    = Object.freeze({ anchor: anchorCursor, composite: currentCompositeSeq(this.db, scope) });
-    const { projectionToken } = this.ledger.register({ principal, scope, planVersion: plan.version, cursor, visible });
+    const { projectionToken } = this.ledger.register({ principal, scope, planVersion: plan.version, cursor, visible, addresses });
     return {
       kind: 'snapshot',
       snapshot: snapshotValue,
@@ -231,6 +232,7 @@ export class CompositePatchDelivery {
           changes,
           includeActionId: this.includeActionId,
           priorVisible: entry.visible,
+          priorAddresses: entry.addresses ?? new Map(),
           readCompositeSeq: () => currentCompositeSeq(this.db, input.scope),
           readAnchorSeq: () => readSeq(this.db, input.scope),
         });
@@ -268,6 +270,7 @@ export class CompositePatchDelivery {
         planVersion: plan.version,
         cursor: cursorAfter,
         visible: projection.visibleAfter,
+        addresses: projection.addressesAfter,
       });
       const envelope                           = {
         type: 'snapshot-patch',
@@ -294,7 +297,10 @@ export class CompositePatchDelivery {
 
 // One shared visibility walk (kept out of the projector's export surface to
 // avoid a public API beyond what tests consume; both call sites use this).
-import { deriveVisibility } from './composite-patch-projector.mjs';
+import { deriveVisibility, deriveVisibilityExtended } from './composite-patch-projector.mjs';
 function deriveVisibilityExport(plan                 , projected                         )                                                                {
   return deriveVisibility(plan, projected);
+}
+function deriveVisibilityExtendedExport(plan                 , projected                         )                                                                                                {
+  return deriveVisibilityExtended(plan, projected);
 }
