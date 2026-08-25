@@ -3,6 +3,13 @@
 // Callbacks can read the database, but may write only their declared objects.
 // Each callback runs in one write-coordinator turn so a claimed rebuild cannot
 // overlap another reconciler or an authoritative writer.
+//
+// Crash recovery: a throw mid-materialize is caught and demoted via the legal
+// 'preparing'/'rebuilding' → 'failed' edges, but a process kill is not — the
+// row survives as-is. engage() therefore sweeps rows stuck in 'preparing'
+// (only reachable outside a live materialize turn, which holds the same
+// coordinator) down to 'failed' so the normal prepare/rebuild paths pick the
+// work back up on the next boot.
 
 import { constants } from 'node:sqlite';
 import type { DbHandle } from './driver.ts';
@@ -136,6 +143,15 @@ export function createDerivedResourceRegistry({
           handle.prepare(`INSERT INTO ${DERIVED_RESOURCE_TABLE} (id, state, attempts, lastError, updatedAt) VALUES (?, 'absent', 0, NULL, ?)`).run(id, now());
           resources.get(id)?.onTransition?.(read(id));
         }
+      }
+      // Boot recovery: a row in 'preparing' inside a coordinator turn cannot
+      // belong to a live materialize (that holds the same coordinator), so it
+      // is an orphan from a crashed process. Demote it on the legal
+      // 'preparing' → 'failed' edge; prepare/rebuild then re-claim the work.
+      for (const entry of handle.prepare(`SELECT id FROM ${DERIVED_RESOURCE_TABLE} WHERE state = 'preparing'`).all()) {
+        const id = String((entry as Record<string, unknown>).id);
+        // transition() notifies onTransition itself.
+        if (!transition(id, 'preparing', 'failed', 'interrupted by process exit', true)) throw new Error(`derived resource '${id}' has corrupt durable state 'preparing'`);
       }
     });
   }
