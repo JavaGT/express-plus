@@ -726,3 +726,66 @@ test('RED-LINE concurrent commit during capture yields to.anchor == captured fen
     }
   }
 });
+
+// ---- re-review round 4 red-lines --------------------------------------------
+
+test('RED-LINE wide-seq write/read agreement: recorded wide entry is visible to the reader', async (t) => {
+  const { db } = await setup(t);
+  const journal = await import('../build/composite-journal.mjs');
+  // Record one declaration-wide invalidation, then read the counter back.
+  recordCompositeChangesWrapper(db, journal, [{ scope: '', declaration: 'Project', actionId: 'wide-1', eventRefs: [], affected: [], invalidating: true }]);
+  const seqAfterWrite = journal.currentDeclarationWideSeq(db);
+  assert.equal(seqAfterWrite, 1, 'writer + reader agree on the same wide counter key');
+  // A second wide entry (different declaration) advances the SAME global axis.
+  recordCompositeChangesWrapper(db, journal, [{ scope: '', declaration: 'Code', actionId: 'wide-2', eventRefs: [], affected: [], invalidating: true }]);
+  assert.equal(journal.currentDeclarationWideSeq(db), 2, 'global wide counter advances monotonically');
+  // And readDeclarationWideChangesSince for either declaration sees its row.
+  assert.equal(journal.readDeclarationWideChangesSince(db, 'Project', 0).length, 1);
+  assert.equal(journal.readDeclarationWideChangesSince(db, 'Code', 0).length, 1);
+
+  function recordCompositeChangesWrapper(db2, journalModule, inputs) {
+    journalModule.recordCompositeChanges(db2, inputs, 'now');
+  }
+});
+
+test('RED-LINE forged fact with valid entity but WRONG BRANCH is rejected — invalidation not suppressed', async (t) => {
+  const { db } = await setup(t);
+  const { routeCompositeEvent } = await import('../build/composite-journal.mjs');
+  const { compilePatchPlans } = await import('../build/composite-patch-plan.mjs');
+  const mk = (anchorName, entries) => ({ anchor: { name: anchorName }, output: { entity: { name: anchorName }, entries }, tombstone: null });
+  // Two branches exist in Project's plan: `codes` targets Code, `users`
+  // targets User. The forged fact names entity Code but branch users.
+  const plans = compilePatchPlans(new Map([['Project', mk('Project', [
+    { key: 'codes', kind: 'keyed', entity: { name: 'Code' }, fk: 'projectId', inverse: true, selected: null, nested: null, order: null, require: null },
+    { key: 'users', kind: 'keyed', entity: { name: 'User' }, fk: 'projectId', inverse: true, selected: null, nested: null, order: null, require: null },
+  ])]]));
+  const empty = { before: new Map(), after: new Map() };
+
+  // (a) entity exists (Code) + branch exists (users) but they DON'T belong
+  // together → must be rejected.
+  const crossFact = { declaration: 'Project', scope: 'Project:p1', entity: 'Code', branch: 'users', id: 'code1', reason: 'update' };
+  const out = routeCompositeEvent(db, plans, {
+    type: 'code.merged.raw', scope: 'Project:p1', seq: 9, actionId: 'wrong-branch-1',
+    declaredRoutingFacts: [crossFact],
+  }, empty);
+  assert.equal(out.some((entry) => !entry.invalidating && entry.affected.length > 0), false, 'cross-entity/branch fact does not route');
+  assert.ok(out.some((entry) => entry.invalidating), 'invalidation NOT suppressed');
+
+  // (b) relation entity with OMITTED branch → ambiguous → rejected.
+  const omittedBranchFact = { declaration: 'Project', scope: 'Project:p1', entity: 'Code', id: 'code1', reason: 'update' };
+  const out2 = routeCompositeEvent(db, plans, {
+    type: 'code.merged.raw', scope: 'Project:p1', seq: 10, actionId: 'omitted-branch-1',
+    declaredRoutingFacts: [omittedBranchFact],
+  }, empty);
+  assert.equal(out2.some((entry) => !entry.invalidating && entry.affected.length > 0), false, 'relation fact without a branch does not route');
+  assert.ok(out2.some((entry) => entry.invalidating), 'invalidation preserved on omitted-branch ambiguity');
+
+  // (c) Contrast: correct pairing routes and suppresses.
+  const goodFact = { declaration: 'Project', scope: 'Project:p1', entity: 'Code', branch: 'codes', id: 'code1', reason: 'update' };
+  const out3 = routeCompositeEvent(db, plans, {
+    type: 'code.merged.raw', scope: 'Project:p1', seq: 11, actionId: 'right-branch-1',
+    declaredRoutingFacts: [goodFact],
+  }, empty);
+  assert.ok(out3.some((entry) => entry.scope === 'Project:p1' && !entry.invalidating && entry.affected.length > 0), 'correctly-paired fact routes');
+  assert.ok(!out3.some((entry) => entry.invalidating), 'correctly-paired fact suppresses invalidation');
+});

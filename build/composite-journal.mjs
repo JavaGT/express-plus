@@ -298,11 +298,28 @@ export function routeCompositeEvent(db          , plans                         
       // unknown branch must neither route nor suppress invalidation.
       const factPlan = plans.get(fact.declaration);
       if (!factPlan) return false;
-      if (String(fact.entity ?? fact.declaration) !== factPlan.declaration
-        && branchesForEntity(factPlan, String(fact.entity ?? fact.declaration)).length === 0) return false;
-      const branchId = typeof fact.branch === 'string' ? fact.branch : 'anchor';
-      const knownBranch = branchId === 'anchor' || findBranch(factPlan, branchId) !== null;
-      if (!knownBranch) return false;
+      const factEntity = String(fact.entity ?? fact.declaration);
+      const entityIsAnchor = factEntity === factPlan.declaration;
+      const entityBranches = branchesForEntity(factPlan, factEntity);
+      // The fact's ENTITY must actually be projected by the declaration — as
+      // the anchor or via some relation branch.
+      if (!entityIsAnchor && entityBranches.length === 0) return false;
+      // The fact's BRANCH must BELONG to that entity (re-review round 4, GAP B):
+      //   - branch omitted → defaults to 'anchor', valid ONLY for anchor-entity
+      //     facts; a relation-entity fact without a branch is ambiguous and is
+      //     rejected rather than guessed.
+      //   - an explicit branch must be one whose relation targets exactly this
+      //     entity. {entity:'Code', branch:'users'} passes neither check when
+      //     'users' is a different entity's branch.
+      const explicitBranch = typeof fact.branch === 'string' ? fact.branch : null;
+      if (explicitBranch === null) {
+        if (!entityIsAnchor) return false;
+      } else if (explicitBranch === 'anchor') {
+        if (!entityIsAnchor) return false;
+      } else {
+        const owningBranches = entityBranches.filter((branch) => branch.branchId === explicitBranch);
+        if (owningBranches.length === 0) return false;
+      }
       return true;
     });
     if (allResolved) {
@@ -334,7 +351,8 @@ export function routeCompositeEvent(db          , plans                         
       }
       const planLower = plan.declaration.toLowerCase();
       const projectsIt = touchedLower !== null
-        && (planLower === touchedLower || branchesForEntity(plan, touchedEntity).some((branch) => branch.entity.toLowerCase() === touchedLower));
+        && (planLower === touchedLower
+            || (touchedEntity !== null && branchesForEntity(plan, touchedEntity).some((branch) => branch.entity.toLowerCase() === touchedLower)));
       if (projectsIt) add({ scope: '', declaration: plan.declaration, actionId: event.actionId, affected: [], invalidating: true });
     }
   };
@@ -655,7 +673,7 @@ export function recordCompositeChanges(db          , inputs                     
     if (input.scope === '') {
       // Declaration-wide invalidations live on their own per-declaration
       // sequence, so a recipient cursor can order against them.
-      seq = bumpDeclarationWideSeq(db, input.declaration);
+      seq = bumpDeclarationWideSeq(db);
     } else {
       insertCounter.run({ scope: input.scope });
       seq = (readCounter.get({ scope: input.scope })                    ).last + 1;
@@ -703,14 +721,18 @@ export function readDeclarationWideChangesSince(db          , declaration       
   return rows.map(parseChangeRow);
 }
 
+// The single wide-counter key shared by bump + read (re-review round 4, GAP A:
+// writer and reader MUST agree or the read always returns 0).
+const WIDE_SEQ_KEY = '\u0000wide';
+
 /**
  * Sequence for declaration-wide entries: ONE global counter (keyed
  * `'\u0000wide'` in the same cursor table) so wide entries — which all share
  * the synthetic scope '' — never collide on the (scope, seq) primary key,
  * while still giving every recipient cursor a monotonic axis to order against.
  */
-function bumpDeclarationWideSeq(db          , _declaration        )         {
-  const key = '\u0000wide';
+function bumpDeclarationWideSeq(db          )         {
+  const key = WIDE_SEQ_KEY;
   prepareCached(db,
     "INSERT INTO _CompositeChangeCursor (scope, lastSeq) VALUES (:scope, 0) ON CONFLICT(scope) DO NOTHING",
   ).run({ scope: key });
@@ -725,9 +747,9 @@ export function minCompositeSeq(db          , scope        )                {
   return row?.min ?? null;
 }
 
-/** Current declaration-wide sequence (wide-invalidation counter). */
-export function currentDeclarationWideSeq(db          , declaration        )         {
-  const row = db.prepare('SELECT lastSeq AS last FROM _CompositeChangeCursor WHERE scope = :scope').get({ scope: `\u0000${declaration}` })                                ;
+/** Current declaration-wide sequence (global wide-invalidation counter). */
+export function currentDeclarationWideSeq(db          )         {
+  const row = db.prepare('SELECT lastSeq AS last FROM _CompositeChangeCursor WHERE scope = :scope').get({ scope: WIDE_SEQ_KEY })                                ;
   return row?.last ?? 0;
 }
 
