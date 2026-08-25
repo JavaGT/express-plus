@@ -2892,6 +2892,12 @@ export function createLiveDeliverySession({
     if (!isPlainObject(span[0]) || !isPlainObject(span[1])) return null;
     if (span[0].anchor !== envelope.from.anchor || span[0].composite !== envelope.from.composite) return null;
     if (span[1].anchor !== envelope.to.anchor || span[1].composite !== envelope.to.composite) return null;
+    // Chain discipline (#156 edge coverage): the server may coalesce a journal
+    // slice into MULTIPLE envelopes. Every envelope after the first must
+    // continue exactly where its predecessor ended — a broken chain cannot be
+    // replayed atomically, so it fails validation into snapshot recovery.
+    if (previous
+      && (previous.to.anchor !== envelope.from.anchor || previous.to.composite !== envelope.from.composite)) return null;
     if (!Array.isArray(envelope.operations)) return null;
     for (const operation of envelope.operations) {
       if (!isPlainObject(operation) || !SNAPSHOT_PATCH_OPERATIONS.has(operation.op)) return null;
@@ -3137,7 +3143,17 @@ export function createLiveDeliverySession({
       snapshotRecoveryCycle.attempts += 1;
     }
     const cycleGenerationAtStart = snapshotRecoveryCycle?.connectionGeneration;
-    const result = await bootstrap({ after: mode === 'catchup' ? cursor : undefined, mode });
+    const result = await bootstrap({
+      after: mode === 'catchup' ? cursor : undefined,
+      mode,
+      // Capability advertisement (#156 client): every recovery attempt offers
+      // snapshot-patch support; a patch-capable host answers with its protocol
+      // echo + fresh projectionToken, a legacy host ignores the extra field.
+      // Catch-up additionally presents the held token so the server can serve
+      // journal patches instead of a full snapshot.
+      capabilities: [SNAPSHOT_PATCH_CAPABILITY],
+      ...(mode === 'catchup' && deltaCapable && typeof projectionToken === 'string' ? { projectionToken } : {}),
+    });
     // A transport can revoke access while an authorized recovery request is
     // pending. Its late result must never rematerialize project state.
     if (closed || status === 'revoked' || generation !== recoveryGeneration) return;
