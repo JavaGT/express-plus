@@ -343,7 +343,19 @@ export function durableMutationVariant({
           }
         }
         for (const ev of finalizedEvents) {
-          for (const entry of routeCompositeEvent(db            , plans, ev                                                                  , evidence)) {
+          for (const entry of routeCompositeEvent(
+            db            ,
+            plans,
+            {
+              type: ev.type          ,
+              scope: ev.scope          ,
+              seq: ev.seq          ,
+              actionId,
+              data: (ev                                      ).data,
+              declaredRoutingFacts: declaredRoutingFacts ?? [],
+            },
+            evidence,
+          )) {
             inputs.push({ ...entry, actionId });
           }
         }
@@ -367,26 +379,6 @@ export function durableMutationVariant({
                 invalidating: true,
               });
             }
-          }
-        }
-        // Declared facts route once per action (not per event): attach to the
-        // first input's eventRefs context by recording them as their own entry
-        // set against the action id.
-        if (declaredRoutingFacts !== undefined && declaredRoutingFacts.length > 0) {
-          for (const fact of declaredRoutingFacts) {
-            inputs.push({
-              scope: typeof fact.scope === 'string' ? fact.scope : '',
-              declaration: typeof fact.declaration === 'string' ? fact.declaration : '',
-              actionId,
-              eventRefs: finalizedEvents.length > 0 ? [{ scope: finalizedEvents[0].scope, seq: finalizedEvents[0].seq }] : [],
-              affected: [{
-                branch: typeof fact.branch === 'string' ? fact.branch : 'anchor',
-                entity: String(fact.entity ?? fact.declaration ?? ''),
-                id: String(fact.id ?? ''),
-                reason: fact.reason ?? 'update',
-              }],
-              invalidating: fact.invalidating === true || !fact.scope || !fact.declaration || !fact.id,
-            });
           }
         }
         recordCompositeChanges(db            , inputs, now);

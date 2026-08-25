@@ -21,6 +21,7 @@ const bob = { type: 'user', id: 'bob', attributes: {} };
 function buildGraph(db) {
   db.exec(`
     CREATE TABLE Project (id TEXT PRIMARY KEY, name TEXT, owner TEXT);
+    CREATE TABLE IF NOT EXISTS User (id TEXT PRIMARY KEY, name TEXT);
     CREATE TABLE Code (id TEXT PRIMARY KEY, projectId TEXT REFERENCES Project(id), label TEXT, colour TEXT, position INTEGER);
     CREATE TABLE Note (id TEXT PRIMARY KEY, codeId TEXT REFERENCES Code(id), projectId TEXT REFERENCES Project(id), title TEXT);
     CREATE TABLE Meta (id TEXT PRIMARY KEY, noteId TEXT REFERENCES Note(id), tag TEXT);
@@ -28,6 +29,10 @@ function buildGraph(db) {
 }
 
 function entities() {
+  const User = entity('User', {
+    name: text({ optional: true }),
+    grant: () => grant(read),
+  });
   const Project = entity('Project', {
     name: text(),
     owner: ref('User', { role: 'owner' }),
@@ -52,7 +57,7 @@ function entities() {
     tag: text(),
     grant: () => grant(read, subscribe),
   });
-  return { Project, Code, Note, Meta };
+  return { Project, Code, Note, Meta, User };
 }
 
 function rowProjections(record) {
@@ -105,6 +110,22 @@ function mergeAction() {
   };
 }
 
+// Same custom shape but NO declared facts — the invalidate-by-default lane.
+function rawMergeAction() {
+  return {
+    type: 'code.merge.raw',
+    authorize: () => true,
+    handler: ({ payload }) => ({
+      events: [{
+        type: 'code.merged.raw',
+        scope: `Project:${payload.projectId}`,
+        data: payload,
+      }],
+    }),
+    projections: [{ eventTypes: ['code.merged.raw'], apply() {} }],
+  };
+}
+
 function crudAction(table, scopeOf, authorize) {
   return {
     type: `${table.toLowerCase()}.write`,
@@ -123,19 +144,34 @@ function crudAction(table, scopeOf, authorize) {
 async function setup(t, { principal = alice, authorization = null } = {}) {
   const db = new DatabaseSync(':memory:');
   buildGraph(db);
-  const { Project, Code, Note, Meta } = entities();
+  const { Project, Code, Note, Meta, User } = entities();
   executeDDL(Code, db);
   executeDDL(Note, db);
   executeDDL(Meta, db);
   const projectScope = (payload) => `Project:${payload.projectId}`;
   const app = workbench({
     db,
-    entities: [Project, Code, Note, Meta],
+    entities: [Project, Code, Note, Meta, User],
     actions: [
       crudAction('Project', (payload) => `Project:${payload.row.id}`, () => true),
       crudAction('Code', projectScope, ({ principal: p }) => p.id === 'alice' || p.id === 'bob'),
       crudAction('Note', projectScope, ({ principal: p }) => p.id === 'alice' || p.id === 'bob'),
       mergeAction(),
+      rawMergeAction(),
+      {
+        // A membership-style mutation on the authorization-dependency entity.
+        type: 'user.write',
+        authorize: () => true,
+        handler: ({ payload }) => ({
+          events: [{ type: payload.exists ? 'User.updated' : 'User.created', scope: `User:${payload.row.id}`, data: payload.row }],
+        }),
+        projections: [{
+          eventTypes: ['User.created', 'User.updated'],
+          apply(event, tx) {
+            tx.prepare('INSERT INTO User (id, name) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name').run(event.data.id, event.data.name);
+          },
+        }],
+      },
     ],
   });
   app.attachLiveDelivery({
@@ -308,7 +344,7 @@ test('patch-capable bootstrap returns composite cursor + token; legacy clients g
   assert.equal(typeof patched.cursor.anchor, 'number');
 });
 
-test('RED-LINE custom-event coverage: declared routing facts route; undeclared custom events invalidate — never silence', async (t) => {
+test('RED-LINE custom-event coverage: declared facts yield a CORRECT PATCH; undeclared custom events routed through real journaling INVALIDATE — never silence', async (t) => {
   const { app, db, delivery } = await setup(t);
   await dispatchOk(app, { actionId: 'p0', type: 'project.write', scope: 'Project:p1', payload: { exists: false, row: { id: 'p1', name: 'R' } }, principal: alice });
   await dispatchOk(app, { actionId: 'c0', type: 'code.write', scope: 'Project:p1', payload: { exists: false, projectId: 'p1', row: { id: 'code1', projectId: 'p1', label: 'L', position: '1' } }, principal: alice });
@@ -316,29 +352,58 @@ test('RED-LINE custom-event coverage: declared routing facts route; undeclared c
   assert.equal(patched.kind, 'snapshot');
 
   // (a) A DECLARED routing fact (privateFact.compositeRouting) routes the
-  // code.merged effect onto the codes branch — a real patch envelope results.
-  await dispatchOk(app, { actionId: 'merge-declared', type: 'code.merge', scope: 'Project:p1', payload: { projectId: 'p1', fact: { targetCodeId: 'code1' } }, principal: alice });
+  // code.merged effect onto the codes branch. The patch must be CORRECT —
+  // apply it and verify parity with the fresh snapshot.
+  await dispatchOk(app, { actionId: 'merge-declared', type: 'code.merge', scope: 'Project:p1', payload: { projectId: 'p1', fact: { targetCodeId: 'code1', mergedLabel: 'MERGED-LABEL' } }, principal: alice });
   const routed = await delivery.catchup({ principal: alice, scope: 'Project:p1', after: patched.cursor, capabilities: ['snapshot-patch/v1'], projectionToken: patched.projectionToken });
   assert.equal(routed.kind, 'catchup', 'declared fact produces a patch, not a fallback');
   assert.ok(routed.envelopes.some((envelope) => envelope.operations.some((op) => op.op === 'put-keyed' && op.id === 'code1')), 'put-keyed for the merged target');
+  // Parity of the declared-fact patch:
+  const patchedState = applyPatches(patched.snapshot, routed.envelopes);
+  const fresh = await delivery.bootstrap({ principal: alice, scope: 'Project:p1', capabilities: ['snapshot-patch/v1'] });
+  assert.equal(fresh.kind, 'snapshot');
+  assert.deepEqual(patchedState, fresh.snapshot, 'declared-fact patch is state-correct');
 
-  // (b) An UNDECLARED custom event (no compositeRouting) must INVALIDATE.
-  // Commit one directly through a raw _Log insert + manual cursor bump —
-  // exactly what an unregistered legacy reducer would produce.
-  const maxSeq = db.prepare("SELECT COALESCE(MAX(seq), 0) AS s FROM _Log WHERE scope = 'Project:p1'").get().s;
-  db.prepare("INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt) VALUES ('Project:p1', ?, 'legacy.custom.op', ?, 'legacy-custom-1', datetime('now'))")
-    .run(maxSeq + 1, JSON.stringify({ projectId: 'p1' }));
-  const outcome = await delivery.catchup({ principal: alice, scope: 'Project:p1', after: routed.cursor, capabilities: ['snapshot-patch/v1'], projectionToken: routed.envelopes.at(-1)?.projectionToken });
-  assert.notEqual(outcome.kind, 'catchup-without-fallback', 'must not silently claim currency over an unrouted change');
+  // (b) An UNDECLARED custom event must INVALIDATE through REAL routing: a
+  // registered reducer emits it WITHOUT compositeRouting; the pipeline's
+  // journal hook records the invalidating entry itself.
+  await dispatchOk(app, { actionId: 'merge-undeclared', type: 'code.merge.raw', scope: 'Project:p1', payload: { projectId: 'p1' }, principal: alice });
+  const outcome = await delivery.catchup({ principal: alice, scope: 'Project:p1', after: fresh.cursor, capabilities: ['snapshot-patch/v1'], projectionToken: fresh.projectionToken });
+  assert.equal(outcome.kind, 'snapshot', 'undeclared custom event forces snapshot recovery, never silence');
+  const invalidating = db.prepare("SELECT COUNT(*) AS n FROM _CompositeChange WHERE actionId = 'merge-undeclared' AND invalidating = 1").get().n;
+  assert.equal(invalidating, 1, 'invalidating entry recorded for the undeclared custom event');
 });
 
-test('RED-LINE revocation: authorization-dependency change forces full resnapshot of affected scopes', async (t) => {
-  const { db, delivery } = await setup(t);
-  // A membership-style table change (User is a declared authorization
-  // dependency by default) must invalidate rather than leave stale visibility.
-  const changes = db.prepare("SELECT COUNT(*) AS n FROM _CompositeChange WHERE declaration = 'Project'").get().n;
-  assert.equal(changes, 0, 'no journal rows yet');
-  void delivery;
+test('RED-LINE revocation: a real User-row (authorization dependency) change invalidates — subscribers never keep stale visibility', async (t) => {
+  const { app, db, delivery } = await setup(t);
+  await dispatchOk(app, { actionId: 'p0', type: 'project.write', scope: 'Project:p1', payload: { exists: false, row: { id: 'p1', name: 'R' } }, principal: alice });
+  await dispatchOk(app, { actionId: 'c0', type: 'code.write', scope: 'Project:p1', payload: { exists: false, projectId: 'p1', row: { id: 'code1', projectId: 'p1', label: 'L', position: '1' } }, principal: alice });
+  const patched = await delivery.bootstrap({ principal: alice, scope: 'Project:p1', capabilities: ['snapshot-patch/v1'] });
+  assert.equal(patched.kind, 'snapshot');
+
+  // A REAL authorization-dependency row lands (User is in the default
+  // dependency list): the pipeline journal hook must record a declaration-wide
+  // invalidation for Project — the grant graph changed, so NO cached
+  // visibility can be trusted. The recipient's next catch-up must then fall
+  // back to a full snapshot instead of serving patches from stale visibility.
+  await dispatchOk(app, {
+    actionId: 'user-1', type: 'user.write', scope: 'User:u9',
+    payload: { exists: false, row: { id: 'u9', name: 'New Member' } }, principal: alice,
+  });
+  const invalidating = db.prepare("SELECT COUNT(*) AS n FROM _CompositeChange WHERE actionId = 'user-1' AND declaration = 'Project' AND invalidating = 1").get().n;
+  assert.equal(invalidating, 1, 'User-row change recorded as declaration-wide invalidation for Project');
+
+  const outcome = await delivery.catchup({
+    principal: alice,
+    scope: 'Project:p1',
+    after: { anchor: patched.cursor.anchor, composite: patched.cursor.composite },
+    capabilities: ['snapshot-patch/v1'],
+    projectionToken: patched.projectionToken,
+  });
+  assert.equal(outcome.kind, 'snapshot', 'catch-up after authorization change converges through a full snapshot');
+  if (outcome.kind === 'snapshot') {
+    assert.ok(!('projectionToken' in outcome) || outcome.snapshot != null, 'fallback snapshot is complete');
+  }
 });
 
 test('parity oracle: keyed child lifecycle + anchor rename + nested removal deep-equals fresh snapshots', async (t) => {
@@ -440,6 +505,25 @@ test('retention prune mid-chain falls back to snapshot recovery together with _L
   const stale = { anchor: boot.cursor.anchor, composite: 1 };
   const afterPrune = await delivery.catchup({ principal: alice, scope: 'Project:p1', after: stale, capabilities: ['snapshot-patch/v1'], projectionToken: boot.projectionToken });
   assert.equal(afterPrune.kind, 'snapshot', 'pruned-gap catch-up must converge through a full snapshot');
+});
+
+test('RED-LINE internal seq gap: a holed retained slice falls back to snapshot, never partial replay', async (t) => {
+  const { app, db, delivery } = await setup(t);
+  await dispatchOk(app, { actionId: 'p0', type: 'project.write', scope: 'Project:p1', payload: { exists: false, row: { id: 'p1', name: 'S' } }, principal: alice });
+  // Recipient bootstraps at composite 1, then TWO more changes land (seqs 2,3)
+  // and seq 2 is destroyed mid-retention. The catch-up slice is [3] while the
+  // recipient expects 2 first — an internal hole → full snapshot.
+  const boot = await delivery.bootstrap({ principal: alice, scope: 'Project:p1', capabilities: ['snapshot-patch/v1'] });
+  assert.equal(boot.kind, 'snapshot');
+  await dispatchOk(app, { actionId: 'c2', type: 'code.write', scope: 'Project:p1', payload: { exists: false, projectId: 'p1', row: { id: 'code2', projectId: 'p1', label: 'M', position: '2' } }, principal: alice });
+  await dispatchOk(app, { actionId: 'c3', type: 'code.write', scope: 'Project:p1', payload: { exists: false, projectId: 'p1', row: { id: 'code3', projectId: 'p1', label: 'N', position: '3' } }, principal: alice });
+  db.prepare("DELETE FROM _CompositeChange WHERE scope = 'Project:p1' AND seq = 2").run();
+  const outcome = await delivery.catchup({
+    principal: alice, scope: 'Project:p1',
+    after: boot.cursor,
+    capabilities: ['snapshot-patch/v1'], projectionToken: boot.projectionToken,
+  });
+  assert.equal(outcome.kind, 'snapshot', 'internal seq hole must converge through a full snapshot');
 });
 
 test('structural counter: unrelated-scope member update performs zero composite journal routing', async (t) => {

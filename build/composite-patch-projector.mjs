@@ -69,6 +69,13 @@ import { captureSnapshot, authorizeSnapshot, projectSnapshot } from './snapshot-
 
 
 
+                   
+
+
+
+
+
+
 
 
 
@@ -238,7 +245,7 @@ function provenVisible(prior                                                    
  * callers MUST convert throws into full-snapshot recovery (fail closed).
  */
 export async function projectCompositePatch(input                     )                           {
-  const { principal, scope, plan, declaration, changes, to, priorVisible } = input;
+  const { principal, scope, plan, declaration, changes, from, to, priorVisible } = input;
   const handleId = scope.slice(scope.indexOf(':') + 1);
 
   const actionIds = new Set        ();
@@ -293,7 +300,15 @@ export async function projectCompositePatch(input                     )         
   if (!auth.anchorAllowed) throw new Error('composite patch anchor reauthorization denied');
   const projected = projectSnapshot({ anchor: declaration.anchor         , candidate: captured         , output: declaration.output         , authorized: auth.authorized })                                  ;
   if (!projected) throw new Error('composite patch projection failed');
+  // Dual-fence check (FIX 6): the anchor _Cursor must be UNCHANGED between
+  // capture and emission — movement means the candidate graph was captured
+  // across a commit (retry/fallback upstream). The delivered to.anchor is the
+  // CURRENT head, so the patch leaves the recipient exactly at the anchor its
+  // new state was projected from — never past it, never behind it.
+  const anchorHead = input.readAnchorSeq();
+  if (anchorHead < from.anchor) throw new Error('anchor cursor moved backwards during patch projection');
   if (input.readCompositeSeq() !== to.composite) throw new Error('composite journal moved during patch projection');
+  if (input.readAnchorSeq() !== anchorHead) throw new Error('anchor cursor moved during patch projection');
 
   const operations                             = [];
 

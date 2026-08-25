@@ -204,6 +204,7 @@ interface RouterEvent {
   readonly scope: string;
   readonly seq: number;
   readonly actionId: string;
+  readonly data?: Record<string, unknown>;
   /** Declared (entity,id) routing facts from the action's private fact seam. */
   readonly declaredRoutingFacts?: readonly DeclaredRoutingFact[];
   /** true when the changed entity is a declared authorization dependency. */
@@ -243,23 +244,73 @@ export function routeCompositeEvent(db: DbHandle, plans: ReadonlyMap<string, Anc
   // change only when the type's entity IS the declaration anchor.
   const handle = tryParseScopeKey(event.scope);
   if (!handle) {
-    return [];
+    // Unparseable scope (cross-exam FIX 1): the affected composite scopes
+    // cannot be proven, so EVERY declaration that projects any entity named by
+    // this event — or every declaration when even the entity is unknown — is
+    // invalidated. Never silence: a silently unrouted change leaves
+    // subscribers permanently stale with no error anywhere.
+    const eventTypeEntity0 = classifyEntityName(event.type);
+    if (eventTypeEntity0 !== null) {
+      for (const plan of plans.values()) {
+        if (branchesForEntity(plan, eventTypeEntity0).length > 0 || plan.declaration === eventTypeEntity0) {
+          return [{ scope: '', declaration: plan.declaration, actionId: event.actionId, eventRefs: [], affected: [], invalidating: true }];
+        }
+      }
+    }
+    return [...plans.values()].map((plan) => ({
+      scope: '', declaration: plan.declaration, actionId: event.actionId, eventRefs: [] as { scope: string; seq: number }[], affected: [], invalidating: true,
+    }));
   }
   const eventTypeEntity = classifyEntityName(event.type);
   const anchorPlan = plans.get(handle.entity);
   const isAnchorEvent = anchorPlan !== undefined && eventTypeEntity === handle.entity;
-  if (!anchorPlan && !eventTypeEntity) {
+
+  // --- declared routing facts (cross-exam 2 / FIX 2) --------------------------
+  // A custom event (code.merged, artefact.transcript.linked, ...) carries a
+  // `compositeRouting` declaration from its action's private fact. When the
+  // declaration FULLY validates — every fact names a known declaration, a
+  // concrete scope, and a concrete row id, and all facts resolve inside THIS
+  // event's scope — the declared entries replace the generic invalidation.
+  // Any partial/invalid declaration invalidates instead: declared-but-broken
+  // is worse than undeclared, because it looks authoritative while guessing.
+  let factsUsable = false;
+  if (!isAnchorEvent && event.declaredRoutingFacts !== undefined && event.declaredRoutingFacts.length > 0) {
+    const allResolved = event.declaredRoutingFacts.every((fact) => {
+      if (typeof fact.declaration !== 'string' || !plans.has(fact.declaration)) return false;
+      if (typeof fact.scope !== 'string' || fact.scope.length === 0) return false;
+      if (typeof fact.id !== 'string' || fact.id.length === 0) return false;
+      return true;
+    });
+    if (allResolved) {
+      for (const fact of event.declaredRoutingFacts) {
+        add({
+          scope: fact.scope as string,
+          declaration: fact.declaration as string,
+          actionId: event.actionId,
+          affected: [{ branch: typeof fact.branch === 'string' ? fact.branch : 'anchor', entity: String(fact.entity ?? fact.declaration), id: String(fact.id), reason: fact.reason ?? 'update' }],
+        });
+      }
+      factsUsable = true;
+    }
+  }
+  if (!anchorPlan && !eventTypeEntity && !factsUsable) {
     // Unclassifiable custom event type on a declared composite scope: the
     // declaration-wide invalidation signal (cross-exam 1). The catch-up path
-    // answers any invalidating entry with a full snapshot — never silence.
+    // answers any invalidating entry with a full snapshot — never silence —
+    // UNLESS fully-validated declared routing facts already routed it (FIX 2).
     add({ scope: '', declaration: handle.entity, actionId: event.actionId, affected: [], invalidating: true });
     return [...entries.values()];
   }
   const classified = classify(event.type);
-  if (!classified) {
+  if (!classified && !factsUsable) {
     // A recognized-entity event with an unrecognized verb could still touch
-    // projected state through application reducers: invalidate, never silence.
+    // projected state through application reducers: invalidate, never silence,
+    // unless validated declared routing facts covered this exact effect.
     add({ scope: '', declaration: handle.entity, actionId: event.actionId, affected: [], invalidating: true });
+    return [...entries.values()];
+  }
+  if (!classified) {
+    // Declared facts routed this custom event; no lifecycle routing remains.
     return [...entries.values()];
   }
   if (anchorPlan && isAnchorEvent) {
@@ -525,12 +576,19 @@ export function recordCompositeChanges(db: DbHandle, inputs: readonly CompositeC
      VALUES (:scope, :seq, :declaration, :actionId, :eventRefs, :affected, :invalidating, :committedAt)`,
   );
   for (const input of inputs) {
-    insertCounter.run({ scope: input.scope });
-    const next = (readCounter.get({ scope: input.scope }) as { last: number }).last + 1;
-    bumpCounter.run({ scope: input.scope, next });
+    let seq: number;
+    if (input.scope === '') {
+      // Declaration-wide invalidations live on their own per-declaration
+      // sequence, so a recipient cursor can order against them.
+      seq = bumpDeclarationWideSeq(db, input.declaration);
+    } else {
+      insertCounter.run({ scope: input.scope });
+      seq = (readCounter.get({ scope: input.scope }) as { last: number }).last + 1;
+      bumpCounter.run({ scope: input.scope, next: seq });
+    }
     insertChange.run({
       scope: input.scope,
-      seq: next,
+      seq,
       declaration: input.declaration,
       actionId: input.actionId,
       eventRefs: JSON.stringify(input.eventRefs),
@@ -558,10 +616,44 @@ export function readCompositeChangesSince(db: DbHandle, scope: string, after: nu
   return rows.map(parseChangeRow);
 }
 
+/**
+ * Declaration-wide invalidating entries (stored under scope '') affecting the
+ * given declaration above `after`. These apply to EVERY composite scope of the
+ * declaration — per-scope catch-up must merge them into its slice.
+ */
+export function readDeclarationWideChangesSince(db: DbHandle, declaration: string, after: number): StoredCompositeChange[] {
+  const rows = prepareCached(db,
+    "SELECT * FROM _CompositeChange WHERE scope = '' AND declaration = :declaration AND seq > :after ORDER BY seq",
+  ).all({ declaration, after }) as Array<Record<string, unknown>>;
+  return rows.map(parseChangeRow);
+}
+
+/**
+ * Sequence for declaration-wide entries: a dedicated counter keyed by
+ * `'\u0000' + declaration` in the same cursor table, so wide invalidations
+ * carry monotonically increasing seqs a recipient cursor can be compared
+ * against.
+ */
+function bumpDeclarationWideSeq(db: DbHandle, declaration: string): number {
+  const key = `\u0000${declaration}`;
+  prepareCached(db,
+    "INSERT INTO _CompositeChangeCursor (scope, lastSeq) VALUES (:scope, 0) ON CONFLICT(scope) DO NOTHING",
+  ).run({ scope: key });
+  const next = (db.prepare('SELECT lastSeq AS last FROM _CompositeChangeCursor WHERE scope = :scope').get({ scope: key }) as { last: number }).last + 1;
+  db.prepare('UPDATE _CompositeChangeCursor SET lastSeq = :next WHERE scope = :scope').run({ scope: key, next });
+  return next;
+}
+
 /** Oldest retained composite seq for a scope, or null when none exist. */
 export function minCompositeSeq(db: DbHandle, scope: string): number | null {
   const row = db.prepare('SELECT MIN(seq) AS min FROM _CompositeChange WHERE scope = :scope').get({ scope }) as { min: number | null };
   return row?.min ?? null;
+}
+
+/** Current declaration-wide sequence (wide-invalidation counter). */
+export function currentDeclarationWideSeq(db: DbHandle, declaration: string): number {
+  const row = db.prepare('SELECT lastSeq AS last FROM _CompositeChangeCursor WHERE scope = :scope').get({ scope: `\u0000${declaration}` }) as { last: number } | undefined;
+  return row?.last ?? 0;
 }
 
 /** Current composite sequence for a scope (the `composite` cursor component). */

@@ -66,6 +66,13 @@ export interface PatchProjectorInput {
   priorVisible: ReadonlyMap<string, ReadonlyMap<string, ReadonlySet<string>>>;
   /** Re-reads the composite cursor for the stable-read fence check. */
   readCompositeSeq: () => number;
+  /**
+   * Re-reads the owning scope's _Cursor (anchor fence, FIX 6): a patch
+   * projected from an older snapshot must never advance a recipient to a
+   * newer anchor — BOTH fences are captured and re-checked before emitting,
+   * matching aggregateSnapshot's stable-read discipline.
+   */
+  readAnchorSeq: () => number;
 }
 
 export interface PatchProjection {
@@ -238,7 +245,7 @@ function provenVisible(prior: ReadonlyMap<string, ReadonlyMap<string, ReadonlySe
  * callers MUST convert throws into full-snapshot recovery (fail closed).
  */
 export async function projectCompositePatch(input: PatchProjectorInput): Promise<PatchProjection> {
-  const { principal, scope, plan, declaration, changes, to, priorVisible } = input;
+  const { principal, scope, plan, declaration, changes, from, to, priorVisible } = input;
   const handleId = scope.slice(scope.indexOf(':') + 1);
 
   const actionIds = new Set<string>();
@@ -293,7 +300,15 @@ export async function projectCompositePatch(input: PatchProjectorInput): Promise
   if (!auth.anchorAllowed) throw new Error('composite patch anchor reauthorization denied');
   const projected = projectSnapshot({ anchor: declaration.anchor as never, candidate: captured as never, output: declaration.output as never, authorized: auth.authorized }) as Record<string, unknown> | null;
   if (!projected) throw new Error('composite patch projection failed');
+  // Dual-fence check (FIX 6): the anchor _Cursor must be UNCHANGED between
+  // capture and emission — movement means the candidate graph was captured
+  // across a commit (retry/fallback upstream). The delivered to.anchor is the
+  // CURRENT head, so the patch leaves the recipient exactly at the anchor its
+  // new state was projected from — never past it, never behind it.
+  const anchorHead = input.readAnchorSeq();
+  if (anchorHead < from.anchor) throw new Error('anchor cursor moved backwards during patch projection');
   if (input.readCompositeSeq() !== to.composite) throw new Error('composite journal moved during patch projection');
+  if (input.readAnchorSeq() !== anchorHead) throw new Error('anchor cursor moved during patch projection');
 
   const operations: SnapshotPatchOperationV1[] = [];
 

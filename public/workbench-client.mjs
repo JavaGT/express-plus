@@ -2822,15 +2822,38 @@ export function createLiveDeliverySession({
       && (value.constructor === undefined || value.constructor === Object);
   }
 
+  function isValidActionIdList(value) {
+    return Array.isArray(value) && value.every((id) => typeof id === 'string' && id.length > 0);
+  }
+
+  // Full envelope validation (cross-exam FIX 5): every field is checked before
+  // anything mutates — projectionToken, actionIds, routedInvisibleActionIds,
+  // nonnegative from/to cursors, seqSpan agreement, and exact cursor key sets.
   function validateSnapshotPatchEnvelope(envelope) {
     if (!isPlainObject(envelope)) return null;
     if (envelope.type !== 'snapshot-patch' || envelope.protocol !== 'snapshot-patch/v1') return null;
     if (typeof envelope.declaration !== 'string' || envelope.declaration.length === 0) return null;
+    if (typeof envelope.projectionToken !== 'string' || envelope.projectionToken.length === 0) return null;
+    if (envelope.actionIds !== undefined && !isValidActionIdList(envelope.actionIds)) return null;
+    if (envelope.routedInvisibleActionIds !== undefined && !isValidActionIdList(envelope.routedInvisibleActionIds)) return null;
     for (const key of ['from', 'to']) {
       const c = envelope[key];
+      // Exact two-key composite cursor: anchor + composite, both nonnegative.
       if (!isPlainObject(c)
-        || !Number.isSafeInteger(c.anchor) || !Number.isSafeInteger(c.composite)) return null;
+        || !Number.isSafeInteger(c.anchor) || c.anchor < 0
+        || !Number.isSafeInteger(c.composite) || c.composite < 0
+        || Object.keys(c).length !== 2) return null;
     }
+    // `to` must be NEWER than `from` on the composite axis and never move the
+    // anchor backwards (an anchor regression is a revoke signal, not a patch).
+    if (envelope.to.composite < envelope.from.composite) return null;
+    if (envelope.to.anchor < envelope.from.anchor) return null;
+    // seqSpan must be exactly [from, to] in this protocol revision.
+    const span = envelope.seqSpan;
+    if (!Array.isArray(span) || span.length !== 2) return null;
+    if (!isPlainObject(span[0]) || !isPlainObject(span[1])) return null;
+    if (span[0].anchor !== envelope.from.anchor || span[0].composite !== envelope.from.composite) return null;
+    if (span[1].anchor !== envelope.to.anchor || span[1].composite !== envelope.to.composite) return null;
     if (!Array.isArray(envelope.operations)) return null;
     for (const operation of envelope.operations) {
       if (!isPlainObject(operation) || !SNAPSHOT_PATCH_OPERATIONS.has(operation.op)) return null;
@@ -2848,6 +2871,9 @@ export function createLiveDeliverySession({
           break;
         case 'replace-one':
           if (operation.value !== null && !isPlainObject(operation.value)) return null;
+          break;
+        case 'replace-fields':
+          if (!isPlainObject(operation.value)) return null;
           break;
       }
     }
@@ -2887,10 +2913,22 @@ export function createLiveDeliverySession({
         holder[last] = operation.value;
         return;
       }
-      case 'replace-fields':
-        // Selected-field set replacement: relations and identity untouched.
-        Object.assign(parent, operation.value);
+      case 'replace-fields': {
+        // Selected-field set replacement: the value carries the COMPLETE
+        // declared selected set at this node. Fields present locally but
+        // omitted from the value are removed (stale values may not survive
+        // redaction or projection changes); relation branches are untouched.
+        const selectedFields = Object.keys(operation.value);
+        for (const existingKey of Object.keys(parent)) {
+          if (existingKey === 'id') continue;
+          const isRelationBranch = !selectedFields.includes(existingKey)
+            && parent[existingKey] != null
+            && typeof parent[existingKey] === 'object';
+          if (!selectedFields.includes(existingKey) && !isRelationBranch) delete parent[existingKey];
+        }
+        Object.assign(parent, JSON.parse(JSON.stringify(operation.value)));
         return;
+      }
       default:
         throw new Error(`unknown patch op ${operation.op}`);
     }
@@ -2900,10 +2938,18 @@ export function createLiveDeliverySession({
     // 1. Grammar + protocol validation before anything mutates.
     const valid = validateSnapshotPatchEnvelope(envelope);
     if (!valid) return { status: 'resync' };
-    if (!cursor) return { status: 'resync' };
-    // 2. Cursor decisions (design §9): both anchor AND composite must match.
+    if (!cursor || typeof cursor !== 'object' || cursor.composite === undefined) return { status: 'resync' };
+    // 2. Cursor decisions (design §9): the composite axes must match exactly;
+    // `to` must actually advance the composite sequence. The ANCHOR may jump
+    // FORWARD in `to`: the server projected this state AT its current _Cursor
+    // head (dual-fence enforced server-side), so application lands the
+    // recipient exactly on that anchor — never behind it, never past it.
     const from = envelope.from;
     const to = envelope.to;
+    if (to.composite <= cursor.composite && !(to.composite === cursor.composite)) {
+      return { status: 'duplicate' };
+    }
+    if (to.anchor < cursor.anchor) return { status: 'resync' };
     if (cursor.anchor !== from.anchor || cursor.composite !== from.composite) {
       // duplicate / stale / gap / incomparable all recover through a snapshot.
       if (cursor.anchor === to.anchor && cursor.composite === to.composite) return { status: 'duplicate' };

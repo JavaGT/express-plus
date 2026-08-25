@@ -9,7 +9,7 @@
 import { tryParseScopeKey } from './scope-handle.ts';
 import type { ScopeHandle } from './scope-handle.ts';
 import { readSeq } from './committed-log.ts';
-import { currentCompositeSeq, minCompositeSeq, readCompositeChangesSince } from './composite-journal.ts';
+import { currentCompositeSeq, minCompositeSeq, readCompositeChangesSince, readDeclarationWideChangesSince } from './composite-journal.ts';
 import { compilePatchPlans } from './composite-patch-plan.ts';
 import type { AnchorPatchPlan } from './composite-patch-plan.ts';
 import type { CompositeCursorV1, CompositePatchEnvelopeV1 } from './composite-patch-envelope.ts';import { createProjectionLedger } from './projection-token.ts';
@@ -154,15 +154,44 @@ export class CompositePatchDelivery {
     });
     if (!entry) return { kind: 'snapshot-fallback', reason: 'projection-token-missing-or-mismatched' };
 
+    // The effective journal head for this recipient is the MAX of its scope's
+    // own sequence and the declaration-wide invalidation sequence (FIX 2):
+    // a wide invalidation must pull every lagging recipient into recovery even
+    // though their own scope counter did not move. Because the two sequences
+    // are independent counters, presence (not magnitude) is what matters: ANY
+    // declaration-wide invalidating entry forces this catch-up to snapshot —
+    // invalidations are rare, so the conservative cost is one resnapshot per
+    // invalidation event across subscribers.
+    const wideChanges = readDeclarationWideChangesSince(this.db, plan.declaration, 0);
+    if (wideChanges.length > 0) {
+      return { kind: 'snapshot-fallback', reason: 'declaration-wide-invalidation' };
+    }
     const toComposite = currentCompositeSeq(this.db, input.scope);
     if (input.after.composite > toComposite) return { kind: 'snapshot-fallback', reason: 'cursor-ahead-of-journal' };
     if (input.after.composite === toComposite) {
       return { kind: 'catchup', envelopes: [], cursor: input.after };
     }
     // Bounded read (cross-exam 7): one row beyond the budget proves overflow.
-    const changes = readCompositeChangesSince(this.db, input.scope, input.after.composite, this.maxCatchupChanges + 1);
-    if (changes.length > this.maxCatchupChanges) {
+    // Declaration-wide invalidating entries (scope '') apply to EVERY scope of
+    // this declaration and must be merged into the slice.
+    const changes = [
+      ...readCompositeChangesSince(this.db, input.scope, input.after.composite, this.maxCatchupChanges + 1),
+      ...readDeclarationWideChangesSince(this.db, plan.declaration, input.after.composite),
+    ].sort((left, right) => left.seq - right.seq);
+    const scopedChanges = changes.filter((change) => change.scope === input.scope);
+    if (scopedChanges.length > this.maxCatchupChanges) {
       return { kind: 'snapshot-fallback', reason: 'catchup-budget-exceeded' };
+    }
+    // Internal contiguity (FIX 4): a retained slice with INTERNAL holes
+    // (e.g. [1,3]) is unfillable mid-history — the recipient cannot replay a
+    // gap. Every returned scoped seq must equal previous + 1 starting at the
+    // cursor.
+    let expected = input.after.composite + 1;
+    for (const change of scopedChanges) {
+      if (change.seq !== expected) {
+        return { kind: 'snapshot-fallback', reason: 'journal-gap' };
+      }
+      expected += 1;
     }
     const min = minCompositeSeq(this.db, input.scope);
     if (changes.length === 0 || (min !== null && min > input.after.composite + 1)) {
@@ -189,11 +218,16 @@ export class CompositePatchDelivery {
           mayVerb: this.mayVerb,
           authorization: this.authorization,
           from: input.after,
-          to: { anchor: input.after.anchor, composite: toComposite },
+          to: { anchor: readSeq(this.db, input.scope), composite: toComposite },
           changes,
           includeActionId: this.includeActionId,
           priorVisible: entry.visible,
           readCompositeSeq: () => currentCompositeSeq(this.db, input.scope),
+          // The anchor fence is captured HERE and re-checked after projection:
+          // any commit in between throws → retry → fallback. The envelope's
+          // to.anchor equals this fence, so a recipient never advances to an
+          // anchor newer than the snapshot the patch was projected from.
+          readAnchorSeq: () => readSeq(this.db, input.scope),
         });
         lastError = null;
         break;
