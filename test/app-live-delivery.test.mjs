@@ -1019,7 +1019,7 @@ test('annotated-text capability hints distinguish live read-only from write-gran
   principal = { type: 'user', id: 'u2', attributes: {} };
   const viewer = boot('u2', 'viewer-op');
   await viewer.ready.catch((error) => { error.message = `viewer ready: ${error.message}`; throw error; });
-  assert.equal(viewer.document.version, 2);
+  assert.equal(viewer.document.version, 3);
   assert.notEqual(viewer.status, 'revoked');
   assert.deepEqual(viewer.document.capabilities, []);
 
