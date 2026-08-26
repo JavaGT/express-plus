@@ -16,6 +16,9 @@ import { DatabaseSync } from 'node:sqlite';
 import workbench, { entity, inherit, ref, text, grant, read, subscribe, write, scope, everyone, snapshot, one } from '../build/index.mjs';
 const { object, select, include, keyed, many, orderBy } = snapshot;
 import { executeDDL } from '../build/internal.mjs';
+import { projectCompositePatch } from '../build/composite-patch-projector.mjs';
+import { compositeFragmentAddressKey, compilePatchPlans } from '../build/composite-patch-plan.mjs';
+import { compileSnapshots } from '../build/snapshot-projection.mjs';
 
 const alice = { type: 'user', id: 'alice', attributes: {} };
 
@@ -183,50 +186,51 @@ async function setup(t, { adapter = null, badges = false, featured = false } = {
   // Forward-one branch under `codes` for the finding-4 constraint test: the
   // badge branch's ANCESTOR step (codes -> latestNote) is a forward one()
   // (Code row holds the fk), which targeted capture does not support.
-  app.attachLiveDelivery({
-    principalOf: () => alice,
-    ...(adapter ? { authorization: adapter } : {}),
-    snapshots: [snapshot(Project, {
-      output: object({
-        name: select(Project.field.name),
-        ...(featured ? {
-          // Top-level forward-one branch (finding 2 fixture): the ANCHOR row
-          // holds the fk. Chain length 1 — routable, capturable, addressable,
-          // unlike a NESTED forward-one whose ancestor step poisons routing.
-          featured: one(Note, { via: Project.field.featuredNoteId, include: object({ featuredFields: select(Note.field.title) }) }),
-        } : {}),
-        codes: keyed(Code, {
-          via: Code.field.projectId,
-          orderBy: orderBy(Code.field.position, 'asc'),
-          include: object({
-            codeFields: select(Code.field.label, Code.field.colour),
-            ...(badges ? {
-              // Finding-4 constraint fixture: a FORWARD one() ANCESTOR — the
-              // Code row holds the fk into Note. Targeted capture does not
-              // support non-inverse ancestor chains; see the constraint test.
-              latestNote: one(Note, { via: Code.field.latestNoteId, include: object({
-                latestNoteFields: select(Note.field.title),
-                badges: many(Badge, { via: Badge.field.noteId, orderBy: orderBy(Badge.field.id, 'asc'), include: object({ badgeFields: select(Badge.field.name) }) }),
-              }) }),
-            } : {}),
-            notes: many(Note, {
-              via: Note.field.codeId,
-              orderBy: orderBy(Note.field.id, 'asc'),
-              include: object({
-                noteFields: select(Note.field.title),
-              }),
+  const projectSnapshotDeclaration = snapshot(Project, {
+    output: object({
+      name: select(Project.field.name),
+      ...(featured ? {
+        // Top-level forward-one branch (finding 2 fixture): the ANCHOR row
+        // holds the fk. Chain length 1 — routable, capturable, addressable,
+        // unlike a NESTED forward-one whose ancestor step poisons routing.
+        featured: one(Note, { via: Project.field.featuredNoteId, include: object({ featuredFields: select(Note.field.title) }) }),
+      } : {}),
+      codes: keyed(Code, {
+        via: Code.field.projectId,
+        orderBy: orderBy(Code.field.position, 'asc'),
+        include: object({
+          codeFields: select(Code.field.label, Code.field.colour),
+          ...(badges ? {
+            // Finding-4 constraint fixture: a FORWARD one() ANCESTOR — the
+            // Code row holds the fk into Note. Targeted capture does not
+            // support non-inverse ancestor chains; see the constraint test.
+            latestNote: one(Note, { via: Code.field.latestNoteId, include: object({
+              latestNoteFields: select(Note.field.title),
+              badges: many(Badge, { via: Badge.field.noteId, orderBy: orderBy(Badge.field.id, 'asc'), include: object({ badgeFields: select(Badge.field.name) }) }),
+            }) }),
+          } : {}),
+          notes: many(Note, {
+            via: Note.field.codeId,
+            orderBy: orderBy(Note.field.id, 'asc'),
+            include: object({
+              noteFields: select(Note.field.title),
             }),
-            entries: keyed(Entry, {
-              via: Entry.field.codeId,
-              orderBy: orderBy(Entry.field.id, 'asc'),
-              include: object({
-                entryFields: select(Entry.field.term),
-              }),
+          }),
+          entries: keyed(Entry, {
+            via: Entry.field.codeId,
+            orderBy: orderBy(Entry.field.id, 'asc'),
+            include: object({
+              entryFields: select(Entry.field.term),
             }),
           }),
         }),
       }),
-    })],
+    }),
+  });
+  app.attachLiveDelivery({
+    principalOf: () => alice,
+    ...(adapter ? { authorization: adapter } : {}),
+    snapshots: [projectSnapshotDeclaration],
   });
   await app.ddl();
   app.listen(0);
@@ -237,7 +241,19 @@ async function setup(t, { adapter = null, badges = false, featured = false } = {
     db.close();
   });
   const delivery = app._applicationLiveDelivery.delivery;
-  return { app, db, delivery };
+  // Compile a structural twin of the attached declaration (same raw
+  // declaration, same entity objects) so tests can drive the projector
+  // directly; the facade keeps its own compiled map private.
+  const resolveEntity = (name) => [Project, Code, Note, Entry, ...(badges ? [Badge] : []), User].find((candidate) => candidate.name === name);
+  const compiledComposites = compileSnapshots([projectSnapshotDeclaration], resolveEntity, db);
+  return {
+    app,
+    db,
+    delivery,
+    projectSnapshotDeclaration,
+    compiledDeclaration: compiledComposites.get('Project'),
+    projectPlan: compilePatchPlans(compiledComposites).get('Project'),
+  };
 }
 
 async function dispatchOk(app, request) {
@@ -589,5 +605,66 @@ test('PARITY oracle: surviving row reparented between keyed instances patches BO
   assert.equal(final.kind, 'snapshot');
   const patched = applyPatches(boot.snapshot, envelopes);
   assert.deepEqual(patched, final.snapshot, 'parity: patched replay === fresh snapshot after reparent');
+  await app.shutdown();
+});
+
+test('GATE: stale FIRST-level ledger address fails closed against the anchor (final-review residual)', async (t) => {
+  // Defense-in-depth proof: the ledger stores addresses in memory derived
+  // from projected state, and journal routing walks CURRENT fk rows — no
+  // protocol-reachable flow delivers a stale first-level address today. Drive
+  // projectCompositePatch DIRECTLY with a removal change whose ledger
+  // address names a foreign-but-readable first-level ancestor. Removals have
+  // no post-state row, so addressing falls back to the ledger; at chain
+  // length 1 the ANCHOR link is the only link, and pre-fix it was never
+  // validated (the spine loop started at level > 0).
+  const { app, db, delivery, projectSnapshotDeclaration, compiledDeclaration, projectPlan } = await setup(t);
+  await dispatchOk(app, { actionId: 'p0', type: 'project.write', scope: 'Project:p1', payload: { exists: false, row: { id: 'p1', name: 'Research' } }, principal: alice });
+  await dispatchOk(app, { actionId: 'c0a', type: 'code.write', scope: 'Project:p1', payload: { exists: false, projectId: 'p1', row: { id: 'codeA', projectId: 'p1', label: 'Identity', colour: '#334155', position: '1' } }, principal: alice });
+  await dispatchOk(app, { actionId: 'e0', type: 'entry.write', scope: 'Project:p1', payload: { exists: false, projectId: 'p1', row: { id: 'e1', codeId: 'codeA', projectId: 'p1', term: 'gloss' } }, principal: alice });
+
+  const boot = await delivery.bootstrap({ principal: alice, scope: 'Project:p1', capabilities: ['snapshot-patch/v1'] });
+  assert.equal(boot.kind, 'snapshot');
+  assert.ok(boot.snapshot.codes.codeA.entries.e1, 'e1 visible under codeA at bootstrap');
+
+  // Foreign-but-readable first-level ancestor: belongs to another project,
+  // so the anchor link is broken while every other validation would pass.
+  db.exec(`INSERT INTO Project (id, name, owner) VALUES ('pElsewhere', 'Other', 'alice');
+    INSERT INTO Code (id, projectId, label, colour, position) VALUES ('codeX', 'pElsewhere', 'Fraud', null, '9');`);
+
+  const priorVisible = new Map([
+    ['codes.entries', new Map([['Entry', new Set(['e1'])]])],
+  ]);
+  const priorAddresses = new Map([
+    [compositeFragmentAddressKey('codes.entries', 'Entry', 'e1'), Object.freeze(['codeX'])],
+  ]);
+  // Compile the SAME declaration the app attached (compileSnapshots fills in
+  // entries/entities the plan compiler walks), then derive its patch plan.
+  await assert.rejects(
+    projectCompositePatch({
+      db,
+      principal: alice,
+      scope: 'Project:p1',
+      plan: projectPlan,
+      declaration: compiledDeclaration,
+      mayVerb: delivery.mayVerb,
+      authorization: delivery.authorization,
+      from: boot.cursor,
+      to: { anchor: boot.cursor.anchor + 1, composite: boot.cursor.composite + 1 },
+      changes: [{
+        actionId: 'forged',
+        scope: 'Project:p1',
+        declaration: 'Project',
+        affected: [{ branch: 'codes.entries', entity: 'Entry', id: 'e1', reason: 'remove' }],
+        invalidating: false,
+      }],
+      includeActionId: true,
+      priorVisible,
+      priorAddresses,
+      readCompositeSeq: () => boot.cursor.composite + 1,
+      readAnchorSeq: () => boot.cursor.anchor + 1,
+    }),
+    /ledger address no longer matches current ancestry/,
+    'the anchor link must be validated like every other link',
+  );
   await app.shutdown();
 });

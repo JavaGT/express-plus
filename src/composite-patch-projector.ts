@@ -425,7 +425,12 @@ function fillAffectedBranch(ctx: CaptureContext, rootRaw: Record<string, unknown
       const memberId = group.levels[level];
       const evidence = [...fragments.values()].find((candidate) => String(candidate.levels[level]?.raw.id) === memberId);
       const raw = evidence?.levels[level]?.raw ?? fetchAncestorRow(ctx, levelEntry, memberId);
-      if (level > 0 && String(raw[levelRelation.fk]) !== String(spineRaws[level - 1].id)) {
+      // EVERY link is validated, including level 0 against the ANCHOR itself
+      // (#157 final review): skipping the anchor link let a readable-but-
+      // foreign first ancestor patch a ghost instance silently. The anchor is
+      // simply level -1 of the spine.
+      const parent = level > 0 ? spineRaws[level - 1] : rootRaw;
+      if (String(raw[levelRelation.fk]) !== String(parent.id)) {
         throw new Error('ledger address no longer matches current ancestry');
       }
       spineRaws.push(raw);
