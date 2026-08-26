@@ -466,6 +466,90 @@ test('BATCH COALESCE: a broken middle link in a delivered batch resyncs into rec
   session.close();
 });
 
+// ---- double-control batches (#156 round 4) ----------------------------------
+//
+// Round 3 made the FIRST resync/state-invalidate control in a batch await its
+// replacement inline — but its recovery CLEARS the snapshot recovery cycle,
+// so a SECOND control's fire-and-forget branch minted an un-awaited cycle and
+// let a trailing patch run apply+publish against the base that control had
+// just declared untrusted. The late replacement then wiped that state (cursor
+// regression) — and worse, a trailing-run attribution could settle an op
+// whose effect the replacement removed.
+
+test('DOUBLE CONTROL: [patch, resync, resync, patch] — every control gates the rest of its batch; no untrusted-base publication, no cursor regression', async () => {
+  // Snapshot #1 arms the session (A @ composite 1); every later snapshot call
+  // is a control-triggered replacement CONTINUING the stream (@ composite 2).
+  let snapshotCalls = 0;
+  const { session, probe } = await startSession({
+    snapshotResult: () => (++snapshotCalls === 1
+      ? patchCapableSnapshot()
+      : patchCapableSnapshot({ token: 'wbpt_canon', composite: 2, name: 'CANON' })),
+  });
+  const publishedNames = [];
+  const unsubscribe = session.subscribe((snapshot) => publishedNames.push(snapshot.name));
+  publishedNames.length = 0;
+
+  // An op attributed by the TRAILING patch run: under the round-4 fix it may
+  // only settle after BOTH replacements have landed.
+  const dispatched = await session.dispatch('code.rename', { codeId: 'c1' });
+  const settledTrailing = dispatched.settlement.wait();
+  let bootstrapsAtSettlement = -1;
+  settledTrailing.then(() => { bootstrapsAtSettlement = probe.bootstrapCalls.length; });
+
+  // Count only DELIVERY-driven publications from here (dispatch itself
+  // legitimately republishes canonical state).
+  publishedNames.length = 0;
+  const bootstrapsBefore = probe.bootstrapCalls.length;
+  await probe.deliver([
+    patchEnvelope({ fromComposite: 1, toComposite: 2, token: 'wbpt_d2', operations: renameRoot('D2') }),
+    { type: 'resync' },
+    { type: 'resync' },
+    // Continues the RECOVERED cursor (composite 2), not the pre-recovery one.
+    patchEnvelope({ fromComposite: 2, toComposite: 3, token: 'wbpt_d3', actionIds: [dispatched.opId], operations: renameRoot('D3') }),
+  ]);
+
+  // Publication discipline: run1's own publish, then canonical/recovered
+  // publications ONLY, then run2 against the recovered base. Nothing may
+  // derive from a base any control declared untrusted.
+  assert.ok(publishedNames.indexOf('D2') >= 0, 'run1 published');
+  const firstCanon = publishedNames.indexOf('CANON');
+  assert.ok(firstCanon > publishedNames.indexOf('D2'), 'first replacement landed after run1');
+  const run2Index = publishedNames.indexOf('D3');
+  assert.ok(run2Index > publishedNames.lastIndexOf('CANON'), 'run2 published AFTER the second replacement');
+  assert.deepEqual(
+    [...new Set(publishedNames)].sort(), ['CANON', 'D2', 'D3'],
+    `no publication escaped outside {run1, recovered, run2}: ${JSON.stringify(publishedNames)}`,
+  );
+
+  // No cursor regression: the trailing run's commit SURVIVES the replacements.
+  assert.equal(session.snapshot.name, 'D3');
+  assert.equal(session.cursor.composite, 3);
+  assert.equal(session.projectionToken, 'wbpt_d3');
+
+  // Trailing-run attribution settled only against post-replacement state:
+  // both control bootstraps were already spent when the settlement resolved.
+  const outcome = await settledTrailing;
+  assert.equal(outcome.status, 'reconciled');
+  assert.equal(session.pendingCount(), 0);
+  assert.ok(
+    bootstrapsAtSettlement >= bootstrapsBefore + 2,
+    `settlement waited for both replacements (saw ${bootstrapsAtSettlement - bootstrapsBefore} bootstraps after start)`,
+  );
+
+  // Bounded: exactly the two control replacements — no runaway cycle minting.
+  assert.equal(probe.bootstrapCalls.length - bootstrapsBefore, 2);
+  unsubscribe();
+  session.close();
+});
+//
+// Ordering that stranded ops before round 3: dispatch → covering patch
+// DELIVERED+APPLIED (its actionIds attribute the op) WHILE the sendAction HTTP
+// receipt is still in flight → at patch-commit the settlement loop required
+// operation.delivered and SKIPPED the op → the receipt resolved fence-covered
+// (or was suppressed outright) → the actionId was never echoed again → the op
+// NEVER settled: promise unresolved, pendingCount stuck, optimistic ghost
+// re-projected on every publish.
+
 // ---- settlement strand: the patch wins the race (#156 round 3) ---------------
 //
 // Ordering that stranded ops before round 3: dispatch → covering patch

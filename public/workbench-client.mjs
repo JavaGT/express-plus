@@ -2391,7 +2391,10 @@ export function createLiveDeliverySession({
   // Rev 3: one shared finite budget per logical recovery cycle. Every
   // bootstrap({mode:'snapshot'}) inside that cycle consumes one attempt,
   // including server retry, receipt-fence, floor-coverage, and follow-up
-  // kicks. Controls only raise the cycle floor.
+  // kicks. A control that lands while a cycle is already running raises its
+  // floor instead of minting a new budget; a control with no cycle running
+  // starts one (round 4: every control's recovery is captured and awaited —
+  // see receive()).
   const MAX_SNAPSHOT_BOOTSTRAPS_PER_CYCLE = 4;
   let snapshotRecoveryFloor = null;
   let snapshotRecoveryRequested = false;
@@ -3296,12 +3299,14 @@ export function createLiveDeliverySession({
       // Recovery controls are intentionally opaque to applications: a transport
       // `resync` and a bounded-overflow `state-invalidate` boundary both demand
       // a fresh replacement snapshot rather than in-place reconciliation.
-      // Controls in one batch (or while a cycle is already running) only raise
-      // that cycle's floor — they do not mint a new budget.
+      // EVERY control's recovery is captured AND awaited (#156 round 4): the
+      // first control awaits its replacement inline; a later control chains
+      // onto its own freshly requested one. Each control invalidates the base
+      // until ITS replacement lands — later envelopes are never evaluated
+      // against a base any control in this batch declared untrusted.
       if (envelope.type === 'resync' || envelope.type === 'state-invalidate') {
         const coverage = Number.isSafeInteger(envelope.seq) ? envelope.seq : undefined;
-        if (!recoveryWait) recoveryWait = requestSnapshotRecovery(coverage, !hasUnknownTransmission(), true);
-        else requestSnapshotRecovery(coverage, false, true);
+        recoveryWait = requestSnapshotRecovery(coverage, !hasUnknownTransmission(), true);
         // A control declares the CURRENT base untrusted (#156 round 3): later
         // envelopes in the same batch must not derive state from it. Await the
         // replacement before continuing — subsequent patch runs are then
