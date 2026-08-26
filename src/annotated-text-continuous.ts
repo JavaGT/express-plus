@@ -51,6 +51,7 @@ interface ContinuousTextDerivedIndex {
   /** Visible UTF-16 length before each traversal position. */
   readonly visibleOffsets: number[];
   readonly text: string;
+  readonly textLength: number;
 }
 
 export type OffsetEdit =
@@ -179,7 +180,7 @@ export function materializeText(family: ContinuousTextFamily): string {
 
 /** Return the cached visible UTF-16 length of a continuous family. */
 export function textFamilyVisibleLength(family: ContinuousTextFamily): number {
-  return derivedIndex(assertTrustedFamily(family)).text.length;
+  return derivedIndex(assertTrustedFamily(family)).textLength;
 }
 
 /**
@@ -197,18 +198,33 @@ function derivedIndex(family: ContinuousTextFamily): ContinuousTextDerivedIndex 
   const positions = new Map<string, number>();
   const visibleOffsets = [0];
   let visibleOffset = 0;
-  let text = '';
+  // Keep visible scalars as segments. Repeated `text += scalar` turns a
+  // checkpoint rebuild into repeated copying of the already-built document;
+  // callers that need the public string still get exactly one join, lazily.
+  const textChunks: string[] = [];
+  let textLength = 0;
   for (let index = 0; index < order.length; index += 1) {
     const [key, element] = order[index];
     positions.set(key, index);
     if (element.deletedBy.length === 0) {
-      text += element.scalar;
+      textChunks.push(element.scalar);
       visibleOffset += element.scalar.length;
+      textLength += element.scalar.length;
     }
     visibleOffsets.push(visibleOffset);
   }
 
-  const derived = Object.freeze({ order, positions, visibleOffsets, text });
+  let materializedText: string | undefined;
+  const derived = Object.freeze({
+    order,
+    positions,
+    visibleOffsets,
+    textLength,
+    get text() {
+      materializedText ??= textChunks.join('');
+      return materializedText;
+    },
+  });
   derivedIndexCache.set(family, derived);
   return derived;
 }
