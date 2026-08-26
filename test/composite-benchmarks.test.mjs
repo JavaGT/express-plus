@@ -304,6 +304,40 @@ async function mintRecipient(fixture, principal, snapshotValue, anchorCursor) {
   return { principal, cursor: patched.cursor, projectionToken: patched.projectionToken };
 }
 
+// ---- B3: server CPU per mutation + structural hard-fail gates ----------------
+
+test('B3 GATE WIRING: the #157 structural-counter gates pass (re-run of the targeted-capture suite)', () => {
+  // Cross-exam verdict 10 (on #122) demands STRUCTURAL counters, not timing:
+  //   - captureSnapshot walking unrelated collections = FAIL;
+  //   - authorization calls growing with project size at fixed K = FAIL.
+  // Those gates ALREADY EXIST as tests in
+  // test/composite-patch-targeted-capture.test.mjs (#157). This suite does not
+  // duplicate them — it RE-RUNS them in a child process and fails if their
+  // invariant regresses, making them part of the benchmark gate set.
+  const output = execFileSync(process.execPath, ['--test', 'test/composite-patch-targeted-capture.test.mjs'], {
+    // node --test runs this file from the package root; the child re-runs in
+    // the same root so its relative specifiers resolve identically.
+    cwd: process.cwd(),
+    timeout: 60_000,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    // The inner run is an independent test process: an inherited
+    // NODE_TEST_CONTEXT makes the nested `node --test` skip file execution as
+    // "recursive" (empty output), so the variable is REMOVED for the child.
+    env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== 'NODE_TEST_CONTEXT')),
+  });
+  if (process.env.BENCH_TIMINGS) console.error('[bench] gate child tail:\n' + output.trimEnd().split('\n').slice(-12).join('\n'));
+  // Parse the spec reporter's summary lines ("ℹ pass 7" / "ℹ fail 0").
+  const passed = Number(output.match(/^ℹ pass (\d+)$/m)?.[1] ?? '0');
+  const failed = Number(output.match(/^ℹ fail (\d+)$/m)?.[1] ?? '1');
+  const gateTests = ['GATE anchor rename', 'GATE member rename'].every((name) => output.includes(name));
+  assert.equal(failed, 0, `targeted-capture gate suite regressed:\n${output.split('\n').filter((line) => line.startsWith('not ok') || line.includes('AssertionError')).join('\n')}`);
+  assert.ok(passed >= 7, `expected the full targeted-capture suite (>=7 tests), got ${passed}`);
+  assert.ok(gateTests, 'both B3 structural GATE tests ran');
+});
+
+
+
 // ---- B1: bytes-on-wire -------------------------------------------------------
 
 test('B1 bytes-on-wire: one code rename vs fresh bootstrap, sizes × K', async () => {
@@ -349,6 +383,45 @@ test('B1 bytes-on-wire: one code rename vs fresh bootstrap, sizes × K', async (
       // ~N/2, so a proportional floor stands in — documented deviation.
       if (size >= 5000) assert.ok(ratio >= 1000, `B1 ratio ${Math.round(ratio)} >= 1000 at size ${size}`);
       else assert.ok(ratio >= size / 4, `B1 ratio ${Math.round(ratio)} >= ${size / 4} at size ${size}`);
+    }
+  }
+  console.table(rows);
+});
+
+// ---- B3: server CPU per rename fan-out × K ------------------------------------
+
+test('B3 server CPU: one rename fanned out to K patch recipients, sizes × K', async () => {
+  const rows = [];
+  for (const size of SIZES) {
+    const fixture = await getProject(size);
+    for (const k of KS) {
+      // K distinct recipients on ONE lane, all registered before the rename.
+      const subs = [];
+      const referenceBoot = await fixture.delivery.bootstrap({ principal: principalFor(`b3-ref-${size}-${k}`), scope: fixture.scope, capabilities: [CAP] });
+      assert.equal(referenceBoot.kind, 'snapshot');
+      subs.push({ principal: principalFor(`b3-${size}-${k}-0`), cursor: referenceBoot.cursor, projectionToken: null, boot: referenceBoot });
+      for (let i = 0; i < k; i += 1) subs.push(await mintRecipient(fixture, principalFor(`b3-${size}-${k}-${i}`), referenceBoot.snapshot, referenceBoot.cursor.anchor));
+      // The first sub's token lives on the PUBLIC ledger — swap it for a
+      // lane-registered one by minting a replacement and dropping the public
+      // recipient from the measured set.
+      subs.shift();
+      const cpu0 = process.cpuUsage();
+      const wall0 = performance.now();
+      let lastKind = null;
+      for (const sub of subs) {
+        const outcome = await renameCodeAndCatchup(fixture, sub, { lane: 'package' });
+        lastKind = outcome.kind;
+        assert.equal(outcome.kind, 'catchup', `fan-out recipient patched at size ${size} k=${k} (${outcome.reason ?? outcome.kind})`);
+      }
+      const cpu = process.cpuUsage(cpu0);
+      const wallMs = performance.now() - wall0;
+      rows.push({
+        metric: 'B3', hash: GIT_HASH, size, k,
+        cpu_ms: Number(((cpu.user + cpu.system) / 1000).toFixed(1)),
+        wall_ms: Number(wallMs.toFixed(1)),
+        per_recipient_cpu_ms: Number(((cpu.user + cpu.system) / 1000 / Math.max(k, 1)).toFixed(2)),
+        kind: lastKind,
+      });
     }
   }
   console.table(rows);
