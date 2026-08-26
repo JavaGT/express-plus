@@ -110,6 +110,38 @@ test('cached visible length stays equal to materialized text across edits', () =
   assertLength();
 });
 
+test('random offset edits preserve the reducer text contract', () => {
+  let family = createTextFamily('differential', textCheckpoint(createTextState()));
+  let expected = '';
+  let lamport = 1;
+  for (let step = 0; step < 80; step += 1) {
+    const actor = editActor();
+    if (expected.length === 0 || step % 3 !== 0) {
+      const at = expected.length === 0 ? 0 : (step * 7) % (expected.length + 1);
+      const inserted = String.fromCharCode(97 + (step % 26));
+      family = applyTextOperation(family, textOperationForOffsetEdit(
+        family,
+        { kind: 'text.insert', at: { offset: at, affinity: 'right' }, text: inserted },
+        actor,
+        lamport++,
+      ));
+      expected = expected.slice(0, at) + inserted + expected.slice(at);
+    } else {
+      const from = (step * 5) % expected.length;
+      const to = Math.min(expected.length, from + 1);
+      family = applyTextOperation(family, textOperationForOffsetEdit(
+        family,
+        { kind: 'text.delete', from: { offset: from }, to: { offset: to } },
+        actor,
+        lamport++,
+      ));
+      expected = expected.slice(0, from) + expected.slice(to);
+    }
+    assert.equal(materializeText(family), expected);
+    assert.equal(textFamilyVisibleLength(family), expected.length);
+  }
+});
+
 test('stored endpoint stays valid when the current frontier dominates its basis (historical-basis projection)', () => {
   let family = seedViaPlanner(createTextFamily('d1', textCheckpoint(createTextState())), 'hello world');
   // Capture an endpoint at the current frontier: position 5 (' ').
