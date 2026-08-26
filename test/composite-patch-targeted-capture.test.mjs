@@ -547,3 +547,47 @@ test('CONSTRAINT: non-inverse ancestor chains fall back to snapshot — the docu
   }
   await app.shutdown();
 });
+
+test('PARITY oracle: surviving row reparented between keyed instances patches BOTH paths (finding 1)', async (t) => {
+  const { app, delivery } = await setup(t);
+  await dispatchOk(app, { actionId: 'p0', type: 'project.write', scope: 'Project:p1', payload: { exists: false, row: { id: 'p1', name: 'Research' } }, principal: alice });
+  await dispatchOk(app, { actionId: 'c0a', type: 'code.write', scope: 'Project:p1', payload: { exists: false, projectId: 'p1', row: { id: 'codeA', projectId: 'p1', label: 'Identity', colour: '#334155', position: '1' } }, principal: alice });
+  await dispatchOk(app, { actionId: 'c0b', type: 'code.write', scope: 'Project:p1', payload: { exists: false, projectId: 'p1', row: { id: 'codeB', projectId: 'p1', label: 'Money', colour: null, position: '2' } }, principal: alice });
+  await dispatchOk(app, { actionId: 'e0', type: 'entry.write', scope: 'Project:p1', payload: { exists: false, projectId: 'p1', row: { id: 'e1', codeId: 'codeA', projectId: 'p1', term: 'gloss' } }, principal: alice });
+
+  const boot = await delivery.bootstrap({ principal: alice, scope: 'Project:p1', capabilities: ['snapshot-patch/v1'] });
+  assert.equal(boot.kind, 'snapshot');
+  assert.ok(boot.snapshot.codes.codeA.entries.e1, 'e1 visible under codeA at bootstrap');
+  assert.equal(boot.snapshot.codes.codeB.entries.e1, undefined);
+
+  // Reparent the SURVIVING entry e1 from codeA to codeB in one commit.
+  await dispatchOk(app, { actionId: 'r1', type: 'entry.write', scope: 'Project:p1', payload: { exists: true, projectId: 'p1', row: { id: 'e1', codeId: 'codeB', projectId: 'p1', term: 'gloss' } }, principal: alice });
+
+  let cursor = boot.cursor;
+  let token = boot.projectionToken;
+  const envelopes = [];
+  const fallbacks = [];
+  for (;;) {
+    const outcome = await delivery.catchup({ principal: alice, scope: 'Project:p1', after: cursor, capabilities: ['snapshot-patch/v1'], projectionToken: token });
+    if (outcome.kind !== 'catchup') { fallbacks.push(outcome.kind); break; }
+    if (outcome.envelopes.length === 0) break;
+    envelopes.push(...outcome.envelopes);
+    token = outcome.envelopes.at(-1)?.projectionToken ?? token;
+    cursor = outcome.cursor;
+  }
+  assert.deepEqual(fallbacks, [], `no snapshot fallbacks on reparent (${JSON.stringify(fallbacks)})`);
+
+  const ops = envelopes.flatMap((envelope) => envelope.operations);
+  const putAtNew = ops.find((operation) => operation.op === 'put-keyed' && operation.id === 'e1'
+    && operation.path.join('.') === 'codes.codeB.entries');
+  assert.ok(putAtNew, `new-path write emitted (ops: ${JSON.stringify(ops.map((operation) => [operation.op, operation.path]))})`);
+  const removedAtOld = ops.find((operation) => operation.op === 'remove-keyed' && operation.id === 'e1'
+    && operation.path.join('.') === 'codes.codeA.entries');
+  assert.ok(removedAtOld, 'old-path removal emitted — the client must not keep the stale copy');
+
+  const final = await delivery.bootstrap({ principal: alice, scope: 'Project:p1', capabilities: ['snapshot-patch/v1'] });
+  assert.equal(final.kind, 'snapshot');
+  const patched = applyPatches(boot.snapshot, envelopes);
+  assert.deepEqual(patched, final.snapshot, 'parity: patched replay === fresh snapshot after reparent');
+  await app.shutdown();
+});

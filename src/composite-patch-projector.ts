@@ -295,6 +295,14 @@ interface CaptureContext {
   resolution: Map<string, Map<string, AffectedFragment>>;
   /** Per touched branch: addressing instances (post-state ∪ ledger-addressed). */
   instances: Map<string, Map<string, InstanceGroup>>;
+  /**
+   * Finding 1 (#157): per touched branch, surviving rows whose LEDGER address
+   * (pre-move) differs from their current ancestry — keyed as
+   * `branchId\u0000rowId` → old-instance levels. Their old instance must be
+   * re-emitted (wholesale kinds) or explicitly removed (keyed) alongside the
+   * new-path write, or the client keeps a stale copy under the old path.
+   */
+  departed: Map<string, Map<string, readonly string[]>>;
 }
 
 /** One addressing instance of one touched branch. */
@@ -303,6 +311,13 @@ interface InstanceGroup {
   readonly levels: readonly string[];
   /** Affected ids resolved at this instance. */
   readonly ids: Set<string>;
+  /**
+   * Finding 1 (#157): true for wholesale-kind instances registered ONLY
+   * because a member moved away — no journal event named this instance's
+   * remaining rows, so it is absent from `touched`. The whole instance is
+   * captured and re-emitted so its replacement value reflects the departure.
+   */
+  departedOnly?: boolean;
 }
 
 function newNode(raw: Record<string, unknown>, ledgerAdmitted: boolean): SnapshotNodeLike {
@@ -686,6 +701,9 @@ export async function projectCompositePatch(input: PatchProjectorInput): Promise
   // never addressed cannot be placed — fail closed. An id never delivered to
   // this recipient is simply not ours to name.
   const instancesByBranch = new Map<string, Map<string, InstanceGroup>>();
+  // Finding 1 (#157): surviving rows reparented between keyed instances,
+  // keyed branchId\u0000rowId -> the OLD instance's levels.
+  const departedByBranch = new Map<string, Map<string, readonly string[]>>();
 
   for (const [branchId, ids] of touched) {
     if (branchId === 'anchor') continue;
@@ -747,10 +765,59 @@ export async function projectCompositePatch(input: PatchProjectorInput): Promise
       const levels = levelsOf(id, fragment)
         ?? ((relation.kind !== 'keyed') ? siblingLevels(relation.entity, chain.length - 1) : null);
       if (!levels) continue;
+      // Finding 1 (#157): a SURVIVING row whose ledger address differs from
+      // its CURRENT ancestry was reparented between keyed ancestor instances.
+      // The client still holds it under the old path; register the old
+      // instance so emission cleans it up there too.
+      if (fragment.row) {
+        const priorAddress = priorAddresses.get(compositeFragmentAddressKey(branchId, relation.entity, id));
+        if (fragment.row && priorAddress && priorAddress.length === chain.length - 1
+          && priorAddress.some((level, index) => level !== levels[index])) {
+          departedByBranch.set(branchId, (departedByBranch.get(branchId) ?? new Map()).set(id, priorAddress));
+          // Make the moved row resolvable at its OLD instance for capture and
+          // authorization: synthesize a fragment carrying the old spine.
+          if (!fragments.has(`${id}@departed`)) {
+            const oldSpine: AncestorLevel[] = [];
+            let cursorRow: Record<string, unknown> | null = fragment.row;
+            for (let level = chain.length - 2; level >= 0; level -= 1) {
+              const ancestorId = priorAddress[level];
+              const ancestorRelation = chain[level];
+              const ancestorEntry = compiledEntryAt(declaration.output, ancestorRelation.path);
+              if (!ancestorEntry.entity || !cursorRow) throw new Error('departed row cannot rebuild its old spine');
+              const ancestorRows = readRowsByIds(input.db, ancestorEntry.entity as never, principal, [ancestorId], null, tombstones as never);
+              if (ancestorRows.length !== 1) throw new Error('departed row ancestor could not be read');
+              oldSpine.unshift({ raw: ancestorRows[0], memberId: ancestorRelation.kind === 'keyed' ? ancestorId : null });
+              cursorRow = ancestorRows[0];
+            }
+            fragments.set(`${id}@departed`, { row: fragment.row, levels: oldSpine });
+          }
+        }
+      }
       const key = levels.join('\u0000');
       let group = groups.get(key);
       if (!group) groups.set(key, group = { levels, ids: new Set() });
       group.ids.add(id);
+    }
+  }
+
+  // Finding 1 (#157): for every departed row, register its OLD instance as a
+  // group so capture rebuilds it and emission cleans the row's stale copy.
+  // Wholesale kinds (many/count/one) re-emit the whole instance (the
+  // replacement value reflects the departure); keyed instances are handled
+  // at emission with an explicit remove-keyed, since capturing there would
+  // misplace the moved row into the old parent.
+  for (const [branchId, departedRows] of departedByBranch) {
+    let groups = instancesByBranch.get(branchId);
+    if (!groups) instancesByBranch.set(branchId, groups = new Map());
+    // One group per DISTINCT old instance; every row that left through it is
+    // named as `rowId@departed` so emission can clean the stale client copy.
+    for (const [, priorAddress] of departedRows) {
+      const key = `departed\u0000${priorAddress.join('\u0000')}`;
+      let group = groups.get(key);
+      if (!group) group = groups.set(key, { levels: [...priorAddress], ids: new Set(), departedOnly: true }).get(key);
+      for (const [rowId, prior] of departedRows) {
+        if (prior.join('\u0000') === priorAddress.join('\u0000')) group.ids.add(`${rowId}@departed`);
+      }
     }
   }
 
@@ -762,7 +829,7 @@ export async function projectCompositePatch(input: PatchProjectorInput): Promise
   const anchorFenceBeforeCapture = input.readAnchorSeq();
 
   // --- one TARGETED capture → authorize → project pass for the WHOLE batch --
-  const captured = captureAffectedGraph({ db: input.db, principal, declaration, plan, tombstones, touched, anchorTouched, resolution, instances: instancesByBranch }, handleId);
+  const captured = captureAffectedGraph({ db: input.db, principal, declaration, plan, tombstones, touched, anchorTouched, resolution, instances: instancesByBranch, departed: departedByBranch }, handleId);
   if (!captured) {
     return { operations: [], actionIds: [...actionIds], routedInvisibleActionIds: [...routedInvisible], revokedAnchor: true, visibleAfter: new Map(), addressesAfter: new Map() };
   }
@@ -890,6 +957,17 @@ export async function projectCompositePatch(input: PatchProjectorInput): Promise
 
       // keyed: member-level put/remove; removals ledger-gated.
       for (const id of group.ids) {
+        // Finding 1 (#157): `id@departed` names a row that MOVED AWAY from
+        // this instance. The client still holds its old copy — remove it.
+        if (id.endsWith('@departed')) {
+          const realId = id.slice(0, -'@departed'.length);
+          if (provenVisible(priorVisible, branchId, relation.entity, realId)) {
+            operations.push({ op: 'remove-keyed', path, id: realId });
+            addressesAfter.delete(compositeFragmentAddressKey(branchId, relation.entity, realId));
+            visibleBucket(visibleAfter, branchId, relation.entity).delete(realId);
+          }
+          continue;
+        }
         const collection = navigate(projected, path);
         const current = collection && typeof collection === 'object' && !Array.isArray(collection)
           ? (collection as Record<string, unknown>)[id]
