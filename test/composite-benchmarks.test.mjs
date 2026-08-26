@@ -394,6 +394,81 @@ test('B1 bytes-on-wire: one code rename vs fresh bootstrap, sizes × K', async (
 
 // ---- B4: per-recipient memory (heapUsed tripwire, K=20) ------------------------
 
+// ---- B2: client-visible stall per mutation over a REAL live-delivery session --
+
+test('B2 CLIENT STALL: 1000 mutations, real session, publish-latency p50/p95/p99', async () => {
+  const fixture = await getProject(5000);
+  const b2Principal = { type: 'user', id: 'b2-session-holder' };
+  const b2Recipient = { principal: b2Principal, cursor: null, projectionToken: null };
+  // A REAL client session over in-process adapters. The bootstrap adapter is
+  // the public seam itself; the subscribe adapter hands recipient envelopes to
+  // the package-owned ingest (applySnapshotPatch). No HTTP, same machinery.
+  let deliverEnvelopes = null;
+  const session = createLiveDeliverySession({
+    bootstrap: async ({ mode }) => {
+      if (mode !== 'snapshot') throw new Error(`unexpected recovery mode ${mode}`);
+      const boot = await fixture.delivery.bootstrap({ principal: b2Principal, scope: fixture.scope, capabilities: [CAP] });
+      // The server-side catch-up driver needs the same anchor + token the
+      // client just received.
+      b2Recipient.cursor = boot.cursor;
+      b2Recipient.projectionToken = boot.projectionToken;
+      return boot;
+    },
+    subscribe: async ({ deliver }) => {
+      deliverEnvelopes = (envelopes) => deliver(envelopes);
+      return { close() { deliverEnvelopes = null; } };
+    },
+    validateSnapshot: (snapshot) => snapshot,
+    sendAction: async () => ({ ok: true }),
+    createActionId: (() => { let n = 0; return () => `b2-act-${n += 1}`; })(),
+    // Far beyond any real recovery; kept inside setTimeout's 32-bit range.
+    recoveryWarningDelayMs: 2 ** 31 - 1,
+  });
+  await session.ready;
+  assert.equal(session.status, 'live');
+  assert.equal(session.deltaCapable, true, 'capability echo arms delta mode');
+  assert.ok(typeof session.projectionToken === 'string');
+
+  // Stall = listener-publish timestamp minus the moment envelopes were handed
+  // to the client's delivery chain. Includes applySnapshotPatch + settlement.
+  let handedAt = 0;
+  const stalls = [];
+  const dispatchRtts = [];
+  session.subscribe(() => {
+    stalls.push(performance.now() - handedAt);
+  });
+
+  const rounds = 1000;
+  for (let i = 0; i < rounds; i += 1) {
+    const t0 = performance.now();
+    const outcome = await renameCodeAndCatchup(fixture, b2Recipient, { lane: 'public' });
+    dispatchRtts.push(performance.now() - t0);
+    assert.equal(outcome.kind, 'catchup', `round ${i} patched (${outcome.reason ?? outcome.kind})`);
+    // The ledger rotates per accepted patch: carry the newest handle forward.
+    b2Recipient.cursor = outcome.cursor;
+    b2Recipient.projectionToken = outcome.envelopes[outcome.envelopes.length - 1].projectionToken;
+    handedAt = performance.now();
+    await deliverEnvelopes(outcome.envelopes);
+    // Drain microtasks so the publish lands before the next round measures it.
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  assert.ok(stalls.length >= 500, `measured >=500 publish stalls, got ${stalls.length}`);
+  const sorted = [...stalls].sort((a, b) => a - b);
+  const pct = (p) => Number(sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))].toFixed(3));
+  const mean = (array) => array.reduce((total, value) => total + value, 0) / array.length;
+  console.table([{
+    metric: 'B2', hash: GIT_HASH, size: 5000, k: 1, rounds,
+    stall_p50_ms: pct(0.5), stall_p95_ms: pct(0.95), stall_p99_ms: pct(0.99),
+    dispatch_rtt_mean_ms: Number(mean(dispatchRtts).toFixed(2)),
+  }]);
+  // The client must remain live and fully drained after 1000 patch cycles.
+  assert.equal(session.status, 'live', 'session stayed live through 1000 patches');
+  assert.equal(session.pendingCount(), 0, 'no optimistic residue — no actions dispatched via the client');
+  assert.ok(pct(0.95) < 16, `publish-stall p95 ${pct(0.95)}ms < one frame budget`);
+  session.close();
+});
+
 // ---- B4 HEAP: per-recipient memory tripwire ------------------------------------
 
 test('B4 HEAP: retained memory per active subscription stays within the ledger budget', async () => {
