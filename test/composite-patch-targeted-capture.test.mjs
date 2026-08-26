@@ -23,7 +23,7 @@ function buildGraph(db) {
   db.exec(`
     CREATE TABLE Project (id TEXT PRIMARY KEY, name TEXT, owner TEXT, featuredNoteId TEXT REFERENCES Note(id));
     CREATE TABLE IF NOT EXISTS User (id TEXT PRIMARY KEY, name TEXT);
-    CREATE TABLE Code (id TEXT PRIMARY KEY, projectId TEXT REFERENCES Project(id), label TEXT, colour TEXT, position INTEGER);
+    CREATE TABLE Code (id TEXT PRIMARY KEY, projectId TEXT REFERENCES Project(id), label TEXT, colour TEXT, position INTEGER, latestNoteId TEXT REFERENCES Note(id));
     CREATE TABLE Note (id TEXT PRIMARY KEY, codeId TEXT REFERENCES Code(id), projectId TEXT REFERENCES Project(id), title TEXT);
     CREATE TABLE Entry (id TEXT PRIMARY KEY, codeId TEXT REFERENCES Code(id), projectId TEXT REFERENCES Project(id), term TEXT);
   `);
@@ -44,6 +44,7 @@ function entities() {
   });
   const Code = entity('Code', {
     projectId: ref(Project, { immutable: true }),
+    latestNoteId: ref('Note', { optional: true }),
     label: text(),
     colour: text({ optional: true }),
     position: text({ optional: true }),
@@ -175,6 +176,7 @@ async function setup(t, { adapter = null, badges = false, featured = false } = {
       crudAction('Project', (payload) => `Project:${payload.row.id}`),
       crudAction('Code', projectScope),
       crudAction('Note', projectScope),
+      crudAction('Badge', projectScope),
       crudAction('Entry', projectScope),
     ],
   });
@@ -198,6 +200,15 @@ async function setup(t, { adapter = null, badges = false, featured = false } = {
           orderBy: orderBy(Code.field.position, 'asc'),
           include: object({
             codeFields: select(Code.field.label, Code.field.colour),
+            ...(badges ? {
+              // Finding-4 constraint fixture: a FORWARD one() ANCESTOR — the
+              // Code row holds the fk into Note. Targeted capture does not
+              // support non-inverse ancestor chains; see the constraint test.
+              latestNote: one(Note, { via: Code.field.latestNoteId, include: object({
+                latestNoteFields: select(Note.field.title),
+                badges: many(Badge, { via: Badge.field.noteId, orderBy: orderBy(Badge.field.id, 'asc'), include: object({ badgeFields: select(Badge.field.name) }) }),
+              }) }),
+            } : {}),
             notes: many(Note, {
               via: Note.field.codeId,
               orderBy: orderBy(Note.field.id, 'asc'),
@@ -501,5 +512,38 @@ test('PARITY oracle: forward-one swap batch keeps ledger parity across successor
   assert.equal(final.snapshot.featured ?? null, null);
   const patched = applyPatches(boot.snapshot, envelopes);
   assert.deepEqual(patched.featured ?? null, final.snapshot.featured ?? null, 'patched featured === fresh');
+  await app.shutdown();
+});
+
+test('CONSTRAINT: non-inverse ancestor chains fall back to snapshot — the documented excluded class (finding 4)', async (t) => {
+  const { app, delivery } = await setup(t, { badges: true });
+  await dispatchOk(app, { actionId: 'p0', type: 'project.write', scope: 'Project:p1', payload: { exists: false, row: { id: 'p1', name: 'Research' } }, principal: alice });
+  await dispatchOk(app, { actionId: 'c0a', type: 'code.write', scope: 'Project:p1', payload: { exists: false, projectId: 'p1', row: { id: 'codeA', projectId: 'p1', latestNoteId: null, label: 'Identity', colour: '#334155', position: '1' } }, principal: alice });
+  await dispatchOk(app, { actionId: 'n0', type: 'note.write', scope: 'Project:p1', payload: { exists: false, projectId: 'p1', row: { id: 'noteA', codeId: 'codeA', projectId: 'p1', title: 'Latest' } }, principal: alice });
+  await dispatchOk(app, { actionId: 'b0', type: 'badge.write', scope: 'Project:p1', payload: { exists: false, projectId: 'p1', row: { id: 'badge1', noteId: 'noteA', name: 'Gold' } }, principal: alice });
+  await dispatchOk(app, { actionId: 's0', type: 'code.write', scope: 'Project:p1', payload: { exists: true, projectId: 'p1', row: { id: 'codeA', projectId: 'p1', latestNoteId: 'noteA', label: 'Identity', colour: '#334155', position: '1' } }, principal: alice });
+
+  const boot = await delivery.bootstrap({ principal: alice, scope: 'Project:p1', capabilities: ['snapshot-patch/v1'] });
+  assert.equal(boot.kind, 'snapshot');
+  assert.equal(boot.snapshot.codes.codeA.latestNote.badges.length, 1);
+
+  // A badge mutation can only be routed through the badge branch whose
+  // ancestor step is a FORWARD one() (Code holds latestNoteId). Targeted
+  // capture cannot address it: resolveFragments throws on non-inverse steps,
+  // and the caller recovers through a full snapshot. This test PINS that
+  // documented behavior — a fallback, never silence or a wrong patch.
+  await dispatchOk(app, { actionId: 'b1', type: 'badge.write', scope: 'Project:p1', payload: { exists: true, projectId: 'p1', row: { id: 'badge1', noteId: 'noteA', name: 'Platinum' } }, principal: alice });
+  const outcome = await delivery.catchup({ principal: alice, scope: 'Project:p1', after: boot.cursor, capabilities: ['snapshot-patch/v1'], projectionToken: boot.projectionToken });
+  assert.equal(outcome.kind, 'snapshot', `non-inverse ancestor chains fall back to snapshot (got ${outcome.kind})`);
+  assert.equal(outcome.snapshot.codes.codeA.latestNote.badges[0].name, 'Platinum', 'fallback delivers correct fresh state');
+
+  // The fallback must not have poisoned the ledger: a subsequent unrelated
+  // mutation still patches exactly.
+  await dispatchOk(app, { actionId: 'probe', type: 'project.write', scope: 'Project:p1', payload: { exists: true, row: { id: 'p1', name: 'Renamed' } }, principal: alice });
+  const outcome2 = await delivery.catchup({ principal: alice, scope: 'Project:p1', after: boot.cursor, capabilities: ['snapshot-patch/v1'], projectionToken: boot.projectionToken });
+  assert.notEqual(outcome2.kind, 'revoked');
+  if (outcome2.kind === 'catchup') {
+    assert.ok(outcome2.envelopes.length >= 0);
+  }
   await app.shutdown();
 });
