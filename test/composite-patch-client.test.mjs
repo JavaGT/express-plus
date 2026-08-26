@@ -550,6 +550,43 @@ test('DOUBLE CONTROL: [patch, resync, resync, patch] — every control gates the
 // NEVER settled: promise unresolved, pendingCount stuck, optimistic ghost
 // re-projected on every publish.
 
+test('SETTLEMENT RACE: transport throw AFTER patch attribution — dispatch reports committed, not outcome-unknown', async () => {
+  // sendAction rejects (pure transport failure) while the covering patch is
+  // delivered first: the patch's actionIds attribution already settled and
+  // removed the op, so the catch path must take the committed escape.
+  let releaseReceipt;
+  const receiptGate = new Promise((resolve) => { releaseReceipt = resolve; });
+  const { session, probe } = await startSession({
+    sendAction: async () => {
+      await receiptGate;
+      throw new Error('ECONNRESET after commit');
+    },
+    optimistic: (snapshot, action) => ({ ...snapshot, edits: [...(snapshot.edits ?? []), action.type] }),
+  });
+  const dispatched = session.dispatch('code.rename', { codeId: 'c1' });
+  const opId = session.operations()[0]?.opId;
+  assert.ok(opId);
+
+  await probe.deliver([patchEnvelope({
+    fromComposite: 1,
+    toComposite: 2,
+    token: 'wbpt_thr',
+    actionIds: [opId],
+    operations: renameRoot('THROWN'),
+  })]);
+  assert.equal(session.pendingCount(), 0, 'attribution settled the in-flight op');
+  assert.equal(session.snapshot.name, 'THROWN');
+
+  releaseReceipt();
+  const result = await dispatched;
+  assert.equal(result.ok, true, 'attribution proves commitment despite the transport throw');
+  assert.equal(result.status, 'committed');
+  assert.equal(result.settlement == null || (await result.settlement.wait()).status, 'reconciled');
+  assert.equal(session.pendingCount(), 0);
+  assert.equal(session.snapshot.name, 'THROWN', 'no optimistic ghost re-appears');
+  session.close();
+});
+
 // ---- settlement strand: the patch wins the race (#156 round 3) ---------------
 //
 // Ordering that stranded ops before round 3: dispatch → covering patch
