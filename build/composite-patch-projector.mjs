@@ -393,9 +393,33 @@ function fillAffectedBranch(ctx                , rootRaw                        
   if (!fragments) throw new Error('affected fragments unresolved for a touched branch');
 
   for (const [, group] of groups) {
+    // Finding 3 (#157 re-review): validate the group's address chain against
+    // CURRENT ancestry BEFORE building or emitting through it. Consecutive
+    // spine rows must still be fk-linked (every keyed ancestor step is
+    // inverse: the child row holds the parent's id). A stale ledger chain —
+    // e.g. after an unnoticed reparent or id recycle — fails closed here and
+    // recovers through a full snapshot instead of patching an instance that
+    // moved. Evidence rows are post-state so they pass by construction; only
+    // fetched (ledger-only) rows can fail, which is exactly the staleness
+    // signal.
+    const spineRaws                                 = [];
+    for (let level = 0; level < chain.length - 1; level += 1) {
+      const levelRelation = chain[level];
+      const levelEntry = compiledEntryAt(ctx.declaration.output, levelRelation.path);
+      if (!levelEntry.entity) throw new Error('ancestor branch lacks a compiled entity');
+      const memberId = group.levels[level];
+      const evidence = [...fragments.values()].find((candidate) => String(candidate.levels[level]?.raw.id) === memberId);
+      const raw = evidence?.levels[level]?.raw ?? fetchAncestorRow(ctx, levelEntry, memberId);
+      if (level > 0 && String(raw[levelRelation.fk]) !== String(spineRaws[level - 1].id)) {
+        throw new Error('ledger address no longer matches current ancestry');
+      }
+      spineRaws.push(raw);
+    }
+
     // Walk/build the ancestor spine, outermost first. Every level's node is
     // REUSED when already present in its parent's children (placed by an
     // earlier group or touched branch) and only read+captured when missing.
+    // Raw rows come from the validated spine pass above.
     let parentNode = { raw: rootRaw, children: into }                    ;
     for (let level = 0; level < chain.length - 1; level += 1) {
       const relation = chain[level];
@@ -410,11 +434,8 @@ function fillAffectedBranch(ctx                , rootRaw                        
       const existing = (parentNode.children.get(levelEntry) ?? [])                      ;
       let node = existing.find((candidate) => String(candidate.raw.id) === memberId) ?? null;
       if (!node) {
-        // Prefer post-state evidence from an affected fragment at this level;
-        // fall back to a scoped read (ledger-addressed spine rows).
-        const evidence = [...fragments.values()].find((candidate) => String(candidate.levels[level]?.raw.id) === memberId);
-        const raw = evidence?.levels[level]?.raw ?? fetchAncestorRow(ctx, levelEntry, memberId);
-        node = newNode(raw, false);
+        // Raw row comes from the validated spine pass above.
+        node = newNode(spineRaws[level], false);
         // Spine rows are addressed, not emitted: nested entries stay empty
         // unless a later touched branch fills them under this same node.
         for (const nestedEntry of nestedEntriesOf(levelEntry)) node.children.set(nestedEntry, []);
