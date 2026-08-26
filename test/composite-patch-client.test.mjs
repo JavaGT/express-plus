@@ -479,11 +479,20 @@ test('BATCH COALESCE: a broken middle link in a delivered batch resyncs into rec
 test('DOUBLE CONTROL: [patch, resync, resync, patch] — every control gates the rest of its batch; no untrusted-base publication, no cursor regression', async () => {
   // Snapshot #1 arms the session (A @ composite 1); every later snapshot call
   // is a control-triggered replacement CONTINUING the stream (@ composite 2).
+  // The SECOND replacement is gated: a synchronous resolution lets pre-fix
+  // modules publish the replacement before receive() resumes, hiding the
+  // untrusted-base window this test exists to catch.
   let snapshotCalls = 0;
+  let releaseSecond;
+  const secondGate = new Promise((resolve) => { releaseSecond = resolve; });
   const { session, probe } = await startSession({
-    snapshotResult: () => (++snapshotCalls === 1
-      ? patchCapableSnapshot()
-      : patchCapableSnapshot({ token: 'wbpt_canon', composite: 2, name: 'CANON' })),
+    snapshotResult: async () => {
+      snapshotCalls += 1;
+      if (snapshotCalls === 1) return patchCapableSnapshot();
+      if (snapshotCalls === 2) return patchCapableSnapshot({ token: 'wbpt_canon', composite: 2, name: 'CANON' });
+      await secondGate;
+      return patchCapableSnapshot({ token: 'wbpt_canon', composite: 2, name: 'CANON' });
+    },
   });
   const publishedNames = [];
   const unsubscribe = session.subscribe((snapshot) => publishedNames.push(snapshot.name));
@@ -500,13 +509,25 @@ test('DOUBLE CONTROL: [patch, resync, resync, patch] — every control gates the
   // legitimately republishes canonical state).
   publishedNames.length = 0;
   const bootstrapsBefore = probe.bootstrapCalls.length;
-  await probe.deliver([
+  const delivered = probe.deliver([
     patchEnvelope({ fromComposite: 1, toComposite: 2, token: 'wbpt_d2', operations: renameRoot('D2') }),
     { type: 'resync' },
     { type: 'resync' },
     // Continues the RECOVERED cursor (composite 2), not the pre-recovery one.
     patchEnvelope({ fromComposite: 2, toComposite: 3, token: 'wbpt_d3', actionIds: [dispatched.opId], operations: renameRoot('D3') }),
   ]);
+
+  // RED-LINE: while the second control's replacement is still gated, NOTHING
+  // may publish beyond run1 + the first replacement, the op must stay
+  // pending, and no cursor regression may occur. On a pre-fix module the
+  // second control is fire-and-forget: the trailing run applies+publishes D3
+  // against the untrusted base and settles the op BEFORE this release.
+  await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.ok(!publishedNames.includes('D3'), `no untrusted-base publication before the second replacement lands (saw ${JSON.stringify(publishedNames)})`);
+  assert.equal(session.pendingCount(), 1, 'trailing-run op must not settle before both replacements land');
+  releaseSecond();
+  await delivered;
 
   // Publication discipline: run1's own publish, then canonical/recovered
   // publications ONLY, then run2 against the recovered base. Nothing may
