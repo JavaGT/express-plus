@@ -24,7 +24,7 @@
 // real client session instead.
 
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { execFileSync } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
@@ -240,9 +240,13 @@ async function buildProject(size) {
 }
 
 // Shared fixtures live for the whole file (node --test runs files serially);
-// closed once in the module-level `after` hook below.
+// the module-level after() hook closes them even under --test-name-pattern
+// filters (a teardown TEST would be filtered out, leaking listening servers).
 const projects = new Map();
 const closers = [];
+after(async () => {
+  for (const close of closers.splice(0)) await close();
+});
 async function getProject(size) {
   if (!projects.has(size)) {
     const fixture = await buildProject(size);
@@ -427,6 +431,40 @@ test('B3 server CPU: one rename fanned out to K patch recipients, sizes × K', a
   console.table(rows);
 });
 
-test('teardown shared benchmark fixtures', async () => {
-  for (const close of closers.splice(0)) await close();
+// ---- B4: per-recipient memory + ledger-eviction demotion ----------------------
+
+test('B4 DEMOTION: an evicted projection token falls back to a full snapshot on next catch-up', async (t) => {
+  const fixture = await getProject(5000);
+  const holder = principalFor('b4-holder');
+  // Quiet-journal setup: every bootstrap below registers against the SAME
+  // composite cursor, so the ONLY difference between the control and the
+  // demotion attempt is ledger presence (eviction), never cursor disagreement.
+  const first = await fixture.delivery.bootstrap({ principal: holder, scope: fixture.scope, capabilities: [CAP] });
+  assert.equal(first.kind, 'snapshot');
+  // The retained predecessor chain per holder is bounded (chainLength=3):
+  // three further registrations evict `first`'s entry insertion-order.
+  for (let i = 0; i < 3; i += 1) {
+    const next = await fixture.delivery.bootstrap({ principal: holder, scope: fixture.scope, capabilities: [CAP] });
+    assert.equal(next.kind, 'snapshot');
+    assert.notEqual(next.projectionToken, first.projectionToken);
+  }
+  const current = await fixture.delivery.bootstrap({ principal: holder, scope: fixture.scope, capabilities: [CAP] });
+  // CONTROL: the newest token resolves — a no-op catch-up ('you are current').
+  const control = await fixture.delivery.catchup({
+    principal: holder, scope: fixture.scope, after: current.cursor,
+    capabilities: [CAP], projectionToken: current.projectionToken,
+  });
+  assert.equal(control.kind, 'catchup', `control catch-up with the live token (${control.reason ?? control.kind})`);
+  assert.deepEqual(control.envelopes, [], 'no journal movement — empty delta');
+  // DEMOTION: the EVICTED token cannot resolve → the public seam answers with
+  // a fresh full authorized snapshot (never an error, never a partial).
+  const demoted = await fixture.delivery.catchup({
+    principal: holder, scope: fixture.scope, after: first.cursor,
+    capabilities: [CAP], projectionToken: first.projectionToken,
+  });
+  assert.equal(demoted.kind, 'snapshot', `evicted-token catch-up must demote to a full snapshot (got ${demoted.kind} ${demoted.reason ?? ''})`);
+  assert.ok(demoted.projectionToken && demoted.projectionToken !== first.projectionToken, 'demotion re-arms with a FRESH projection token');
+  assert.equal(demoted.protocol, CAP, 'the fallback snapshot echoes the negotiated protocol');
+  assert.equal(Object.keys(demoted.snapshot.codes).length, 5000, 'demotion delivers the complete project state');
 });
+
