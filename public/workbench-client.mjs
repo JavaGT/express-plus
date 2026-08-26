@@ -3600,8 +3600,9 @@ export function createLiveDeliverySession({
         return { ok: false, status: 'failed-rolled-back', opId: operation.actionId, settlement: operation.settlement, failure: new ClientClosedError('Live delivery access was revoked') };
       }
       // A delivery echo proves the action reached the committed recipient
-      // stream even when its request promise fails after that point.
-      if (operation.echoCursor != null) {
+      // stream even when its request promise fails after that point. An
+      // accepted-patch attribution (#156 round 3) is the same commit proof.
+      if (operation.echoCursor != null || operation.patchAttributed) {
         settleOperation(operation, { status: 'reconciled' });
         operations.delete(operation.actionId);
         publish();
@@ -3676,7 +3677,10 @@ export function createLiveDeliverySession({
         publish();
         return { ok: false, status: 'failed-rolled-back', opId: operation.actionId, settlement: operation.settlement, failure: new ClientClosedError('Live delivery access was revoked') };
       }
-      if (operation.echoCursor != null) {
+      // Same commit-proof escapes as submitAction: a delivery echo or an
+      // accepted-patch attribution (#156 round 3) proves the batch committed
+      // even when its request promise fails after that point.
+      if (operation.echoCursor != null || operation.patchAttributed) {
         settleOperation(operation, { status: 'reconciled' });
         operations.delete(operation.actionId);
         publish();
