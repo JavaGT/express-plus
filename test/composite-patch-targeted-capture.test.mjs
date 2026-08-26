@@ -21,9 +21,9 @@ const alice = { type: 'user', id: 'alice', attributes: {} };
 
 function buildGraph(db) {
   db.exec(`
-    CREATE TABLE Project (id TEXT PRIMARY KEY, name TEXT, owner TEXT);
+    CREATE TABLE Project (id TEXT PRIMARY KEY, name TEXT, owner TEXT, featuredNoteId TEXT REFERENCES Note(id));
     CREATE TABLE IF NOT EXISTS User (id TEXT PRIMARY KEY, name TEXT);
-    CREATE TABLE Code (id TEXT PRIMARY KEY, projectId TEXT REFERENCES Project(id), label TEXT, colour TEXT, position INTEGER, ownerId TEXT REFERENCES User(id));
+    CREATE TABLE Code (id TEXT PRIMARY KEY, projectId TEXT REFERENCES Project(id), label TEXT, colour TEXT, position INTEGER);
     CREATE TABLE Note (id TEXT PRIMARY KEY, codeId TEXT REFERENCES Code(id), projectId TEXT REFERENCES Project(id), title TEXT);
     CREATE TABLE Entry (id TEXT PRIMARY KEY, codeId TEXT REFERENCES Code(id), projectId TEXT REFERENCES Project(id), term TEXT);
   `);
@@ -37,11 +37,13 @@ function entities() {
   const Project = entity('Project', {
     name: text(),
     owner: ref('User', { role: 'owner' }),
+    // Pointer for the top-level forward-one `featured` branch (finding 2
+    // fixture). Physical FK is REQUIRED by snapshot compilation.
+    featuredNoteId: ref('Note', { optional: true }),
     grant: [scope(() => everyone()).can(() => grant(read, subscribe))],
   });
   const Code = entity('Code', {
     projectId: ref(Project, { immutable: true }),
-    ownerId: ref(User, { optional: true }),
     label: text(),
     colour: text({ optional: true }),
     position: text({ optional: true }),
@@ -63,7 +65,15 @@ function entities() {
     term: text(),
     grant: inherit(Code, { via: 'codeId' }),
   });
-  return { Project, Code, Note, Entry, User };
+  // Badge hangs under a forward one() step (the PARENT row holds the fk) —
+  // the mutation class finding 4 excludes from targeted capture. Only
+  // registered when setup({ badges: true }); its table arrives via executeDDL.
+  const Badge = entity('Badge', {
+    noteId: ref('Note'),
+    name: text(),
+    grant: () => grant(read, subscribe),
+  });
+  return { Project, Code, Note, Entry, Badge, User };
 }
 
 function rowProjections(record) {
@@ -146,17 +156,21 @@ function installReadCounter(db) {
   return rowsByTable;
 }
 
-async function setup(t, { adapter = null } = {}) {
+async function setup(t, { adapter = null, badges = false, featured = false } = {}) {
   const db = new DatabaseSync(':memory:');
   buildGraph(db);
-  const { Project, Code, Note, Entry, User } = entities();
+  const { Project, Code, Note, Entry, Badge, User } = entities();
   executeDDL(Code, db);
   executeDDL(Note, db);
   executeDDL(Entry, db);
+  if (badges) {
+    db.exec('CREATE TABLE Badge (id TEXT PRIMARY KEY, noteId TEXT REFERENCES Note(id), name TEXT)');
+    executeDDL(Badge, db);
+  }
   const projectScope = (payload) => `Project:${payload.projectId}`;
   const app = workbench({
     db,
-    entities: [Project, Code, Note, Entry, User],
+    entities: badges ? [Project, Code, Note, Entry, Badge, User] : [Project, Code, Note, Entry, User],
     actions: [
       crudAction('Project', (payload) => `Project:${payload.row.id}`),
       crudAction('Code', projectScope),
@@ -164,18 +178,26 @@ async function setup(t, { adapter = null } = {}) {
       crudAction('Entry', projectScope),
     ],
   });
+  // Forward-one branch under `codes` for the finding-4 constraint test: the
+  // badge branch's ANCESTOR step (codes -> latestNote) is a forward one()
+  // (Code row holds the fk), which targeted capture does not support.
   app.attachLiveDelivery({
     principalOf: () => alice,
     ...(adapter ? { authorization: adapter } : {}),
     snapshots: [snapshot(Project, {
       output: object({
         name: select(Project.field.name),
+        ...(featured ? {
+          // Top-level forward-one branch (finding 2 fixture): the ANCHOR row
+          // holds the fk. Chain length 1 — routable, capturable, addressable,
+          // unlike a NESTED forward-one whose ancestor step poisons routing.
+          featured: one(Note, { via: Project.field.featuredNoteId, include: object({ featuredFields: select(Note.field.title) }) }),
+        } : {}),
         codes: keyed(Code, {
           via: Code.field.projectId,
           orderBy: orderBy(Code.field.position, 'asc'),
           include: object({
             codeFields: select(Code.field.label, Code.field.colour),
-            owner: one(User, { via: Code.field.ownerId, include: object({ ownerFields: select(User.field.name) }) }),
             notes: many(Note, {
               via: Note.field.codeId,
               orderBy: orderBy(Note.field.id, 'asc'),
@@ -419,5 +441,65 @@ test('PARITY oracle: mixed mutations (rename, add, nested removal, top-level rem
   assert.equal(final.kind, 'snapshot');
   const patched = applyPatches(boot.snapshot, envelopes);
   assert.deepEqual(patched, final.snapshot, 'parity: patched replay === fresh snapshot');
+  await app.shutdown();
+});
+
+test('PARITY oracle: forward-one swap batch keeps ledger parity across successor lifecycles (finding 2)', async (t) => {
+  const { app, delivery } = await setup(t, { featured: true });
+  await dispatchOk(app, { actionId: 'p0', type: 'project.write', scope: 'Project:p1', payload: { exists: false, row: { id: 'p1', name: 'Research' } }, principal: alice });
+  // Notes MUST carry a real codeId: an orphan row cannot be placed by the
+  // router's upward walk and conservatively records a declaration-wide
+  // invalidation instead of a scoped entry.
+  await dispatchOk(app, { actionId: 'c0a', type: 'code.write', scope: 'Project:p1', payload: { exists: false, projectId: 'p1', row: { id: 'codeA', projectId: 'p1', label: 'Identity', colour: '#334155', position: '1' } }, principal: alice });
+  await dispatchOk(app, { actionId: 'n0a', type: 'note.write', scope: 'Project:p1', payload: { exists: false, projectId: 'p1', row: { id: 'noteOld', codeId: 'codeA', projectId: 'p1', title: 'Old' } }, principal: alice });
+  await dispatchOk(app, { actionId: 's0', type: 'project.write', scope: 'Project:p1', payload: { exists: true, row: { id: 'p1', name: 'Research', featuredNoteId: 'noteOld' } }, principal: alice });
+
+  const boot = await delivery.bootstrap({ principal: alice, scope: 'Project:p1', capabilities: ['snapshot-patch/v1'] });
+  assert.equal(boot.kind, 'snapshot');
+  assert.equal(boot.snapshot.featured.id, 'noteOld');
+
+  // BATCH 1 (one drain = one patch batch): swap the featured occupant.
+  // noteNew's creation routes SILENTLY (nothing references it yet), so the
+  // journal names ONLY codeA's field update — the successor is never named
+  // by any event and its identity must come from the projected value. The
+  // old ledger logic recorded group.ids[0] ('noteOld') as successor while
+  // visibility dropped it. Create-before-remove ordering satisfies the
+  // projection layer's enforced foreign keys (noteOld is still referenced).
+  await dispatchOk(app, { actionId: 'x1', type: 'note.write', scope: 'Project:p1', payload: { exists: false, projectId: 'p1', row: { id: 'noteNew', codeId: 'codeA', projectId: 'p1', title: 'New' } }, principal: alice });
+  await dispatchOk(app, { actionId: 'x2', type: 'project.write', scope: 'Project:p1', payload: { exists: true, row: { id: 'p1', name: 'Research', featuredNoteId: 'noteNew' } }, principal: alice });
+
+  let cursor = boot.cursor;
+  let token = boot.projectionToken;
+  const envelopes = [];
+  const fallbacks = [];
+  const drain = async () => {
+    for (;;) {
+      const outcome = await delivery.catchup({ principal: alice, scope: 'Project:p1', after: cursor, capabilities: ['snapshot-patch/v1'], projectionToken: token });
+      if (outcome.kind !== 'catchup') { fallbacks.push(outcome.kind); return; }
+      if (outcome.envelopes.length === 0) return;
+      envelopes.push(...outcome.envelopes);
+      token = outcome.envelopes.at(-1)?.projectionToken ?? token;
+      cursor = outcome.cursor;
+    }
+  };
+  await drain();
+  assert.deepEqual(fallbacks, [], `no snapshot fallbacks on the swap batch (${JSON.stringify(fallbacks)})`);
+  const patchedMid = applyPatches(boot.snapshot, envelopes);
+  assert.equal(patchedMid.featured?.id ?? null, 'noteNew', 'mid-sequence: patched featured === noteNew');
+
+  // BATCH 2: clear the pointer FIRST (FK order), then remove noteOld's
+  // successor. If batch 1's ledger had drifted (old ids[0] logic), this
+  // catchup would fall back or emit against stale state.
+  await dispatchOk(app, { actionId: 'y1', type: 'project.write', scope: 'Project:p1', payload: { exists: true, row: { id: 'p1', name: 'Research', featuredNoteId: null } }, principal: alice });
+  await dispatchOk(app, { actionId: 'y2', type: 'note.write', scope: 'Project:p1', payload: { exists: true, removed: true, projectId: 'p1', row: { id: 'noteNew' } }, principal: alice });
+  await drain();
+  assert.deepEqual(fallbacks, [], `no snapshot fallbacks after successor removal (${JSON.stringify(fallbacks)})`);
+
+  // Full parity at every step's endpoint.
+  const final = await delivery.bootstrap({ principal: alice, scope: 'Project:p1', capabilities: ['snapshot-patch/v1'] });
+  assert.equal(final.kind, 'snapshot');
+  assert.equal(final.snapshot.featured ?? null, null);
+  const patched = applyPatches(boot.snapshot, envelopes);
+  assert.deepEqual(patched.featured ?? null, final.snapshot.featured ?? null, 'patched featured === fresh');
   await app.shutdown();
 });

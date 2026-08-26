@@ -261,6 +261,11 @@ function resolveFragments(db                                , principal         
     let current                          = row;
     for (let index = chain.length - 1; index >= 1; index -= 1) {
       const step = chain[index];
+      // Accepted scope (#157 re-review finding 4): ancestor steps must be
+      // inverse (child holds the fk). A FORWARD `one` step (parent row holds
+      // the fk) has no cheap scoped reverse lookup yet — a mutation that moves
+      // a row INTO such a branch cannot be addressed, so it fails closed here
+      // and recovers through a full snapshot. See the ticket constraint.
       if (step.inverse !== true) throw new Error('targeted capture supports inverse relation chains only');
       const parentId = current[step.fk];
       if (typeof parentId !== 'string' || parentId.length === 0) throw new Error('affected fragment lacks a readable ancestor reference');
@@ -801,13 +806,42 @@ export async function projectCompositePatch(input                     )         
           : { op: 'replace-one', path, value: (value ?? null)                                   });
         if (relation.kind === 'one') {
           const idSet = visibleBucket(visibleAfter, branchId, relation.entity);
-          for (const id of group.ids) {
-            const fragment = fragments.get(id);
-            if (!fragment) throw new Error('affected fragment unresolved');
-            if (fragment.row) idSet.add(id);
-            else idSet.delete(id);
+          // Finding 2 (#157 re-review): a one-relation batch may remove or
+          // replace SEVERAL candidate rows in one commit, and visibility
+          // updates every affected id — but only ONE row survives under the
+          // relation. Derive the successor identity from the PROJECTED VALUE
+          // (never group order) and clear every prior entry ADDRESSED AT THIS
+          // SAME INSTANCE (levels-equal; the address key is instance-blind,
+          // so branch+entity alone would nuke sibling instances' successors)
+          // from visibility AND the address ledger.
+          const prefix = compositeFragmentAddressKey(branchId, relation.entity, '');
+          const priorEntries                                                   = [];
+          for (const [key, levels] of addressesAfter) {
+            if (key.startsWith(prefix)) priorEntries.push({ id: key.slice(prefix.length), levels });
           }
-          addressesAfter.set(compositeFragmentAddressKey(branchId, relation.entity, [...group.ids][0]), Object.freeze([...group.levels]));
+          const successorId = value && typeof value === 'object' && !Array.isArray(value)
+            ? String((value                           ).id)
+            : null;
+          const sameInstance = (candidate                   )          => (
+            candidate.length === group.levels.length && group.levels.every((level, index) => candidate[index] === level)
+          );
+          for (const prior of priorEntries) {
+            if (prior.id === successorId || !sameInstance(prior.levels)) continue;
+            addressesAfter.delete(compositeFragmentAddressKey(branchId, relation.entity, prior.id));
+            idSet.delete(prior.id);
+          }
+          // The projected value is the SINGLE source of visible identity for
+          // a one relation: surviving candidate rows that are not selected do
+          // NOT become visible, and a removed row that lost selection does
+          // not stay visible merely because group.ids names it.
+          if (successorId !== null) {
+            // The address key is single-valued per (branch, entity, id); when
+            // the same row occupies several instances across this batch,
+            // .set() naturally yields LAST group wins — mirroring
+            // deriveVisibilityExtended's overwrite order against a fresh snapshot.
+            idSet.add(successorId);
+            addressesAfter.set(compositeFragmentAddressKey(branchId, relation.entity, successorId), Object.freeze([...group.levels]));
+          }
         }
         continue;
       }
