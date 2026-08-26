@@ -13,7 +13,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { entity, inherit, ref, text, grant, read, subscribe, write, scope, everyone, snapshot } from '../build/index.mjs';
+import workbench, { entity, inherit, ref, text, grant, read, subscribe, write, scope, everyone, snapshot, one } from '../build/index.mjs';
 const { object, select, include, keyed, many, orderBy } = snapshot;
 import { executeDDL } from '../build/internal.mjs';
 
@@ -23,7 +23,7 @@ function buildGraph(db) {
   db.exec(`
     CREATE TABLE Project (id TEXT PRIMARY KEY, name TEXT, owner TEXT);
     CREATE TABLE IF NOT EXISTS User (id TEXT PRIMARY KEY, name TEXT);
-    CREATE TABLE Code (id TEXT PRIMARY KEY, projectId TEXT REFERENCES Project(id), label TEXT, colour TEXT, position INTEGER);
+    CREATE TABLE Code (id TEXT PRIMARY KEY, projectId TEXT REFERENCES Project(id), label TEXT, colour TEXT, position INTEGER, ownerId TEXT REFERENCES User(id));
     CREATE TABLE Note (id TEXT PRIMARY KEY, codeId TEXT REFERENCES Code(id), projectId TEXT REFERENCES Project(id), title TEXT);
     CREATE TABLE Entry (id TEXT PRIMARY KEY, codeId TEXT REFERENCES Code(id), projectId TEXT REFERENCES Project(id), term TEXT);
   `);
@@ -41,6 +41,7 @@ function entities() {
   });
   const Code = entity('Code', {
     projectId: ref(Project, { immutable: true }),
+    ownerId: ref(User, { optional: true }),
     label: text(),
     colour: text({ optional: true }),
     position: text({ optional: true }),
@@ -174,6 +175,7 @@ async function setup(t, { adapter = null } = {}) {
           orderBy: orderBy(Code.field.position, 'asc'),
           include: object({
             codeFields: select(Code.field.label, Code.field.colour),
+            owner: one(User, { via: Code.field.ownerId, include: object({ ownerFields: select(User.field.name) }) }),
             notes: many(Note, {
               via: Note.field.codeId,
               orderBy: orderBy(Note.field.id, 'asc'),
