@@ -392,7 +392,40 @@ test('B1 bytes-on-wire: one code rename vs fresh bootstrap, sizes × K', async (
   console.table(rows);
 });
 
-// ---- B3: server CPU per rename fan-out × K ------------------------------------
+// ---- B4: per-recipient memory (heapUsed tripwire, K=20) ------------------------
+
+// ---- B4 HEAP: per-recipient memory tripwire ------------------------------------
+
+test('B4 HEAP: retained memory per active subscription stays within the ledger budget', async () => {
+  // Per-SUBSCRIPTION state (ledger entry + projection token + cursor) is the
+  // quantity under bound — the snapshot VALUE is transient per request. The
+  // smallest fixture exercises the identical subscription machinery at a
+  // fraction of the setup cost.
+  const fixture = await getProject(100);
+  const SIZE_BUDGET_PER_SUB = 5000 * 400; // ids × ~50B budget, 8× GC-noise headroom
+  const baseline = process.memoryUsage().heapUsed;
+  // K=20 ACTIVE subscriptions on the public seam — distinct principals so each
+  // holds its own independent ledger entry + projection token.
+  const subs = [];
+  for (let i = 0; i < 20; i += 1) {
+    subs.push(await bootstrapRecipient(fixture, principalFor(`b4-heap-${i}`)));
+  }
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const afterBootstrap = process.memoryUsage().heapUsed;
+  const perSubDelta = Math.max(0, afterBootstrap - baseline) / subs.length;
+  console.table([{
+    metric: 'B4', hash: GIT_HASH, size: 100, k: subs.length,
+    per_sub_heap_delta_bytes: Math.round(perSubDelta),
+    budget_bytes_per_sub: SIZE_BUDGET_PER_SUB,
+    verdict: perSubDelta <= SIZE_BUDGET_PER_SUB ? 'within-budget' : 'OVER-BUDGET',
+  }]);
+  // Regression TRIPWIRE, not a precise budget (GC noise is real; the bound is
+  // deliberately ~8× the ~ids×50B expectation). A structural leak — e.g. an
+  // unbounded per-subscriber index — blows through this immediately.
+  assert.ok(perSubDelta <= SIZE_BUDGET_PER_SUB,
+    `per-subscription retained heap ${Math.round(perSubDelta)}B <= ${SIZE_BUDGET_PER_SUB}B (ids×~50B with generous tolerance)`);
+});
+
 
 test('B3 server CPU: one rename fanned out to K patch recipients, sizes × K', async () => {
   const rows = [];
