@@ -334,7 +334,13 @@ function attachRequirement(ctx: CaptureContext, entry: CompiledEntryLike, child:
   const related = readRows(db, entry.require.entity as never, principal, 'id', child[entry.require.childRef], false, null, tombstones as never);
   // The related row must be co-owned by this exact branch parent.
   if (related.length === 1 && related[0][entry.require.fk] === holderRaw.id) {
-    node.required = Object.freeze(newNode(related[0], ledgerAdmitted));
+    // The required node must carry its entity — authorizeSnapshot walks
+    // `node.required.entity` when it re-authorizes the requirement. newNode()
+    // omits it, and a missing entity makes that walk authorize(undefined, …),
+    // which throws into the fail-closed catch and DENIES every affected row of
+    // a require-carrying branch (a Scope code rename projected as remove-keyed
+    // instead of put-keyed). Mirror the full-capture shape in snapshot-projection.
+    node.required = Object.freeze({ entity: entry.require.entity, raw: related[0], children: new Map() });
   }
 }
 

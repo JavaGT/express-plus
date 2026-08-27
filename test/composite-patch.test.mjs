@@ -836,3 +836,89 @@ test('RED-LINE forged fact with valid entity but WRONG BRANCH is rejected — in
   assert.ok(out3.some((entry) => entry.scope === 'Project:p1' && !entry.invalidating && entry.affected.length > 0), 'correctly-paired fact routes');
   assert.ok(!out3.some((entry) => entry.invalidating), 'correctly-paired fact suppresses invalidation');
 });
+
+// #159 regression: a require-carrying branch (Code requires its Codebook) must
+// project an update as put-keyed, never remove-keyed. The patch projector's
+// attachRequirement built the required node WITHOUT its entity, so
+// authorizeSnapshot walked authorize(undefined, required) → threw into the
+// fail-closed catch → every affected row of the branch was DENIED → the
+// renamed code was emitted as remove-keyed (removed from the client). Found by
+// Scope's real-seam delta test (#159 round 2); pinned here on the producer.
+test('REGRESSION: require-carrying branch projects an update as put-keyed, not remove-keyed', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(`
+    CREATE TABLE Project (id TEXT PRIMARY KEY, name TEXT);
+    CREATE TABLE Codebook (id TEXT PRIMARY KEY, projectId TEXT REFERENCES Project(id), name TEXT);
+    CREATE TABLE Code (id TEXT PRIMARY KEY, projectId TEXT REFERENCES Project(id), codebookId TEXT REFERENCES Codebook(id), label TEXT);
+  `);
+  const User = entity('User', { name: text({ optional: true }), grant: () => grant(read) });
+  const Project = entity('Project', {
+    name: text(),
+    grant: [scope(() => everyone()).can(() => grant(read, subscribe))],
+  });
+  const Codebook = entity('Codebook', {
+    projectId: ref(Project, { immutable: true }),
+    name: text(),
+    grant: inherit(Project, { via: 'projectId' }),
+  });
+  const Code = entity('Code', {
+    projectId: ref(Project, { immutable: true }),
+    codebookId: ref(Codebook, { immutable: true }),
+    label: text(),
+    grant: inherit(Project, { via: 'projectId' }),
+  });
+  const app = workbench({
+    db,
+    entities: [User, Project, Codebook, Code],
+    actions: [
+      crudAction('Project', (payload) => `Project:${payload.row.id}`, () => true),
+      crudAction('Codebook', (payload) => `Project:${payload.row.projectId}`, () => true),
+      crudAction('Code', (payload) => `Project:${payload.row.projectId}`, () => true),
+    ],
+  });
+  app.attachLiveDelivery({
+    principalOf: () => alice,
+    snapshots: [snapshot(Project, {
+      output: object({
+        name: select(Project.field.name),
+        codebooks: keyed(Codebook, { via: Codebook.field.projectId, select: select(Codebook.field.name) }),
+        codes: keyed(Code, {
+          via: Code.field.projectId,
+          require: snapshot.related(Code.field.codebookId, { via: Codebook.field.projectId }),
+          select: select(Code.field.codebookId, Code.field.label),
+        }),
+      }),
+    })],
+  });
+  await app.ddl();
+  app.listen(0);
+  await app.ready;
+  t.after(async () => {
+    app.httpServer.closeAllConnections?.();
+    await app.shutdown();
+    db.close();
+  });
+  const delivery = app._applicationLiveDelivery.delivery;
+
+  await dispatchOk(app, { actionId: 'p1', type: 'project.write', scope: 'Project:p1', payload: { exists: false, row: { id: 'p1', name: 'Research' } }, principal: alice });
+  await dispatchOk(app, { actionId: 'b1', type: 'codebook.write', scope: 'Project:p1', payload: { exists: false, projectId: 'p1', row: { id: 'b1', projectId: 'p1', name: 'Book' } }, principal: alice });
+  await dispatchOk(app, { actionId: 'c1', type: 'code.write', scope: 'Project:p1', payload: { exists: false, projectId: 'p1', row: { id: 'c1', projectId: 'p1', codebookId: 'b1', label: 'Old Name' } }, principal: alice });
+
+  const boot = await delivery.bootstrap({ principal: alice, scope: 'Project:p1', capabilities: ['snapshot-patch/v1'] });
+  assert.equal(boot.kind, 'snapshot');
+  assert.equal(boot.snapshot.codes['c1'].label, 'Old Name');
+
+  // A real rename through the journal.
+  await dispatchOk(app, { actionId: 'rename-1', type: 'code.write', scope: 'Project:p1', payload: { exists: true, projectId: 'p1', row: { id: 'c1', projectId: 'p1', codebookId: 'b1', label: 'Renamed Code' } }, principal: alice });
+
+  const outcome = await delivery.catchup({ principal: alice, scope: 'Project:p1', after: boot.cursor, capabilities: ['snapshot-patch/v1'], projectionToken: boot.projectionToken });
+  assert.equal(outcome.kind, 'catchup', 'the rename is delivered as a patch chain, not a full snapshot');
+  const patches = outcome.envelopes.filter((envelope) => envelope.type === 'snapshot-patch');
+  assert.ok(patches.length > 0, 'catchup carries server-produced snapshot-patch envelopes');
+  const ops = patches.flatMap((patch) => patch.operations);
+  assert.ok(
+    ops.some((op) => op.op === 'put-keyed' && op.id === 'c1' && op.value.label === 'Renamed Code'),
+    `the rename is projected as put-keyed with the new label (got ${JSON.stringify(ops)})`
+  );
+  assert.ok(!ops.some((op) => op.op === 'remove-keyed' && op.id === 'c1'), 'the renamed row is never removed');
+});
