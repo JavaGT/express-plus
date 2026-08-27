@@ -38,6 +38,9 @@ const OPAQUE_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 
 
 
+
+
+
 function opaqueToken(value         )                  {
   return typeof value === 'string' && OPAQUE_TOKEN.test(value);
 }
@@ -126,6 +129,30 @@ export function annotatedTextAction(
       }
       edit = { kind: command.kind, annotationId: command.annotationId };
       break;
+    case 'annotation.update': {
+      if (typeof command.annotationId !== 'string' || command.annotationId.length === 0) {
+        throw new Error('annotatedTextAction: annotation.update requires annotationId');
+      }
+      const hasFields = Object.hasOwn(command, 'fields');
+      if (hasFields && (!command.fields || typeof command.fields !== 'object' || Array.isArray(command.fields))) {
+        throw new Error('annotatedTextAction: annotation.update fields must be a non-array object');
+      }
+      const hasFrom = Object.hasOwn(command, 'from');
+      const hasTo = Object.hasOwn(command, 'to');
+      if (hasFrom !== hasTo) {
+        throw new Error('annotatedTextAction: annotation.update range requires both from and to');
+      }
+      if (!hasFields && !hasFrom) {
+        throw new Error('annotatedTextAction: annotation.update requires fields or a from/to range');
+      }
+      edit = {
+        kind: command.kind,
+        annotationId: command.annotationId,
+        ...(hasFields ? { fields: command.fields } : {}),
+        ...(hasFrom ? { from: position(command.from, 'from'), to: position(command.to, 'to') } : {}),
+      };
+      break;
+    }
     default:
       throw new Error(`annotatedTextAction: unsupported command kind '${String(command.kind)}'`);
   }

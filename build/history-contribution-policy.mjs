@@ -212,6 +212,11 @@ function classifyNativeInsert(handle                    , payload         )     
   // CLOSED: malformed/non-insert native actions are BARRIERS (the "unsupported
   // annotated action is a barrier" law) — the cursor cleaves there instead of
   // exposing an older insert across it. There is no annotated-move special case.
+  //
+  // #174 exception: `annotation.update` is also ELIGIBLE — it is a semantic
+  // atomic step whose compensation rides its own captured before/after image
+  // fact (annotated-text.annotation-update), with compare-and-compensate no-ops
+  // when the live state moved on.
   let command                                           ;
   try {
     command = assertV9AnnotatedTextOffsetEditPayload(handle.entity, handle.fieldName, payload);
@@ -219,6 +224,9 @@ function classifyNativeInsert(handle                    , payload         )     
     return 'barrier';
   }
   if (command.edit.kind === 'text.insert' && typeof command.edit.text === 'string' && command.edit.text.length > 0) {
+    return 'eligible';
+  }
+  if (command.edit.kind === 'annotation.update') {
     return 'eligible';
   }
   return 'barrier';

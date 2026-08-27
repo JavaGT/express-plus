@@ -323,6 +323,93 @@ export function planAnnotationRemove({ documentId, structureVersion, family, ann
   });
 }
 
+/**
+ * Plan the semantic atomic annotation.update (#174): new fields (and optionally
+ * a moved range) on an EXISTING annotation, committed as ONE history step.
+ *
+ * Range unchanged → every existing endpoint object passes through VERBATIM, so
+ * the stored basis anchors (decision 0023) survive untouched. Range changed →
+ * mirrors planTextRangeApply: offsets resolve on the current frontier and an
+ * exclusive 'one'-cardinality family trims overlapped same-family ranges.
+ */
+export function planAnnotationUpdate({ documentId, structureVersion, family, target, fields, annotations, ranges, actorId, cardinality = 'many', sameFamilyAnnotationIds = null, selection = null }: {
+  documentId: string;
+  structureVersion: number;
+  family: ContinuousTextFamily;
+  /** The stored annotation being updated ({ id, family, empty }); identity is immutable. */
+  target: Annotation & { fields?: Record<string, unknown>; protectedTargetIds?: readonly string[] };
+  /** The complete new field record (every declared field). */
+  fields: Record<string, unknown>;
+  annotations: Annotation[];
+  ranges: AnnotationRange[];
+  actorId: string;
+  cardinality?: 'many' | 'one';
+  sameFamilyAnnotationIds?: Set<string> | null;
+  selection?: { startOffset: number; startAffinity: 'left' | 'right'; endOffset: number; endAffinity: 'left' | 'right' } | null;
+}): TextPlan {
+  const existing = annotations.find((annotation) => annotation.id === target.id);
+  if (!existing || existing.family !== target.family) throw new Error('annotation not found');
+  const updatedAnnotation = { ...target, fields };
+  let nextRanges: AnnotationRange[];
+  if (selection === null) {
+    // Fields-only: the membership postimage is exactly the current relation;
+    // endpoint objects pass through byte-identical.
+    nextRanges = ranges;
+  } else {
+    const text = materializeText(family);
+    assertForwardOffset(text, selection.startOffset, selection.endOffset);
+    if (selection.startOffset === selection.endOffset) {
+      const error = new Error('annotation selection must be a forward, non-empty range') as Error & { code: string };
+      error.code = 'position-invalid';
+      throw error;
+    }
+    const start = resolveOffsetToEndpoint(family, selection.startOffset, family.checkpoint.frontier, selection.startAffinity);
+    const end = resolveOffsetToEndpoint(family, selection.endOffset, family.checkpoint.frontier, selection.endAffinity);
+    nextRanges = [];
+    for (const entry of ranges) {
+      if (entry.annotationId === target.id) continue;
+      if (cardinality === 'one' && sameFamilyAnnotationIds?.has(entry.annotationId)) {
+        const existingStart = projectEndpointToOffset(family, entry.start);
+        const existingEnd = projectEndpointToOffset(family, entry.end);
+        if (existingEnd > selection.startOffset && existingStart < selection.endOffset) {
+          if (existingStart < selection.startOffset) {
+            nextRanges.push({
+              annotationId: entry.annotationId,
+              start: entry.start,
+              end: resolveOffsetToEndpoint(family, selection.startOffset, family.checkpoint.frontier, 'left'),
+            });
+          }
+          if (existingEnd > selection.endOffset) {
+            nextRanges.push({
+              annotationId: entry.annotationId,
+              start: resolveOffsetToEndpoint(family, selection.endOffset, family.checkpoint.frontier, 'right'),
+              end: entry.end,
+            });
+          }
+          continue;
+        }
+      }
+      nextRanges.push(entry);
+    }
+    nextRanges.push({ annotationId: target.id, start, end });
+  }
+  return unifiedPlan({
+    id: documentId,
+    before: before(family, structureVersion),
+    after: Object.freeze({ structuralRevision: structureVersion, frontier: family.checkpoint.frontier }),
+    operation: {
+      kind: 'annotation.update',
+      annotation: updatedAnnotation,
+      selection: selection === null ? null : Object.freeze({ startOffset: selection.startOffset, endOffset: selection.endOffset }),
+    },
+    family: textFamilyCheckpoint(family),
+    annotation: updatedAnnotation,
+    ranges: Object.freeze(nextRanges.map((entry) => deepFreeze({ annotationId: entry.annotationId, start: entry.start, end: entry.end }))),
+    actorId,
+    measurements: [],
+  });
+}
+
 export function planAnnotationApplyOffsets(): never {
   const error = new Error('planAnnotationApplyOffsets is block-era; use planTextRangeApply') as Error & { code: string };
   error.code = 'position-invalid';

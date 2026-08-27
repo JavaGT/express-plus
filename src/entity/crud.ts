@@ -29,7 +29,8 @@ import { projectAnnotatedTextSnapshot } from '../annotated-text-snapshot.ts';
 import { authoringRedactionsForRecipient } from '../annotated-text-recipient-projection.ts';
 import { mapVisibleOffsetToCanonical } from '../annotated-text-recipient-projection.ts';
 import { planTextRangeApply } from '../annotated-text-plan.ts';
-import { annotationRangeRows } from '../annotated-text-storage.ts';
+import { annotationRangeRows, loadAnnotationImages } from '../annotated-text-storage.ts';
+import { canonicalEndpointJSON } from '../annotated-text-delete-history-shared.ts';
 import { assertUtf16Range } from '../annotated-text.ts';
 import { rawRow } from './query.ts';
 
@@ -43,6 +44,183 @@ export const CRUD_CURSOR_POLICY = Symbol('workbench.crud-cursor-policy');
  * never an action-name test.
  */
 export const ANNOTATED_COMPENSATION_INPUT = 'workbench.annotated-text-compensation';
+
+// ---------------------------------------------------------------------------
+// Semantic atomic annotation-update history (#174)
+//
+// A committed `annotation.update` captures ONE private contribution fact
+// binding the whole pre/post images (fields, protected edges, and the FULL
+// document membership relation) of the annotation it touched. Undo/redo
+// compensations are symmetric: a consumed transition {before → after} applies
+// after→before for undo and before→after for redo, each compare-and-compensated
+// against the LIVE state (compare-and-compensate, never half-restore).
+// ---------------------------------------------------------------------------
+
+/** One image side of an update transition: complete annotation state plus the document-wide range postimage. */
+interface AnnotationUpdateImage {
+  fields: Record<string, unknown>;
+  protectedTargetIds: string[];
+  ranges: Array<{ annotationId: string; ordinal: number; start: unknown; end: unknown }>;
+}
+
+/**
+ * Snapshot the live storage as an update-transition image: deserialized typed
+ * cells, sorted protected edges, and the full membership relation in the same
+ * canonical order the reducer writes (annotationId, ordinal).
+ */
+function captureAnnotationUpdateImage(db: any, { prefix, documentId, annotationsDeclarations, annotationId }: { prefix: string; documentId: string; annotationsDeclarations: Array<{ annotationName: string; fields: Record<string, unknown> }>; annotationId: string }): AnnotationUpdateImage | null {
+  const annotations = loadAnnotationImages(db, { prefix, documentId, declarations: annotationsDeclarations, deserializeFields: true });
+  const target = annotations.find((candidate) => candidate.id === annotationId);
+  if (!target) return null;
+  const ranges = annotationRangeRows(db, prefix, documentId).map((row) => ({
+    annotationId: row.annotation_id,
+    ordinal: row.ordinal,
+    start: JSON.parse(row.start_point),
+    end: JSON.parse(row.end_point),
+  }));
+  return { fields: { ...target.fields }, protectedTargetIds: [...target.protectedTargetIds], ranges };
+}
+
+/** Canonical comparison form of an update image (sorted keys, canonical endpoints). */
+function normalizeAnnotationUpdateImage(image: AnnotationUpdateImage) {
+  return {
+    fields: Object.fromEntries(Object.keys(image.fields).sort().map((name) => [name, image.fields[name] ?? null])),
+    protectedTargetIds: [...image.protectedTargetIds].sort(),
+    ranges: [...image.ranges]
+      .map((entry) => ({
+        annotationId: entry.annotationId,
+        ordinal: entry.ordinal,
+        start: JSON.parse(canonicalEndpointJSON(entry.start)),
+        end: JSON.parse(canonicalEndpointJSON(entry.end)),
+      }))
+      .sort((left, right) => (left.annotationId < right.annotationId ? -1 : left.annotationId > right.annotationId ? 1 : left.ordinal - right.ordinal)),
+  };
+}
+
+function annotationUpdateImagesEqual(left: AnnotationUpdateImage, right: AnnotationUpdateImage): boolean {
+  return JSON.stringify(normalizeAnnotationUpdateImage(left)) === JSON.stringify(normalizeAnnotationUpdateImage(right));
+}
+
+/**
+ * Compare-and-compensate gate for an update move: the LIVE document state
+ * (typed cells + protected edges + the full membership relation) must equal
+ * the expected transition side exactly, or the move is a durable no-op.
+ */
+function liveStateMatchesAnnotationUpdateImage(db: any, options: { prefix: string; documentId: string; annotationsDeclarations: Array<{ annotationName: string; fields: Record<string, unknown> }>; annotationId: string; expected: AnnotationUpdateImage }): boolean {
+  const live = captureAnnotationUpdateImage(db, {
+    prefix: options.prefix, documentId: options.documentId,
+    annotationsDeclarations: options.annotationsDeclarations, annotationId: options.annotationId,
+  });
+  if (!live) return false;
+  return annotationUpdateImagesEqual(live, options.expected);
+}
+
+/**
+ * Ordinals a projected range postimage receives under the membership rewrite
+ * (per-annotation encounter order over the event's list).
+ */
+function ordinalsByEncounterOrder(ranges: ReadonlyArray<{ annotationId: string; start: unknown; end: unknown }>) {
+  const counter = new Map<string, number>();
+  return ranges.map((entry) => {
+    const ordinal = counter.get(entry.annotationId) ?? 0;
+    counter.set(entry.annotationId, ordinal + 1);
+    return { ...entry, ordinal };
+  });
+}
+
+interface AnnotationUpdateTransition {
+  kind: 'annotation.update';
+  annotationId: string;
+  before: AnnotationUpdateImage;
+  after: AnnotationUpdateImage;
+}
+
+/**
+ * The undo/redo compensation emitter for annotation.update contributions.
+ * A consumed transition applies after→before (undo) or before→after (redo);
+ * both directions are CAS-gated on the LIVE state matching the consumed side's
+ * opposite image, mirroring the compare-and-compensate law of delete-undo.
+ */
+function annotatedUpdateCompensation({ name, fieldName, prefix, db, scope, payload, sourceFact, descriptor }: {
+  name: string; fieldName: string; prefix: string; db: any; scope: string;
+  payload: any; sourceFact: any; descriptor: any;
+}): { events: readonly unknown[]; privateFact: unknown; historyOutcome: 'applied' | 'noop' } {
+  const direction = payload.history.direction;
+  // Undo consumes the fact's own contribution; redo of an applied undo receipt
+  // consumes its recorded inverse (`redo`) — the exact insert-algebra pattern.
+  const step: AnnotationUpdateTransition | undefined = direction === 'undo' ? sourceFact.contribution : sourceFact.redo;
+  if (!step || step.kind !== 'annotation.update' || typeof step.annotationId !== 'string' || !step.before || !step.after) {
+    throw new ValidationError('invalid annotated text compensation contribution');
+  }
+  if (step.before.ranges.length === 0 || step.after.ranges.length === 0) {
+    throw new ValidationError('invalid annotated text compensation contribution');
+  }
+  const noop: { events: readonly unknown[]; privateFact: unknown; historyOutcome: 'applied' | 'noop' } = { events: [], privateFact: { version: 2, kind: 'annotated-text.compensation', documentId: payload.id, linkage: { rootActionId: payload.history.rootActionId, targetActionId: payload.history.targetActionId, direction, outcome: 'noop' } }, historyOutcome: 'noop' };
+  const declarations: Array<{ annotationName: string; fields: Record<string, unknown> }> = descriptor.annotations ?? [];
+  const movingTo = direction === 'undo' ? step.before : step.after;
+  const expecting = direction === 'undo' ? step.after : step.before;
+  if (!liveStateMatchesAnnotationUpdateImage(db, { prefix, documentId: payload.id, annotationsDeclarations: declarations, annotationId: step.annotationId, expected: expecting })) {
+    return noop;
+  }
+  const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(payload.id);
+  if (!state) return noop;
+  const currentFrontier = restoreTextFamilySerialized(state.family_checkpoint).checkpoint.frontier;
+  const targetAnnotations = loadAnnotationImages(db, { prefix, documentId: payload.id, declarations, deserializeFields: true });
+  const targetAnnotation = targetAnnotations.find((candidate) => candidate.id === step.annotationId);
+  if (!targetAnnotation) return noop;
+  // An annotation.update never moves the text family: both revisions bind the
+  // live frontier and structure version.
+  const revision = Object.freeze({
+    structuralRevision: Number(state.structure_version),
+    // The envelope grammar wants a mutable plain array; the stored checkpoint
+    // carries an immutable one, so pass a shallow copy of the same values.
+    frontier: [...(currentFrontier as readonly unknown[])] as unknown[],
+  });
+  const envelope = constructV14OperatedEvent({
+    id: payload.id,
+    before: revision,
+    after: revision,
+    operation: Object.freeze({
+      kind: 'annotation.update',
+      annotation: Object.freeze({
+        id: step.annotationId,
+        family: targetAnnotation.family,
+        fields: { ...movingTo.fields },
+        protectedTargetIds: [...movingTo.protectedTargetIds],
+      }),
+      selection: null,
+      authored: 'history',
+    }),
+    annotation: Object.freeze({
+      id: step.annotationId,
+      family: targetAnnotation.family,
+      fields: { ...movingTo.fields },
+      protectedTargetIds: [...movingTo.protectedTargetIds],
+    }),
+    ranges: Object.freeze(movingTo.ranges.map(({ annotationId, start, end }) => ({ annotationId, start, end }))),
+    actorId: null,
+    measurements: [],
+  });
+  const handle = eventHandles.native(name, fieldName, 'operated');
+  const event = Object.freeze({ handle, type: handle.type, scope, data: Object.freeze(envelope) });
+  // This receipt applied `movingFrom → movingTo`; undo receipts additionally
+  // record how to redo THIS receipt (the inverse transition), exactly like the
+  // insert algebra stores the original contribution under `redo`.
+  const movingFrom = direction === 'undo' ? step.after : step.before;
+  const appliedContribution = { kind: 'annotation.update', annotationId: step.annotationId, before: movingFrom, after: movingTo };
+  const compensation: Record<string, any> = {
+    version: 2,
+    kind: 'annotated-text.compensation',
+    documentId: payload.id,
+    linkage: { rootActionId: payload.history.rootActionId, targetActionId: payload.history.targetActionId, direction, outcome: 'applied' },
+    contribution: appliedContribution,
+  };
+  if (direction === 'undo') {
+    compensation.redo = { kind: 'annotation.update', annotationId: step.annotationId, before: movingTo, after: movingFrom };
+  }
+  return { events: [event], privateFact: compensation, historyOutcome: 'applied' };
+}
+
 
 /** Prefer the dispatch scope when it is the inherited parent shell for this row. */
 export function resolveGeneratedEventScope(record: any, { id, row, payload, scope }: any) {
@@ -100,6 +278,18 @@ export function assertV9AnnotatedTextOffsetEditPayload(name: string, fieldName: 
     edit = Object.freeze({ kind: 'annotation.detach', annotationId: e.annotationId, positionToken: e.positionToken });
   } else if (e.kind === 'annotation.remove' && Object.keys(e).length === 2 && typeof e.annotationId === 'string' && e.annotationId) {
     edit = Object.freeze({ kind: 'annotation.remove', annotationId: e.annotationId });
+  } else if (e.kind === 'annotation.update' && typeof e.annotationId === 'string' && e.annotationId
+    && Object.keys(e).every((key) => ['kind', 'annotationId', 'fields', 'from', 'to'].includes(key))
+    && (!Object.hasOwn(e, 'fields') || (!!e.fields && typeof e.fields === 'object' && !Array.isArray(e.fields)))
+    && (!!e.from === !!e.to)
+    && (Object.hasOwn(e, 'fields') || Object.hasOwn(e, 'from'))) {
+    // #174: fields are the complete declared record; the range edit is all-or-nothing.
+    edit = Object.freeze({
+      kind: 'annotation.update',
+      annotationId: e.annotationId,
+      ...(Object.hasOwn(e, 'fields') ? { fields: frozenJsonSnapshot(e.fields) } : {}),
+      ...(Object.hasOwn(e, 'from') ? { from: pToken(e.from, 'update start'), to: pToken(e.to, 'update end') } : {}),
+    });
   } else if (e.kind === 'block.continue' && Object.keys(e).length === 3 && typeof e.temporaryBlock === 'string' && e.temporaryBlock.length > 0) {
     edit = Object.freeze({ kind: 'block.continue', at: pToken(e.at, 'continue position'), temporaryBlock: e.temporaryBlock });
   } else if (e.kind === 'block.split-and-assign' && Object.keys(e).length === 4 && typeof e.temporaryBlock === 'string' && e.temporaryBlock.length > 0) {
@@ -715,6 +905,11 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         if (payload.history.direction === 'redo' && sourceFact.linkage?.outcome === 'noop') {
           return { events: [], privateFact: { version: 2, kind: 'annotated-text.compensation', documentId: payload.id, linkage: { rootActionId: payload.history.rootActionId, targetActionId: payload.history.targetActionId, direction: payload.history.direction, outcome: 'noop' } }, historyOutcome: 'noop' };
         }
+        // #174: semantic atomic annotation-update contributions compensate
+        // symmetrically on their captured before/after images.
+        if (sourceFact.contribution?.kind === 'annotation.update' || sourceFact.redo?.kind === 'annotation.update') {
+          return annotatedUpdateCompensation({ name, fieldName, prefix, db, scope, payload, sourceFact, descriptor });
+        }
         const contribution = payload.history.direction === 'undo' ? sourceFact.contribution : sourceFact.redo;
         if (!contribution || contribution.kind !== 'text.insert') throw new ValidationError('invalid annotated text compensation contribution');
         const originalOp = contribution.opId;
@@ -748,11 +943,38 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       if (payload.version === 1) throw new ValidationError('annotated text compensation is history-authored only');
       return Promise.resolve(r1Handler({ payload, db, scope, principal, actionId })).then((events: any) => {
         if (payload.version !== 9) return events;
+        const originFact = command.edit.kind === 'text.insert'
+          ? { version: 2, kind: 'annotated-text.contribution', documentId: command.id, contribution: { kind: 'text.insert', opId: events[0].data.operation.operation[2], anchor: events[0].data.operation.operation[5][1], text: command.edit.text, scalarCount: scalarCount(command.edit.text) } }
+          : command.edit.kind === 'annotation.update'
+            ? (() => {
+              // #174: capture the WHOLE pre-image (and the edges that stay
+              // unchanged through the update) BEFORE any projection applies.
+              // The post-image binds the plan's fact postimage with ordinals
+              // assigned exactly as the reducer will assign them.
+              const declarations = (descriptor.annotations ?? []) as Array<{ annotationName: string; fields: Record<string, unknown> }>;
+              const captured = captureAnnotationUpdateImage(db, { prefix, documentId: command.id, annotationsDeclarations: declarations, annotationId: command.edit.annotationId });
+              if (!captured || !Array.isArray(events[0]?.data?.facts?.ranges)) throw new ValidationError(`${name}.${fieldName}.operation annotation not found`);
+              const after = {
+                fields: { ...(events[0].data.facts.annotation.fields as Record<string, unknown>) },
+                protectedTargetIds: [...captured.protectedTargetIds],
+                ranges: ordinalsByEncounterOrder(events[0].data.facts.ranges as Array<{ annotationId: string; start: unknown; end: unknown }>),
+              };
+              return Object.freeze({
+                version: 2,
+                kind: 'annotated-text.annotation-update',
+                documentId: command.id,
+                contribution: Object.freeze({
+                  kind: 'annotation.update',
+                  annotationId: command.edit.annotationId,
+                  before: Object.freeze(captured),
+                  after: Object.freeze(after),
+                }),
+              });
+            })()
+            : { version: 2, kind: 'annotated-text.barrier', documentId: command.id };
         return {
           events,
-          privateFact: command.edit.kind === 'text.insert'
-            ? { version: 2, kind: 'annotated-text.contribution', documentId: command.id, contribution: { kind: 'text.insert', opId: events[0].data.operation.operation[2], anchor: events[0].data.operation.operation[5][1], text: command.edit.text, scalarCount: scalarCount(command.edit.text) } }
-            : { version: 2, kind: 'annotated-text.barrier', documentId: command.id },
+          privateFact: originFact,
           authoringReceipt: async ({ db: receiptDb, confirmedThrough }: any) => {
             // Blockless (issue #33): issue ONE document-scoped position frame
             // bound to the post-commit family so the authoring client can keep

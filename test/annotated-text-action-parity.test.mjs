@@ -53,6 +53,19 @@ test('server annotatedTextAction matches the pure builder on representative bloc
       kind: 'annotation.remove', id: 'doc-1', authoring,
       annotationId: 'ann-1',
     },
+    {
+      // #174: semantic atomic update — fields only, and fields + range.
+      kind: 'annotation.update', id: 'doc-1', authoring,
+      annotationId: 'ann-1',
+      fields: { value: 'y' },
+    },
+    {
+      kind: 'annotation.update', id: 'doc-1', authoring,
+      annotationId: 'ann-1',
+      fields: { value: 'z' },
+      from: { positionToken: token('p3'), offset: 2, affinity: 'left' },
+      to: { positionToken: token('p4'), offset: 7, affinity: 'right' },
+    },
   ];
   for (const command of commands) {
     assert.deepEqual(

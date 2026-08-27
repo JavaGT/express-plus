@@ -92,8 +92,13 @@ function annotatedPrivateFact(fact                 )          {
   if (fact.kind === 'annotated-text.contribution') {
     return exactKeys(fact, ['version', 'kind', 'documentId', 'contribution']) && annotatedContribution(fact.contribution);
   }
+  // #174: a committed annotation.update binds its whole before/after images.
+  if (fact.kind === 'annotated-text.annotation-update') {
+    return exactKeys(fact, ['version', 'kind', 'documentId', 'contribution']) && annotatedUpdateContribution(fact.contribution);
+  }
   if (fact.kind === 'annotated-text.barrier') return exactKeys(fact, ['version', 'kind', 'documentId']);
   if (fact.kind !== 'annotated-text.compensation' || !fact.linkage || typeof fact.linkage !== 'object' || Array.isArray(fact.linkage)) return false;
+  const validContribution = (value         ) => annotatedContribution(value) || annotatedUpdateContribution(value);
   const keys = fact.linkage.outcome === 'applied'
     ? ['version', 'kind', 'documentId', 'linkage', 'contribution', ...(fact.linkage.direction === 'undo' ? ['redo'] : [])]
     : ['version', 'kind', 'documentId', 'linkage'];
@@ -102,7 +107,48 @@ function annotatedPrivateFact(fact                 )          {
     && typeof fact.linkage.rootActionId === 'string' && fact.linkage.rootActionId.length > 0
     && typeof fact.linkage.targetActionId === 'string' && fact.linkage.targetActionId.length > 0
     && ['undo', 'redo'].includes(fact.linkage.direction          ) && ['applied', 'noop'].includes(fact.linkage.outcome          )
-    && (fact.linkage.outcome === 'noop' || (annotatedContribution(fact.contribution) && (!Object.hasOwn(fact, 'redo') || annotatedContribution(fact.redo))));
+    && (fact.linkage.outcome === 'noop' || (validContribution(fact.contribution) && (!Object.hasOwn(fact, 'redo') || validContribution(fact.redo))));
+}
+
+/** #174: one image side of an annotation.update transition. */
+function annotatedUpdateImage(image         )          {
+  if (!image || typeof image !== 'object' || Array.isArray(image)) return false;
+  if (!exactKeys(image, ['fields', 'protectedTargetIds', 'ranges'])) return false;
+  const record = image                                                                     ;
+  if (!record.fields || typeof record.fields !== 'object' || Array.isArray(record.fields)) return false;
+  for (const value of Object.values(record.fields)) {
+    try { json(value, 'annotation-update image fields'); } catch { return false; }
+  }
+  if (!Array.isArray(record.protectedTargetIds) || record.protectedTargetIds.some((id) => typeof id !== 'string')) return false;
+  let previousTarget                = null;
+  for (const id of record.protectedTargetIds) {
+    if (previousTarget !== null && String(id) <= previousTarget) return false;
+    previousTarget = String(id);
+  }
+  if (!Array.isArray(record.ranges) || record.ranges.length === 0) return false;
+  for (const entry of record.ranges) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || !exactKeys(entry, ['annotationId', 'ordinal', 'end', 'start'])) return false;
+    const range = entry                                                                             ;
+    if (typeof range.annotationId !== 'string' || range.annotationId.length === 0 || !Number.isSafeInteger(range.ordinal)) return false;
+    for (const endpoint of [range.start, range.end]) {
+      if (!endpoint || typeof endpoint !== 'object' || Array.isArray(endpoint) || !exactKeys(endpoint, ['point', 'basisFrontier'])) return false;
+      const point = endpoint                                              ;
+      try {
+        json(point.point, 'annotation-update image endpoint');
+        json(point.basisFrontier, 'annotation-update image endpoint');
+      } catch { return false; }
+    }
+  }
+  return true;
+}
+
+/** #174: the symmetric before/after contribution of an atomic update. */
+function annotatedUpdateContribution(contribution         )          {
+  if (!contribution || typeof contribution !== 'object' || Array.isArray(contribution)) return false;
+  if (!exactKeys(contribution, ['after', 'annotationId', 'before', 'kind'])) return false;
+  const record = contribution                                                                             ;
+  if (record.kind !== 'annotation.update' || typeof record.annotationId !== 'string' || record.annotationId.length === 0) return false;
+  return annotatedUpdateImage(record.before) && annotatedUpdateImage(record.after);
 }
 
 

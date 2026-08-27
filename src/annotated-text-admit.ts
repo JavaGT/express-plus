@@ -15,7 +15,7 @@ import { restoreTextFamilySerialized, materializeText, textFamilyBasis, type Con
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.ts';
 import { resolveStream, resolveLease, resolvePosition } from './annotated-text-authoring-stream.ts';
 import { readSeq } from './committed-log.ts';
-import { planAnnotationRemove, planTextOffsetEdit, planTextRangeApply } from './annotated-text-plan.ts';
+import { planAnnotationRemove, planAnnotationUpdate, planTextOffsetEdit, planTextRangeApply } from './annotated-text-plan.ts';
 import { mapVisibleOffsetToCanonical, authoringRedactionsForRecipient, type AuthoringRedaction } from './annotated-text-recipient-projection.ts';
 import { projectAnnotatedTextSnapshot } from './annotated-text-snapshot.ts';
 import type { StructuralEndpoint } from './annotated-text-family.ts';
@@ -59,6 +59,7 @@ interface V9EditLoose {
   positionToken?: string;
   annotationId?: string;
   annotation?: V9Annotation;
+  fields?: Record<string, unknown>;
 }
 
 interface V9Command {
@@ -450,6 +451,73 @@ async function admitAnnotationRemove(ctx: V9Prelude & { edit: unknown }): Promis
   return [{ handle, type: handle.type, scope: documentScope, data: plan }];
 }
 
+/**
+ * annotation.update (#174): the semantic atomic field (and optionally range)
+ * mutation of an EXISTING annotation. One history step; when no range edit is
+ * requested the stored endpoint basis anchors pass through untouched.
+ */
+async function admitTextAnnotationUpdate(ctx: V9Prelude & { edit: V9EditLoose }): Promise<unknown[]> {
+  const { name, fieldName, command, db, prefix, documentScope, family, state, edit, compiledMeta } = ctx;
+  const annotations = loadAnnotations({ db, prefix, compiledMeta, documentId: command.id });
+  const target = annotations.find((annotation) => annotation.id === edit.annotationId);
+  if (!target || !edit.annotationId) throw new ValidationError(`${name}.${fieldName}.operation annotation not found`);
+  const familyMeta = compiledMeta.annotationHandles[target.family];
+  if (!familyMeta) throw new ValidationError(`${name}.${fieldName}.operation unknown annotation family`, { code: 'position-invalid' });
+  // An update never changes protected edges; the plan image carries the live
+  // set so replay can fail closed on any drift.
+  const protectedTargetIds = (db.prepare(`SELECT target_annotation_id FROM ${prefix}_annotation_protected_target WHERE annotation_id = ? ORDER BY target_annotation_id`).all(target.id) as Array<{ target_annotation_id: string }>).map((edge) => edge.target_annotation_id);
+
+  const hasRange = !!edit.from?.positionToken || !!edit.to?.positionToken;
+  let selection: { startOffset: number; startAffinity: 'left' | 'right'; endOffset: number; endAffinity: 'left' | 'right' } | null = null;
+  if (hasRange) {
+    const from = edit.from;
+    const to = edit.to;
+    const fromToken = from?.positionToken;
+    const toToken = to?.positionToken;
+    if (!from || !to || !fromToken || !toToken) throw new ValidationError(`${name}.${fieldName}.operation annotation range tokens unavailable`, { code: 'position-token-unavailable' });
+    const fromPos = resolvePosition({ db, prefix, positionToken: fromToken, leaseId: ctx.lease.id }) as unknown as AuthoringPosition | null;
+    const toPos = resolvePosition({ db, prefix, positionToken: toToken, leaseId: ctx.lease.id }) as unknown as AuthoringPosition | null;
+    if (!fromPos || !toPos) throw new ValidationError(`${name}.${fieldName}.operation annotation range tokens unavailable`, { code: 'position-token-unavailable' });
+    if (!fromPos.visible_at_issue || !toPos.visible_at_issue) throw new ValidationError(`${name}.${fieldName}.operation annotation range position no longer visible`, { code: 'position-no-longer-visible' });
+    if (!samePositionBasis(fromPos.family_checkpoint, family) ||
+        !samePositionBasis(toPos.family_checkpoint, family)) {
+      throw new ValidationError(`${name}.${fieldName}.operation annotation range authoring basis is stale; re-bootstrap the snapshot`, { code: 'position-stale' });
+    }
+    const redactions = parsedRedactions(fromPos);
+    assertRedactionsBasesMatch(redactions, parsedRedactions(toPos), 'annotation range');
+    const mapped = mapWireRangeToCanonical(from.offset, from.affinity, to.offset, to.affinity, redactions,
+      from.offset !== to.offset || from.affinity !== to.affinity);
+    assertEditLandsInVisibleText(mapped.from, mapped.to, redactions, 'annotation range');
+    selection = {
+      startOffset: mapped.from,
+      startAffinity: from.affinity,
+      endOffset: mapped.to,
+      endAffinity: to.affinity,
+    };
+  }
+
+  const ranges = loadRanges({ db, prefix, documentId: command.id });
+  const sameFamilyAnnotationIds = new Set(annotations.filter((candidate) => candidate.family === target.family).map((candidate) => candidate.id));
+  let plan;
+  try {
+    plan = planAnnotationUpdate({
+      documentId: command.id, structureVersion: state.structure_version, family,
+      target: { id: target.id, family: target.family, empty: target.empty, protectedTargetIds },
+      fields: edit.fields ?? {},
+      annotations, ranges,
+      actorId: ctx.principal?.id ?? '',
+      cardinality: familyMeta.cardinality,
+      sameFamilyAnnotationIds,
+      selection,
+    });
+  } catch (error) {
+    const err = error as Error & { code?: string };
+    throw new ValidationError(`${name}.${fieldName}.operation ${err.message}`, err.code ? { code: err.code } : undefined);
+  }
+  const handle = eventHandles.native(name, fieldName, 'operated');
+  return [{ handle, type: handle.type, scope: documentScope, data: plan }];
+}
+
 function edit_annotationId(command: V9Command): string | undefined {
   return command.edit?.annotationId ?? command.edit?.annotation?.id;
 }
@@ -470,6 +538,9 @@ export async function admitV9AnnotatedTextEdit(ctx: V9AdmitContext): Promise<unk
   }
   if (edit.kind === 'annotation.remove') {
     return admitAnnotationRemove({ ...prelude, edit });
+  }
+  if (edit.kind === 'annotation.update') {
+    return admitTextAnnotationUpdate({ ...prelude, edit });
   }
   throw new ValidationError(`${prelude.name}.${prelude.fieldName}.operation block-era edit '${edit.kind}' is not supported (issue #33)`, { code: 'position-invalid' });
 }

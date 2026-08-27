@@ -115,6 +115,25 @@ const V15_PROOF_KEYS = ['affectedIds', 'afterDigest', 'beforeDigest']         ;
 
 
 
+// Semantic atomic annotation update (#174): fields (and optionally the range)
+// of an EXISTING annotation as one history step. `selection` is null when the
+// range is unchanged; `annotation` carries the complete post-image.
+// `historyAuthored` marks undo/redo compensations, which restore verbatim
+// captured images (historical endpoint bases) rather than planner offsets.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -660,6 +679,34 @@ export function normalizeOperatedEvent(raw         , context                    
       before: raw.before,
       after: raw.after,
       annotationId: operation.annotationId,
+      facts,
+      familyProof,
+      wireVersion: version,
+    });
+  }
+  // #174: annotation.update — one history step updating fields (and optionally
+  // the range) of an existing annotation. `selection` null = fields-only (the
+  // stored endpoint basis anchors must survive untouched); non-null carries the
+  // new absolute offsets the planner resolved. History-AUTHORED compensations
+  // (undo/redo of an update) carry `authored: 'history'`: they restore the
+  // captured verbatim images whose endpoints keep their historical bases, so
+  // the planner-offset recompute cannot apply to them.
+  if (kind === 'annotation.update' &&
+      (exactKeys(operation, ['annotation', 'kind', 'selection']) ||
+       (exactKeys(operation, ['annotation', 'kind', 'selection', 'authored']) && operation.authored === 'history'))
+    && operation.annotation && typeof operation.annotation === 'object' && !Array.isArray(operation.annotation)
+    && (operation.selection === null || (
+      operation.selection && typeof operation.selection === 'object' && !Array.isArray(operation.selection)
+      && Number.isSafeInteger((operation.selection                             ).startOffset)
+      && Number.isSafeInteger((operation.selection                           ).endOffset)))) {
+    return Object.freeze({
+      kind: 'annotation.update',
+      id: raw.id,
+      before: raw.before,
+      after: raw.after,
+      annotation: operation.annotation,
+      selection: operation.selection,
+      historyAuthored: operation.authored === 'history',
       facts,
       familyProof,
       wireVersion: version,

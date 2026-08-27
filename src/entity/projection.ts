@@ -346,6 +346,14 @@ function canonicalToReplayPayload(canonical: CanonicalOperatedEvent): OperatedEn
     case 'annotation.remove':
       operation = Object.freeze({ kind: 'annotation.remove', annotationId: canonical.annotationId });
       break;
+    case 'annotation.update':
+      operation = Object.freeze({
+        kind: 'annotation.update',
+        annotation: canonical.annotation as Record<string, unknown> | undefined,
+        selection: canonical.selection,
+        ...(canonical.historyAuthored ? { authored: 'history' } : {}),
+      });
+      break;
     default:
       throw new Error('region.edit replayed events are applied from the canonical event, never through the replay payload');
   }
@@ -375,6 +383,7 @@ export function applyCanonicalAnnotatedTextOperation({ name, handle, db, descrip
     case 'annotation.apply-range':
     case 'annotation.remove':
       return projectFromCanonical({ name, handle, db, descriptor, canonical });
+    case 'annotation.update': return projectBlocklessAnnotationUpdate({ name, handle, db, descriptor, data: canonicalToReplayPayload(canonical) });
     case 'region.edit': return projectRegionEdit({ name, handle, db, descriptor, canonical });
     default: throw new Error(`${name}.${handle.field}.operated event has unknown operation kind`);
   }
@@ -631,6 +640,177 @@ function projectBlocklessAnnotationApplyRange({ name, handle, db, descriptor, da
   // remnants require. Writing the WHOLE postimage makes the exclusive trim of
   // another annotation's range durable and replay deterministically from the
   // committed event.
+  db.prepare(`DELETE FROM ${prefix}_membership WHERE annotation_id IN (SELECT id FROM ${prefix}_annotation WHERE document_id = ?)`).run(data.id);
+  const ordinalByAnnotation = new Map<string, number>();
+  for (const entry of f.ranges) {
+    const ordinal = ordinalByAnnotation.get(entry.annotationId as string) ?? 0;
+    attachAnnotationRange(db, prefix, data.id as string, entry.annotationId as string, entry.start, entry.end, ordinal);
+    ordinalByAnnotation.set(entry.annotationId as string, ordinal + 1);
+  }
+  db.prepare(`UPDATE ${prefix}_state SET structure_version = ? WHERE document_id = ?`).run(data.after.structuralRevision, data.id);
+}
+
+// Semantic atomic annotation.update (#174): one history step replacing an
+// EXISTING annotation's fields (and optionally its single range). The whole
+// postimage is validated fail-closed before any write; a fields-only update
+// (selection null) must carry the CURRENT membership relation verbatim, which
+// is what keeps stored endpoint basis anchors untouched.
+function projectBlocklessAnnotationUpdate({ name, handle, db, descriptor, data }: { name: string; handle: NativeEventHandle; db: Db; descriptor: FieldDescriptor; data: OperatedEnvelope }) {
+  const prefix = `${name}_${handle.field}`;
+  const operation = data.operation;
+  const f = data.facts;
+  if (!operation || operation.kind !== 'annotation.update' || !operation.annotation || !f.annotation ||
+      !isTextRevision(data.before) || !isTextRevision(data.after)) throw new Error(`${name}.${handle.field}.operated v${data.version} annotation.update event has invalid data`);
+  // History-authored compensations restore verbatim captured images whose
+  // endpoints keep their historical bases — planner-offset recomputation
+  // cannot apply to them (decision 0023).
+  const historyAuthored = (operation as { authored?: unknown }).authored === 'history';
+  if (operation.selection !== null &&
+      (!operation.selection || typeof operation.selection !== 'object' ||
+       !Number.isSafeInteger((operation.selection as { startOffset?: unknown }).startOffset) ||
+       !Number.isSafeInteger((operation.selection as { endOffset?: unknown }).endOffset))) {
+    throw new Error(`${name}.${handle.field}.operated v13 annotation selection is invalid`);
+  }
+  const annOp = operation.annotation;
+  const annFact = f.annotation;
+  if (JSON.stringify(Object.keys(annOp).sort()) !== JSON.stringify(Object.keys(annFact).sort()) ||
+      annOp.id !== annFact.id || annOp.family !== annFact.family ||
+      JSON.stringify(annOp.fields) !== JSON.stringify(annFact.fields) ||
+      JSON.stringify(annOp.protectedTargetIds ?? []) !== JSON.stringify(annFact.protectedTargetIds ?? []) ||
+      typeof annOp.id !== 'string' || typeof annOp.family !== 'string' ||
+      !annOp.fields || typeof annOp.fields !== 'object' || Array.isArray(annOp.fields)) throw new Error(`${name}.${handle.field}.operated v13 annotation facts do not match the operation`);
+  for (const entry of f.ranges) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry) ||
+        typeof entry.annotationId !== 'string' || !entry.annotationId ||
+        !entry.start || typeof entry.start !== 'object' || Array.isArray(entry.start) ||
+        !entry.end || typeof entry.end !== 'object' || Array.isArray(entry.end)) {
+      throw new Error(`${name}.${handle.field}.operated v13 annotation range is invalid`);
+    }
+  }
+  const currentRow = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(data.id);
+  if (!currentRow) throw new Error(`${name}.${handle.field}.operated v13 document does not exist`);
+  const current = restoreTextFamilySerialized(currentRow.family_checkpoint as string);
+  if (currentRow.structure_version !== data.before.structuralRevision ||
+      JSON.stringify(current.checkpoint.frontier) !== JSON.stringify(data.before.frontier)) throw new Error(`${name}.${handle.field}.operated v13 event conflicts with projection state`);
+  if (JSON.stringify(current.checkpoint.frontier) !== JSON.stringify(data.after.frontier) ||
+      data.after.structuralRevision !== data.before.structuralRevision) throw new Error(`${name}.${handle.field}.operated v13 annotation update must not change the text family`);
+  const row = rawRow(db, name, data.id);
+  if (!row) throw new Error(`${name}.${handle.field}.operated v13 document row is missing`);
+  // The updated annotation must already exist; only its declared-family fields
+  // and its own range may move.
+  const existingAnnotation = db.prepare(`SELECT id, family FROM ${prefix}_annotation WHERE id = ? AND document_id = ?`).get(annOp.id, data.id);
+  if (!existingAnnotation) throw new Error(`${name}.${handle.field}.operated v13 annotation to update does not exist`);
+  if (existingAnnotation.family !== annOp.family) throw new Error(`${name}.${handle.field}.operated v13 annotation family cannot change`);
+  const declared = descriptor.annotations!.find((entry) => entry.annotationName === annOp.family);
+  if (!declared) throw new Error(`${name}.${handle.field}.operated v13 annotation family is not declared`);
+  const fieldNames = Object.keys(declared.fields);
+  const suppliedFieldNames = Object.keys(annOp.fields).sort();
+  if (suppliedFieldNames.length !== fieldNames.length || [...fieldNames].sort().some((fieldName, index) => suppliedFieldNames[index] !== fieldName)) {
+    throw new Error(`${name}.${handle.field}.operated v13 annotation fields disagree with declaration`);
+  }
+  // Fail closed on protection drift: an update NEVER changes protected edges,
+  // so the carried image must equal the live edge set exactly.
+  const targetIds = (annOp.protectedTargetIds ?? []) as string[];
+  if (Array.isArray(targetIds) && targetIds.some((id, index, ids) => typeof id !== 'string' || (index > 0 && ids[index - 1] >= id))) throw new Error(`${name}.${handle.field}.operated v13 protected targets are invalid`);
+  const liveEdges = (db.prepare(`SELECT target_annotation_id FROM ${prefix}_annotation_protected_target WHERE annotation_id = ? ORDER BY target_annotation_id`).all(annOp.id) as Array<{ target_annotation_id: string }>).map((edge) => edge.target_annotation_id);
+  if (JSON.stringify(liveEdges) !== JSON.stringify(targetIds)) throw new Error(`${name}.${handle.field}.operated v13 annotation update must not change protected targets`);
+  // Everything below validates the FULL postimage BEFORE the first write.
+  const values = fieldNames.map((fieldName) => {
+    if (!Object.hasOwn(annOp.fields!, fieldName)) throw new Error(`${name}.${handle.field}.operated v13 annotation is missing field '${fieldName}'`);
+    const field = declared.fields[fieldName];
+    const strategy = resolveStrategy(field.kind);
+    const validation = strategy.validate(annOp.fields![fieldName], field);
+    if (validation !== true || (typeof field.validate === 'function' && field.validate(annOp.fields![fieldName]) !== true)) throw new Error(`${name}.${handle.field}.operated v13 annotation field '${fieldName}' failed validation`);
+    return serializeField(field, annOp.fields![fieldName]);
+  });
+  for (const entry of f.ranges) {
+    if (!db.prepare(`SELECT id FROM ${prefix}_annotation WHERE id = ? AND document_id = ?`).get(entry.annotationId, data.id)) {
+      throw new Error(`${name}.${handle.field}.operated v13 annotation range names an unknown annotation`);
+    }
+  }
+  const postimageRanges = f.ranges as Array<{ annotationId: string; start: ReturnType<typeof resolveOffsetToEndpoint>; end: ReturnType<typeof resolveOffsetToEndpoint> }>;
+  const appliedRanges = postimageRanges.filter((entry) => entry.annotationId === annOp.id);
+  if (appliedRanges.length !== 1) throw new Error(`${name}.${handle.field}.operated v13 updated annotation must keep exactly one range`);
+  for (const entry of postimageRanges) {
+    let start: number;
+    let end: number;
+    try {
+      start = projectEndpointToOffset(current, entry.start);
+      end = projectEndpointToOffset(current, entry.end);
+    } catch {
+      throw new Error(`${name}.${handle.field}.operated v13 annotation range is not projectable`);
+    }
+    if (start >= end) throw new Error(`${name}.${handle.field}.operated v13 annotation range must be forward and non-empty`);
+  }
+  const currentRanges = annotationRangeRows(db, prefix, data.id).map((entry) => ({
+    annotationId: entry.annotation_id,
+    start: JSON.parse(entry.start_point),
+    end: JSON.parse(entry.end_point),
+  }));
+  const selectedRange = appliedRanges[0];
+  if (historyAuthored) {
+    // A history-authored compensation restores the captured verbatim image:
+    // structural validity (already proven above: shapes, existence,
+    // projectability, forward non-empty, exactly one own range) is the whole
+    // contract — the same trust level a text.apply compensation rides.
+  } else if (operation.selection !== null) {
+    const selection = operation.selection as { startOffset: number; endOffset: number };
+    const selectedStart = projectEndpointToOffset(current, selectedRange.start);
+    const selectedEnd = projectEndpointToOffset(current, selectedRange.end);
+    if (selectedStart !== selection.startOffset || selectedEnd !== selection.endOffset || selectedStart >= selectedEnd) {
+      throw new Error(`${name}.${handle.field}.operated v13 selected range disagrees with the semantic operation`);
+    }
+    const declaredCardinality = 'cardinality' in declared ? declared.cardinality : undefined;
+    const expectedRanges = [];
+    for (const entry of currentRanges) {
+      if (entry.annotationId === annOp.id) continue;
+      if (declaredCardinality === 'one') {
+        const start = projectEndpointToOffset(current, entry.start);
+        const end = projectEndpointToOffset(current, entry.end);
+        if (end > selectedStart && start < selectedEnd) {
+          if (start < selectedStart) expectedRanges.push({
+            annotationId: entry.annotationId,
+            start: entry.start,
+            end: resolveOffsetToEndpoint(current, selectedStart, current.checkpoint.frontier, 'left'),
+          });
+          if (end > selectedEnd) expectedRanges.push({
+            annotationId: entry.annotationId,
+            start: resolveOffsetToEndpoint(current, selectedEnd, current.checkpoint.frontier, 'right'),
+            end: entry.end,
+          });
+          continue;
+        }
+      }
+      expectedRanges.push(entry);
+    }
+    expectedRanges.push(selectedRange);
+    const rangeSignatures = (entries: any[]) => entries.map((entry) => JSON.stringify([
+      entry.annotationId,
+      canonicalEndpointJSON(entry.start),
+      canonicalEndpointJSON(entry.end),
+    ]));
+    if (JSON.stringify(rangeSignatures(postimageRanges)) !== JSON.stringify(rangeSignatures(expectedRanges))) {
+      throw new Error(`${name}.${handle.field}.operated v13 annotation range postimage disagrees with the semantic operation`);
+    }
+  } else {
+    // Fields-only update: the membership relation passes through VERBATIM —
+    // this exact-equality check is what preserves endpoint basis anchors
+    // (decision 0023) byte-for-byte across a field update.
+    const rangeSignatures = (entries: any[]) => entries.map((entry) => JSON.stringify([
+      entry.annotationId,
+      canonicalEndpointJSON(entry.start),
+      canonicalEndpointJSON(entry.end),
+    ]));
+    if (JSON.stringify(rangeSignatures(postimageRanges)) !== JSON.stringify(rangeSignatures(currentRanges))) {
+      throw new Error(`${name}.${handle.field}.operated v13 fields-only update must not move ranges`);
+    }
+  }
+  // Validation complete — the writes that follow cannot fail validation.
+  if (fieldNames.length) {
+    const stored = db.prepare(`SELECT * FROM ${prefix}_annotation_${annOp.family} WHERE annotation_id = ?`).get(annOp.id);
+    if (!stored) throw new Error(`${name}.${handle.field}.operated v13 annotation typed row is missing`);
+    db.prepare(`UPDATE ${prefix}_annotation_${annOp.family} SET ${fieldNames.map((fieldName) => `${fieldName} = ?`).join(', ')} WHERE annotation_id = ?`).run(...values, annOp.id);
+  }
   db.prepare(`DELETE FROM ${prefix}_membership WHERE annotation_id IN (SELECT id FROM ${prefix}_annotation WHERE document_id = ?)`).run(data.id);
   const ordinalByAnnotation = new Map<string, number>();
   for (const entry of f.ranges) {
