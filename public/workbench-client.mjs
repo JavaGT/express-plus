@@ -2402,6 +2402,17 @@ export function createLiveDeliverySession({
   let snapshotRecoveryWaiters = [];
   let snapshotRecoveryCycle = null;
   let snapshotRecoveryCycleSeq = 0;
+  // Delta-mode control recovery (#159): in delta mode a transport `resync` /
+  // `state-invalidate` control re-establishes state by CATCH-UP (pulling
+  // journal patches from the held cursor+token) rather than a full snapshot
+  // bootstrap. Catch-up carries no receipt fences or attempt budget — it is
+  // cheap and idempotent from the held cursor — so the machinery is a
+  // minimal coalescer, not a copy of the snapshot cycle.
+  let catchupRecoveryRequested = false;
+  let catchupRecoveryRunning = false;
+  let catchupRecoveryWaiters = [];
+  let catchupRecoveryCycle = null;
+  let catchupRecoveryCycleSeq = 0;
   const listeners = new Set();
   const { operations, makeOperation, shouldReconcile, count } = createOpLifecycle();
   const recoveryRetryWaiters = new Set();
@@ -2675,6 +2686,61 @@ export function createLiveDeliverySession({
     // A delivery callback runs on deliveryChain.  Run its recovery inline so
     // it cannot wait on the chain which is waiting on the callback.  Sender
     // receipts, by contrast, join the chain and serialize with later delivery.
+    if (inline) {
+      void run().catch(() => {});
+    } else {
+      const attempt = deliveryChain.catch(() => {}).then(run);
+      deliveryChain = attempt.catch(() => {});
+    }
+  }
+
+  function cancelCatchupRecovery(error = new ClientClosedError('Live delivery is unavailable')) {
+    catchupRecoveryRequested = false;
+    catchupRecoveryCycle = null;
+    for (const waiter of catchupRecoveryWaiters.splice(0)) waiter.reject(error);
+  }
+
+  function requestCatchupRecovery(wait = !hasUnknownTransmission(), inline = false) {
+    if (closed || status === 'revoked' || status === 'unavailable') {
+      const error = new ClientClosedError('Live delivery is unavailable');
+      return wait ? Promise.reject(error) : Promise.resolve();
+    }
+    if (!catchupRecoveryCycle || catchupRecoveryCycle.connectionGeneration !== connectionGeneration) {
+      catchupRecoveryCycle = { id: ++catchupRecoveryCycleSeq, connectionGeneration };
+    }
+    catchupRecoveryRequested = true;
+    if (catchupRecoveryRunning) catchupRecoveryCycle.followupRequested = true;
+    const promise = wait
+      ? new Promise((resolve, reject) => catchupRecoveryWaiters.push({ resolve, reject }))
+      : Promise.resolve();
+    kickCatchupRecovery(inline);
+    return promise;
+  }
+
+  function kickCatchupRecovery(inline = false) {
+    if (!catchupRecoveryRequested || catchupRecoveryRunning || closed || status === 'revoked' || status === 'unavailable') return;
+    if (hasUnknownTransmission()) return;
+    catchupRecoveryRunning = true;
+    catchupRecoveryRequested = false;
+    const cycle = catchupRecoveryCycle;
+    if (cycle) cycle.followupRequested = false;
+    const waiters = catchupRecoveryWaiters.splice(0);
+    const run = async () => {
+      try {
+        // recover('catchup') pulls journal patches from the held cursor and
+        // presents the held token; a patch-apply failure inside it falls back
+        // to a full snapshot (the base is untrusted), which this await covers.
+        await recover('catchup');
+        for (const waiter of waiters) waiter.resolve();
+      } catch (error) {
+        if (!closed && status !== 'revoked') becomeUnavailable(error);
+        for (const waiter of waiters) waiter.reject(error);
+        throw error;
+      } finally {
+        catchupRecoveryRunning = false;
+        kickCatchupRecovery();
+      }
+    };
     if (inline) {
       void run().catch(() => {});
     } else {
@@ -3134,6 +3200,7 @@ export function createLiveDeliverySession({
   function becomeUnavailable(error) {
     if (closed || status === 'revoked') return;
     cancelSnapshotRecovery(error instanceof Error ? error : new ClientClosedError('Live delivery is unavailable'));
+    cancelCatchupRecovery(error instanceof Error ? error : new ClientClosedError('Live delivery is unavailable'));
     finishRecoveryWarning();
     status = 'unavailable';
     settleAdmissions(false);
@@ -3306,7 +3373,19 @@ export function createLiveDeliverySession({
       // against a base any control in this batch declared untrusted.
       if (envelope.type === 'resync' || envelope.type === 'state-invalidate') {
         const coverage = Number.isSafeInteger(envelope.seq) ? envelope.seq : undefined;
-        recoveryWait = requestSnapshotRecovery(coverage, !hasUnknownTransmission(), true);
+        // Delta mode (#159): an ordinary `resync` control re-establishes state
+        // by CATCH-UP — journal patches pulled from the held cursor+token —
+        // instead of a full snapshot bootstrap. That is the entire point of
+        // delta delivery and the fix for the #159 acceptance (a rename must
+        // not re-bootstrap). `state-invalidate` is NOT catch-up-able: it is
+        // the bounded-overflow boundary (an SSE frame too large to carry),
+        // whose replacement is inherently a full snapshot. Full snapshot
+        // recovery is also preserved for legacy (non-delta) sessions and for
+        // patch-validation failures, where the installed base is untrusted and
+        // only an authorized snapshot restores it.
+        recoveryWait = deltaCapable && typeof projectionToken === 'string' && envelope.type === 'resync'
+          ? requestCatchupRecovery(!hasUnknownTransmission(), true)
+          : requestSnapshotRecovery(coverage, !hasUnknownTransmission(), true);
         // A control declares the CURRENT base untrusted (#156 round 3): later
         // envelopes in the same batch must not derive state from it. Await the
         // replacement before continuing — subsequent patch runs are then
@@ -3467,6 +3546,7 @@ export function createLiveDeliverySession({
     if (closed || status === 'revoked') return;
     status = 'revoked';
     cancelSnapshotRecovery();
+    cancelCatchupRecovery();
     disarmDeltaMode();
     finishRecoveryWarning();
     settleAdmissions(false);
@@ -3791,6 +3871,7 @@ export function createLiveDeliverySession({
       if (closed) return;
       closed = true;
       cancelSnapshotRecovery();
+      cancelCatchupRecovery();
       finishRecoveryWarning();
       settleAdmissions(false);
       cancelRecoveryRetries();

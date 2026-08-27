@@ -121,6 +121,59 @@ test('NEGOTIATION: legacy result (no echo) never arms; a pushed patch resyncs to
   session.close();
 });
 
+test('DELTA MODE (#159): a resync control re-establishes by catch-up (server patch), never a second snapshot bootstrap', async () => {
+  let snapshotBootstraps = 0;
+  let catchups = 0;
+  const { session, probe } = await startSession({
+    snapshotResult: () => {
+      snapshotBootstraps += 1;
+      return patchCapableSnapshot();
+    },
+    onCatchup: async (request) => {
+      catchups += 1;
+      assert.deepEqual(request.capabilities, [CAP], 'catch-up advertises the capability');
+      assert.equal(typeof request.projectionToken, 'string', 'catch-up presents the held token');
+      return {
+        kind: 'catchup',
+        envelopes: [patchEnvelope({ fromComposite: 1, toComposite: 2, token: 'wbpt_rot1', operations: renameRoot('CAUGHT-UP') })],
+        cursor: { anchor: 1, composite: 2 },
+      };
+    },
+  });
+  assert.equal(session.deltaCapable, true, 'delta armed by the echoed bootstrap');
+  await probe.deliver([{ type: 'resync', seq: 2, reason: 'recipient-snapshot-required' }]);
+  assert.equal(catchups, 1, 'the control triggered a catch-up');
+  assert.equal(snapshotBootstraps, 1, 'no second snapshot bootstrap');
+  assert.equal(session.snapshot.name, 'CAUGHT-UP', 'the server patch installed state');
+  session.close();
+});
+
+test('DELTA MODE (#159): a state-invalidate control STILL forces a full snapshot — it is not catch-up-able', async () => {
+  // `state-invalidate` is the bounded-overflow boundary (an SSE frame too
+  // large to carry); its replacement is inherently a full snapshot, never a
+  // catch-up. This must hold even in delta mode.
+  let snapshotBootstraps = 0;
+  let catchups = 0;
+  const { session, probe } = await startSession({
+    snapshotResult: () => {
+      snapshotBootstraps += 1;
+      return snapshotBootstraps === 1
+        ? patchCapableSnapshot()
+        : patchCapableSnapshot({ token: 'wbpt_fresh', composite: 2, name: 'FRESH' });
+    },
+    onCatchup: async () => {
+      catchups += 1;
+      return { kind: 'catchup', envelopes: [], cursor: { anchor: 1, composite: 2 } };
+    },
+  });
+  assert.equal(session.deltaCapable, true, 'delta armed');
+  await probe.deliver([{ type: 'state-invalidate', reason: 'bounded-overflow' }]);
+  assert.equal(snapshotBootstraps, 2, 'state-invalidate recovered through a FULL snapshot');
+  assert.equal(catchups, 0, 'no catch-up was attempted for an oversized-batch boundary');
+  assert.equal(session.snapshot.name, 'FRESH', 'the replacement snapshot installed');
+  session.close();
+});
+
 test('NEGOTIATION: legacy sessions keep folding event envelopes byte-identically (numeric cursors)', async () => {
   const probe = { bootstrapCalls: [], subscribeCalls: [], deliver: null };
   const folded = [];
@@ -477,21 +530,23 @@ test('BATCH COALESCE: a broken middle link in a delivered batch resyncs into rec
 // whose effect the replacement removed.
 
 test('DOUBLE CONTROL: [patch, resync, resync, patch] — every control gates the rest of its batch; no untrusted-base publication, no cursor regression', async () => {
-  // Snapshot #1 arms the session (A @ composite 1); every later snapshot call
-  // is a control-triggered replacement CONTINUING the stream (@ composite 2).
-  // The SECOND replacement is gated: a synchronous resolution lets pre-fix
-  // modules publish the replacement before receive() resumes, hiding the
-  // untrusted-base window this test exists to catch.
-  let snapshotCalls = 0;
+  // Bootstrap #1 arms the session (A @ composite 1). In DELTA MODE (#159) a
+  // control re-establishes by CATCH-UP: each catch-up returns a replacement
+  // patch envelope CONTINUING the stream. The SECOND catch-up is gated: a
+  // synchronous resolution lets pre-fix modules publish the replacement before
+  // receive() resumes, hiding the untrusted-base window this test exists to
+  // catch.
+  let catchups = 0;
   let releaseSecond;
   const secondGate = new Promise((resolve) => { releaseSecond = resolve; });
   const { session, probe } = await startSession({
-    snapshotResult: async () => {
-      snapshotCalls += 1;
-      if (snapshotCalls === 1) return patchCapableSnapshot();
-      if (snapshotCalls === 2) return patchCapableSnapshot({ token: 'wbpt_canon', composite: 2, name: 'CANON' });
+    onCatchup: async () => {
+      catchups += 1;
+      if (catchups === 1) {
+        return { kind: 'catchup', envelopes: [patchEnvelope({ fromComposite: 2, toComposite: 3, token: 'wbpt_canon', operations: renameRoot('CANON') })], cursor: { anchor: 1, composite: 3 } };
+      }
       await secondGate;
-      return patchCapableSnapshot({ token: 'wbpt_canon', composite: 2, name: 'CANON' });
+      return { kind: 'catchup', envelopes: [patchEnvelope({ fromComposite: 3, toComposite: 4, token: 'wbpt_canon2', operations: renameRoot('CANON') })], cursor: { anchor: 1, composite: 4 } };
     },
   });
   const publishedNames = [];
@@ -513,8 +568,9 @@ test('DOUBLE CONTROL: [patch, resync, resync, patch] — every control gates the
     patchEnvelope({ fromComposite: 1, toComposite: 2, token: 'wbpt_d2', operations: renameRoot('D2') }),
     { type: 'resync' },
     { type: 'resync' },
-    // Continues the RECOVERED cursor (composite 2), not the pre-recovery one.
-    patchEnvelope({ fromComposite: 2, toComposite: 3, token: 'wbpt_d3', actionIds: [dispatched.opId], operations: renameRoot('D3') }),
+    // Continues the RECOVERED cursor (composite 4, after both catch-up
+    // replacements), not the pre-recovery one.
+    patchEnvelope({ fromComposite: 4, toComposite: 5, token: 'wbpt_d3', actionIds: [dispatched.opId], operations: renameRoot('D3') }),
   ]);
 
   // RED-LINE: while the second control's replacement is still gated, NOTHING
@@ -544,7 +600,7 @@ test('DOUBLE CONTROL: [patch, resync, resync, patch] — every control gates the
 
   // No cursor regression: the trailing run's commit SURVIVES the replacements.
   assert.equal(session.snapshot.name, 'D3');
-  assert.equal(session.cursor.composite, 3);
+  assert.equal(session.cursor.composite, 5);
   assert.equal(session.projectionToken, 'wbpt_d3');
 
   // Trailing-run attribution settled only against post-replacement state:
@@ -705,15 +761,13 @@ test('CHAIN SEQUENCE: replace-fields then put-keyed on the SAME node apply stric
 });
 
 test('MIXED BATCH: [snapshot-patch, resync-control, snapshot-patch] — first run atomic, control recovers, second run handled POST-recovery', async () => {
-  // First snapshot bootstrap arms the session (A @ composite 1); every LATER
-  // snapshot call is the recovery replacement. It CONTINUES the stream
-  // (composite 2) so the trailing patch run has a legitimate post-recovery
-  // continuation to be evaluated against.
-  let snapshotCalls = 0;
+  // First snapshot bootstrap arms the session (A @ composite 1). In DELTA MODE
+  // (#159) the resync control re-establishes by CATCH-UP: the catch-up returns
+  // a replacement patch envelope CONTINUING the stream (composite 2→3) so the
+  // trailing patch run has a legitimate post-recovery continuation to be
+  // evaluated against (composite 3→4).
   const { session, probe } = await startSession({
-    snapshotResult: () => (++snapshotCalls === 1
-      ? patchCapableSnapshot()
-      : patchCapableSnapshot({ token: 'wbpt_canon', composite: 2, name: 'CANON' })),
+    onCatchup: async () => ({ kind: 'catchup', envelopes: [patchEnvelope({ fromComposite: 2, toComposite: 3, token: 'wbpt_canon', operations: renameRoot('CANON') })], cursor: { anchor: 1, composite: 3 } }),
   });
   const publishedNames = [];
   const unsubscribe = session.subscribe((snapshot) => publishedNames.push(snapshot.name));
@@ -722,8 +776,8 @@ test('MIXED BATCH: [snapshot-patch, resync-control, snapshot-patch] — first ru
   await probe.deliver([
     patchEnvelope({ fromComposite: 1, toComposite: 2, token: 'wbpt_m2', operations: renameRoot('M2') }),
     { type: 'resync' },
-    // Continues the RECOVERED cursor (composite 2), not the pre-recovery one.
-    patchEnvelope({ fromComposite: 2, toComposite: 3, token: 'wbpt_m3', operations: renameRoot('M3') }),
+    // Continues the RECOVERED cursor (composite 3), not the pre-recovery one.
+    patchEnvelope({ fromComposite: 3, toComposite: 4, token: 'wbpt_m3', operations: renameRoot('M3') }),
   ]);
   // Order proof: run1's publish precedes the recovery replacement, and run2's
   // publish follows it (pre-round-3 receive() applied run2 BEFORE the
@@ -737,7 +791,7 @@ test('MIXED BATCH: [snapshot-patch, resync-control, snapshot-patch] — first ru
     'the control minted exactly ONE recovery; run2 neither blocked nor re-minted it',
   );
   assert.equal(session.snapshot.name, 'M3', 'run2 applied ON TOP of the recovered base');
-  assert.equal(session.cursor.composite, 3);
+  assert.equal(session.cursor.composite, 4);
   assert.equal(session.projectionToken, 'wbpt_m3', 'run2\'s rotation landed after recovery re-armed');
   unsubscribe();
   session.close();

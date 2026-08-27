@@ -33,12 +33,21 @@ function afterFrom(url: URL): PublicCursor | null {
     return Number.isSafeInteger(after) ? after : null;
   }
   try {
-    const cursor = JSON.parse(raw) as { anchor?: unknown; aggregate?: unknown };
+    // Aggregate cursors are {anchor, aggregate}; composite-patch cursors
+    // (#122 delta delivery) are {anchor, composite}. Both are two-field
+    // nonnegative-cursor shapes — accept either, preserving the exact shape
+    // so the delivery seam's cursor agreement holds.
+    const cursor = JSON.parse(raw) as { anchor?: unknown; aggregate?: unknown; composite?: unknown };
     if (!cursor || typeof cursor !== 'object' || Array.isArray(cursor)
       || !Number.isSafeInteger(cursor.anchor) || (cursor.anchor as number) < 0
-      || !Number.isSafeInteger(cursor.aggregate) || (cursor.aggregate as number) < 0
       || Object.keys(cursor).length !== 2) return null;
-    return Object.freeze({ anchor: cursor.anchor as number, aggregate: cursor.aggregate as number });
+    if (Number.isSafeInteger(cursor.aggregate) && (cursor.aggregate as number) >= 0) {
+      return Object.freeze({ anchor: cursor.anchor as number, aggregate: cursor.aggregate as number });
+    }
+    if (Number.isSafeInteger(cursor.composite) && (cursor.composite as number) >= 0) {
+      return Object.freeze({ anchor: cursor.anchor as number, composite: cursor.composite as number });
+    }
+    return null;
   } catch {
     return null;
   }
@@ -158,6 +167,15 @@ export function createLiveDeliveryHttpHandler({ delivery, principalOf, path = '/
       reject(res, 400, 'invalid live delivery rule');
       return true;
     }
+    // Protocol negotiation forwarding (#159): the client advertises
+    // `snapshot-patch/v1` capabilities and presents its projection token on
+    // every bootstrap/catchup/subscribe call. The delivery seam already
+    // accepts both; without forwarding them here the delta lane is
+    // unreachable over HTTP/SSE and every edit falls back to a full snapshot.
+    const capabilities = url.searchParams.has('capabilities')
+      ? url.searchParams.get('capabilities')!.split(',').map((capability) => capability.trim()).filter((capability) => capability.length > 0)
+      : undefined;
+    const projectionToken = url.searchParams.get('projectionToken') ?? undefined;
     const documentIdentity = url.searchParams.has('documentId') ? {
       entity: url.searchParams.get('entity'), field: url.searchParams.get('field'), documentId: url.searchParams.get('documentId'),
     } : null;
@@ -180,15 +198,15 @@ export function createLiveDeliveryHttpHandler({ delivery, principalOf, path = '/
         const mode = url.searchParams.get('mode');
         if (mode === 'snapshot') {
           // The delivery seam creates the snapshot from its recipient-hydrated row.
-          const result = await delivery.bootstrap({ principal, scope: effectiveScope, document });
+          const result = await delivery.bootstrap({ principal, scope: effectiveScope, document, capabilities });
           writeJson(res, result, BOOTSTRAP_LIMIT);
         } else if (mode === 'catchup') {
-          const result = await delivery.catchup({ principal, scope: effectiveScope, after, document });
+          const result = await delivery.catchup({ principal, scope: effectiveScope, after, document, capabilities, projectionToken });
           // A small event count can still contain a large recipient envelope.
           // Replace oversized replay with the same paired opaque recovery.
           const encoded = JSON.stringify(result);
           writeJson(res, Buffer.byteLength(encoded) > JSON_LIMIT
-            ? await delivery.bootstrap({ principal, scope: effectiveScope, document })
+            ? await delivery.bootstrap({ principal, scope: effectiveScope, document, capabilities })
             : result, BOOTSTRAP_LIMIT);
         } else {
           reject(res, 400, 'invalid live delivery mode');
@@ -224,6 +242,8 @@ export function createLiveDeliveryHttpHandler({ delivery, principalOf, path = '/
         rule: rule as never,
         signal: controller.signal,
         revoke: () => { revoked = true; release(); if (res.headersSent && !res.writableEnded) res.end(); },
+        capabilities,
+        projectionToken,
         deliver: async (envelopes) => {
           if (controller.signal.aborted) throw new Error('live delivery stream closed');
           const payload = JSON.stringify(envelopes);
