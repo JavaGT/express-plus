@@ -2402,11 +2402,13 @@ export function createLiveDeliverySession({
   let snapshotRecoveryWaiters = [];
   let snapshotRecoveryCycle = null;
   let snapshotRecoveryCycleSeq = 0;
-  // Delta-mode control recovery (#159): in delta mode a transport `resync` /
-  // `state-invalidate` control re-establishes state by CATCH-UP (pulling
-  // journal patches from the held cursor+token) rather than a full snapshot
-  // bootstrap. Catch-up carries no receipt fences or attempt budget — it is
-  // cheap and idempotent from the held cursor — so the machinery is a
+  // Delta-mode control recovery (#159): in delta mode an ordinary transport
+  // `resync` control re-establishes state by CATCH-UP (pulling journal
+  // patches from the held cursor+token) rather than a full snapshot bootstrap.
+  // `state-invalidate` is NOT catch-up-able (it is the bounded-overflow
+  // boundary whose replacement is inherently a full snapshot) and stays on
+  // the snapshot path. Catch-up carries no receipt fences or attempt budget —
+  // it is cheap and idempotent from the held cursor — so the machinery is a
   // minimal coalescer, not a copy of the snapshot cycle.
   let catchupRecoveryRequested = false;
   let catchupRecoveryRunning = false;
@@ -3479,8 +3481,13 @@ export function createLiveDeliverySession({
       },
       // Capability advertisement (#156): the live subscription offers the
       // capability too, so a patch-capable host can push snapshot-patch
-      // envelopes on the stream. Additive — legacy hosts ignore it.
+      // envelopes on the stream. Additive — legacy hosts ignore it. The held
+      // projection token rides along (#159 round-3): a host emitting patches
+      // over the stream needs the recipient's ledger handle; the token is
+      // re-established on every reconnect, so it never goes stale within a
+      // connection.
       capabilities: [SNAPSHOT_PATCH_CAPABILITY],
+      ...(typeof projectionToken === 'string' && projectionToken.length > 0 ? { projectionToken } : {}),
     });
     // Delivery can revoke access while transport establishment is pending.
     // Never retain a subscription that became unauthorized before its handle.
@@ -3950,14 +3957,17 @@ export function createLiveDeliveryHttpSession({
     return result;
   }
 
-  function subscribe({ after, deliver, closed }) {
+  function subscribe({ after, deliver, closed, projectionToken: heldToken }) {
     const url = new URL(eventsEndpoint, globalThis.location?.href ?? 'http://workbench.local');
     if (!requestIdentity) url.searchParams.set('scope', scope);
     for (const [key, value] of Object.entries(requestIdentity ?? {})) url.searchParams.set(key, value);
     url.searchParams.set('after', typeof after === 'object' ? JSON.stringify(after) : String(after));
     // Capability advertisement (#156): the stream may carry snapshot-patch
-    // envelopes for a patch-capable server. Additive query parameter.
+    // envelopes for a patch-capable server. Additive query parameter. The
+    // held projection token rides along (#159 round-3) so a host emitting
+    // patches over the stream has the recipient's ledger handle.
     url.searchParams.set('capabilities', SNAPSHOT_PATCH_CAPABILITY);
+    if (typeof heldToken === 'string' && heldToken.length > 0) url.searchParams.set('projectionToken', heldToken);
     const source = eventSourceFactory(url.toString(), { withCredentials: true });
     let open = true;
     source.onmessage = (message) => {

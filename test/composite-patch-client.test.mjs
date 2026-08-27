@@ -141,6 +141,7 @@ test('DELTA MODE (#159): a resync control re-establishes by catch-up (server pat
     },
   });
   assert.equal(session.deltaCapable, true, 'delta armed by the echoed bootstrap');
+  assert.equal(probe.subscribeCalls[0].projectionToken, 'wbpt_boot', 'the live subscription presents the held token (#159 round-3)');
   await probe.deliver([{ type: 'resync', seq: 2, reason: 'recipient-snapshot-required' }]);
   assert.equal(catchups, 1, 'the control triggered a catch-up');
   assert.equal(snapshotBootstraps, 1, 'no second snapshot bootstrap');
