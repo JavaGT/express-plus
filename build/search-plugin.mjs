@@ -48,6 +48,7 @@ import {
   searchWithDeadline,
 } from './search-response.mjs';
 
+import { compileProjectPurgePlan,                       } from './owned-resource-purge.mjs';
 
 // The contract version this package's registry supports. A plugin declares the
 // version it was built against; anything else fails registration (version
@@ -74,6 +75,7 @@ export const SUPPORTED_SEARCH_PLUGIN_CONTRACT_VERSION = 2;
 // statements that create it. `ddl` entries are census-ingestible in the
 // framework's { source, sql } DdlEntry shape (schema-table-census.ts), and
 // `metadata` rides along as census metadata.
+
 
 
 
@@ -254,6 +256,7 @@ export const SUPPORTED_SEARCH_PLUGIN_CONTRACT_VERSION = 2;
 // NO plugin-supplied generation hook: generation/fence are registry-owned
 // materialization/invalidation counts (spec 5). `stalenessKey` decides which
 // changes invalidate the index (spec: stalenessKey(change) format).
+
 
 
 
@@ -509,6 +512,7 @@ export function createSearchPluginRegistry(options                              
   const searchTimeoutMs = options.searchTimeoutMs ?? SEARCH_DEFAULT_TIMEOUT_MS;
   const plugins = new Map                      ();
   const ledger = new Map                      ();
+  const purgePlansById = new Map                          ();
   const ownedNames = new Set        ();
   let source                            = null;
   let indexCapability                                            = null;
@@ -639,6 +643,7 @@ export function createSearchPluginRegistry(options                              
         );
       }
     }
+    const purgePlan = compileProjectPurgePlan(plugin);
 
     if (!Array.isArray(plugin.sourceInterests)) {
       throw new Error(`search plugin '${plugin.id}' sourceInterests must be an array`);
@@ -685,6 +690,7 @@ export function createSearchPluginRegistry(options                              
       attempts: 0,
       generationIdentity: plugin.generationIdentity,
     });
+    purgePlansById.set(plugin.id, purgePlan);
   }
 
   function census()                     {
@@ -700,6 +706,11 @@ export function createSearchPluginRegistry(options                              
     }
     return Object.freeze({ entries: Object.freeze(entries), objects: Object.freeze(objects) });
   }
+
+  function purgePlans()                              {
+    return Object.freeze([...purgePlansById.values()]);
+  }
+
 
   function bindSource(handle                           )       {
     source = handle;
@@ -968,5 +979,6 @@ export function createSearchPluginRegistry(options                              
     reconcile,
     rebuild,
     search,
+    purgePlans,
   });
 }

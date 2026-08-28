@@ -334,6 +334,8 @@ async function bootApplication(app            )                      {
 }
 
 export function startApplication(app            )                      {
+  // A start call is an idempotent read of the singular boot promise. Callers
+  // must not need to reach into the private promise to await application boot.
   if (app._startFailed && app._startPromise) return app._startPromise;
   if (app._shutdownStarted) {
     return Promise.reject(new Error('application has been shut down and cannot be started again'));

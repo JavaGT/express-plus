@@ -44,6 +44,7 @@ import { protectedArtefactCapability } from './protected-artefact-store.mjs';
 import { executeAtomicOperations, isAtomicOperation,                                                   } from './atomic-operations.mjs';
 import { admitRowTransition } from './field-admission.mjs';
 import { writeInvalidationInTxn } from './invalidation-ledger.mjs';
+import { ownedResourcesCapability } from './owned-resource-purge.mjs';
 
 // `action(type)` — declare an imperative request type. The handler that turns it
 // into events is attached later by the entity/dispatch wiring.
@@ -1026,6 +1027,8 @@ async function commitEvents(db     , events     , {
         const protectedArtefact = handler.protectedArtefactTables?.length
           ? protectedArtefactCapability(db, handler.protectedArtefactTables)
           : null;
+        const ownedResources = handler.ownedResources
+          ? ownedResourcesCapability(db, handler.ownedResourcePlans ?? []) : null;
         try {
           atomicOperationsFor(payload);
           const atomic = await resolveAtomicOperation(handler, {
@@ -1036,10 +1039,12 @@ async function commitEvents(db     , events     , {
             ...(atomic ? { atomic } : {}),
             ...(authorization !== undefined && authorization !== null ? { authorization } : {}),
             ...(protectedArtefact ? { protectedArtefact } : {}),
+            ...(ownedResources ? { ownedResources } : {}),
             ...(historyCommit?.handlerInputs ? { history: historyCommit.handlerInputs[0] } : {}),
           });
         } finally {
           protectedArtefact?.close();
+          ownedResources?.close();
         }
       }
       let commit = Array.isArray(events) ? { events } : events;

@@ -184,12 +184,13 @@ export function createFts5Plugin(options                   )             {
     version: options.version,
     tokenizer,
     ownedObjects: Object.freeze([
-      { kind: 'table'         , name: stateTable, ddl: [`CREATE TABLE IF NOT EXISTS ${stateTable} (slot TEXT PRIMARY KEY CHECK (slot = 'active'), active INTEGER NOT NULL CHECK (active IN (0, 1)), previous INTEGER NOT NULL CHECK (previous IN (0, 1)));`] },
+      { kind: 'table'         , name: stateTable, disposition: { kind: 'retained'         , reason: 'FTS generation state is rebuilt independently of project rows' }, ddl: [`CREATE TABLE IF NOT EXISTS ${stateTable} (slot TEXT PRIMARY KEY CHECK (slot = 'active'), active INTEGER NOT NULL CHECK (active IN (0, 1)), previous INTEGER NOT NULL CHECK (previous IN (0, 1)));`] },
       ...tables.map((name) => ({
         kind: 'virtual-table'         ,
         name,
         // payload is retained only for exact index/source census comparison. Search
         // queries never select it, so indexed source data cannot leak in a hit.
+        disposition: { kind: 'retained'         , reason: 'FTS index is derived and rebuilt from the source census' },
         ddl: [`CREATE VIRTUAL TABLE IF NOT EXISTS ${name} USING fts5(${[...options.source.fields, `${idColumn} UNINDEXED`, 'payload UNINDEXED'].join(', ')}, tokenize='${tokenizer}');`],
       })),
       // FTS5 creates these physical tables with its virtual table. They are
@@ -199,7 +200,7 @@ export function createFts5Plugin(options                   )             {
       ...tables.flatMap((table) => ftsShadowNames(table).map((name) => ({
         kind: 'table'         ,
         name,
-        ddl: [`-- ${name} is created by its declared FTS5 virtual table.`],
+        disposition: { kind: 'schema-only'          }, ddl: [`-- ${name} is created by its declared FTS5 virtual table.`],
       }))),
     ]),
     sourceInterests: Object.freeze([{ entity: options.source.entity }]),
