@@ -432,10 +432,18 @@ function assertAnnotatedTextImportPayload(name        , fieldName        , descr
       measurements: Object.freeze(measurements),
     }));
   }
-  // Document-absolute annotation ranges over the concatenated block texts
-  // (issue #216): one annotation row, its family field row, and one membership
-  // per range, seeded by the create projection in the same transaction.
-  const fullText = blocks.map((block     ) => block.text).join('');
+  // Legacy import ranges are offsets over the concatenated source block texts
+  // (issue #216). The continuous document uses LF-delimited runs, so translate
+  // each endpoint across the inserted boundaries before validating and storing
+  // the canonical ranges. Start points land after a boundary; end points at a
+  // boundary remain before it, preserving half-open range semantics.
+  const fullText = blocks.map((block     ) => block.text).join('\n');
+  const sourceTextLength = blocks.reduce((length, block) => length + block.text.length, 0);
+  const blockBoundaries = blocks.slice(0, -1).reduce((offsets          , block     , index        ) => {
+    offsets.push((offsets[index - 1] ?? 0) + block.text.length);
+    return offsets;
+  }, []);
+  const translatedOffset = (offset        , isStart         ) => offset + blockBoundaries.filter((boundary) => isStart ? boundary <= offset : boundary < offset).length;
   const canonicalRanges = [];
   const annotationIds = new Set();
   if (value.ranges !== undefined) {
@@ -449,7 +457,7 @@ function assertAnnotatedTextImportPayload(name        , fieldName        , descr
       for (const key of Object.keys(range)) {
         if (!allowedRange.has(key)) throw new ValidationError(`${name}.${fieldName} annotated-text import ranges[${i}] has unknown key '${key}'`);
       }
-      const { annotationId, family, start, end } = range;
+      const { annotationId, family, start: sourceStart, end: sourceEnd } = range;
       if (typeof annotationId !== 'string' || annotationId.length === 0) {
         throw new ValidationError(`${name}.${fieldName} annotated-text import ranges[${i}].annotationId must be a non-empty string`);
       }
@@ -459,9 +467,11 @@ function assertAnnotatedTextImportPayload(name        , fieldName        , descr
       if (typeof family !== 'string' || !declaredAnnotation) {
         throw new ValidationError(`${name}.${fieldName} annotated-text import ranges[${i}].family '${String(family)}' is not declared`);
       }
-      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end <= start || end > fullText.length) {
-        throw new ValidationError(`${name}.${fieldName} annotated-text import ranges[${i}] offsets must be safe integers with 0 <= start < end <= ${fullText.length}`);
+      if (!Number.isSafeInteger(sourceStart) || !Number.isSafeInteger(sourceEnd) || sourceStart < 0 || sourceEnd <= sourceStart || sourceEnd > sourceTextLength) {
+        throw new ValidationError(`${name}.${fieldName} annotated-text import ranges[${i}] offsets must be safe integers with 0 <= start < end <= ${sourceTextLength} over the concatenated source block texts`);
       }
+      const start = translatedOffset(sourceStart, true);
+      const end = translatedOffset(sourceEnd, false);
       try { assertUtf16Offset(fullText, start); assertUtf16Offset(fullText, end); } catch (error     ) {
         throw new ValidationError(`${name}.${fieldName} annotated-text import ranges[${i}] offsets ${error.message}`);
       }

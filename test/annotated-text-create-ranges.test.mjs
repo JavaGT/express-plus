@@ -1,8 +1,8 @@
 // Create-source annotation ranges (issue #216): a diarized transcript imports
 // its text AND its speaker/annotation ranges atomically in the create action —
-// no post-create applies. Ranges are document-absolute over the concatenated
-// block texts, validated at the action + import seams, and seeded by the create
-// projection in the same transaction with membership-valid affinity.
+// no post-create applies. Ranges use legacy document-absolute offsets over the
+// concatenated source block texts; import canonicalization inserts LF run
+// boundaries and translates those offsets before seeding the continuous family.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
@@ -111,18 +111,31 @@ test('create with source.ranges lands text and ranges atomically', async () => {
   await app.close?.();
 });
 
-test('create with source.ranges seeds one membership per range over multi-block text', async () => {
+test('create with source.ranges inserts LF boundaries and translates legacy offsets', async () => {
   const { app, db } = await appFor();
   const created = await createWithRanges(app, 'd2', [
     { annotationId: 'turn-1', family: 'turn', start: 0, end: 6, fields: { label: 'A' } },
     { annotationId: 'turn-2', family: 'turn', start: 6, end: 11, fields: { label: 'B' } },
   ], [{ text: 'hello ' }, { text: 'world' }]);
   assert.equal(created.ok, true, created.failure?.message);
-  // Document-absolute offsets over the concatenated 'hello world'.
-  assert.deepEqual((await committedOffsets(db, 'd2', 'turn-1')).text, 'hello world');
+  // The public import range remains [6, 11], while the canonical document is
+  // LF-delimited and the second range moves to [7, 12].
+  assert.deepEqual((await committedOffsets(db, 'd2', 'turn-1')).text, 'hello \nworld');
   assert.deepEqual((await committedOffsets(db, 'd2', 'turn-1')).range, { start: 0, end: 6 });
-  assert.deepEqual((await committedOffsets(db, 'd2', 'turn-2')).range, { start: 6, end: 11 });
+  assert.deepEqual((await committedOffsets(db, 'd2', 'turn-2')).range, { start: 7, end: 12 });
   assert.equal(committedMemberships(db, 'd2').length, 2);
+  await app.close?.();
+});
+
+test('create with source.ranges preserves an existing LF and translates later blocks', async () => {
+  const { app, db } = await appFor();
+  const created = await createWithRanges(app, 'existing-lf', [
+    { annotationId: 'turn-1', family: 'turn', start: 0, end: 2, fields: {} },
+    { annotationId: 'turn-2', family: 'turn', start: 3, end: 8, fields: {} },
+  ], [{ text: 'hi\n' }, { text: 'there' }]);
+  assert.equal(created.ok, true, created.failure?.message);
+  assert.equal((await committedOffsets(db, 'existing-lf', 'turn-1')).text, 'hi\n\nthere');
+  assert.deepEqual((await committedOffsets(db, 'existing-lf', 'turn-2')).range, { start: 4, end: 9 });
   await app.close?.();
 });
 

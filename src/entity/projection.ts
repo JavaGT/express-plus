@@ -151,7 +151,10 @@ function initializeAnnotatedText({ name, fields, event, db, row, asyncSeed = fal
       assertWellFormedText(importedBlock.text);
       if (importedBlock.text.length === 0 && imported.blocks.some((candidate) => candidate.fields !== null)) throw new Error(`${name}.${fieldName} created event has an empty imported block`);
     }
-    const fullText = imported.blocks.map((importedBlock) => importedBlock.text).join('');
+    // Import validation translates legacy concatenated-block offsets before
+    // they reach the event. Keep the projection's text construction identical
+    // to that canonicalization so endpoint resolution sees the same LF runs.
+    const fullText = imported.blocks.map((importedBlock) => importedBlock.text).join('\n');
     const family = importTextToFamily(row.id as string, imported.actor, fullText);
     const checkpoint = serializeCompactTextFamilyCheckpoint(family);
     const state = db.prepare(`SELECT * FROM ${prefix}_state WHERE document_id = ?`).get(row.id);
