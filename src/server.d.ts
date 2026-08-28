@@ -20,11 +20,13 @@ export type { WorkbenchDatabase, WorkbenchStatement, UserPrincipal } from '../in
 export type SearchPluginState = 'building' | 'ready' | 'stale' | 'failed';
 export type SearchOwnedObjectKind = 'table' | 'index' | 'trigger' | 'virtual-table';
 export type SearchPluginCounts = Readonly<Record<string, number>>;
+export type ProjectPurgeDisposition = import('../index.d.ts').ProjectPurgeDisposition;
 export interface SearchOwnedObject {
   readonly kind: SearchOwnedObjectKind;
   readonly name: string;
   readonly ddl: readonly string[];
   readonly metadata?: Readonly<Record<string, unknown>>;
+  readonly disposition: ProjectPurgeDisposition;
 }
 export interface SearchSourceInterest {
   readonly entity: string;

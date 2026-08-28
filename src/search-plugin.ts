@@ -48,6 +48,7 @@ import {
   searchWithDeadline,
 } from './search-response.ts';
 import type { Principal } from './principal.ts';
+import { compileProjectPurgePlan, type ProjectPurgePlan } from './owned-resource-purge.ts';
 
 // The contract version this package's registry supports. A plugin declares the
 // version it was built against; anything else fails registration (version
@@ -79,6 +80,7 @@ export interface SearchOwnedObject {
   readonly name: string;
   readonly ddl: readonly string[];
   readonly metadata?: Readonly<Record<string, unknown>>;
+  readonly disposition: import('./owned-resource-purge.ts').ProjectPurgeDisposition;
 }
 
 // A source resource the plugin indexes. `entity` names the source table; the
@@ -301,6 +303,7 @@ export interface SearchPluginRegistry {
   reconcile(id: string, changes: readonly SearchChange[]): Promise<SearchLifecycleOutcome>;
   rebuild(id: string): Promise<SearchLifecycleOutcome>;
   search(id: string, request: SearchRequest): Promise<SearchSearchOutcome>;
+  purgePlans(): readonly ProjectPurgePlan[];
 }
 
 // A bare SQL identifier: letters, digits, underscores, no leading digit. Owned
@@ -509,6 +512,7 @@ export function createSearchPluginRegistry(options: SearchPluginRegistryOptions 
   const searchTimeoutMs = options.searchTimeoutMs ?? SEARCH_DEFAULT_TIMEOUT_MS;
   const plugins = new Map<string, SearchPlugin>();
   const ledger = new Map<string, PluginLedger>();
+  const purgePlansById = new Map<string, ProjectPurgePlan>();
   const ownedNames = new Set<string>();
   let source: SearchSourceHandle | null = null;
   let indexCapability: ((id: string) => SearchOwnedIndex) | null = null;
@@ -601,6 +605,7 @@ export function createSearchPluginRegistry(options: SearchPluginRegistryOptions 
     if (!Array.isArray(plugin.ownedObjects)) {
       throw new Error(`search plugin '${plugin.id}' ownedObjects must be an array`);
     }
+    const purgePlan = compileProjectPurgePlan(plugin);
     // Intra-plugin duplicate detection happens BEFORE the global ownedNames
     // pass: a plugin naming the same object twice must not slip past on its
     // own second mention (ownedNames only gains this plugin's objects after
@@ -685,6 +690,7 @@ export function createSearchPluginRegistry(options: SearchPluginRegistryOptions 
       attempts: 0,
       generationIdentity: plugin.generationIdentity,
     });
+    purgePlansById.set(plugin.id, purgePlan);
   }
 
   function census(): SearchPluginCensus {
@@ -700,6 +706,11 @@ export function createSearchPluginRegistry(options: SearchPluginRegistryOptions 
     }
     return Object.freeze({ entries: Object.freeze(entries), objects: Object.freeze(objects) });
   }
+
+  function purgePlans(): readonly ProjectPurgePlan[] {
+    return Object.freeze([...purgePlansById.values()]);
+  }
+
 
   function bindSource(handle: SearchSourceHandle | null): void {
     source = handle;
@@ -968,5 +979,6 @@ export function createSearchPluginRegistry(options: SearchPluginRegistryOptions 
     reconcile,
     rebuild,
     search,
+    purgePlans,
   });
 }

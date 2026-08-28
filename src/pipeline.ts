@@ -44,6 +44,7 @@ import type { DataTier } from './live-tier.ts';
 import { executeAtomicOperations, isAtomicOperation, type AtomicExecution, type AtomicOperationContext } from './atomic-operations.ts';
 import { admitRowTransition } from './field-admission.ts';
 import { writeInvalidationInTxn } from './invalidation-ledger.ts';
+import { ownedResourcesCapability } from './owned-resource-purge.ts';
 
 // `action(type)` — declare an imperative request type. The handler that turns it
 // into events is attached later by the entity/dispatch wiring.
@@ -1026,6 +1027,8 @@ async function commitEvents(db: any, events: any, {
         const protectedArtefact = handler.protectedArtefactTables?.length
           ? protectedArtefactCapability(db, handler.protectedArtefactTables)
           : null;
+        const ownedResources = handler.ownedResources
+          ? ownedResourcesCapability(db, handler.ownedResourcePlans ?? []) : null;
         try {
           atomicOperationsFor(payload);
           const atomic = await resolveAtomicOperation(handler, {
@@ -1036,10 +1039,12 @@ async function commitEvents(db: any, events: any, {
             ...(atomic ? { atomic } : {}),
             ...(authorization !== undefined && authorization !== null ? { authorization } : {}),
             ...(protectedArtefact ? { protectedArtefact } : {}),
+            ...(ownedResources ? { ownedResources } : {}),
             ...(historyCommit?.handlerInputs ? { history: historyCommit.handlerInputs[0] } : {}),
           });
         } finally {
           protectedArtefact?.close();
+          ownedResources?.close();
         }
       }
       let commit = Array.isArray(events) ? { events } : events;

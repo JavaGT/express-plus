@@ -24,6 +24,15 @@ export interface WorkbenchDatabase {
   }): void;
 }
 
+export type ProjectPurgeDisposition =
+  | { readonly kind: 'project-purge-root'; readonly projectKey: string }
+  | { readonly kind: 'project-purge-dependent'; readonly parent: string; readonly foreignKey: string }
+  | { readonly kind: 'retained'; readonly reason: string }
+  | { readonly kind: 'schema-only' };
+export interface OwnedResources {
+  purgeProject(projectId: string): Readonly<Record<string, Readonly<Record<string, number>>>>;
+}
+
 export type PrincipalType = 'user' | 'link' | 'system' | 'apiKey' | 'anonymous';
 
 // The closed principal-status union (S5/A1). Defaults to `'active'`; the
@@ -2072,7 +2081,9 @@ export interface RegisteredAction<
      * exists; the capability closes when the handler returns and its writes roll
      * back with the action on any failure.
      */
-    readonly protectedArtefact?: ProtectedArtefactStore;
+     readonly protectedArtefact?: ProtectedArtefactStore;
+     /** Host-executed project purge authority; present only for opted-in actions and only in a transaction. */
+     readonly ownedResources?: OwnedResources;
     /** Present only for a Workbench-owned inverse/redo dispatch; never serialized. */
     readonly history?: Readonly<{
       readonly operation: 'undo' | 'redo';
@@ -2091,6 +2102,8 @@ export interface RegisteredAction<
    * permanently hard-deletes the declared rows. Requires single dispatch.
    */
   readonly protectedArtefacts?: Readonly<{ tables: readonly string[] }>;
+  /** Opt into the transaction-bound host execution of registered plugin purge plans. */
+  readonly ownedResources?: true;
   /** Privileged durable-pipeline erasure directive; requires history.cursor excluded. */
   readonly erasure?: true | Readonly<{
     /** Exact application-owned tables the preparation callback may mutate. */

@@ -205,6 +205,10 @@ function collectAppEntities(app: any) {
       };
     };
     Object.defineProperty(handler, 'inTransaction', { value: true });
+    if (declaration.ownedResources === true) {
+      Object.defineProperty(handler, 'ownedResources', { value: true });
+      Object.defineProperty(handler, 'ownedResourcePlans', { value: app.searchPlugins.purgePlans() });
+    }
     Object.defineProperty(handler, 'batchForbidden', {
       value: compoundContributionPolicy != null
         || (app._blobLifecycleOptions?.fields ?? []).some((field: any) => field.actionName === declaration.type)
