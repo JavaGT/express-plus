@@ -605,7 +605,6 @@ export function createSearchPluginRegistry(options: SearchPluginRegistryOptions 
     if (!Array.isArray(plugin.ownedObjects)) {
       throw new Error(`search plugin '${plugin.id}' ownedObjects must be an array`);
     }
-    const purgePlan = compileProjectPurgePlan(plugin);
     // Intra-plugin duplicate detection happens BEFORE the global ownedNames
     // pass: a plugin naming the same object twice must not slip past on its
     // own second mention (ownedNames only gains this plugin's objects after
@@ -644,6 +643,7 @@ export function createSearchPluginRegistry(options: SearchPluginRegistryOptions 
         );
       }
     }
+    const purgePlan = compileProjectPurgePlan(plugin);
 
     if (!Array.isArray(plugin.sourceInterests)) {
       throw new Error(`search plugin '${plugin.id}' sourceInterests must be an array`);

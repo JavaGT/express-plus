@@ -86,7 +86,7 @@ describe('search response contract — staleness disclosure', () => {
       contractVersion: SUPPORTED_SEARCH_PLUGIN_CONTRACT_VERSION,
       id: 'notes-fts',
       version: '1.0.0',
-      ownedObjects: [{ kind: 'virtual-table', name: 'notes_fts', ddl: ['CREATE VIRTUAL TABLE notes_fts USING fts5(title);'] }],
+      ownedObjects: [{ kind: 'virtual-table', name: 'notes_fts', ddl: ['CREATE VIRTUAL TABLE notes_fts USING fts5(title);'], disposition: { kind: 'schema-only' } }],
       sourceInterests: [{ entity: 'Note' }],
       stalenessKey: (change) => (change.entity === 'Note' ? `${change.entity}:${change.rowId}` : null),
       prepare: () => {},

@@ -96,12 +96,12 @@ export function makeShadowIndexedPlugin({ db, id = 'notes-fts', version = '1.0.0
     version,
     ownedObjects: [
       {
-        kind: 'virtual-table',
+        kind: 'virtual-table', disposition: { kind: 'schema-only' },
         name: `${id.replace(/[^A-Za-z0-9_]/g, '_')}_fts`,
         ddl: [`CREATE VIRTUAL TABLE IF NOT EXISTS ${id.replace(/[^A-Za-z0-9_]/g, '_')}_fts USING fts5(title);`],
       },
-      { kind: 'table', name: 'notes_fts_state', ddl: ['CREATE TABLE IF NOT EXISTS notes_fts_state (slot TEXT PRIMARY KEY, generation INTEGER NOT NULL);'] },
-      { kind: 'table', name: 'notes_fts_document', ddl: ['CREATE TABLE IF NOT EXISTS notes_fts_document (generation INTEGER NOT NULL, id TEXT NOT NULL, title TEXT, body TEXT, PRIMARY KEY (generation, id));'] },
+      { kind: 'table', name: 'notes_fts_state', disposition: { kind: 'retained', reason: 'test fixture' }, ddl: ['CREATE TABLE IF NOT EXISTS notes_fts_state (slot TEXT PRIMARY KEY, generation INTEGER NOT NULL);'] },
+      { kind: 'table', name: 'notes_fts_document', disposition: { kind: 'retained', reason: 'test fixture' }, ddl: ['CREATE TABLE IF NOT EXISTS notes_fts_document (generation INTEGER NOT NULL, id TEXT NOT NULL, title TEXT, body TEXT, PRIMARY KEY (generation, id));'] },
     ],
     sourceInterests: [{ entity: 'Note' }],
     stalenessKey: (change) => (change.entity === 'Note' ? `${change.entity}:${change.rowId}` : null),

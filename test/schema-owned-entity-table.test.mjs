@@ -262,7 +262,7 @@ test('schema-owned entity table validation permits a trigger owned by a register
       id: 'note-audit',
       version: '1',
       ownedObjects: [{
-        kind: 'trigger',
+         kind: 'trigger', disposition: { kind: 'schema-only' },
         name: 'SchemaNote_plugin_audit',
         ddl: ['CREATE TRIGGER SchemaNote_plugin_audit AFTER INSERT ON SchemaNote BEGIN SELECT 1; END'],
       }],

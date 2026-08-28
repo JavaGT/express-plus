@@ -45,7 +45,7 @@ function makeIndexedPlugin({ id = 'notes-fts', version = '1.0.0' } = {}) {
       id,
       version,
       ownedObjects: [
-        { kind: 'virtual-table', name: 'notes_fts', ddl: ['CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(title);'] },
+        { kind: 'virtual-table', name: 'notes_fts', disposition: { kind: 'schema-only' }, ddl: ['CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(title);'] },
       ],
       sourceInterests: [{ entity: 'Note' }],
       stalenessKey: (change) => (change.entity === 'Note' ? `${change.entity}:${change.rowId}` : null),
@@ -474,7 +474,7 @@ describe('staleness bridge — revocation and erasure priority', () => {
       change.entity === 'Note' && change.kind === 'removed' ? `${change.entity}:${change.rowId}` : null
     );
     pluginB.plugin.ownedObjects = [
-      { kind: 'virtual-table', name: 'plugin_b_fts', ddl: ['CREATE VIRTUAL TABLE IF NOT EXISTS plugin_b_fts USING fts5(title);'] },
+      { kind: 'virtual-table', name: 'plugin_b_fts', disposition: { kind: 'schema-only' }, ddl: ['CREATE VIRTUAL TABLE IF NOT EXISTS plugin_b_fts USING fts5(title);'] },
     ];
     registry.register(pluginA.plugin);
     registry.register(pluginB.plugin);
@@ -552,7 +552,7 @@ describe('staleness bridge — plugin-declared trigger census', () => {
     const plugin = makeIndexedPlugin();
     plugin.plugin.ownedObjects = [
       {
-        kind: 'trigger',
+        kind: 'trigger', disposition: { kind: 'schema-only' },
         name: 'notes_fts_maintain',
         ddl: [
           'CREATE TRIGGER IF NOT EXISTS notes_fts_maintain AFTER INSERT ON Note BEGIN INSERT INTO notes_fts(rowid, title) VALUES (new.id, new.title); END',
@@ -639,7 +639,7 @@ describe('staleness bridge — reserved-name guard', () => {
     const registry = createSearchPluginRegistry();
     const { plugin } = makeIndexedPlugin();
     plugin.ownedObjects = [
-      { kind: 'table', name: SEARCH_STALENESS_LEDGER_TABLE, ddl: [`CREATE TABLE ${SEARCH_STALENESS_LEDGER_TABLE} (id TEXT);`] },
+      { kind: 'table', name: SEARCH_STALENESS_LEDGER_TABLE, disposition: { kind: 'retained', reason: 'test fixture' }, ddl: [`CREATE TABLE ${SEARCH_STALENESS_LEDGER_TABLE} (id TEXT);`] },
     ];
     assert.throws(
       () => registry.register(plugin),

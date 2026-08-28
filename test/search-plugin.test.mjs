@@ -54,7 +54,12 @@ function makePlugin({
     contractVersion,
     id,
     version,
-    ownedObjects,
+    ownedObjects: ownedObjects.map((entry) => ({
+      ...entry,
+      disposition: entry.disposition ?? (entry.kind === 'table'
+        ? { kind: 'retained', reason: 'test fixture' }
+        : { kind: 'schema-only' }),
+    })),
     sourceInterests,
     stalenessKey,
     prepare,
@@ -108,7 +113,7 @@ describe('search plugin registry — declaration validation', () => {
     const registry = createSearchPluginRegistry();
     assert.throws(
       () => registry.register(makePlugin({
-        ownedObjects: [{ kind: 'shard', name: 'notes_shard', ddl: ['CREATE TABLE notes_shard (id TEXT);'] }],
+        ownedObjects: [{ kind: 'shard', name: 'notes_shard', ddl: ['CREATE TABLE notes_shard (id TEXT);'], disposition: { kind: 'schema-only' } }],
       })),
       /unknown kind/,
     );
@@ -116,9 +121,9 @@ describe('search plugin registry — declaration validation', () => {
 
   test('refuses an owned-object name already owned by another plugin', () => {
     const registry = createSearchPluginRegistry();
-    registry.register(makePlugin({ id: 'one', ownedObjects: [{ kind: 'table', name: 'shared_obj', ddl: ['CREATE TABLE shared_obj (id TEXT);'] }] }));
+    registry.register(makePlugin({ id: 'one', ownedObjects: [{ kind: 'table', name: 'shared_obj', ddl: ['CREATE TABLE shared_obj (id TEXT);'], disposition: { kind: 'retained', reason: 'test fixture' } }] }));
     assert.throws(
-      () => registry.register(makePlugin({ id: 'two', ownedObjects: [{ kind: 'table', name: 'shared_obj', ddl: ['CREATE TABLE shared_obj (id TEXT);'] }] })),
+      () => registry.register(makePlugin({ id: 'two', ownedObjects: [{ kind: 'table', name: 'shared_obj', ddl: ['CREATE TABLE shared_obj (id TEXT);'], disposition: { kind: 'retained', reason: 'test fixture' } }] })),
       /already owned by another plugin/,
     );
   });
@@ -128,8 +133,8 @@ describe('search plugin registry — declaration validation', () => {
     assert.throws(
       () => registry.register(makePlugin({
         ownedObjects: [
-          { kind: 'table', name: 'notes_idx', ddl: ['CREATE TABLE notes_idx (id TEXT);'] },
-          { kind: 'index', name: 'notes_idx', ddl: ['CREATE INDEX notes_idx ON Note(id);'] },
+          { kind: 'table', name: 'notes_idx', ddl: ['CREATE TABLE notes_idx (id TEXT);'], disposition: { kind: 'retained', reason: 'test fixture' } },
+          { kind: 'index', name: 'notes_idx', ddl: ['CREATE INDEX notes_idx ON Note(id);'], disposition: { kind: 'schema-only' } },
         ],
       })),
       /declares owned object 'notes_idx' more than once/,
@@ -914,7 +919,7 @@ describe('app.registerSearchPlugin surface', () => {
     assert.throws(
       () => app.registerSearchPlugin(makePlugin({
         id: 'bad-kind',
-        ownedObjects: [{ kind: 'shard', name: 'bad_shard', ddl: ['CREATE TABLE bad_shard (id TEXT);'] }],
+         ownedObjects: [{ kind: 'shard', name: 'bad_shard', ddl: ['CREATE TABLE bad_shard (id TEXT);'], disposition: { kind: 'schema-only' } }],
       })),
       /unknown kind/,
     );

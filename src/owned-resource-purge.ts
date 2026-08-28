@@ -1,3 +1,7 @@
+// Project declarations are ORDER-AGNOSTIC: the array order is never a purge
+// instruction. The compiler topologically sorts dependent tables before their
+// parents. Registration rejects only missing/invalid dispositions, foreign
+// parents, and cycles; a declaration that lists a parent first is valid.
 import type { DbHandle } from './driver.ts';
 import type { SearchOwnedObject, SearchPlugin } from './search-plugin.ts';
 
@@ -26,10 +30,12 @@ function dispositionOf(object: SearchOwnedObject, pluginId: string): ProjectPurg
   }
   const value = disposition as Record<string, unknown>;
   if (value.kind === 'project-purge-root') {
+    if (object.kind !== 'table') throw new Error(`search plugin '${pluginId}' object '${object.name}' has a project-purge root disposition but census kind '${object.kind}' is not a table`);
     identifier(value.projectKey, `project-purge root '${object.name}' projectKey`);
     return { kind: 'project-purge-root', projectKey: value.projectKey };
   }
   if (value.kind === 'project-purge-dependent') {
+    if (object.kind !== 'table') throw new Error(`search plugin '${pluginId}' object '${object.name}' has a project-purge dependent disposition but census kind '${object.kind}' is not a table`);
     identifier(value.parent, `project-purge dependent '${object.name}' parent`);
     identifier(value.foreignKey, `project-purge dependent '${object.name}' foreignKey`);
     return { kind: 'project-purge-dependent', parent: value.parent, foreignKey: value.foreignKey };
@@ -78,8 +84,8 @@ export function compileProjectPurgePlan(plugin: SearchPlugin): ProjectPurgePlan 
         ? `DELETE FROM ${object.name} WHERE ${disposition.foreignKey} IN (SELECT id FROM ${disposition.parent})`
         : '',
   }));
-  // A dependent must not precede its parent declaration's deletion unless it is
-  // actually ordered before it; this assertion documents the compiled invariant.
+  // Prove the compiled child-before-parent invariant. Declaration order is
+  // intentionally irrelevant; this checks the order produced by the sort.
   for (const [index, plan] of plans.entries()) if (plan.disposition.kind === 'project-purge-dependent') {
     const parent = plan.disposition.parent;
     if (index >= plans.findIndex((candidate) => candidate.name.toLowerCase() === parent.toLowerCase())) throw new Error(`search plugin '${plugin.id}' purge order places parent before dependent '${plan.name}'`);

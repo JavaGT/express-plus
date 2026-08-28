@@ -18,6 +18,12 @@ test('purge plan rejects missing, foreign, cyclic, and parent-first declarations
     object('child', { kind: 'project-purge-dependent', parent: 'root', foreignKey: 'root_id' }),
   ]));
   assert.deepEqual(plan.objects.map(({ name }) => name), ['child', 'root']);
+  const reversed = compileProjectPurgePlan(plugin([
+    object('child', { kind: 'project-purge-dependent', parent: 'root', foreignKey: 'root_id' }),
+    object('root', { kind: 'project-purge-root', projectKey: 'project_id' }),
+  ]));
+  assert.deepEqual(reversed.objects.map(({ name }) => name), ['child', 'root']);
+  assert.throws(() => compileProjectPurgePlan(plugin([{ kind: 'index', name: 'bad', ddl: ['x'], disposition: { kind: 'project-purge-root', projectKey: 'project_id' } }])), /not a table/);
 });
 
 test('host executes precompiled plan and returns non-sensitive counts', () => {
