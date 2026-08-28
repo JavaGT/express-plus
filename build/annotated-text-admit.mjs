@@ -529,7 +529,10 @@ async function admitAnnotationPaste(ctx                                   )     
   if (!edit.annotation || typeof edit.text !== 'string' || !edit.text.length || !edit.at) {
     throw new ValidationError(`${ctx.name}.${ctx.fieldName}.operation annotation.paste requires annotation, at, and text`);
   }
-  const familyMeta = compiledMeta.annotationHandles[edit.annotation.family];
+  // Bind once past the guard: TS property narrowing does not reach into the
+  // filter callback below, and every later use reads this same annotation.
+  const pastedAnnotation = edit.annotation;
+  const familyMeta = compiledMeta.annotationHandles[pastedAnnotation.family];
   if (!familyMeta) throw new ValidationError(`${ctx.name}.${ctx.fieldName}.operation unknown annotation family`, { code: 'position-invalid' });
   const insertPlan = planTextOffsetEdit({
     documentId: command.id, structureVersion: state.structure_version, family, actor, lamport,
@@ -539,16 +542,16 @@ async function admitAnnotationPaste(ctx                                   )     
   const id = randomUUID();
   const annotation = {
     id,
-    family: edit.annotation.family,
+    family: pastedAnnotation.family,
     empty: familyMeta.empty,
-    fields: { ...(edit.annotation.fields ?? {}) },
+    fields: { ...(pastedAnnotation.fields ?? {}) },
     // Protection edges point at document-local ids and cannot be copied by
     // reference; a paste copies annotation fields, not those relationships.
     protectedTargetIds: [],
   };
   const ranges = loadRanges({ db, prefix, documentId: command.id });
   const annotations = loadAnnotations({ db, prefix, compiledMeta, documentId: command.id });
-  const sameFamilyAnnotationIds = new Set(annotations.filter((candidate) => candidate.family === edit.annotation.family).map((candidate) => candidate.id));
+  const sameFamilyAnnotationIds = new Set(annotations.filter((candidate) => candidate.family === pastedAnnotation.family).map((candidate) => candidate.id));
   const annotationPlan = planTextRangeApply({
     documentId: command.id, structureVersion: insertPlan.after.structuralRevision, family: insertedFamily,
     annotation, from: { offset: edit.at.offset, affinity: 'left' },
