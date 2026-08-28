@@ -5,7 +5,7 @@ import { compileProjectPurgePlan, executeProjectPurgePlans, ownedResourcesCapabi
 const plugin = (ownedObjects) => ({ id: 'fixture', ownedObjects });
 const object = (name, disposition) => ({ kind: 'table', name, ddl: ['CREATE TABLE ' + name], disposition });
 
-test('purge plan rejects missing, foreign, cyclic, and parent-first declarations', () => {
+test('purge plan rejects missing, foreign, and cyclic declarations; compiles order-agnostically children-first', () => {
   assert.throws(() => compileProjectPurgePlan(plugin([object('root', undefined)])), /missing.*disposition/);
   assert.throws(() => compileProjectPurgePlan(plugin([object('child', { kind: 'project-purge-dependent', parent: 'other', foreignKey: 'root_id' })])), /foreign purge parent/);
   const cycle = [
