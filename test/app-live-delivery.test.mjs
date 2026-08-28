@@ -58,6 +58,9 @@ test('application-integrated live delivery owns registered action wakeup and rec
   const db = new DatabaseSync(':memory:');
   const app = workbench({ db, entities: [project()], actions: [projectAction()] });
   app.attachLiveDelivery({ principalOf: () => user, maxSubscriptions: 1 });
+  assert.equal(app.delivery.attached, true);
+  assert.ok(app.delivery.test);
+  assert.equal(typeof app.delivery.test.bootstrap, 'function');
   app.listen(0);
   await app.ready;
   t.after(async () => {

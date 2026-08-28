@@ -1751,6 +1751,31 @@ export interface AppLiveDeliveryOptions {
   maxCatchupEvents?: number;
 }
 
+/** Transport-neutral delivery operations for focused hosts and tests. */
+export interface ApplicationDeliveryTestSurface {
+  bootstrap(input: {
+    principal: Principal;
+    scope: string;
+    document?: unknown;
+    capabilities?: readonly string[];
+  }): Promise<unknown>;
+  catchup(input: {
+    principal: Principal;
+    scope: string;
+    after?: number | Readonly<{ anchor: number; aggregate: number }>;
+    document?: unknown;
+    capabilities?: readonly string[];
+    projectionToken?: string;
+  }): Promise<unknown>;
+  subscribe(input: Record<string, unknown>): Promise<unknown>;
+}
+
+/** Read-only application delivery state; the test surface shares live authority with transports. */
+export interface ApplicationDelivery {
+  readonly attached: boolean;
+  readonly test: ApplicationDeliveryTestSurface | null;
+}
+
 export interface WorkbenchOptions {
   db?: string | WorkbenchDatabase;
   /** Declares physical SQLite tables. Named entity main tables are never generated. */
@@ -2138,6 +2163,8 @@ export interface WorkbenchApp extends RouteBuilder {
   readonly writeQueue: WriteQueue;
   /** The platform write coordinator (S1/A5) — the same object as `writeQueue`; every write category enters through it. */
   readonly writeCoordinator: WriteQueue;
+  /** Whether package-owned live delivery is attached, plus its transport-neutral test seam. */
+  readonly delivery: ApplicationDelivery;
   /** Controlled read-only description for external readers; throws fail-closed on a raw-handle app. */
   readMirror(): ReadMirrorDescription;
   /**
@@ -2173,6 +2200,8 @@ export interface WorkbenchApp extends RouteBuilder {
   /** Attach package-owned HTTP/SSE delivery to this app before start or listen. */
   attachLiveDelivery(options: AppLiveDeliveryOptions): this;
   start(): Promise<this>;
+  /** Close an unstarted database synchronously; rejects after startup begins. */
+  releaseUnstartedDatabase(): this;
   onShutdown(
     name: string,
     hook: () => void | Promise<void>,

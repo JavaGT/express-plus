@@ -569,6 +569,17 @@ export default function workbench({
     // contract) fills the same role before its deferred open completes; the
     // opened database replaces it once installed.
     app._dbAdapter = pendingDbAdapter ?? openedDb;
+    // Public lifecycle inspection without exposing the application-integrated
+    // delivery transport object. The test protocol is the same authority used
+    // by the HTTP and WebSocket skins.
+    app.delivery = Object.freeze({
+      get attached() {
+        return Boolean(app._applicationLiveDelivery);
+      },
+      get test() {
+        return app._applicationLiveDelivery?.delivery ?? null;
+      },
+    });
     app._isManagedPath = pendingDbAdapter
       ? pendingDbAdapter.isManagedPath
       : openedDb ? openedDb.isManagedPath : undefined;
@@ -617,6 +628,27 @@ export default function workbench({
     // reference it) — one mutex, never a second one.
     app.writeQueue = createWriteQueue();
     app.writeCoordinator = app.writeQueue;
+    app.releaseUnstartedDatabase = () => {
+      if (app._startPromise || app._startupMode || app._transportAttached || app.httpServer) {
+        throw new Error('releaseUnstartedDatabase() is only valid before application startup');
+      }
+      if (app.writeQueue.running || app.writeQueue.depth > 0) {
+        throw new Error('releaseUnstartedDatabase() requires an idle write queue');
+      }
+      if (app._databaseReleased) return app;
+
+      const owned = app._dbAdapter;
+      if (owned && typeof owned.close === 'function') {
+        owned.close();
+      } else if (app.db && typeof app.db.close === 'function') {
+        app.db.close();
+      }
+      app._databaseReleased = true;
+      app._dbAdapter = null;
+      app.db = null;
+      runtime.db = null;
+      return app;
+    };
     // Reconciliation materialization (S4/A2 drain) routes through the ONE write
     // coordinator, serializing plugin-owned index writes with authoritative
     // writes (consideration #9).
@@ -1062,7 +1094,12 @@ export default function workbench({
     });
     app.ddl = () => app.prepareSchema();
 
-    app.start = () => startApplication(app);
+    app.start = () => {
+      if (app._databaseReleased) {
+        return Promise.reject(new Error('application database was released before startup'));
+      }
+      return startApplication(app);
+    };
     // Live delivery attaches before startup, when the kernel has not yet captured
     // its post-commit consumers. The app owns registry and authorization wiring;
     // callers provide only transport policy and declared aggregate snapshots.

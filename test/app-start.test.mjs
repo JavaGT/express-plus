@@ -54,6 +54,26 @@ test('app.start boots schema and dispatch without opening an HTTP socket', async
   assert.equal(app.start(), first, 'a completed start keeps the same readiness promise');
 });
 
+test('app.start is idempotent and unstarted database release closes the handle', async () => {
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db });
+
+  assert.equal(app.start, app.start);
+  assert.equal(app.releaseUnstartedDatabase(), app);
+  assert.throws(() => db.prepare('SELECT 1'), /closed/i);
+  await assert.rejects(app.start(), /database was released/i);
+});
+
+test('unstarted database release fails after startup', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db });
+  t.after(() => db.close());
+
+  await app.start();
+  assert.throws(() => app.releaseUnstartedDatabase(), /only valid before application startup/i);
+  await app.shutdown();
+});
+
 test('generated create preserves a caller-owned id through commit and projection', async (t) => {
   const db = new DatabaseSync(':memory:');
   const app = workbench({ db }).mount('/start-notes', startNote());
