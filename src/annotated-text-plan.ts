@@ -113,6 +113,41 @@ function assertForwardOffset(text: string, fromOffset: number, toOffset: number)
   }
 }
 
+/**
+ * Calculate the range postimage for a deletion. A range which loses only part
+ * of its visible text is clamped to the surviving boundary characters. The
+ * original endpoint affinities are deliberately retained when a boundary is
+ * re-resolved, so an insertion at that boundary remains on the intended side.
+ */
+function rangesAfterDelete({ beforeFamily, afterFamily, ranges, from, to }: {
+  beforeFamily: ContinuousTextFamily;
+  afterFamily: ContinuousTextFamily;
+  ranges: AnnotationRange[];
+  from: number;
+  to: number;
+}): AnnotationRange[] {
+  const deleted = to - from;
+  return ranges.flatMap((range) => {
+    const start = projectEndpointToOffset(beforeFamily, range.start);
+    const end = projectEndpointToOffset(beforeFamily, range.end);
+    if (start >= end || end <= from || start >= to) return [range];
+
+    const deletedStart = Math.max(start, from);
+    const deletedEnd = Math.min(end, to);
+    const newStart = Math.min(start, from);
+    const newEnd = Math.max(0, end - (deletedEnd - deletedStart));
+    if (newStart >= newEnd) return [range];
+
+    const startAffinity = range.start.point[2];
+    const endAffinity = range.end.point[2];
+    return [{
+      annotationId: range.annotationId,
+      start: resolveOffsetToEndpoint(afterFamily, newStart, afterFamily.checkpoint.frontier, startAffinity),
+      end: resolveOffsetToEndpoint(afterFamily, newEnd, afterFamily.checkpoint.frontier, endAffinity),
+    }];
+  });
+}
+
 /** A range becomes empty when its visible width drops to zero after an edit. */
 function emptiedRanges({ beforeFamily, afterFamily, ranges, annotations, structureVersion }: {
   beforeFamily: ContinuousTextFamily;
@@ -198,6 +233,7 @@ export function planTextOffsetEdit({ documentId, structureVersion, family, actor
       let insertOperation: unknown = ['workbench.text', 1, [`${actor.slice(0, 30)}e0`, 1], lamport + 1, intermediate.checkpoint.frontier, ['insert', anchor, edit.text]];
       insertOperation = canonicalTextOp(insertOperation);
       const nextFamily = applyTextOperation(intermediate, insertOperation);
+      const nextRanges = rangesAfterDelete({ beforeFamily: family, afterFamily: nextFamily, ranges, from: edit.from.offset, to: edit.to.offset });
       // A replacement can empty an annotation range exactly like a delete does;
       // the emptied-annotation dispositions must be planned and applied.
       const emptied = emptiedRanges({ beforeFamily: family, afterFamily: nextFamily, ranges, annotations, structureVersion });
@@ -207,11 +243,13 @@ export function planTextOffsetEdit({ documentId, structureVersion, family, actor
         operation: { kind: 'text.replace', operations: [deleteOperation, insertOperation] },
         after: Object.freeze({ structuralRevision: structureVersion + (emptied.length ? 1 : 0), frontier: nextFamily.checkpoint.frontier }),
         family: textFamilyCheckpoint(nextFamily),
+        ranges: Object.freeze(nextRanges.map((entry) => deepFreeze({ annotationId: entry.annotationId, start: entry.start, end: entry.end }))),
         emptiedAnnotations: Object.freeze(emptied),
       });
     }
     const operation = textOperationForOffsetEdit(family, { kind: 'text.delete', from: edit.from, to: edit.to }, actor, lamport);
     const nextFamily = applyTextOperation(family, operation);
+    const nextRanges = rangesAfterDelete({ beforeFamily: family, afterFamily: nextFamily, ranges, from: edit.from.offset, to: edit.to.offset });
     const emptied = emptiedRanges({ beforeFamily: family, afterFamily: nextFamily, ranges, annotations, structureVersion });
     return unifiedPlan({
       id: documentId,
@@ -219,6 +257,7 @@ export function planTextOffsetEdit({ documentId, structureVersion, family, actor
       operation: { kind: 'text.apply', operation },
       after: Object.freeze({ structuralRevision: structureVersion + (emptied.length ? 1 : 0), frontier: nextFamily.checkpoint.frontier }),
       family: textFamilyCheckpoint(nextFamily),
+      ranges: Object.freeze(nextRanges.map((entry) => deepFreeze({ annotationId: entry.annotationId, start: entry.start, end: entry.end }))),
       emptiedAnnotations: Object.freeze(emptied),
     });
   }

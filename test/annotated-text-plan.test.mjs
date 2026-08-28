@@ -138,6 +138,23 @@ test('replace empties a delete-policy annotation like a delete does', () => {
   assert.equal(plan.facts.emptiedAnnotations[0].disposition.savedQuote, null);
 });
 
+test('delete shrinks partial ranges and preserves endpoint affinities', () => {
+  const family = familyFromText('abcdef');
+  const annotation = { id: 'ann1', family: 'code', empty: 'delete', protectedTargetIds: [] };
+  const ranges = [{
+    annotationId: 'ann1',
+    start: resolveOffsetToEndpoint(family, 1, family.checkpoint.frontier, 'right'),
+    end: resolveOffsetToEndpoint(family, 5, family.checkpoint.frontier, 'left'),
+  }];
+  const plan = input(family, { kind: 'text.delete', from: at(2), to: at(4) }, { annotations: [annotation], ranges });
+  assert.equal(materializePlan(family, plan), 'abef');
+  const after = applyTextOperation(family, plan.operation.operation);
+  assert.deepEqual(offsetsOf(after, plan.facts.ranges), [{ annotationId: 'ann1', start: 1, end: 3 }]);
+  assert.equal(plan.facts.ranges[0].start.point[2], 'right');
+  assert.equal(plan.facts.ranges[0].end.point[2], 'left');
+  assert.deepEqual(plan.facts.emptiedAnnotations, []);
+});
+
 test('delete that does not empty a covering range leaves emptiedAnnotations empty', () => {
   const family = familyFromText('abcd');
   const annotation = { id: 'ann1', family: 'comment', empty: 'orphan', protectedTargetIds: [] };
