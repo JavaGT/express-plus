@@ -126,7 +126,6 @@ function rangesAfterDelete({ beforeFamily, afterFamily, ranges, from, to }
 
 
  )                    {
-  const deleted = to - from;
   return ranges.flatMap((range) => {
     const start = projectEndpointToOffset(beforeFamily, range.start);
     const end = projectEndpointToOffset(beforeFamily, range.end);

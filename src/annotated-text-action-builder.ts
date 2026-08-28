@@ -17,6 +17,10 @@ interface Annotation {
   fields: Record<string, unknown>;
 }
 
+interface PasteAnnotation extends Annotation {
+  protectedTargetIds?: readonly string[];
+}
+
 interface AuthoringBinding {
   version: 1;
   stream: string;
@@ -29,6 +33,7 @@ type AnnotatedTextEdit =
   | { kind: 'text.delete'; from: Position; to: Position }
   | { kind: 'text.replace'; from: Position; to: Position; text: string }
   | { kind: 'annotation.apply'; annotation: Annotation; from: Position; to: Position }
+  | { kind: 'annotation.paste'; annotation: PasteAnnotation; at: Position; text: string }
   | { kind: 'annotation.remove'; annotationId: string }
   // Semantic atomic update (#174): new fields (complete declared record) on an
   // EXISTING annotation, optionally moving its range in the same history step.
@@ -122,6 +127,15 @@ export function annotatedTextAction(
         throw new Error('annotatedTextAction: annotation.apply requires annotation');
       }
       edit = { kind: command.kind, annotation: command.annotation, from: position(command.from, 'from'), to: position(command.to, 'to') };
+      break;
+    case 'annotation.paste':
+      if (!command.annotation || typeof command.annotation !== 'object' || Array.isArray(command.annotation)) {
+        throw new Error('annotatedTextAction: annotation.paste requires annotation');
+      }
+      if (typeof command.text !== 'string' || command.text.length === 0) {
+        throw new Error('annotatedTextAction: pasted text must be non-empty');
+      }
+      edit = { kind: command.kind, annotation: command.annotation, at: position(command.at, 'at'), text: command.text };
       break;
     case 'annotation.remove':
       if (typeof command.annotationId !== 'string' || command.annotationId.length === 0) {

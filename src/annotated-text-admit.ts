@@ -6,12 +6,12 @@
 // frames, or fold client ops — it admits a validated v9 command and returns the
 // blockless operated event/plan.
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { ValidationError, type FieldDescriptor } from './field-strategy.ts';
 import * as eventHandles from './event-handle.ts';
 import { authorizeFieldOp } from './strategy/index.ts';
 import { write } from './grant.ts';
-import { restoreTextFamilySerialized, materializeText, textFamilyBasis, type ContinuousTextFamily } from './annotated-text-continuous.ts';
+import { applyTextOperation, restoreTextFamilySerialized, materializeText, textFamilyBasis, type ContinuousTextFamily } from './annotated-text-continuous.ts';
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.ts';
 import { resolveStream, resolveLease, resolvePosition } from './annotated-text-authoring-stream.ts';
 import { readSeq } from './committed-log.ts';
@@ -518,6 +518,48 @@ async function admitTextAnnotationUpdate(ctx: V9Prelude & { edit: V9EditLoose })
   return [{ handle, type: handle.type, scope: documentScope, data: plan }];
 }
 
+/**
+ * Paste text and carry one source annotation onto the pasted characters. The
+ * two ordinary events are returned in one admission result, so the commit
+ * pipeline can append them together; the copied annotation always receives a
+ * new identity and its endpoints are resolved against the inserted family.
+ */
+async function admitAnnotationPaste(ctx: V9Prelude & { edit: V9EditLoose }): Promise<unknown[]> {
+  const { edit, family, state, command, documentScope, actor, lamport, compiledMeta } = ctx;
+  if (!edit.annotation || typeof edit.text !== 'string' || !edit.text.length || !edit.at) {
+    throw new ValidationError(`${ctx.name}.${ctx.fieldName}.operation annotation.paste requires annotation, at, and text`);
+  }
+  const familyMeta = compiledMeta.annotationHandles[edit.annotation.family];
+  if (!familyMeta) throw new ValidationError(`${ctx.name}.${ctx.fieldName}.operation unknown annotation family`, { code: 'position-invalid' });
+  const insertPlan = planTextOffsetEdit({
+    documentId: command.id, structureVersion: state.structure_version, family, actor, lamport,
+    edit: { kind: 'text.insert', at: { offset: edit.at.offset, affinity: edit.at.affinity }, text: edit.text },
+  });
+  const insertedFamily = applyTextOperation(family, insertPlan.operation.operation);
+  const id = randomUUID();
+  const annotation = {
+    id,
+    family: edit.annotation.family,
+    empty: familyMeta.empty,
+    fields: { ...(edit.annotation.fields ?? {}) },
+    // Protection edges point at document-local ids and cannot be copied by
+    // reference; a paste copies annotation fields, not those relationships.
+    protectedTargetIds: [],
+  };
+  const annotationPlan = planTextRangeApply({
+    documentId: command.id, structureVersion: insertPlan.after.structuralRevision, family: insertedFamily,
+    annotation, from: { offset: edit.at.offset, affinity: 'left' },
+    to: { offset: edit.at.offset + edit.text.length, affinity: 'right' },
+    actorId: ctx.principal?.id ?? '', cardinality: familyMeta.cardinality,
+    sameFamilyAnnotationIds: null,
+  });
+  const handle = eventHandles.native(ctx.name, ctx.fieldName, 'operated');
+  return [
+    { handle, type: handle.type, scope: documentScope, data: insertPlan },
+    { handle, type: handle.type, scope: documentScope, data: annotationPlan },
+  ];
+}
+
 function edit_annotationId(command: V9Command): string | undefined {
   return command.edit?.annotationId ?? command.edit?.annotation?.id;
 }
@@ -541,6 +583,9 @@ export async function admitV9AnnotatedTextEdit(ctx: V9AdmitContext): Promise<unk
   }
   if (edit.kind === 'annotation.update') {
     return admitTextAnnotationUpdate({ ...prelude, edit });
+  }
+  if (edit.kind === 'annotation.paste') {
+    return admitAnnotationPaste({ ...prelude, edit });
   }
   throw new ValidationError(`${prelude.name}.${prelude.fieldName}.operation block-era edit '${edit.kind}' is not supported (issue #33)`, { code: 'position-invalid' });
 }

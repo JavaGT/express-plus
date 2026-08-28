@@ -41,6 +41,11 @@ const OPAQUE_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 
 
 
+
+
+
+
+
 function opaqueToken(value         )                  {
   return typeof value === 'string' && OPAQUE_TOKEN.test(value);
 }
@@ -122,6 +127,15 @@ export function annotatedTextAction(
         throw new Error('annotatedTextAction: annotation.apply requires annotation');
       }
       edit = { kind: command.kind, annotation: command.annotation, from: position(command.from, 'from'), to: position(command.to, 'to') };
+      break;
+    case 'annotation.paste':
+      if (!command.annotation || typeof command.annotation !== 'object' || Array.isArray(command.annotation)) {
+        throw new Error('annotatedTextAction: annotation.paste requires annotation');
+      }
+      if (typeof command.text !== 'string' || command.text.length === 0) {
+        throw new Error('annotatedTextAction: pasted text must be non-empty');
+      }
+      edit = { kind: command.kind, annotation: command.annotation, at: position(command.at, 'at'), text: command.text };
       break;
     case 'annotation.remove':
       if (typeof command.annotationId !== 'string' || command.annotationId.length === 0) {

@@ -126,7 +126,6 @@ function rangesAfterDelete({ beforeFamily, afterFamily, ranges, from, to }: {
   from: number;
   to: number;
 }): AnnotationRange[] {
-  const deleted = to - from;
   return ranges.flatMap((range) => {
     const start = projectEndpointToOffset(beforeFamily, range.start);
     const end = projectEndpointToOffset(beforeFamily, range.end);
