@@ -60,7 +60,7 @@ test('app.start is idempotent and unstarted database release closes the handle',
 
   assert.equal(app.start, app.start);
   assert.equal(app.releaseUnstartedDatabase(), app);
-  assert.throws(() => db.prepare('SELECT 1'), /closed/i);
+  assert.throws(() => db.prepare('SELECT 1'), /database is not open/i);
   await assert.rejects(app.start(), /database was released/i);
 });
 
