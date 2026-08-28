@@ -223,14 +223,14 @@ function mainTableDDL(entity: DdlEntity): string {
     // A text CRDT's declared cell is its canonical JSON checkpoint, not a
     // materialized string plus a hidden second authority.
     if (descriptor.kind === 'value' || descriptor.kind === 'crdt' || descriptor.kind === 'hash' || descriptor.kind === 'state' || descriptor.kind === 'projected' || (descriptor.kind === 'computed' && descriptor.mode === 'stored')) {
-      let column = `${name} ${sqlType(descriptor)}`;
+      let column = `${quoteIdent(name)} ${sqlType(descriptor)}`;
       if (physicalRef(entity, descriptor) && !(descriptor.nullable || descriptor.optional)) column += ' NOT NULL';
       cols.push(column);
     } else if (descriptor.kind === 'struct') {
       // struct fields (link) flatten to multiple columns
       for (const cellName of Object.keys(descriptor.cells ?? {})) {
         const cell = structCellColumn(name, cellName);
-        cols.push(`${cell} TEXT`);
+        cols.push(`${quoteIdent(cell)} TEXT`);
       }
     }
     // map / log / ephemeral / store → NOT stored in main table
@@ -249,7 +249,7 @@ function mainTableDDL(entity: DdlEntity): string {
       : ' ON DELETE RESTRICT ON UPDATE NO ACTION';
     cols.push(`FOREIGN KEY (${quoteIdent(name)}) REFERENCES ${quoteIdent(target)} (${quoteIdent('id')})${removal}`);
   }
-  return `CREATE TABLE IF NOT EXISTS ${entity.name} (\n  ${cols.join(',\n  ')}\n);`;
+  return `CREATE TABLE IF NOT EXISTS ${quoteIdent(entity.name)} (\n  ${cols.join(',\n  ')}\n);`;
 }
 
 // Generate a complete, ordered sequence of CREATE TABLE statements for one
