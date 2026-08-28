@@ -274,6 +274,9 @@ export function assertV9AnnotatedTextOffsetEditPayload(name        , fieldName  
     edit = Object.freeze({ kind: 'block.merge', leftPositionToken: e.leftPositionToken, rightPositionToken: e.rightPositionToken });
   } else if (e.kind === 'annotation.apply' && Object.keys(e).length === 4 && e.annotation && typeof e.annotation === 'object') {
     edit = Object.freeze({ kind: 'annotation.apply', annotation: frozenJsonSnapshot(e.annotation), from: pToken(e.from, 'annotation start'), to: pToken(e.to, 'annotation end') });
+  } else if (e.kind === 'annotation.paste' && Object.keys(e).length === 4 && e.annotation && typeof e.annotation === 'object' && typeof e.text === 'string' && e.text.length > 0) {
+    try { assertWellFormedText(e.text); } catch (error     ) { throw new ValidationError(`${name}.${fieldName}.operation pasted text ${error.message}`); }
+    edit = Object.freeze({ kind: 'annotation.paste', annotation: frozenJsonSnapshot(e.annotation), at: pToken(e.at, 'paste position'), text: e.text });
   } else if (e.kind === 'annotation.detach' && Object.keys(e).length === 3 && typeof e.annotationId === 'string' && e.annotationId && typeof e.positionToken === 'string' && e.positionToken) {
     edit = Object.freeze({ kind: 'annotation.detach', annotationId: e.annotationId, positionToken: e.positionToken });
   } else if (e.kind === 'annotation.remove' && Object.keys(e).length === 2 && typeof e.annotationId === 'string' && e.annotationId) {
@@ -943,7 +946,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       if (payload.version === 1) throw new ValidationError('annotated text compensation is history-authored only');
       return Promise.resolve(r1Handler({ payload, db, scope, principal, actionId })).then((events     ) => {
         if (payload.version !== 9) return events;
-        const originFact = command.edit.kind === 'text.insert'
+        const originFact = command.edit.kind === 'text.insert' || command.edit.kind === 'annotation.paste'
           ? { version: 2, kind: 'annotated-text.contribution', documentId: command.id, contribution: { kind: 'text.insert', opId: events[0].data.operation.operation[2], anchor: events[0].data.operation.operation[5][1], text: command.edit.text, scalarCount: scalarCount(command.edit.text) } }
           : command.edit.kind === 'annotation.update'
             ? (() => {
