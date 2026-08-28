@@ -115,9 +115,10 @@ function assertForwardOffset(text: string, fromOffset: number, toOffset: number)
 
 /**
  * Calculate the range postimage for a deletion. A range which loses only part
- * of its visible text is clamped to the surviving boundary characters. The
- * original endpoint affinities are deliberately retained when a boundary is
- * re-resolved, so an insertion at that boundary remains on the intended side.
+ * of its visible text is clamped to the surviving characters in after-edit
+ * coordinates. Fully-covered ranges are omitted (emptiedRanges owns dispose).
+ * Affinities are copied onto the re-resolved endpoints so a later insertion
+ * at the new boundary still hugs the same side the original endpoint declared.
  */
 function rangesAfterDelete({ beforeFamily, afterFamily, ranges, from, to }: {
   beforeFamily: ContinuousTextFamily;
@@ -133,9 +134,10 @@ function rangesAfterDelete({ beforeFamily, afterFamily, ranges, from, to }: {
 
     const deletedStart = Math.max(start, from);
     const deletedEnd = Math.min(end, to);
+    const surviving = (end - start) - (deletedEnd - deletedStart);
     const newStart = Math.min(start, from);
-    const newEnd = Math.max(0, end - (deletedEnd - deletedStart));
-    if (newStart >= newEnd) return [range];
+    const newEnd = newStart + surviving;
+    if (newEnd <= newStart) return [];
 
     const startAffinity = range.start.point[2];
     const endAffinity = range.end.point[2];

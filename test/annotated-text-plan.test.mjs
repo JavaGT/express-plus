@@ -155,6 +155,28 @@ test('delete shrinks partial ranges and preserves endpoint affinities', () => {
   assert.deepEqual(plan.facts.emptiedAnnotations, []);
 });
 
+test('delete that starts before a range and ends inside it shrinks to surviving text', () => {
+  const family = familyFromText('abcdefghijklmnopqrstu');
+  const annotation = { id: 'ann1', family: 'code', empty: 'delete', protectedTargetIds: [] };
+  const ranges = [rangeFor(family, 'ann1', 3, 15)];
+  const plan = input(family, { kind: 'text.delete', from: at(0), to: at(10) }, { annotations: [annotation], ranges });
+  assert.equal(materializePlan(family, plan), 'klmnopqrstu');
+  const after = applyTextOperation(family, plan.operation.operation);
+  assert.deepEqual(offsetsOf(after, plan.facts.ranges), [{ annotationId: 'ann1', start: 0, end: 5 }]);
+  assert.deepEqual(plan.facts.emptiedAnnotations, []);
+});
+
+test('delete that fully covers a range omits it from the postimage and empties it', () => {
+  const family = familyFromText('abcdefghijklmnop');
+  const annotation = { id: 'ann1', family: 'code', empty: 'delete', protectedTargetIds: [] };
+  const ranges = [rangeFor(family, 'ann1', 5, 10)];
+  const plan = input(family, { kind: 'text.delete', from: at(3), to: at(15) }, { annotations: [annotation], ranges });
+  assert.equal(plan.facts.ranges.length, 0);
+  assert.equal(plan.facts.emptiedAnnotations.length, 1);
+  assert.equal(plan.facts.emptiedAnnotations[0].annotationId, 'ann1');
+  assert.equal(plan.facts.emptiedAnnotations[0].disposition.kind, 'deleted');
+});
+
 test('delete that does not empty a covering range leaves emptiedAnnotations empty', () => {
   const family = familyFromText('abcd');
   const annotation = { id: 'ann1', family: 'comment', empty: 'orphan', protectedTargetIds: [] };

@@ -525,7 +525,7 @@ async function admitTextAnnotationUpdate(ctx: V9Prelude & { edit: V9EditLoose })
  * new identity and its endpoints are resolved against the inserted family.
  */
 async function admitAnnotationPaste(ctx: V9Prelude & { edit: V9EditLoose }): Promise<unknown[]> {
-  const { edit, family, state, command, documentScope, actor, lamport, compiledMeta } = ctx;
+  const { edit, family, state, command, documentScope, actor, lamport, compiledMeta, db, prefix } = ctx;
   if (!edit.annotation || typeof edit.text !== 'string' || !edit.text.length || !edit.at) {
     throw new ValidationError(`${ctx.name}.${ctx.fieldName}.operation annotation.paste requires annotation, at, and text`);
   }
@@ -546,12 +546,15 @@ async function admitAnnotationPaste(ctx: V9Prelude & { edit: V9EditLoose }): Pro
     // reference; a paste copies annotation fields, not those relationships.
     protectedTargetIds: [],
   };
+  const ranges = loadRanges({ db, prefix, documentId: command.id });
+  const annotations = loadAnnotations({ db, prefix, compiledMeta, documentId: command.id });
+  const sameFamilyAnnotationIds = new Set(annotations.filter((candidate) => candidate.family === edit.annotation.family).map((candidate) => candidate.id));
   const annotationPlan = planTextRangeApply({
     documentId: command.id, structureVersion: insertPlan.after.structuralRevision, family: insertedFamily,
     annotation, from: { offset: edit.at.offset, affinity: 'left' },
     to: { offset: edit.at.offset + edit.text.length, affinity: 'right' },
-    actorId: ctx.principal?.id ?? '', cardinality: familyMeta.cardinality,
-    sameFamilyAnnotationIds: null,
+    ranges, actorId: ctx.principal?.id ?? '', cardinality: familyMeta.cardinality,
+    sameFamilyAnnotationIds,
   });
   const handle = eventHandles.native(ctx.name, ctx.fieldName, 'operated');
   return [

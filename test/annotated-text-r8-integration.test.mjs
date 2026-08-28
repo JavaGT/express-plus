@@ -341,6 +341,43 @@ test('annotation.apply creates one document-scoped membership range', async () =
   await app.close?.();
 });
 
+test('annotation.paste on a document with an existing annotation mints a fresh id', async () => {
+  const { app, db, binding, authoringOf, documentPositionToken } = await setupDoc('hello world');
+  assert.equal((await app.dispatch({
+    actionId: 'apply-coding', type: 'R8IntegrationDocument.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: {
+      version: 9, id: 'd1',
+      authoring: authoringOf(binding, 'm-apply-coding'),
+      edit: {
+        kind: 'annotation.apply',
+        annotation: { id: 'coding-1', family: 'coding', fields: {} },
+        from: { positionToken: documentPositionToken, offset: 0, affinity: 'left' },
+        to: { positionToken: documentPositionToken, offset: 5, affinity: 'right' },
+      },
+    },
+  })).ok, true);
+  const pasted = await app.dispatch({
+    actionId: 'paste-coding', type: 'R8IntegrationDocument.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: {
+      version: 9, id: 'd1',
+      authoring: authoringOf(binding, 'm-paste-coding'),
+      edit: {
+        kind: 'annotation.paste',
+        annotation: { id: 'coding-1', family: 'coding', fields: {} },
+        at: { positionToken: documentPositionToken, offset: 6, affinity: 'right' },
+        text: 'zz',
+      },
+    },
+  });
+  assert.equal(pasted.ok, true, pasted.failure?.message);
+  assert.equal(familyText(db), 'hello zzworld');
+  const annotations = db.prepare('SELECT id, family FROM R8IntegrationDocument_body_annotation ORDER BY id').all();
+  assert.equal(annotations.length, 2);
+  assert.ok(annotations.some((row) => row.id === 'coding-1'));
+  assert.ok(annotations.some((row) => row.id !== 'coding-1' && row.family === 'coding'));
+  await app.close?.();
+});
+
 test('protecting annotation.apply records protected targets; remove deletes both cleanly', async () => {
   const { app, db, binding, authoringOf, documentPositionToken, refreshBinding } = await setupDoc('hello world');
   assert.equal((await app.dispatch({
