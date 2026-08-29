@@ -127,6 +127,33 @@ test('create with source.ranges inserts LF boundaries and translates legacy offs
   await app.close?.();
 });
 
+test('create with source.ranges preserves a range spanning a block boundary', async () => {
+  const { app, db } = await appFor();
+  const created = await createWithRanges(app, 'spanning-boundary', [
+    { annotationId: 'turn-1', family: 'turn', start: 4, end: 8, fields: {} },
+  ], [{ text: 'hello ' }, { text: 'world' }]);
+  assert.equal(created.ok, true, created.failure?.message);
+  assert.equal((await committedOffsets(db, 'spanning-boundary', 'turn-1')).text, 'hello \nworld');
+  // Legacy [4, 8] covers `o wo`; the inserted LF shifts only its end.
+  assert.deepEqual((await committedOffsets(db, 'spanning-boundary', 'turn-1')).range, { start: 4, end: 9 });
+  await app.close?.();
+});
+
+test('create with source.ranges translates multiple boundaries in a three-block import', async () => {
+  const { app, db } = await appFor();
+  const created = await createWithRanges(app, 'three-blocks', [
+    { annotationId: 'turn-1', family: 'turn', start: 1, end: 10, fields: {} },
+    { annotationId: 'turn-2', family: 'turn', start: 6, end: 11, fields: {} },
+  ], [{ text: 'one' }, { text: 'two' }, { text: 'three' }]);
+  assert.equal(created.ok, true, created.failure?.message);
+  assert.equal((await committedOffsets(db, 'three-blocks', 'turn-1')).text, 'one\ntwo\nthree');
+  // Legacy [1, 10] crosses both boundaries; [6, 11] starts at the second
+  // boundary and covers the whole third source block.
+  assert.deepEqual((await committedOffsets(db, 'three-blocks', 'turn-1')).range, { start: 1, end: 12 });
+  assert.deepEqual((await committedOffsets(db, 'three-blocks', 'turn-2')).range, { start: 8, end: 13 });
+  await app.close?.();
+});
+
 test('create with source.ranges preserves an existing LF and translates later blocks', async () => {
   const { app, db } = await appFor();
   const created = await createWithRanges(app, 'existing-lf', [
