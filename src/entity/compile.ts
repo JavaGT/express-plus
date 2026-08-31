@@ -263,9 +263,9 @@ export function entity<const Name extends string, const Declaration extends Reco
     if (!Array.isArray(indexesDecl)) throw new Error(`entity('${name}') indexes must be an array`);
     const seenIndexes = new Set();
     for (const index of indexesDecl) {
-      if (!index || typeof index !== 'object' || Array.isArray(index) || index.unique !== true || !Array.isArray(index.fields)
+      if (!index || typeof index !== 'object' || Array.isArray(index) || typeof index.unique !== 'boolean' || !Array.isArray(index.fields)
         || Object.keys(index).some((key) => key !== 'fields' && key !== 'unique')) {
-        throw new Error(`entity('${name}') indexes entries must be { fields: [..], unique: true }`);
+        throw new Error(`entity('${name}') indexes entries must be { fields: [..], unique: boolean }`);
       }
       if (index.fields.length < 2 || index.fields.some((fieldName: any) => typeof fieldName !== 'string')) {
         throw new Error(`entity('${name}') index fields must contain at least two field names`);
@@ -287,7 +287,7 @@ export function entity<const Name extends string, const Declaration extends Reco
           throw new Error(`entity('${name}') index field '${fieldName}' must be a stored main-table field`);
         }
       }
-      indexes.push(Object.freeze({ fields: Object.freeze([...index.fields]), unique: true }));
+      indexes.push(Object.freeze({ fields: Object.freeze([...index.fields]), unique: index.unique }));
     }
   }
 

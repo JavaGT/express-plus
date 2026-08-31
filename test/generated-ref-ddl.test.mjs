@@ -103,6 +103,28 @@ test('composite unique indexes reject invalid and duplicate declarations before 
   db.close();
 });
 
+test('composite non-unique indexes preserve duplicate rows and compile as ordinary indexes', async (t) => {
+  const Entity = entity('NonUniqueIndex', {
+    transcriptId: text(),
+    createdAt: text(),
+    indexes: [{ fields: ['transcriptId', 'createdAt'], unique: false }],
+    grant: grants,
+  });
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db, entities: [Entity] });
+  t.after(async () => { await app.shutdown(); db.close(); });
+  await app.start();
+
+  const ddl = Entity.generateDDL().join('\n');
+  assert.match(ddl, /CREATE INDEX IF NOT EXISTS "idx_NonUniqueIndex_transcriptId_createdAt" ON "NonUniqueIndex" \("transcriptId", "createdAt"\);/);
+  assert.doesNotMatch(ddl, /CREATE UNIQUE INDEX/);
+  assert.deepEqual(
+    db.prepare("SELECT name, \"unique\" FROM pragma_index_list('NonUniqueIndex') WHERE origin = 'c'").all(),
+    [{ name: 'idx_NonUniqueIndex_transcriptId_createdAt', unique: 0 }],
+  );
+  db.prepare('INSERT INTO NonUniqueIndex (id, transcriptId, createdAt) VALUES (?, ?, ?), (?, ?, ?)').run('one', 't', 'same', 'two', 't', 'same');
+});
+
 test('eventful removal refs are deferred NO ACTION and cannot be deleted outside Workbench', async (t) => {
   const Parent = entity('RefCascadeParent', { name: text(), grant: grants });
   const Child = entity('RefCascadeChild', { parentId: ref(Parent, { onRemove: 'cascade', physical: true }), grant: grants });

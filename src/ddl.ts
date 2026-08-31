@@ -79,7 +79,7 @@ interface DdlEntity {
   // callers legitimately carry a looser record (e.g. describeEntityStorage).
   fields?: unknown;
   schedule?: Record<string, unknown>;
-  indexes?: ReadonlyArray<{ fields: readonly string[] }>;
+  indexes?: ReadonlyArray<{ fields: readonly string[]; unique: boolean }>;
 }
 
 function fieldsOf(entity: DdlEntity): Readonly<Record<string, FieldDescriptorLike>> | undefined {
@@ -197,15 +197,26 @@ function physicalRef(entity: DdlEntity, descriptor: FieldDescriptorLike | null |
     && Boolean(name || target === entity.name);
 }
 
-function uniqueIndexes(entity: DdlEntity): Array<{ name: string; fields: readonly string[] }> {
-  return (entity.indexes ?? []).map(({ fields }) => ({
+function declaredIndexes(entity: DdlEntity, unique: boolean): Array<{ name: string; fields: readonly string[] }> {
+  return (entity.indexes ?? []).filter((index) => index.unique === unique).map(({ fields }) => ({
     name: `idx_${entity.name}_unique_${fields.join('_')}`,
     fields,
   }));
 }
 
+function uniqueIndexes(entity: DdlEntity): Array<{ name: string; fields: readonly string[] }> {
+  return declaredIndexes(entity, true);
+}
+
+function nonUniqueIndexes(entity: DdlEntity): Array<{ name: string; fields: readonly string[] }> {
+  return declaredIndexes(entity, false).map(({ fields }) => ({
+    name: `idx_${entity.name}_${fields.join('_')}`,
+    fields,
+  }));
+}
+
 export function generatedIndexNames(entity: DdlEntity): string[] {
-  return [...refIndexes(entity), ...scheduleIndexNames(entity), ...uniqueIndexes(entity)].map(({ name }) => name);
+  return [...refIndexes(entity), ...scheduleIndexNames(entity), ...uniqueIndexes(entity), ...nonUniqueIndexes(entity)].map(({ name }) => name);
 }
 
 // Generate the main table DDL for one entity.
@@ -276,6 +287,9 @@ export function generateDDL(entity: DdlEntity): string[] {
   }
   for (const { name, fields: indexFields } of uniqueIndexes(entity)) {
     statements.push(`CREATE UNIQUE INDEX IF NOT EXISTS ${quoteIdent(name)} ON ${quoteIdent(entity.name)} (${indexFields.map(quoteIdent).join(', ')});`);
+  }
+  for (const { name, fields: indexFields } of nonUniqueIndexes(entity)) {
+    statements.push(`CREATE INDEX IF NOT EXISTS ${quoteIdent(name)} ON ${quoteIdent(entity.name)} (${indexFields.map(quoteIdent).join(', ')});`);
   }
 
   return statements;

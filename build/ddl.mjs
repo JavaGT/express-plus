@@ -197,15 +197,26 @@ function physicalRef(entity           , descriptor                              
     && Boolean(name || target === entity.name);
 }
 
-function uniqueIndexes(entity           )                                                     {
-  return (entity.indexes ?? []).map(({ fields }) => ({
+function declaredIndexes(entity           , unique         )                                                     {
+  return (entity.indexes ?? []).filter((index) => index.unique === unique).map(({ fields }) => ({
     name: `idx_${entity.name}_unique_${fields.join('_')}`,
     fields,
   }));
 }
 
+function uniqueIndexes(entity           )                                                     {
+  return declaredIndexes(entity, true);
+}
+
+function nonUniqueIndexes(entity           )                                                     {
+  return declaredIndexes(entity, false).map(({ fields }) => ({
+    name: `idx_${entity.name}_${fields.join('_')}`,
+    fields,
+  }));
+}
+
 export function generatedIndexNames(entity           )           {
-  return [...refIndexes(entity), ...scheduleIndexNames(entity), ...uniqueIndexes(entity)].map(({ name }) => name);
+  return [...refIndexes(entity), ...scheduleIndexNames(entity), ...uniqueIndexes(entity), ...nonUniqueIndexes(entity)].map(({ name }) => name);
 }
 
 // Generate the main table DDL for one entity.
@@ -276,6 +287,9 @@ export function generateDDL(entity           )           {
   }
   for (const { name, fields: indexFields } of uniqueIndexes(entity)) {
     statements.push(`CREATE UNIQUE INDEX IF NOT EXISTS ${quoteIdent(name)} ON ${quoteIdent(entity.name)} (${indexFields.map(quoteIdent).join(', ')});`);
+  }
+  for (const { name, fields: indexFields } of nonUniqueIndexes(entity)) {
+    statements.push(`CREATE INDEX IF NOT EXISTS ${quoteIdent(name)} ON ${quoteIdent(entity.name)} (${indexFields.map(quoteIdent).join(', ')});`);
   }
 
   return statements;

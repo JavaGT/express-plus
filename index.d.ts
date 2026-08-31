@@ -1307,7 +1307,7 @@ export interface WorkbenchEntity<Row extends object = Record<string, unknown>> {
 export type EntityIndexFields<Row extends object> = readonly [keyof Row & string, keyof Row & string, ...(keyof Row & string)[]];
 export interface EntityIndexDeclaration<Row extends object> {
   readonly fields: EntityIndexFields<Row>;
-  readonly unique: true;
+  readonly unique: boolean;
 }
 
 type SelectedKeys<Row extends object, Fields extends readonly FieldHandle<any, any>[]> =
