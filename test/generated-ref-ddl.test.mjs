@@ -119,7 +119,8 @@ test('composite non-unique indexes preserve duplicate rows and compile as ordina
   assert.match(ddl, /CREATE INDEX IF NOT EXISTS "idx_NonUniqueIndex_transcriptId_createdAt" ON "NonUniqueIndex" \("transcriptId", "createdAt"\);/);
   assert.doesNotMatch(ddl, /CREATE UNIQUE INDEX/);
   assert.deepEqual(
-    db.prepare("SELECT name, \"unique\" FROM pragma_index_list('NonUniqueIndex') WHERE origin = 'c'").all(),
+    db.prepare("SELECT name, \"unique\" FROM pragma_index_list('NonUniqueIndex') WHERE origin = 'c'").all()
+      .map(({ name, unique }) => ({ name, unique })),
     [{ name: 'idx_NonUniqueIndex_transcriptId_createdAt', unique: 0 }],
   );
   db.prepare('INSERT INTO NonUniqueIndex (id, transcriptId, createdAt) VALUES (?, ?, ?), (?, ?, ?)').run('one', 't', 'same', 'two', 't', 'same');
