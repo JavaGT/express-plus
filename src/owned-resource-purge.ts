@@ -56,6 +56,9 @@ export function compileProjectPurgePlan(plugin: SearchPlugin): ProjectPurgePlan 
     const parent = byName.get(disposition.parent.toLowerCase());
     if (!parent) throw new Error(`search plugin '${plugin.id}' object '${object.name}' references foreign purge parent '${disposition.parent}'`);
     if (parent.object.kind !== 'table') throw new Error(`search plugin '${plugin.id}' dependent '${object.name}' parent '${disposition.parent}' is not a table`);
+    if (parent.disposition.kind !== 'project-purge-root' && parent.disposition.kind !== 'project-purge-dependent') {
+      throw new Error(`search plugin '${plugin.id}' dependent '${object.name}' parent '${disposition.parent}' is not project-purgeable`);
+    }
   }
   const visiting = new Set<string>();
   const visited = new Set<string>();
@@ -75,13 +78,22 @@ export function compileProjectPurgePlan(plugin: SearchPlugin): ProjectPurgePlan 
     visiting.delete(key); visited.add(key); ordered.push(entry);
   };
   for (const { object } of objects) visit(object.name);
+  const projectScopedIds = (name: string): string => {
+    const entry = byName.get(name.toLowerCase())!;
+    const disposition = entry.disposition;
+    if (disposition.kind === 'project-purge-root') {
+      return `SELECT id FROM ${entry.object.name} WHERE ${disposition.projectKey} = ?`;
+    }
+    if (disposition.kind !== 'project-purge-dependent') throw new Error(`project-purge parent '${name}' is not project-purgeable`);
+    return `SELECT id FROM ${entry.object.name} WHERE ${disposition.foreignKey} IN (${projectScopedIds(disposition.parent)})`;
+  };
   const plans = ordered.map(({ object, disposition }) => ({
     name: object.name,
     disposition,
     sql: disposition.kind === 'project-purge-root'
       ? `DELETE FROM ${object.name} WHERE ${disposition.projectKey} = ?`
       : disposition.kind === 'project-purge-dependent'
-        ? `DELETE FROM ${object.name} WHERE ${disposition.foreignKey} IN (SELECT id FROM ${disposition.parent})`
+        ? `DELETE FROM ${object.name} WHERE ${disposition.foreignKey} IN (${projectScopedIds(disposition.parent)})`
         : '',
   }));
   // Prove the compiled child-before-parent invariant. Declaration order is
