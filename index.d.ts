@@ -914,6 +914,27 @@ export interface AnnotatedTextRegionEditDescriptor {
 export function parseRegionEditDescriptor(raw: unknown): AnnotatedTextRegionEditDescriptor;
 export function isRegionEditDescriptor(value: unknown): value is AnnotatedTextRegionEditDescriptor;
 
+export interface AnnotatedTextRegionBuildInput {
+  readonly id: string;
+  readonly from: number;
+  readonly to: number;
+  readonly replacement: string;
+  readonly transitions: readonly unknown[];
+  /** Optional immutable wording check used by server-side review commits. */
+  readonly expectedText?: string;
+}
+export interface AnnotatedTextOperationRegion {
+  (descriptor: unknown): AnnotatedTextRegionEditDescriptor;
+  readonly build: (db: WorkbenchDatabase, input: AnnotatedTextRegionBuildInput) => AnnotatedTextRegionEditDescriptor;
+}
+export interface AnnotatedTextOperationHandle {
+  readonly __brand: 'annotatedTextOperation';
+  readonly entity: string;
+  readonly field: string;
+  readonly region: AnnotatedTextOperationRegion;
+}
+export function annotatedTextOperation(entity: AnyWorkbenchEntity, field: AnnotatedTextFieldHandle): AnnotatedTextOperationHandle;
+
 /** The `edit` half of a v9 operation payload (command minus id/authoring). */
 export type AnnotatedTextOperationEdit =
   | Omit<AnnotatedTextInsertCommand, 'id' | 'authoring'>
@@ -2045,6 +2066,10 @@ export interface ProtectedArtefactStore {
 }
 export interface RegisteredActionCommit {
   readonly events: readonly Readonly<{ type: string; scope: string; data: unknown }>[];
+  /** One descriptor for the action's declared annotated-text operation. */
+  readonly annotatedText?: readonly unknown[];
+  /** Application-side before/after fact committed with the document operation. */
+  readonly applicationTransition?: Readonly<{ before: unknown; after: unknown }>;
   readonly directive?: ErasureDirectiveV1 | ErasureDirectivePreparationV1;
   /**
    * The non-sensitive action identity stored as the receipt's canonical
@@ -2137,6 +2162,8 @@ export interface RegisteredAction<
   }): readonly Readonly<{ type: string; scope: string; data: unknown }>[] | RegisteredActionCommit | Promise<readonly Readonly<{ type: string; scope: string; data: unknown }>[] | RegisteredActionCommit>;
   readonly projections?: readonly Projection[];
   readonly history?: { readonly cursor?: 'eligible' | 'excluded' };
+  /** At most one declared annotated-text operation, composed atomically with this action. */
+  readonly operations?: readonly AnnotatedTextOperationHandle[];
   /**
    * Declared application-owned protected-artefact store. The handler receives a
    * transaction-bound `protectedArtefact` capability restricted to exactly these

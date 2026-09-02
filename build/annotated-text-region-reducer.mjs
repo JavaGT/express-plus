@@ -306,6 +306,39 @@ function projectRetainedMemberships(
   return retained;
 }
 
+/** Trim existing exclusive-family memberships around newly created ranges. */
+function trimExclusiveMemberships(
+  family                      ,
+  memberships                             ,
+  occupied                                                     ,
+)                     {
+  const retained                     = [];
+  for (const membership of memberships) {
+    let pieces                                                  = [];
+    try {
+      const start = projectEndpointToOffset(family, membership.start);
+      const end = projectEndpointToOffset(family, membership.end);
+      pieces = [{ start, end }];
+    } catch {
+      continue;
+    }
+    for (const range of occupied) {
+      pieces = pieces.flatMap((piece) => [
+        ...(piece.start < range.start ? [{ start: piece.start, end: Math.min(piece.end, range.start) }] : []),
+        ...(piece.end > range.end ? [{ start: Math.max(piece.start, range.end), end: piece.end }] : []),
+      ].filter((piece) => piece.end > piece.start));
+    }
+    for (const piece of pieces) {
+      retained.push({
+        ordinal: retained.length,
+        start: resolveOffsetToEndpoint(family, piece.start, family.checkpoint.frontier, 'left'),
+        end: resolveOffsetToEndpoint(family, piece.end, family.checkpoint.frontier, 'right'),
+      });
+    }
+  }
+  return retained;
+}
+
 function cloneImage(image                       , memberships                             , orphan                           = image.orphan)                        {
   return deepFreeze({
     ...image,
@@ -361,6 +394,12 @@ export function reduceRegionPostimage({
 
   const next = new Map                               ();
   const emptied                                       = [];
+  const exclusiveCreatedRanges = transitions.flatMap((transition) => {
+    if (transition.kind !== 'create') return [];
+    const declared = declarationOf(declarations, transition.annotation.family);
+    if ((declared.cardinality ?? 'many') !== 'one') return [];
+    return transition.ranges.map((range) => ({ start: region.from + range.start, end: region.from + range.end, family: transition.annotation.family }));
+  });
 
   for (const transition of transitions) {
     if (transition.kind !== 'remove') continue;
@@ -388,8 +427,14 @@ export function reduceRegionPostimage({
     }
     if (transition?.kind === 'create') throw new Error(REGION_POSTIMAGE_DISAGREES);
     const retained = projectRetainedMemberships(beforeFamily, afterFamily, image.memberships);
-    if (retained.length > 0) {
-      next.set(image.id, cloneImage(image, retained));
+    const exclusiveRanges = exclusiveCreatedRanges
+      .filter((range) => range.family === image.family)
+      .map(({ start, end }) => ({ start, end }));
+    const exclusiveRetained = image.cardinality === 'one' && exclusiveRanges.length > 0
+      ? trimExclusiveMemberships(afterFamily, retained, exclusiveRanges)
+      : retained;
+    if (exclusiveRetained.length > 0) {
+      next.set(image.id, cloneImage(image, exclusiveRetained));
       continue;
     }
     const declared = declarationOf(declarations, image.family);
@@ -451,7 +496,7 @@ export function reduceRegionPostimage({
       throw new Error(REGION_POSTIMAGE_DISAGREES);
     }
     const declared = declarationOf(declarations, transition.annotation.family);
-    if ((declared.cardinality ?? 'many') !== 'many') throw new Error(REGION_POSTIMAGE_DISAGREES);
+    const cardinality = (declared.cardinality ?? 'many') === 'one' ? 'one' : 'many';
     const declaredNames = Object.keys(declared.fields).sort();
     const suppliedNames = Object.keys(transition.annotation.fields).sort();
     if (declaredNames.join('\0') !== suppliedNames.join('\0')) throw new Error(REGION_POSTIMAGE_DISAGREES);
@@ -463,7 +508,7 @@ export function reduceRegionPostimage({
       memberships: resolvePostRegionRanges(afterFamily, region.from, transition.ranges),
       orphan: null,
       empty: declared.empty === 'orphan' ? 'orphan' : 'delete',
-      cardinality: 'many',
+       cardinality,
       prerequisites: Object.freeze([]),
     }));
   }
@@ -657,4 +702,3 @@ export function assertCompleteRegionWitness({
     }
   }
 }
-

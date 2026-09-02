@@ -19,5 +19,6 @@ export {
   annotatedTextRetireAction,
 } from './annotated-text-action.mjs';
 export { parseRegionEditDescriptor, isRegionEditDescriptor } from './annotated-text-region-descriptor.mjs';
+export { annotatedTextOperation } from './annotated-text-region-operation.mjs';
 export { exportAnnotatedText, readAnnotatedTextForRecipient } from './annotated-text-snapshot.mjs';
 export { annotatedTextAnnotationAction } from './annotated-text-thread-action.mjs';

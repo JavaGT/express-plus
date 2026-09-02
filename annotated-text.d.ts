@@ -75,6 +75,9 @@ export type {
   AnnotatedTextRegionRelativeRange,
   AnnotatedTextRegionEditTransition,
   AnnotatedTextRegionEditDescriptor,
+  AnnotatedTextRegionBuildInput,
+  AnnotatedTextOperationRegion,
+  AnnotatedTextOperationHandle,
 } from './index.js';
 
-export { parseRegionEditDescriptor, isRegionEditDescriptor } from './index.js';
+export { parseRegionEditDescriptor, isRegionEditDescriptor, annotatedTextOperation } from './index.js';

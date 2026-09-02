@@ -1,6 +1,6 @@
 export { text, boolean, date, number, json, ref, hash, blob, link, map, list, log, ephemeral, state, computed, projected, raster, polyline, vector } from './field.ts';
 export { normalizeTierDeclaration, tierOf, isDataTier, isEntityTier, DATA_TIERS, ENTITY_TIERS, TIER_DESCRIPTIONS, type DataTier, type EntityTier, type HistoryMode, type HistoryVerb, type HistoryVerbMode, type ResolvedTier, type TierDeclaration } from './field.ts';
-export { annotatedText, annotation, protectingAnnotation, measurement, annotationAction, annotationEntityAction, annotationEntityRemoveAction, registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension, annotatedTextAction, annotatedTextAnnotationAction, annotatedTextCreateAction, annotatedTextRetireAction, parseRegionEditDescriptor, isRegionEditDescriptor, exportAnnotatedText, readAnnotatedTextForRecipient } from './annotated-text-public.ts';
+export { annotatedText, annotation, protectingAnnotation, measurement, annotationAction, annotationEntityAction, annotationEntityRemoveAction, registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension, annotatedTextAction, annotatedTextAnnotationAction, annotatedTextCreateAction, annotatedTextRetireAction, parseRegionEditDescriptor, isRegionEditDescriptor, annotatedTextOperation, exportAnnotatedText, readAnnotatedTextForRecipient } from './annotated-text-public.ts';
 export { annotatedTextClientHandle } from './annotated-text-field.ts';
 export { owner } from './owner.ts';
 export { now } from './deferred.ts';

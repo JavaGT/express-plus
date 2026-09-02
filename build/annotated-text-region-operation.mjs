@@ -23,6 +23,31 @@ import { planRegionEdit,                 } from './annotated-text-region-plan.mj
 import { constructV16RegionEvent } from './annotated-text-operated-event.mjs';
 
 import { parseRegionEditDescriptor } from './annotated-text-region-descriptor.mjs';
+import {
+  computeAffectedClosure,
+  digestAffectedClosure,
+  namedTransitionIds,
+  regionImageFromStored,
+
+} from './annotated-text-region-reducer.mjs';
+import { materializeText, projectEndpointToOffset, textFamilyBasis } from './annotated-text-continuous.mjs';
+import { sha256Utf8, regionStaleError } from './annotated-text-region-limits.mjs';
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -100,11 +125,20 @@ export function annotatedTextOperation                                          
   if (!descriptor || descriptor.kind !== 'annotatedText') {
     throw new Error(`annotatedTextOperation: '${entityName}.${fieldName}' is not an annotatedText field`);
   }
+  const region = ((rawDescriptor         ) => parseRegionEditDescriptor(rawDescriptor))                                ;
+  Object.defineProperty(region, 'build', {
+    value: (db          , input                               ) => buildRegionEditDescriptor({
+      handle: { entity: entityName, field: fieldName },
+      entities: new Map([[entityName, Entity]]),
+      db,
+      input,
+    }),
+  });
   return Object.freeze({
     __brand: 'annotatedTextOperation',
     entity: entityName,
     field: fieldName,
-    region: (rawDescriptor         ) => parseRegionEditDescriptor(rawDescriptor),
+    region: Object.freeze(region),
   });
 }
 
@@ -161,7 +195,76 @@ function loadPlanContext(dbInTxn          , prefix        , documentId        , 
     memberships: image.memberships,
     prerequisites: image.prerequisites,
   }));
-  return { state, family, annotations: storedAsRegion, regionDeclarations, structureVersion: state.structure_version };
+  const declarationByName = new Map(regionDeclarations.map((entry     ) => [entry.annotationName, entry]));
+  const images = storedAsRegion.map((image) => regionImageFromStored(image, declarationByName.get(image.family)));
+  return { state, family, annotations: storedAsRegion, images, regionDeclarations, structureVersion: state.structure_version };
+}
+
+function coveredAnnotationIds(
+  closure                                  ,
+  family                                                ,
+  from        ,
+  to        ,
+)           {
+  const ids           = [];
+  for (const image of closure) {
+    if (image.memberships.some((membership) => {
+      const start = projectEndpointToOffset(family, membership.start);
+      const end = projectEndpointToOffset(family, membership.end);
+      return Math.min(end, to) - Math.max(start, from) > 0;
+    })) ids.push(image.id);
+  }
+  return ids.sort();
+}
+
+function buildRegionEditDescriptor({
+  handle,
+  entities,
+  db,
+  input,
+}
+
+
+
+
+ )                       {
+  const { descriptor, compiledMeta } = compiledDeclarationFor(handle                                , entities);
+  const prefix = `${handle.entity}_${handle.field}`;
+  const context = loadPlanContext(db, prefix, input.id, handle.entity, handle.field, compiledMeta, descriptor);
+  const text = materializeText(context.family);
+  if (input.expectedText !== undefined && input.expectedText !== text) {
+    throw regionStaleError('region.edit reviewed wording no longer matches the live document');
+  }
+  if (!Number.isSafeInteger(input.from) || !Number.isSafeInteger(input.to)
+    || input.from < 0 || input.to < input.from || input.to > text.length) {
+    throw regionStaleError('region.edit range is outside the live document');
+  }
+  const provisional = parseRegionEditDescriptor({
+    version: 10,
+    kind: 'region.edit',
+    id: input.id,
+    basis: textFamilyBasis(context.family),
+    from: input.from,
+    to: input.to,
+    coveredTextDigest: '0'.repeat(64),
+    affectedClosureDigest: '0'.repeat(64),
+    expectedCoveredAnnotationIds: [],
+    replacement: input.replacement,
+    transitions: input.transitions,
+  });
+  const closure = computeAffectedClosure({
+    annotations: context.images,
+    family: context.family,
+    from: input.from,
+    to: input.to,
+    namedIds: namedTransitionIds(provisional),
+  });
+  return parseRegionEditDescriptor({
+    ...provisional,
+    coveredTextDigest: sha256Utf8(text.slice(input.from, input.to)),
+    affectedClosureDigest: digestAffectedClosure(closure),
+    expectedCoveredAnnotationIds: coveredAnnotationIds(closure, context.family, input.from, input.to),
+  });
 }
 
 /**
@@ -205,7 +308,7 @@ export function compileRegionFieldPolicy(
       // Mandatory in-transaction annotated field admission; the outer action
       // authorization never substitutes for field authorization.
       await authorizeFieldOp({ name: handle.entity, fields }       , handle.field, fieldGrantCheck                     , row, principal);
-      const { family, annotations, regionDeclarations, structureVersion } = loadPlanContext(dbInTxn, prefix, documentId, handle.entity, handle.field, compiledMeta, descriptor);
+       const { family, annotations, regionDeclarations, structureVersion } = loadPlanContext(dbInTxn, prefix, documentId, handle.entity, handle.field, compiledMeta, descriptor);
       const actor = createHash('sha256')
         .update(`${handle.entity}\u0000${handle.field}\u0000${documentId}\u0000${principal?.id ?? ''}\u0000${owners.scope}`)
         .digest('hex').slice(0, 32);
