@@ -565,6 +565,29 @@ export function namedTransitionIds(descriptor                      )           {
 
 const REGION_V16_DECLARATION_FINGERPRINT_VERSION = 1;
 
+// Field descriptors contain executable framework helpers (`can`, `validate`)
+// and may point at an entity object. Fingerprints cover their declaration
+// contract, not those per-compile objects or runtime-only callbacks.
+function declarationFieldShape(value         , stack = new Set        ())          {
+  if (value === undefined) return null;
+  if (typeof value === 'function') return `function:${Function.prototype.toString.call(value)}`;
+  if (value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map((entry) => declarationFieldShape(entry, stack));
+  const record = value                           ;
+  if (typeof record.name === 'string' && record.fields && typeof record.fields === 'object') {
+    return { name: record.name };
+  }
+  if (stack.has(record)) throw regionLimitError('region.edit declaration contains a cycle');
+  stack.add(record);
+  const shaped                          = {};
+  for (const name of Object.keys(record).sort()) {
+    if (name === 'access' || name === 'can') continue;
+    shaped[name] = declarationFieldShape(record[name], stack);
+  }
+  stack.delete(record);
+  return shaped;
+}
+
 /**
  * SHA-256 over canonical family names, declared fields/types, empty/cardinality
  * policy, protecting relation, placeholder declaration, and the named
@@ -587,7 +610,7 @@ export function regionDeclarationFingerprint(declarations                       
     fields.push(
       declaration.annotationName,
       String(names.length),
-      ...names.flatMap((name) => [name, canonicalJson((declaration.fields ?? {})[name] ?? null)]),
+      ...names.flatMap((name) => [name, canonicalJson(declarationFieldShape((declaration.fields ?? {})[name]))]),
       (declaration.empty === 'orphan' ? 'orphan' : 'delete'),
       ((declaration                            ).cardinality === 'one' ? 'one' : 'many'),
       (typeof declaration.protects === 'string' ? declaration.protects : ''),

@@ -45,6 +45,7 @@ import { executeAtomicOperations, isAtomicOperation, type AtomicExecution, type 
 import { admitRowTransition } from './field-admission.ts';
 import { writeInvalidationInTxn } from './invalidation-ledger.ts';
 import { ownedResourcesCapability } from './owned-resource-purge.ts';
+import { ANNOTATED_TEXT_STALE } from './annotated-text-region-limits.ts';
 
 // `action(type)` — declare an imperative request type. The handler that turns it
 // into events is attached later by the entity/dispatch wiring.
@@ -763,8 +764,11 @@ function unknownActionOutcome(type: unknown, details?: unknown) {
 }
 
 function executionFailure(error: unknown, context: Record<string, unknown> = {}, details?: unknown) {
+  const validationDetails = error instanceof ValidationError && isPlainObject((error as { failure?: unknown }).failure)
+    ? (error as { failure: Record<string, unknown> }).failure
+    : undefined;
   const normalized = error instanceof ValidationError
-    ? failure('invalid-input', (error as Error).message, isPlainObject((error as { failure?: unknown }).failure) ? (error as { failure: Record<string, unknown> }).failure : undefined)
+    ? failure(validationDetails?.code === ANNOTATED_TEXT_STALE ? 'conflict' : 'invalid-input', (error as Error).message, validationDetails)
     : failureFromError(error);
   if (normalized.category === 'internal') {
     getLog().error('dispatch', 'dispatch failed', { err: error, ...context });

@@ -9,7 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
   annotatedText, annotation, entity, everyone, executeDDL, executeFrameworkDDL,
-  grant, parseEventType, read, ref, scope, write,
+  grant, number, parseEventType, read, ref, scope, text, write,
 } from '../build/internal.mjs';
 import { defineSqliteSchema } from '../build/server.mjs';
 import {
@@ -150,6 +150,22 @@ test('declaration fingerprint is stable under reordering and sensitive to policy
     regionDeclarationFingerprint([{ ...base[1], cardinality: 'many' }, ...base.slice(0, 1)]),
     'cardinality change must change the fingerprint',
   );
+});
+
+test('declaration fingerprint accepts compiled annotation field descriptors', () => {
+  const timing = annotation('timing', {
+    fields: {
+      mediaStartMs: number(),
+      timingSource: text({ oneOf: ['original', 'interpolated'] }),
+    },
+  });
+  assert.doesNotThrow(() => regionDeclarationFingerprint([{
+    annotationName: timing.annotationName,
+    fields: timing.fields,
+    empty: timing.empty,
+    cardinality: timing.cardinality,
+    kind: timing.kind,
+  }]));
 });
 
 // ---------- planner/replay witness equality ----------

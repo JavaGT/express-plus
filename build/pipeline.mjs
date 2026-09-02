@@ -45,6 +45,7 @@ import { executeAtomicOperations, isAtomicOperation,                            
 import { admitRowTransition } from './field-admission.mjs';
 import { writeInvalidationInTxn } from './invalidation-ledger.mjs';
 import { ownedResourcesCapability } from './owned-resource-purge.mjs';
+import { ANNOTATED_TEXT_STALE } from './annotated-text-region-limits.mjs';
 
 // `action(type)` — declare an imperative request type. The handler that turns it
 // into events is attached later by the entity/dispatch wiring.
@@ -763,8 +764,11 @@ function unknownActionOutcome(type         , details          ) {
 }
 
 function executionFailure(error         , context                          = {}, details          ) {
+  const validationDetails = error instanceof ValidationError && isPlainObject((error                         ).failure)
+    ? (error                                        ).failure
+    : undefined;
   const normalized = error instanceof ValidationError
-    ? failure('invalid-input', (error         ).message, isPlainObject((error                         ).failure) ? (error                                        ).failure : undefined)
+    ? failure(validationDetails?.code === ANNOTATED_TEXT_STALE ? 'conflict' : 'invalid-input', (error         ).message, validationDetails)
     : failureFromError(error);
   if (normalized.category === 'internal') {
     getLog().error('dispatch', 'dispatch failed', { err: error, ...context });
