@@ -154,6 +154,128 @@ test('state replacement installs its document and family together without a fami
   session.close();
 });
 
+test('every accepted annotated-text publication is a fresh identity; duplicates and recovery reseed obey the contract', async () => {
+  const familyA = seedHelloWorld();
+  const familyB = seedHelloWorld();
+  const familyC = seedHelloWorld();
+  const sources = [];
+  let bootstraps = 0;
+  let resolveRecovery;
+  const recoveryGate = new Promise((resolve) => { resolveRecovery = resolve; });
+  // Byte-identical document JSON for every delivery (state, bootstrap reseed).
+  const bytes = () => ({
+    kind: 'workbench.annotatedText.recipient', version: 2,
+    text: 'hello world', ranges: [], annotations: [], orphans: [], measurements: [],
+  });
+  const session = createAnnotatedTextHttpSession({
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: Document, field: Document.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => 'action',
+    fetchImpl: async (url, options) => {
+      if (options?.method === 'POST') return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      bootstraps += 1;
+      if (bootstraps === 1) {
+        // Initial bootstrap with family A.
+        return { ok: true, status: 200, json: async () => ({
+          kind: 'snapshot', cursor: 1,
+          snapshot: { body: bytes() },
+          authoring: authoringEnvelope(1, textFamilyCheckpoint(familyA)),
+        }) };
+      }
+      // Recovery bootstraps are held so we can observe the null-family window.
+      await recoveryGate;
+      return { ok: true, status: 200, json: async () => ({
+        kind: 'snapshot', cursor: 3,
+        snapshot: { body: bytes() },
+        authoring: authoringEnvelope(3, textFamilyCheckpoint(familyC)),
+      }) };
+    },
+    eventSourceFactory: () => {
+      const source = { close() {}, onmessage: null, onerror: null };
+      sources.push(source);
+      return source;
+    },
+  });
+  const publications = [];
+  await session.ready;
+  session.subscribe((document) => publications.push({ document, family: session.family }));
+  const [p1] = publications;
+  assert.equal(publications.length, 1, 'bootstrap produced one publication');
+  assert.ok(p1.document && p1.family, 'bootstrap publication carries a document with a family');
+
+  // b. A state replacement at sequence 2: byte-identical document JSON, family B.
+  sources[0].onmessage({ data: JSON.stringify([{
+    type: 'state', entity: 'Project', id: 'p1', seq: 2,
+    state: { body: bytes() },
+    authoring: authoringEnvelope(2, textFamilyCheckpoint(familyB)),
+  }]) });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(publications.length, 2, 'state added exactly one publication');
+  const p2 = publications[1];
+  assert.notEqual(p2.document, p1.document, 'state publication is a fresh document identity');
+  assert.equal(session.document?.text, 'hello world', 'session document content is equivalent');
+  assert.deepEqual(session.document?.annotations, [], 'session document content is equivalent');
+  for (const { document, family } of publications) {
+    assert.ok(document && family, 'every document-bearing callback observed a non-null family');
+  }
+
+  // c. Redeliver the identical sequence-2 envelope: duplicate admission, no install.
+  sources[0].onmessage({ data: JSON.stringify([{
+    type: 'state', entity: 'Project', id: 'p1', seq: 2,
+    state: { body: bytes() },
+    authoring: authoringEnvelope(2, textFamilyCheckpoint(familyB)),
+  }]) });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(publications.length, 2, 'duplicate state delivery produced no publication');
+  assert.equal(publications[publications.length - 1].document, p2.document, 'duplicate delivery did not change the last publication');
+
+  // d. A resync control holds the recovery bootstrap; family is null with no republish.
+  sources[0].onmessage({ data: JSON.stringify([{ type: 'resync', entity: 'Project', id: 'p1', seq: 3, reason: 'opaque' }]) });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(session.family, null, 'during recovery the session family is null');
+  assert.equal(publications.length, 2, 'no republish with a null family during recovery start');
+  const countBeforeReseed = publications.length;
+  resolveRecovery();
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.ok(publications.length > countBeforeReseed, `recovery reseed produced a publication (${publications.length})`);
+  const p3 = publications[publications.length - 1];
+  assert.notEqual(p3.document, p2.document, 'recovery reseed is a fresh document identity');
+  assert.ok(p3.family, 'reseed publication carried a non-null family');
+  assert.equal(session.document?.text, 'hello world', 'reseed content is equivalent');
+  assert.deepEqual(session.document?.annotations, [], 'reseed content is equivalent');
+
+  // e. An accepted fold also yields a fresh callback document identity.
+  const insertOp = textOperationForOffsetEdit(
+    familyC, { kind: 'text.insert', at: { offset: 0, affinity: 'right' }, text: '^' }, 'b'.repeat(32), 2,
+  );
+  const foldFamily = applyTextOperation(familyC, insertOp);
+  const foldText = materializeText(foldFamily);
+  assert.equal(foldText, '^hello world');
+  const countBeforeFold = publications.length;
+  sources[0].onmessage({ data: JSON.stringify([{
+    type: 'event', entity: 'Project', id: 'p1', seq: 4, seqSpan: [4, 4],
+    event: { type: 'FoldDoc.body.operated', scope: 'Project:p1', seq: 4, actionId: 'fold-action' },
+    fold: {
+      kind: 'annotatedText', version: 5, field: 'body', baseCursor: 3, fence: 4,
+      text: { reducer: 'workbench.text', operations: [insertOp] },
+      projection: { text: foldText },
+      dispositions: [],
+      familyElementCount: Object.keys(foldFamily.checkpoint.elements).length,
+      authoring: {
+        acknowledgementFence: 4,
+        stream: token('stream'), lease: token('lease'), snapshot: token('snapshot4'),
+        positionFrames: [{ positionToken: token('position4') }],
+      },
+    },
+  }]) });
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.ok(publications.length > countBeforeFold, `fold produced a publication (${publications.length})`);
+  const p4 = publications[publications.length - 1];
+  assert.notEqual(p4.document, p3.document, 'fold publication is a fresh document identity');
+  assert.equal(session.document?.text, '^hello world');
+  session.close();
+});
+
 test('optimistic splice keeps anchored ranges and shifts redacted offsets', () => {
   const family = restoreTextFamily(textFamilyCheckpoint(seedHelloWorld()));
   const start = resolveOffsetToEndpoint(seedHelloWorld(), 6, seedHelloWorld().checkpoint.frontier, 'right');
