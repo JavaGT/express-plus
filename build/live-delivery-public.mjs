@@ -6,6 +6,9 @@ import { classifyLiveScope, createLiveDeliveryCore } from './live-delivery-core.
 
 import { createLiveEnvelopeBuilder } from './live-delivery-envelope.mjs';
 import { tryBuildAnnotatedTextFoldEnvelopes } from './annotated-text-fold-envelope.mjs';
+import { normalizeOperatedEvent } from './annotated-text-operated-event.mjs';
+import { projectAnnotatedTextSnapshot } from './annotated-text-snapshot.mjs';
+import { authoringRedactionsForRecipient } from './annotated-text-recipient-projection.mjs';
 import { tryParseScopeKey } from './scope-handle.mjs';
 
 import { readSeq } from './committed-log.mjs';
@@ -313,6 +316,62 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, authorization, 
   // Public delivery deliberately has no connection state. It emits only
   // recipient-hydrated lifecycle snapshots or opaque recovery controls.
   const envelopes = createLiveEnvelopeBuilder({ stateful: false, includeActionId });
+
+  async function annotationStateEnvelope(base                    , committedEvent                    , document                       )                           {
+    let operated;
+    try {
+      operated = normalizeOperatedEvent(committedEvent.data, { entity: document.entity.name, field: document.fieldName });
+    } catch {
+      return null;
+    }
+    if (operated.id !== document.documentId
+      || (operated.kind !== 'annotation.apply-range' && operated.kind !== 'annotation.remove')) return null;
+
+    const entityName = tryParseScopeKey(base.scope)?.entity ?? document.entity.name;
+    const id = tryParseScopeKey(base.scope)?.id ?? document.documentId;
+    const row = rawRow(db, document.entity.name, document.documentId);
+    if (!row || typeof document.clientNonce !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(document.clientNonce)) return null;
+
+    try {
+      const recipient = await projectAnnotatedTextSnapshot({
+        db, entity: document.entity, row, principal: base.principal,
+        fieldName: document.fieldName, descriptor: document.descriptor, mintBasis: false,
+      });
+      if (recipient.restricted
+        || (recipient.redactions?.length ?? 0) > 0
+        || authoringRedactionsForRecipient(recipient).length > 0) return null;
+
+      const prefix = `${document.entity.name}_${document.fieldName}`;
+      const stream = ensureStream({
+        db: db         , prefix, documentId: document.documentId,
+        principalType: base.principal?.type ?? 'principal', principalId: base.principal?.id ?? '',
+      });
+      const lease = ensureLease({
+        db: db         , prefix, streamId: stream.id, clientNonceHash: hashClientNonce(document.clientNonce),
+      });
+      if (!lease) return null;
+      const state = await projectEntitySnapshot({
+        db: db         , entity: document.entity         , row,
+        principal: base.principal, authoring: {
+          streamToken: stream.id, leaseToken: lease.id, leaseId: lease.id, fence: base.event.seq,
+        }, authorization,
+      });
+      const annotated = (state                       )[document.fieldName];
+      const authoring = annotated?.authoring;
+      if (!authoring?.family || authoring.acknowledgementFence !== base.event.seq) return null;
+      const publicState = Object.freeze({
+        ...state,
+        [document.fieldName]: Object.freeze(Object.fromEntries(Object.entries(annotated).filter(([key]) => key !== 'authoring'))),
+      });
+      return [Object.freeze({
+        type: 'state', entity: entityName, id, seq: base.event.seq,
+        state: publicState, authoring,
+      })];
+    } catch {
+      return null;
+    }
+  }
+
   const core                   = createLiveDeliveryCore({
     db,
     entities,
@@ -335,9 +394,9 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, authorization, 
       }
       const base = { ...context, row, readableFields, event, composite: !!handle && composites.has(handle.entity) };
       // Document-bound annotated-text operated events may fold as a single
-      // recipient-safe CRDT transition instead of an opaque snapshot recovery.
-      // tryBuildAnnotatedTextFoldEnvelopes returns null to fall through to the
-      // ordinary envelope grammar (snapshot/resync) for non-foldable events.
+      // recipient-safe CRDT transition. Valid annotation-only events instead
+      // carry one authoritative state+family replacement; unsafe or malformed
+      // fall-throughs retain the ordinary opaque snapshot recovery.
       // The fold builder needs the full committed event (including data);
       // buildEnvelope must keep the stripped event (raw eventData never leaves).
       let document = base.document;
@@ -349,6 +408,8 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, authorization, 
       if (document && (context.event                          ).eventType?.startsWith(`${(document                                 ).entity?.name}.`)) {
         const folded = await tryBuildAnnotatedTextFoldEnvelopes({ ...base, document, event: context.event }         , { db: db         , document: document          });
         if (folded) return folded;
+        const state = await annotationStateEnvelope(base                      , context.event                      , document                         );
+        if (state) return state;
       }
       // A composite shell subscriber resyncs only when the committed event can
       // change the composite output. Without this gate the shared envelope

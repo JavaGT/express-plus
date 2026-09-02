@@ -58,6 +58,50 @@ describe('LiveDeliverySession', () => {
     session.close();
   });
 
+  it('validates a live state replacement with its delivery envelope before publishing', async () => {
+    const published = [];
+    const deliveries = [];
+    const { session, deliver } = setup({
+      bootstrap: async () => ({ kind: 'snapshot', snapshot: { values: ['seed'] }, cursor: 1, authoring: { family: 'family-1' } }),
+      validateSnapshot(snapshot, delivery) {
+        deliveries.push(delivery);
+        assert.ok(delivery?.authoring, 'document and authoring family arrive in one validation turn');
+        return { ...snapshot, family: delivery.authoring.family };
+      },
+    });
+    session.subscribe((snapshot) => published.push(snapshot));
+    await session.ready;
+
+    await deliver([{
+      type: 'state', entity: 'Doc', id: 'd1', seq: 2, cursor: 2,
+      state: { values: ['annotation'] }, authoring: { family: 'family-2' },
+    }]);
+
+    assert.equal(deliveries.length, 2);
+    assert.deepEqual(published.at(-1), { values: ['annotation'], family: 'family-2' });
+    assert.equal(published.some((snapshot) => snapshot && snapshot.family == null), false);
+    session.close();
+  });
+
+  it('fails closed to snapshot recovery when a live state replacement is malformed', async () => {
+    let recoveries = 0;
+    let receive;
+    const recoverySession = createLiveDeliverySession({
+      bootstrap: async () => ({ kind: 'snapshot', snapshot: { values: [`snap-${++recoveries}`] }, cursor: recoveries }),
+      subscribe: async ({ deliver }) => { receive = deliver; return { close() {} }; },
+      validateSnapshot(snapshot, delivery) {
+        if (delivery?.type === 'state' && !delivery.authoring) throw new Error('missing authoring family');
+        return snapshot;
+      },
+      sendAction: async () => ({ ok: true }),
+    });
+    await recoverySession.ready;
+    await receive([{ type: 'state', seq: 2, cursor: 2, state: { values: ['invalid'] } }]);
+    assert.equal(recoveries, 2);
+    assert.deepEqual(recoverySession.snapshot, { values: ['snap-2'] });
+    recoverySession.close();
+  });
+
   it('emits one non-terminal delayed-recovery warning across managed retries', async () => {
     const warnings = [];
     let bootstraps = 0;

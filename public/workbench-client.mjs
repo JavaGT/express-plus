@@ -2860,7 +2860,7 @@ export function createLiveDeliverySession({
     if (decision.kind === 'gap') return { status: 'gap' };
     let nextSnapshot;
     try {
-      nextSnapshot = validateSnapshot(envelope.state ?? null);
+      nextSnapshot = validateSnapshot(envelope.state ?? null, envelope);
     } catch {
       // An unvalidatable replacement must not advance the cursor or fence.
       return { status: 'resync' };
@@ -4420,12 +4420,15 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     serializeAction(action) {
       return action.payload?.edit?.kind === 'text.insert'
         || action.payload?.edit?.kind === 'text.delete'
-        || action.payload?.edit?.kind === 'text.replace';
+        || action.payload?.edit?.kind === 'text.replace'
+        || action.payload?.edit?.kind === 'annotation.apply'
+        || action.payload?.edit?.kind === 'annotation.remove';
     },
     validateSnapshot(snapshot, delivery) {
       if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) throw new Error('annotated text delivery snapshot must be an object');
       const authoring = delivery?.authoring;
-      if (!authoring || authoring.acknowledgementFence !== delivery.cursor) throw new Error('annotated text delivery authoring envelope is invalid');
+      const deliveryCursor = delivery?.cursor ?? delivery?.seq;
+      if (!authoring || authoring.acknowledgementFence !== deliveryCursor) throw new Error('annotated text delivery authoring envelope is invalid');
       const documentPositionToken = authoring.positionFrames?.[0]?.positionToken;
       if (!documentPositionToken || typeof documentPositionToken !== 'string') throw new Error('annotated text delivery authoring position token is invalid');
       snapshotBinding.authoring = Object.freeze({

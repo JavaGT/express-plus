@@ -1265,6 +1265,7 @@ export type LiveDeliveryEnvelope =
       readonly id: string;
       readonly seq: number;
       readonly state?: Readonly<Record<string, unknown>>;
+      readonly authoring?: Readonly<Record<string, unknown>>;
       readonly additions?: readonly Record<string, unknown>[];
       readonly removals?: readonly string[];
       readonly reorderings?: readonly { id: string; from: number; to: number }[];

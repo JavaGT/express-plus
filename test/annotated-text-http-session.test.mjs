@@ -356,6 +356,50 @@ test('positive receipt without fold echo falls back to covering snapshot and aut
   session.close();
 });
 
+test('annotation receipt settles from an in-grace state echo without snapshot recovery', async () => {
+  const { session, snapshotRequests, sources } = v9Setup();
+  await session.ready;
+  const pending = session.applyAnnotation({
+    mutationId: 'annotation-echo',
+    annotation: { id: 'a1', family: 'note', fields: {} },
+    from: { offset: 0, affinity: 'left' },
+    to: { offset: 5, affinity: 'right' },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  sources[0].onmessage({ data: JSON.stringify([{
+    type: 'state', entity: 'LiveDocument', id: 'd1', seq: 2,
+    state: {
+      body: {
+        ...snapshot().body,
+        ranges: [{ annotationId: 'a1', start: 0, end: 5 }],
+        annotations: [{ id: 'a1', family: 'note', fields: {} }],
+      },
+    },
+    authoring: authoringEnvelope(2),
+  }]) });
+
+  const result = await pending;
+  assert.deepEqual(await result.settlement.wait(), { opId: result.opId, status: 'reconciled' });
+  await new Promise((resolve) => setTimeout(resolve, 220));
+  assert.equal(snapshotRequests.length, 1, 'the authoritative state echo cancels receipt recovery');
+  assert.equal(session.document.annotations[0].id, 'a1');
+  session.close();
+});
+
+test('annotation receipt without an echo still snapshot-recovers after the grace window', async () => {
+  const { session, snapshotRequests } = v9Setup();
+  await session.ready;
+  const result = await session.applyAnnotation({
+    mutationId: 'annotation-stall',
+    annotation: { id: 'a1', family: 'note', fields: {} },
+    from: { offset: 0, affinity: 'left' },
+    to: { offset: 5, affinity: 'right' },
+  });
+  assert.deepEqual(await result.settlement.wait(), { opId: result.opId, status: 'reconciled' });
+  assert.equal(snapshotRequests.length, 2, 'the stalled echo fails closed through a covering snapshot');
+  session.close();
+});
+
 test('annotation removal is visible before its receipt and authoritative snapshot settle', async () => {
   const actionRequests = [];
   const snapshotRequests = [];

@@ -433,6 +433,9 @@ export interface LiveDeliveryStateEnvelope {
   readonly seq: number;
   readonly seqSpan?: readonly [number, number];
   readonly state?: Readonly<Record<string, unknown>>;
+  /** Document-bound annotated-text states carry the authoring checkpoint that
+   * validates and installs the matching family in the same delivery turn. */
+  readonly authoring?: Readonly<Record<string, unknown>>;
   readonly additions?: readonly Record<string, unknown>[];
   readonly removals?: readonly string[];
   readonly reorderings?: readonly { id: string; from: number; to: number }[];

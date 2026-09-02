@@ -114,6 +114,46 @@ test('fold keeps anchored ranges and resolves them against the advanced family',
   session.close();
 });
 
+test('state replacement installs its document and family together without a family-null publication', async () => {
+  const family = seedHelloWorld();
+  const sources = [];
+  let snapshots = 0;
+  const session = createAnnotatedTextHttpSession({
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: Document, field: Document.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => 'state-action',
+    fetchImpl: async (url, options) => {
+      if (options?.method === 'POST') return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      snapshots += 1;
+      return { ok: true, status: 200, json: async () => ({
+        kind: 'snapshot', cursor: 1,
+        snapshot: { body: { kind: 'workbench.annotatedText.recipient', version: 2, text: 'hello world', ranges: [], annotations: [], orphans: [], measurements: [] } },
+        authoring: authoringEnvelope(1, textFamilyCheckpoint(family)),
+      }) };
+    },
+    eventSourceFactory: () => {
+      const source = { close() {}, onmessage: null, onerror: null };
+      sources.push(source);
+      return source;
+    },
+  });
+  const publications = [];
+  session.subscribe((document) => publications.push({ document, family: session.family }));
+  await session.ready;
+
+  sources[0].onmessage({ data: JSON.stringify([{
+    type: 'state', entity: 'Project', id: 'p1', seq: 2,
+    state: { body: { kind: 'workbench.annotatedText.recipient', version: 2, text: 'hello world', ranges: [], annotations: [], orphans: [], measurements: [] } },
+    authoring: authoringEnvelope(2, textFamilyCheckpoint(family)),
+  }]) });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(snapshots, 1, 'valid state ingestion does not start recovery');
+  assert.equal(publications.some(({ document, family: publishedFamily }) => document && publishedFamily == null), false);
+  assert.equal(publicMaterializeText(session.family), 'hello world');
+  session.close();
+});
+
 test('optimistic splice keeps anchored ranges and shifts redacted offsets', () => {
   const family = restoreTextFamily(textFamilyCheckpoint(seedHelloWorld()));
   const start = resolveOffsetToEndpoint(seedHelloWorld(), 6, seedHelloWorld().checkpoint.frontier, 'right');

@@ -8,6 +8,7 @@ import workbench, {
 } from '../build/internal.mjs';
 import { durableHistory } from '../build/internal.mjs';
 import { tryBuildAnnotatedTextFoldEnvelopes } from '../build/annotated-text-fold-envelope.mjs';
+import { createOwnedLiveDelivery } from '../build/live-delivery-public.mjs';
 import { projectAnnotatedTextSnapshot } from '../build/annotated-text-snapshot.mjs';
 import { ensureStream, ensureLease, hashClientNonce } from '../build/annotated-text-authoring-stream.mjs';
 import { createAnnotatedTextHttpSession, materializeAnnotatedTextSnapshot } from '../public/workbench-client.mjs';
@@ -200,6 +201,52 @@ test('an emptied orphan-policy annotation ships its server disposition and saved
   }]);
   assert.deepEqual(recipient.ranges, []);
   assert.deepEqual(recipient.annotations, []);
+});
+
+test('an annotation-only operated event delivers an atomic recipient state instead of resync', async (t) => {
+  const ctx = await setup();
+  const owned = createOwnedLiveDelivery({
+    db: ctx.db,
+    entities: ctx.app.entities,
+    mayVerb: async () => true,
+  });
+  t.after(async () => { await owned.close(); await ctx.app.shutdown(); ctx.db.close(); });
+
+  const delivered = [];
+  const controller = new AbortController();
+  const boundDoc = ctx.app.entities.get('FoldDispositionDoc');
+  const document = {
+    scope: ctx.scope, entity: boundDoc, fieldName: 'body', descriptor: boundDoc.fields.body,
+    documentId: 'd1', clientNonce: 'x'.repeat(43),
+  };
+  const activation = await owned.delivery.subscribe({
+    principal: { type: 'user', id: 'u1' }, scope: ctx.scope,
+    after: ctx.db.prepare('SELECT lastSeq FROM _Cursor WHERE scope = ?').get(ctx.scope).lastSeq,
+    signal: controller.signal, document,
+    deliver: async (batch) => delivered.push(...batch),
+  });
+  await activation.activate();
+
+  const auth = await binding(ctx, 'u1');
+  const applied = await applyRange(ctx, 'annotation-state', { id: 'comment-1', family: 'comment', fields: {} }, 0, 5, auth);
+  assert.equal(applied.ok, true, applied.failure?.message);
+  const event = lastOperatedEvent(ctx.db);
+  await owned.consumer([{
+    scope: event.scope, eventType: event.eventType, seq: event.seq,
+    data: JSON.parse(event.eventData), actionId: event.actionId, committedAt: event.committedAt,
+  }]);
+  for (let attempt = 0; delivered.length === 0 && attempt < 20; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+
+  assert.equal(delivered.length, 1);
+  assert.equal(delivered[0].type, 'state');
+  assert.equal(delivered[0].seq, event.seq);
+  assert.equal(delivered[0].state.body.annotations[0].id, 'comment-1');
+  assert.equal(delivered[0].authoring.acknowledgementFence, event.seq);
+  assert.ok(delivered[0].authoring.family, 'fully visible recipients receive the matching family checkpoint');
+  assert.equal(delivered.some((envelope) => envelope.type === 'resync'), false);
+  controller.abort();
 });
 
 test('an emptied delete-policy annotation ships a deleted disposition', async (t) => {
