@@ -159,7 +159,27 @@ if (scopeResultWithSettlement.settlement) {
   const scopeSettlement: LiveDeliverySettlement = scopeResultWithSettlement.settlement;
   void scopeSettlement.wait();
 }
-void [scopeResultWithoutSettlement, scopeResultWithSettlement];
+const scopeFailedResultWithSettlement: ScopeDispatchResult = {
+  ok: false,
+  status: 'failed-rolled-back',
+  opId: 'op-2',
+  settlement: {
+    opId: 'op-2',
+    wait: async () => ({ opId: 'op-2', status: 'failed', error: new Error('failed') }),
+  },
+  failure: new Error('failed'),
+};
+const scopeUnknownResultWithSettlement: ScopeDispatchResult = {
+  ok: false,
+  status: 'outcome-unknown',
+  opId: 'op-3',
+  settlement: {
+    opId: 'op-3',
+    wait: async () => ({ opId: 'op-3', status: 'unavailable' }),
+  },
+  failure: new Error('unknown'),
+};
+void [scopeResultWithoutSettlement, scopeResultWithSettlement, scopeFailedResultWithSettlement, scopeUnknownResultWithSettlement];
 
 declare const coordsMarkers: readonly AnnotatedTextRedactionMarker[];
 const wirePosition: AnnotatedTextCoordinatedPosition = wireToDisplayPosition({ offset: 2, affinity: 'right' }, coordsMarkers);
