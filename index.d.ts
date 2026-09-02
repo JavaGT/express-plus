@@ -591,9 +591,10 @@ export interface AnnotatedTextAnnotationEntityRemoveActionDescriptor {
   readonly relation: string;
   readonly project: string;
   readonly author: string;
-  /** The related entity's compare-and-set column (e.g. `updatedAt`); its opaque token is supplied per dispatch. */
+  /** The related entity's compare-and-set column (a text field; its stored cell is the compared version token). */
   readonly stale: string;
-  readonly capability: Capability<'write'>;
+  /** Optional; when declared it must be the imported `write` capability handle. */
+  readonly capability?: Capability<'write'>;
   /** Synchronous server-side policy checked atomically inside the removal transaction. Rejects by throwing; never serialized into compiled handles. */
   readonly invariant?: (context: Readonly<AnnotatedTextAnnotationEntityRemoveContext>) => void;
 }
@@ -648,7 +649,7 @@ export function annotationEntityRemoveAction(options: {
   readonly project: string;
   readonly author: string;
   readonly stale: string;
-  readonly capability: Capability<'write'>;
+  readonly capability?: Capability<'write'>;
   readonly invariant?: (context: Readonly<AnnotatedTextAnnotationEntityRemoveContext>) => void;
 }): AnnotatedTextAnnotationEntityRemoveActionDescriptor;
 
@@ -688,7 +689,7 @@ export type AnnotatedTextAnnotationEntityRemoveActionHandle<
   readonly project: string;
   readonly author: string;
   readonly stale: Descriptor['stale'];
-  readonly capability: Capability<'write'>;
+  readonly capability?: Capability<'write'>;
 }>;
 export type AnnotatedTextDomainActionHandle<
   Descriptor extends AnnotatedTextActionDescriptor = AnnotatedTextActionDescriptor,

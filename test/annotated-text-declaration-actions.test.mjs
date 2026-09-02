@@ -400,9 +400,9 @@ test('durable dedupe: concurrent identical actions commit once; changed input co
 
 test('annotationEntityRemoveAction validates its declaration surface', () => {
   const base = { relation: 'comment', project: 'project', author: 'author', stale: 'updatedAt', capability: write };
-  // Unknown keys are rejected; declared keys are required.
+  // Unknown keys are rejected; declared keys are required (capability is optional).
   assert.throws(() => annotationEntityRemoveAction({ ...base, bogus: true }), /unknown key/);
-  for (const key of ['relation', 'project', 'author', 'stale', 'capability']) {
+  for (const key of ['relation', 'project', 'author', 'stale']) {
     const { [key]: _dropped, ...rest } = base;
     assert.throws(() => annotationEntityRemoveAction(rest), new RegExp(`requires '${key}'`));
   }
@@ -410,6 +410,9 @@ test('annotationEntityRemoveAction validates its declaration surface', () => {
   for (const key of ['relation', 'project', 'author', 'stale']) {
     assert.throws(() => annotationEntityRemoveAction({ ...base, [key]: 7 }), /must be field names/, key);
   }
+  // The capability, when declared, must be a frozen typed handle.
+  assert.throws(() => annotationEntityRemoveAction({ ...base, capability: {} }), /capability/);
+  assert.throws(() => annotationEntityRemoveAction({ ...base, capability: 'write' }), /capability/);
   // The invariant must be a direct synchronous function when declared.
   assert.throws(() => annotationEntityRemoveAction({ ...base, invariant: 'nope' }), /invariant must be a function/);
   assert.throws(() => annotationEntityRemoveAction({ ...base, invariant: async () => {} }), /direct synchronous function/);
@@ -419,6 +422,10 @@ test('annotationEntityRemoveAction validates its declaration surface', () => {
   assert.deepEqual(Object.keys(handle).sort(), ['author', 'capability', 'invariant', 'kind', 'project', 'relation', 'stale']);
   assert.equal(handle.kind, 'annotationEntityRemoveAction');
   assert.equal(handle.stale, 'updatedAt');
+  // Capability is OPTIONAL: a remove action without one is declarable.
+  const bare = annotationEntityRemoveAction({ relation: 'comment', project: 'project', author: 'author', stale: 'updatedAt' });
+  assert.equal(bare.capability, undefined);
+  assert.equal(bare.kind, 'annotationEntityRemoveAction');
   // Omitting the invariant stays legal.
   const plain = annotationEntityRemoveAction(base);
   assert.equal(plain.invariant, undefined);

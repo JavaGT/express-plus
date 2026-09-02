@@ -207,7 +207,12 @@ function validateEntityActionDeclaration(entity        , field        , ann     
     fail(entity, field, `${path}.relation`, 'must name a declared required ref with a target');
   }
   if (!isRequiredField(relation)) fail(entity, field, `${path}.relation`, 'must name a required ref');
-  if (action.capability !== write) fail(entity, field, `${path}.capability`, 'must be the imported write capability handle');
+  // Compose requires the imported write capability; the remove action's is
+  // optional ("if declared") — when absent there is no capability semantics to
+  // enforce beyond the row-author and scope checks.
+  if (action.capability === undefined ? !isRemove : action.capability !== write) {
+    fail(entity, field, `${path}.capability`, 'must be the imported write capability handle');
+  }
   const inputTargets = new Set        ();
   if (!isRemove) {
     const input = action.input;
@@ -246,15 +251,18 @@ function validateEntityActionDeclaration(entity        , field        , ann     
   if (!author || author.kind !== 'value' || author.type !== 'ref' || !isRequiredField(author) || targetName(author) !== documentOwnerTarget) {
     fail(entity, field, `${path}.author`, 'must name a required ref to the document owner principal target');
   }
-  // The remove action's compare-and-set column must be a declared scalar value
-  // field of the related row — never a framework-owned or ref identity.
+  // The remove action's compare-and-set column must be a declared TEXT value
+  // field of the related row — never a framework-owned or ref identity, and
+  // never a date/boolean/number whose stored cell is not the wire token itself.
+  // The CAS compares the stored cell STRICTLY against the client's opaque
+  // string token, so the token is exactly the stored representation.
   if (isRemove) {
     if (action.stale === 'id' || action.stale === action.project || action.stale === action.author) {
       fail(entity, field, `${path}.stale`, 'is framework-owned and cannot be the compare-and-set column');
     }
     const stale = target.fields[action.stale];
-    if (!stale || stale.kind !== 'value' || stale.type === 'ref') {
-      fail(entity, field, `${path}.stale`, 'must name a declared scalar value field on the related entity');
+    if (!stale || stale.kind !== 'value' || stale.type !== 'text') {
+      fail(entity, field, `${path}.stale`, 'must name a declared text field on the related entity (its stored cell is the compared version token)');
     }
   }
   // Removal supplies no input: the row already exists, so the compose-time
@@ -409,8 +417,9 @@ export function annotationEntityAction(options      = {})      {
 /** Declare the lifecycle inverse of `annotationEntityAction`: one generated
  * action removes an annotation-owned related entity row and its annotation in
  * ONE transaction (annotation event first — the related row's annotation FK is
- * ON DELETE RESTRICT). Like the compose descriptor this is data-only for the
- * compiler, except the optional `invariant` predicate: a server-side policy
+ * ON DELETE RESTRICT). `capability` is optional; when declared it must be the
+ * imported `write` handle. Like the compose descriptor this is data-only for
+ * the compiler, except the optional `invariant` predicate: a server-side policy
  * check that runs inside the handler transaction and — exactly like
  * `authorize`/`change` on `annotationAction` — must never be serialized into
  * any compiled or browser-visible handle. */
@@ -419,9 +428,9 @@ export function annotationEntityRemoveAction(options      = {})      {
   if (Object.getPrototypeOf(options) !== Object.prototype) throw new Error('annotationEntityRemoveAction options must be a plain object');
   const optionKeys = ['relation', 'project', 'author', 'stale', 'capability', 'invariant'];
   if (Reflect.ownKeys(options).some((key) => typeof key !== 'string' || !optionKeys.includes(key))) throw new Error('annotationEntityRemoveAction options contain an unknown key');
-  for (const key of ['relation', 'project', 'author', 'stale', 'capability']) if (!Object.hasOwn(options, key)) throw new Error(`annotationEntityRemoveAction requires '${key}'`);
+  for (const key of ['relation', 'project', 'author', 'stale']) if (!Object.hasOwn(options, key)) throw new Error(`annotationEntityRemoveAction requires '${key}'`);
   if (typeof options.relation !== 'string' || typeof options.project !== 'string' || typeof options.author !== 'string' || typeof options.stale !== 'string') throw new Error('annotationEntityRemoveAction relation, project, author, and stale must be field names');
-  if (typeof options.capability !== 'object' || !Object.isFrozen(options.capability)) throw new Error('annotationEntityRemoveAction capability must be a typed capability handle');
+  if (options.capability !== undefined && (typeof options.capability !== 'object' || !Object.isFrozen(options.capability))) throw new Error('annotationEntityRemoveAction capability must be a typed capability handle');
   if (options.invariant !== undefined) {
     if (typeof options.invariant !== 'function') throw new Error('annotationEntityRemoveAction invariant must be a function');
     const source = Function.prototype.toString.call(options.invariant);
@@ -655,10 +664,10 @@ export function validateAnnotatedTextDeclaration(entity        , field        , 
           `expected annotationAction descriptor, got '${String(action.kind)}'`);
       }
       if (action.kind === 'annotationEntityRemoveAction') {
-        for (const key of ['relation', 'project', 'author', 'stale', 'capability']) if (!Object.hasOwn(action, key)) fail(entity, field, `annotations.${ann.annotationName}.actions`, `entity remove action '${actionName}' is missing '${key}'`);
+        for (const key of ['relation', 'project', 'author', 'stale']) if (!Object.hasOwn(action, key)) fail(entity, field, `annotations.${ann.annotationName}.actions`, `entity remove action '${actionName}' is missing '${key}'`);
         const relation = ann.fields?.[action.relation];
         if (!relation || relation.type !== 'ref') fail(entity, field, `annotations.${ann.annotationName}.actions`, `relation '${action.relation}' must be a declared ref field`);
-        if (action.capability !== write) fail(entity, field, `annotations.${ann.annotationName}.actions.${actionName}.capability`, 'must be the imported write capability handle');
+        if (action.capability !== undefined && action.capability !== write) fail(entity, field, `annotations.${ann.annotationName}.actions.${actionName}.capability`, 'must be the imported write capability handle');
         if (!IDENTIFIER.test(action.project) || !IDENTIFIER.test(action.author) || !IDENTIFIER.test(action.stale)) fail(entity, field, `annotations.${ann.annotationName}.actions.${actionName}`, 'project, author, and stale must be identifiers');
         if (action.invariant !== undefined && typeof action.invariant !== 'function') fail(entity, field, `annotations.${ann.annotationName}.actions.${actionName}.invariant`, 'must be a function');
         validateEntityActionDeclaration(entity, field, ann, { ...action, actionName }, targetName(fields[descriptor.project]) , targetName(fields[descriptor.owner]) );

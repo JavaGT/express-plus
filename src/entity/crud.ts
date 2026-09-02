@@ -1243,11 +1243,13 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
           if (!relatedRow || relatedRow[action.project] !== documentRow[descriptor.project]) {
             throw new ValidationError(`${removeActionType} related row does not belong to the document's project`);
           }
-          // CAS on the declared stale column: the stored cell and the client's
-          // opaque version token must agree (compared in canonical string form so
-          // an epoch-millis date cell matches its token). Any drift is a typed
-          // stale failure; the client refreshes and retries.
-          if (relatedRow[action.stale] !== payload.expected && String(relatedRow[action.stale]) !== String(payload.expected)) {
+          // CAS on the declared stale column: the stored cell must STRICTLY
+          // equal the client's opaque version token. The declaration restricts
+          // `stale` to text fields, so the token is exactly the stored
+          // representation — no coercion (a coercive fallback would accept
+          // "undefined"/"null" tokens and collapse numeric precision). Any
+          // drift is a typed stale failure; the client refreshes and retries.
+          if (relatedRow[action.stale] !== payload.expected) {
             throw new ValidationError(`${removeActionType} related row is stale; refresh and retry`);
           }
           // Author-only. Load-bearing even when the related entity's own grant
@@ -1257,10 +1259,11 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
             throw new ValidationError(`${removeActionType} only the related row's author may remove it`);
           }
           // Application policy (e.g. "no replies exist") is checked atomically in
-          // the same transaction. The predicate rejects by throwing — ANY throw
-          // (the application's own Error type included) is normalized into a
-          // typed validation failure, never an internal error — and must be
-          // synchronous and void.
+          // the same transaction. The predicate rejects by throwing; whatever it
+          // throws is normalized to ONE stable public rejection message — the
+          // application's own error text (which may carry row ids or policy
+          // detail) never reaches the client envelope. It must be synchronous
+          // and void.
           if (action.invariant) {
             const context = Object.freeze({
               db,
@@ -1272,8 +1275,8 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
             let verdict: unknown;
             try {
               verdict = action.invariant(context);
-            } catch (error) {
-              throw new ValidationError(`${removeActionType} invariant rejected the removal: ${(error as Error)?.message ?? String(error)}`);
+            } catch {
+              throw new ValidationError(`${removeActionType} precondition failed`);
             }
             if (verdict !== undefined) throw new ValidationError(`${removeActionType} invariant returned a value; it must throw to reject and return nothing`);
           }
