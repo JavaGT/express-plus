@@ -12,7 +12,7 @@ import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  annotatedText, annotation, annotationAction, entity, everyone, executeDDL,
+  annotatedText, annotation, annotationAction, annotationEntityRemoveAction, entity, everyone, executeDDL,
   executeFrameworkDDL, grant, number as numberField, read, ref, scope, write,
 } from '../build/internal.mjs';
 import { defineSqliteSchema } from '../build/server.mjs';
@@ -394,4 +394,32 @@ test('durable dedupe: concurrent identical actions commit once; changed input co
   assert.equal(changed.failure?.category, 'conflict');
   assert.equal(calls, 1);
   assert.deepEqual({ ...ctx.db.prepare('SELECT startMs, durationMs FROM ActionDoc_body_annotation_timing').get() }, { startMs: 0, durationMs: 420 });
+});
+
+// -- annotationEntityRemoveAction: the declaration surface --
+
+test('annotationEntityRemoveAction validates its declaration surface', () => {
+  const base = { relation: 'comment', project: 'project', author: 'author', stale: 'updatedAt', capability: write };
+  // Unknown keys are rejected; declared keys are required.
+  assert.throws(() => annotationEntityRemoveAction({ ...base, bogus: true }), /unknown key/);
+  for (const key of ['relation', 'project', 'author', 'stale', 'capability']) {
+    const { [key]: _dropped, ...rest } = base;
+    assert.throws(() => annotationEntityRemoveAction(rest), new RegExp(`requires '${key}'`));
+  }
+  // Field names must be strings.
+  for (const key of ['relation', 'project', 'author', 'stale']) {
+    assert.throws(() => annotationEntityRemoveAction({ ...base, [key]: 7 }), /must be field names/, key);
+  }
+  // The invariant must be a direct synchronous function when declared.
+  assert.throws(() => annotationEntityRemoveAction({ ...base, invariant: 'nope' }), /invariant must be a function/);
+  assert.throws(() => annotationEntityRemoveAction({ ...base, invariant: async () => {} }), /direct synchronous function/);
+  // The handle is frozen, data + invariant only, with the declared field names.
+  const handle = annotationEntityRemoveAction({ ...base, invariant: () => {} });
+  assert.ok(Object.isFrozen(handle));
+  assert.deepEqual(Object.keys(handle).sort(), ['author', 'capability', 'invariant', 'kind', 'project', 'relation', 'stale']);
+  assert.equal(handle.kind, 'annotationEntityRemoveAction');
+  assert.equal(handle.stale, 'updatedAt');
+  // Omitting the invariant stays legal.
+  const plain = annotationEntityRemoveAction(base);
+  assert.equal(plain.invariant, undefined);
 });

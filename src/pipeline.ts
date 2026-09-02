@@ -273,8 +273,16 @@ export function durableMutationVariant({
       const batchActionTypes = type === '$batch' && Array.isArray(payload)
         ? new Set(payload.map((action) => action?.type).filter((value) => typeof value === 'string'))
         : null;
-      for (const consumer of projectionConsumers) {
-        for (const ev of finalizedEvents) {
+      // Events project in EMISSION order (event-major, not consumer-major): a
+      // generated action may span several entity projections and its handler
+      // owns a load-bearing order between them — the annotation-entity remove
+      // action must tear the annotation down BEFORE the related row whose FK
+      // references it (ON DELETE RESTRICT), and compose must create the row
+      // BEFORE its annotation. Each event still applies exactly once per
+      // subscribing consumer, and per consumer the relative emission order of
+      // its own events is unchanged.
+      for (const ev of finalizedEvents) {
+        for (const consumer of projectionConsumers) {
           if (consumer.eventTypes.includes(ev.type)) {
             if (consumer.actionType !== undefined && consumer.actionType !== type
               && !(batchActionTypes?.has(consumer.actionType))) continue;
@@ -593,8 +601,16 @@ export function liveMutationVariant({
       const batchActionTypes = type === '$batch' && Array.isArray(payload)
         ? new Set(payload.map((action) => action?.type).filter((value) => typeof value === 'string'))
         : null;
-      for (const consumer of projectionConsumers) {
-        for (const ev of finalizedEvents) {
+      // Events project in EMISSION order (event-major, not consumer-major): a
+      // generated action may span several entity projections and its handler
+      // owns a load-bearing order between them — the annotation-entity remove
+      // action must tear the annotation down BEFORE the related row whose FK
+      // references it (ON DELETE RESTRICT), and compose must create the row
+      // BEFORE its annotation. Each event still applies exactly once per
+      // subscribing consumer, and per consumer the relative emission order of
+      // its own events is unchanged.
+      for (const ev of finalizedEvents) {
+        for (const consumer of projectionConsumers) {
           if (consumer.eventTypes.includes(ev.type)) {
             if (consumer.actionType !== undefined && consumer.actionType !== type
               && !(batchActionTypes?.has(consumer.actionType))) continue;

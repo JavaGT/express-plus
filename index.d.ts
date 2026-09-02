@@ -578,9 +578,29 @@ export interface AnnotatedTextAnnotationEntityActionDescriptor<
   readonly capability: Capability<'write'>;
   readonly input: Input;
 }
+/** Server-side context handed to an `annotationEntityRemoveAction` invariant. The db handle is the caller's driver handle; it stays server-side and is never serialized. */
+export interface AnnotatedTextAnnotationEntityRemoveContext {
+  readonly db: unknown;
+  readonly relatedRow: Readonly<Record<string, unknown>>;
+  readonly annotationId: string;
+  readonly relatedId: string;
+  readonly principal: Principal | null;
+}
+export interface AnnotatedTextAnnotationEntityRemoveActionDescriptor {
+  readonly kind: 'annotationEntityRemoveAction';
+  readonly relation: string;
+  readonly project: string;
+  readonly author: string;
+  /** The related entity's compare-and-set column (e.g. `updatedAt`); its opaque token is supplied per dispatch. */
+  readonly stale: string;
+  readonly capability: Capability<'write'>;
+  /** Synchronous server-side policy checked atomically inside the removal transaction. Rejects by throwing; never serialized into compiled handles. */
+  readonly invariant?: (context: Readonly<AnnotatedTextAnnotationEntityRemoveContext>) => void;
+}
 export type AnnotatedTextDeclaredActionDescriptor =
   | AnnotatedTextActionDescriptor
-  | AnnotatedTextAnnotationEntityActionDescriptor;
+  | AnnotatedTextAnnotationEntityActionDescriptor
+  | AnnotatedTextAnnotationEntityRemoveActionDescriptor;
 export function annotation<
   Name extends string,
   Actions extends Readonly<Record<string, AnnotatedTextDeclaredActionDescriptor>> = Readonly<Record<string, never>>,
@@ -623,6 +643,14 @@ export function annotationEntityAction<
   readonly capability: Capability<'write'>;
   readonly input: Input;
 }): AnnotatedTextAnnotationEntityActionDescriptor<Input>;
+export function annotationEntityRemoveAction(options: {
+  readonly relation: string;
+  readonly project: string;
+  readonly author: string;
+  readonly stale: string;
+  readonly capability: Capability<'write'>;
+  readonly invariant?: (context: Readonly<AnnotatedTextAnnotationEntityRemoveContext>) => void;
+}): AnnotatedTextAnnotationEntityRemoveActionDescriptor;
 
 export interface AnnotatedTextOptions {
   project: string;
@@ -648,6 +676,20 @@ export type AnnotatedTextAnnotationEntityActionHandle<
   readonly capability: Capability<'write'>;
   readonly input: Descriptor['input'];
 }>;
+export type AnnotatedTextAnnotationEntityRemoveActionHandle<
+  Descriptor extends AnnotatedTextAnnotationEntityRemoveActionDescriptor = AnnotatedTextAnnotationEntityRemoveActionDescriptor,
+> = Readonly<{
+  readonly kind: 'annotationEntityRemoveAction';
+  readonly family: string;
+  readonly actionName: string;
+  readonly entityName: string;
+  readonly fieldName: string;
+  readonly relation: string;
+  readonly project: string;
+  readonly author: string;
+  readonly stale: Descriptor['stale'];
+  readonly capability: Capability<'write'>;
+}>;
 export type AnnotatedTextDomainActionHandle<
   Descriptor extends AnnotatedTextActionDescriptor = AnnotatedTextActionDescriptor,
 > = Readonly<{
@@ -662,7 +704,9 @@ export type AnnotatedTextCompiledActionHandle<
   Descriptor extends AnnotatedTextDeclaredActionDescriptor = AnnotatedTextDeclaredActionDescriptor,
 > = Descriptor extends AnnotatedTextAnnotationEntityActionDescriptor
   ? AnnotatedTextAnnotationEntityActionHandle<Descriptor>
-  : Descriptor extends AnnotatedTextActionDescriptor ? AnnotatedTextDomainActionHandle<Descriptor> : never;
+  : Descriptor extends AnnotatedTextAnnotationEntityRemoveActionDescriptor
+    ? AnnotatedTextAnnotationEntityRemoveActionHandle<Descriptor>
+    : Descriptor extends AnnotatedTextActionDescriptor ? AnnotatedTextDomainActionHandle<Descriptor> : never;
 export type AnnotatedTextActionHandles<
   Actions extends Readonly<Record<string, AnnotatedTextDeclaredActionDescriptor>>,
 > = {

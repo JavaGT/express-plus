@@ -7,6 +7,7 @@ export {
   measurement,
   annotationAction,
   annotationEntityAction,
+  annotationEntityRemoveAction,
 } from './field.mjs';
 export {
   registerAnnotatedTextContract,

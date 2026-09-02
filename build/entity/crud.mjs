@@ -28,7 +28,7 @@ import { applyTextOperation, compactTextFamilyCheckpoint, materializeText, proje
 import { projectAnnotatedTextSnapshot } from '../annotated-text-snapshot.mjs';
 import { authoringRedactionsForRecipient } from '../annotated-text-recipient-projection.mjs';
 import { mapVisibleOffsetToCanonical } from '../annotated-text-recipient-projection.mjs';
-import { planTextRangeApply } from '../annotated-text-plan.mjs';
+import { planAnnotationRemove, planTextRangeApply } from '../annotated-text-plan.mjs';
 import { annotationRangeRows, loadAnnotationImages } from '../annotated-text-storage.mjs';
 import { canonicalEndpointJSON } from '../annotated-text-delete-history-shared.mjs';
 import { assertUtf16Range } from '../annotated-text.mjs';
@@ -1196,6 +1196,114 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
           handlers[actionType] = domainHandler;
           continue;
         }
+      if (action.kind === 'annotationEntityRemoveAction') {
+        // The declaration key names the action (`...comments.remove`). It cannot
+        // collide with the built-in structural annotation-remove flow: that one
+        // dispatches as `${name}.${fieldName}.operation` carrying an
+        // `annotation.remove` edit, a different action type entirely.
+        const removeActionType = `${name}.${fieldName}.${annotationDeclaration.annotationName}.${actionName}`;
+        const removeRelation = annotationDeclaration.fields?.[action.relation];
+        const removeTargetName = typeof removeRelation?.target === 'string' ? removeRelation.target : removeRelation?.target?.name;
+        const removeTarget = removeTargetName ? record.runtime?.entityOf(removeTargetName) : null;
+        const removeHandler = async ({ payload, db, scope, principal, actionId }     ) => {
+          // Removal carries no basis/selection (it never rebases text) and no
+          // values: identity fields only. Closed payload, like compose.
+          if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+            || (Object.getPrototypeOf(payload) !== Object.prototype && Object.getPrototypeOf(payload) !== null)
+            || Reflect.ownKeys(payload).some((key) => typeof key !== 'string')
+            || Object.keys(payload).sort().join() !== 'annotationId,expected,id,mutationId,relatedId,version'
+            || payload.version !== 1 || typeof payload.id !== 'string' || !payload.id
+            || typeof payload.mutationId !== 'string' || !payload.mutationId
+            || typeof payload.annotationId !== 'string' || !payload.annotationId
+            || typeof payload.relatedId !== 'string' || !payload.relatedId
+            || typeof payload.expected !== 'string' || !payload.expected) {
+            throw new ValidationError(`${removeActionType} requires a closed removal payload`);
+          }
+          const documentRow = rawRow(db, name, payload.id);
+          if (!documentRow) throw new ValidationError(`${removeActionType} document does not exist`);
+          const documentScope = resolveAnnotatedTextOwningScope(descriptor, fields, documentRow).key;
+          if (scope !== documentScope) throw new ValidationError(`${removeActionType} requires its declared document scope`);
+          if (!removeTarget || !removeTarget.crudHandlers) throw new ValidationError(`${removeActionType} related entity is unavailable`);
+
+          const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(payload.id);
+          if (!state) throw new ValidationError(`${removeActionType} document state is unavailable`);
+          const family = restoreTextFamilySerialized(state.family_checkpoint);
+          // The annotation must live in THIS document, belong to the declaring
+          // family, and anchor exactly the supplied related row. One typed
+          // failure covers every mismatch — row identities never leak.
+          const annotationRow = db.prepare(`SELECT id, family, document_id FROM ${prefix}_annotation WHERE id = ?`).get(payload.annotationId)       ;
+          if (!annotationRow || annotationRow.document_id !== payload.id || annotationRow.family !== annotationDeclaration.annotationName) {
+            throw new ValidationError(`${removeActionType} annotation does not belong to this document's '${annotationDeclaration.annotationName}' family`);
+          }
+          const relationRow = db.prepare(`SELECT ${action.relation} FROM ${prefix}_annotation_${annotationDeclaration.annotationName} WHERE annotation_id = ?`).get(payload.annotationId)       ;
+          if (!relationRow || String(relationRow[action.relation] ?? '') !== String(payload.relatedId)) {
+            throw new ValidationError(`${removeActionType} annotation does not anchor the supplied related row`);
+          }
+          const relatedRow = rawRow(db, removeTarget.name, payload.relatedId);
+          if (!relatedRow || relatedRow[action.project] !== documentRow[descriptor.project]) {
+            throw new ValidationError(`${removeActionType} related row does not belong to the document's project`);
+          }
+          // CAS on the declared stale column: the stored cell and the client's
+          // opaque version token must agree (compared in canonical string form so
+          // an epoch-millis date cell matches its token). Any drift is a typed
+          // stale failure; the client refreshes and retries.
+          if (relatedRow[action.stale] !== payload.expected && String(relatedRow[action.stale]) !== String(payload.expected)) {
+            throw new ValidationError(`${removeActionType} related row is stale; refresh and retry`);
+          }
+          // Author-only. Load-bearing even when the related entity's own grant
+          // policy would admit removal: the annotation action must never let a
+          // non-author erase another principal's row (or its anchor).
+          if (principal?.id == null || String(relatedRow[action.author]) !== String(principal.id)) {
+            throw new ValidationError(`${removeActionType} only the related row's author may remove it`);
+          }
+          // Application policy (e.g. "no replies exist") is checked atomically in
+          // the same transaction. The predicate rejects by throwing — ANY throw
+          // (the application's own Error type included) is normalized into a
+          // typed validation failure, never an internal error — and must be
+          // synchronous and void.
+          if (action.invariant) {
+            const context = Object.freeze({
+              db,
+              relatedRow: Object.freeze({ ...relatedRow }),
+              annotationId: payload.annotationId,
+              relatedId: payload.relatedId,
+              principal,
+            });
+            let verdict         ;
+            try {
+              verdict = action.invariant(context);
+            } catch (error) {
+              throw new ValidationError(`${removeActionType} invariant rejected the removal: ${(error         )?.message ?? String(error)}`);
+            }
+            if (verdict !== undefined) throw new ValidationError(`${removeActionType} invariant returned a value; it must throw to reject and return nothing`);
+          }
+          // ORDER IS LOAD-BEARING: the annotation removal is planned FIRST and the
+          // related row's removal is dispatched SECOND. The annotation FK on the
+          // related row is ON DELETE RESTRICT, so the annotation must go first;
+          // compose is the exact inverse (row, then annotation). Both event sets
+          // are projected under ONE receipt/transaction.
+          const annotationRows = db.prepare(`SELECT id, family FROM ${prefix}_annotation WHERE document_id = ? ORDER BY id`).all(payload.id)                                         ;
+          const protectedTargets = db.prepare(`SELECT annotation_id, target_annotation_id FROM ${prefix}_annotation_protected_target WHERE annotation_id IN (SELECT id FROM ${prefix}_annotation WHERE document_id = ?) ORDER BY annotation_id, target_annotation_id`).all(payload.id)                                                                  ;
+          const targetsByAnnotation = new Map                  ();
+          for (const edge of protectedTargets) targetsByAnnotation.set(edge.annotation_id, [...(targetsByAnnotation.get(edge.annotation_id) ?? []), edge.target_annotation_id]);
+          const annotations = annotationRows.map((row) => {
+            const familyMeta = compiledMeta.annotationHandles[row.family];
+            if (!familyMeta) throw new ValidationError(`${removeActionType} annotation '${row.id}' has unknown family '${row.family}'`);
+            return { id: row.id, family: row.family, empty: familyMeta.empty, protectedTargetIds: targetsByAnnotation.get(row.id) ?? [] };
+          });
+          const rangeRows = annotationRangeRows(db, prefix, payload.id);
+          const ranges = rangeRows.map((range     ) => ({ annotationId: range.annotation_id, start: JSON.parse(range.start_point), end: JSON.parse(range.end_point) }));
+          const plan = planAnnotationRemove({ documentId: payload.id, structureVersion: state.structure_version, family, annotationId: payload.annotationId, annotations, ranges });
+          const handle = eventHandles.native(name, fieldName, 'operated');
+          const annotationEvent = { handle, type: handle.type, scope: documentScope, data: plan };
+          const relatedResult = await removeTarget.crudHandlers[`${removeTarget.name}.remove`]({ payload: { id: payload.relatedId }, principal, db, scope: documentScope, actionId });
+          const relatedEvents = (Array.isArray(relatedResult) ? relatedResult : relatedResult.events)
+            .map((event     ) => ({ ...event, scope: documentScope }));
+          return { events: [annotationEvent, ...relatedEvents], canonicalPayload: payload, authoringReceipt: async ({ confirmedThrough }     ) => Object.freeze({ actionId, confirmedThrough, annotationId: payload.annotationId, relatedId: payload.relatedId }) };
+        };
+        Object.defineProperties(removeHandler, { inTransaction: { value: true }, batchForbidden: { value: true }, dedupeReceiptMatches: { value: (receipt     , request     ) => receipt.actionType === removeActionType && receipt.actionData === canonicalStringify(request.payload) } });
+        handlers[removeActionType] = removeHandler;
+      }
         if (action.kind !== 'annotationEntityAction') continue;
         const actionType = `${name}.${fieldName}.${annotationDeclaration.annotationName}.${actionName}`;
         const relation = annotationDeclaration.fields?.[action.relation];

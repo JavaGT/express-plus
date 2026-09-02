@@ -4,8 +4,8 @@ import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  annotatedText, annotation, boolean, entity, executeDDL, executeFrameworkDDL, grant, measurement, ref, read, scope, text, write, everyone,
-  registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension, protectingAnnotation, annotationEntityAction, admin, deny,
+  annotatedText, annotation, boolean, date, entity, executeDDL, executeFrameworkDDL, grant, measurement, ref, read, scope, text, write, everyone,
+  registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension, protectingAnnotation, annotationEntityAction, annotationEntityRemoveAction, admin, deny,
 } from '../build/internal.mjs';
 import { exportAnnotatedText } from '../build/index.mjs';
 import { materializeText, restoreTextFamily } from '../build/annotated-text-continuous.mjs';
@@ -34,6 +34,7 @@ function r8Doc({
     relation: 'comment', project: 'project', author: 'author', capability: write,
     input: { body: 'body' },
   }),
+  removeAction = null,
 } = {}) {
   return entity('R8IntegrationDocument', {
     project: ref('Project'),
@@ -49,7 +50,7 @@ function r8Doc({
            empty: 'orphan',
            ...(thread ? {
              fields: { comment: ref(relationTarget) },
-              actions: { compose: threadAction },
+              actions: { compose: threadAction, ...(removeAction ? { remove: removeAction } : {}) },
            } : {}),
          }),
         protectingAnnotation('confidential', { protects: 'coding', access: protectingAccess }),
@@ -71,6 +72,7 @@ async function appFor(db = new DatabaseSync(':memory:'), principalId = null, opt
     author: ref('User'),
     body: text(),
     resolved: boolean({ default: false }),
+    updatedAt: date({ default: 0 }),
     grant: [scope(() => everyone()).can(() => grant(read, write))],
   }) : null;
   executeFrameworkDDL(db);
@@ -143,8 +145,8 @@ function durableAnnotatedTextState(db) {
   });
 }
 
-async function setupThreadDoc(docText = 'hello world', principalId = 'u1') {
-  return setupDoc(docText, principalId, { thread: true });
+async function setupThreadDoc(docText = 'hello world', principalId = 'u1', options = {}) {
+  return setupDoc(docText, principalId, { thread: true, ...options });
 }
 
 function threadPayload(binding, { basis = binding.documentPositionToken, from = 0, to = 5, body = 'a comment', mutationId = `m-${randomUUID()}` } = {}) {
@@ -742,4 +744,281 @@ test('boundary inserts join the range at its start and stay out at its end', asy
     assert.equal(after.range, null, 'a covering replace empties the range (orphan)');
     await ctx.app.close?.();
   }
+});
+
+// -- Generated annotation-entity REMOVE action (compose's lifecycle inverse) --
+
+function removeDeclaration({ invariant } = {}) {
+  return annotationEntityRemoveAction({
+    relation: 'comment', project: 'project', author: 'author', stale: 'updatedAt', capability: write,
+    ...(invariant ? { invariant } : {}),
+  });
+}
+
+async function setupRemoveDoc(options = {}) {
+  return setupThreadDoc('hello world', 'u1', { removeAction: removeDeclaration(options.removeOptions), ...options });
+}
+
+async function composeComment(ctx, actionId, body = 'a comment') {
+  const result = await dispatchThread(ctx, actionId, { body });
+  assert.equal(result.ok, true, result.failure?.message);
+}
+
+function annotationAnchorFor(db, relatedId) {
+  return db.prepare(`
+    SELECT annotation.id, annotation.family, annotation.document_id, fields.comment
+    FROM R8IntegrationDocument_body_annotation AS annotation
+    JOIN R8IntegrationDocument_body_annotation_comment AS fields ON fields.annotation_id = annotation.id
+    WHERE fields.comment = ?`).get(relatedId);
+}
+
+function dispatchRemove(ctx, actionId, { annotationId, relatedId, expected, mutationId = `m-${randomUUID()}` }, principal = { id: 'u1' }) {
+  return ctx.app.dispatch({
+    actionId, type: 'R8IntegrationDocument.body.comment.remove', scope: 'Project:p1', principal,
+    payload: { version: 1, id: 'd1', mutationId, annotationId, relatedId, expected },
+  });
+}
+
+test('remove action erases the annotation and its related row in ONE settlement', async (t) => {
+  const ctx = await setupRemoveDoc();
+  t.after(() => ctx.app.close?.());
+  await composeComment(ctx, 'compose-1');
+  const comment = ctx.db.prepare('SELECT * FROM R8Comment').get();
+  const anchor = annotationAnchorFor(ctx.db, comment.id);
+  assert.ok(anchor, 'compose must anchor the comment to its related row');
+
+  const result = await dispatchRemove(ctx, 'remove-1', {
+    annotationId: anchor.id, relatedId: comment.id, expected: String(comment.updatedAt),
+  });
+  assert.equal(result.ok, true, result.failure?.message);
+  assert.deepEqual({ ...result.resultData }, { actionId: 'remove-1', confirmedThrough: result.resultData.confirmedThrough, annotationId: anchor.id, relatedId: comment.id });
+  assert.deepEqual(threadCounts(ctx.db), { comments: 0, annotations: 0 }, 'one settlement must remove both rows');
+
+  // Event order is load-bearing: annotation removal FIRST, related row SECOND
+  // (the related row's annotation FK is ON DELETE RESTRICT).
+  const events = ctx.db.prepare("SELECT eventType, eventData FROM _Log WHERE actionId = 'remove-1' AND scope = 'Project:p1' ORDER BY seq").all();
+  assert.deepEqual(events.map((event) => event.eventType), [
+    native('R8IntegrationDocument', 'body', 'operated').type,
+    'R8Comment.removed',
+  ]);
+  const annotationPlan = JSON.parse(events[0].eventData);
+  assert.equal(annotationPlan.operation.kind, 'annotation.remove');
+  assert.deepEqual(annotationPlan.facts.removedAnnotationIds, [anchor.id]);
+});
+
+test('removing one comment leaves sibling comments and their anchors untouched', async (t) => {
+  const ctx = await setupRemoveDoc();
+  t.after(() => ctx.app.close?.());
+  await composeComment(ctx, 'compose-root', 'root thread');
+  await composeComment(ctx, 'compose-other', 'unrelated thread');
+  const [root, other] = ctx.db.prepare('SELECT * FROM R8Comment ORDER BY id').all();
+  const rootAnchor = annotationAnchorFor(ctx.db, root.id);
+
+  const result = await dispatchRemove(ctx, 'remove-root', {
+    annotationId: rootAnchor.id, relatedId: root.id, expected: String(root.updatedAt),
+  });
+  assert.equal(result.ok, true, result.failure?.message);
+  assert.deepEqual(threadCounts(ctx.db), { comments: 1, annotations: 1 });
+  const surviving = ctx.db.prepare('SELECT id, body FROM R8Comment').get();
+  assert.equal(surviving.id, other.id, 'exactly the non-removed row survives');
+  assert.equal(surviving.body, other.body);
+  assert.ok(annotationAnchorFor(ctx.db, other.id), 'the sibling anchor survives');
+  assert.equal(annotationAnchorFor(ctx.db, root.id), undefined);
+});
+
+test('remove action rejects stale tokens, foreign anchors, cross-document ids, non-authors, and malformed envelopes', async (t) => {
+  // Stale compare-and-set: the token must match the row's declared column.
+  {
+    const ctx = await setupRemoveDoc();
+  t.after(() => ctx.app.close?.());
+    await composeComment(ctx, 'compose-1');
+    const comment = ctx.db.prepare('SELECT * FROM R8Comment').get();
+    const anchor = annotationAnchorFor(ctx.db, comment.id);
+    const stale = await dispatchRemove(ctx, 'remove-stale', {
+      annotationId: anchor.id, relatedId: comment.id, expected: '999999',
+    });
+    assert.equal(stale.ok, false);
+    assert.match(stale.failure?.message ?? '', /stale/);
+    assert.deepEqual(threadCounts(ctx.db), { comments: 1, annotations: 1 });
+    // The canonical string form of the stored epoch-millis cell is accepted.
+    const fresh = await dispatchRemove(ctx, 'remove-fresh', {
+      annotationId: anchor.id, relatedId: comment.id, expected: String(comment.updatedAt),
+    });
+    assert.equal(fresh.ok, true, fresh.failure?.message);
+    assert.deepEqual(threadCounts(ctx.db), { comments: 0, annotations: 0 });
+    await ctx.app.close?.();
+  }
+
+  // Relation-field mismatch: the annotation anchors a DIFFERENT related row.
+  {
+    const ctx = await setupRemoveDoc();
+  t.after(() => ctx.app.close?.());
+    await composeComment(ctx, 'compose-1', 'first');
+    await composeComment(ctx, 'compose-2', 'second');
+    const [first, second] = ctx.db.prepare('SELECT * FROM R8Comment ORDER BY id').all();
+    const firstAnchor = annotationAnchorFor(ctx.db, first.id);
+    const mismatch = await dispatchRemove(ctx, 'remove-mismatch', {
+      annotationId: firstAnchor.id, relatedId: second.id, expected: String(first.updatedAt),
+    });
+    assert.equal(mismatch.ok, false);
+    assert.match(mismatch.failure?.message ?? '', /does not anchor/);
+    assert.deepEqual(threadCounts(ctx.db), { comments: 2, annotations: 2 });
+    await ctx.app.close?.();
+  }
+
+  // Cross-document annotation id: the anchor belongs to another document.
+  {
+    const ctx = await setupRemoveDoc();
+  t.after(() => ctx.app.close?.());
+    await composeComment(ctx, 'compose-1');
+    const comment = ctx.db.prepare('SELECT * FROM R8Comment').get();
+    const anchor = annotationAnchorFor(ctx.db, comment.id);
+    const created = await ctx.app.dispatch({
+      actionId: 'create-d2', type: 'R8IntegrationDocument.create', scope: 'Project:p1', principal: { id: 'u1' },
+      payload: { id: 'd2', project: 'p1', owner: 'u1', body: { version: 1, blocks: [{ text: 'second doc' }] } },
+    });
+    assert.equal(created.ok, true, created.failure?.message);
+    const crossDocument = await ctx.app.dispatch({
+      actionId: 'remove-cross', type: 'R8IntegrationDocument.body.comment.remove', scope: 'Project:p1', principal: { id: 'u1' },
+      payload: { version: 1, id: 'd2', mutationId: `m-${randomUUID()}`, annotationId: anchor.id, relatedId: comment.id, expected: String(comment.updatedAt) },
+    });
+    assert.equal(crossDocument.ok, false);
+    assert.match(crossDocument.failure?.message ?? '', /does not belong to this document/);
+    assert.deepEqual(threadCounts(ctx.db), { comments: 1, annotations: 1 });
+    await ctx.app.close?.();
+  }
+
+  // Author-only: another principal (even a project peer) cannot remove.
+  {
+    const ctx = await setupRemoveDoc();
+  t.after(() => ctx.app.close?.());
+    ctx.db.exec("INSERT INTO User (id) VALUES ('u2')");
+    await composeComment(ctx, 'compose-1');
+    const comment = ctx.db.prepare('SELECT * FROM R8Comment').get();
+    const anchor = annotationAnchorFor(ctx.db, comment.id);
+    const foreign = await dispatchRemove(ctx, 'remove-foreign', {
+      annotationId: anchor.id, relatedId: comment.id, expected: String(comment.updatedAt),
+    }, { id: 'u2' });
+    assert.equal(foreign.ok, false);
+    assert.match(foreign.failure?.message ?? '', /author may remove/);
+    assert.deepEqual(threadCounts(ctx.db), { comments: 1, annotations: 1 });
+    await ctx.app.close?.();
+  }
+
+  // Malformed envelopes fail closed before any row is touched.
+  {
+    const ctx = await setupRemoveDoc();
+  t.after(() => ctx.app.close?.());
+    await composeComment(ctx, 'compose-1');
+    const comment = ctx.db.prepare('SELECT * FROM R8Comment').get();
+    const anchor = annotationAnchorFor(ctx.db, comment.id);
+    const malformed = [
+      { version: 1, id: 'd1', mutationId: 'm1', annotationId: anchor.id, relatedId: comment.id },
+      { version: 2, id: 'd1', mutationId: 'm1', annotationId: anchor.id, relatedId: comment.id, expected: '0' },
+      { version: 1, id: 'd1', mutationId: 'm1', annotationId: anchor.id, relatedId: comment.id, expected: '0', extra: true },
+      { version: 1, id: 'd1', mutationId: 'm1', annotationId: anchor.id, relatedId: comment.id, expected: 0 },
+    ];
+    for (const [index, payload] of malformed.entries()) {
+      const result = await ctx.app.dispatch({
+        actionId: `malformed-remove-${index}`, type: 'R8IntegrationDocument.body.comment.remove', scope: 'Project:p1', principal: { id: 'u1' },
+        payload,
+      });
+      assert.equal(result.ok, false, `malformed envelope ${index} must fail`);
+      assert.match(result.failure?.message ?? '', /closed removal payload/);
+    }
+    assert.deepEqual(threadCounts(ctx.db), { comments: 1, annotations: 1 });
+    await ctx.app.close?.();
+  }
+});
+
+test('remove action invariant runs atomically: throwing rejects, returning a value rejects, async rejects', async (t) => {
+  // A throwing invariant (e.g. "no replies exist") blocks the whole removal.
+  {
+    const ctx = await setupRemoveDoc({ removeOptions: { invariant: ({ relatedRow }) => {
+      if (relatedRow.body === 'protected') throw new Error('replies exist');
+  t.after(() => ctx.app.close?.());
+    } } });
+    await composeComment(ctx, 'compose-1', 'protected');
+    const comment = ctx.db.prepare('SELECT * FROM R8Comment').get();
+    const anchor = annotationAnchorFor(ctx.db, comment.id);
+    const blocked = await dispatchRemove(ctx, 'remove-blocked', {
+      annotationId: anchor.id, relatedId: comment.id, expected: String(comment.updatedAt),
+    });
+    assert.equal(blocked.ok, false);
+    assert.match(blocked.failure?.message ?? '', /replies exist/);
+    assert.deepEqual(threadCounts(ctx.db), { comments: 1, annotations: 1 }, 'an invariant rejection must leave both rows');
+    await ctx.app.close?.();
+  }
+
+  // The invariant must be a synchronous void predicate.
+  {
+    const ctx = await setupRemoveDoc({ removeOptions: { invariant: () => false } });
+  t.after(() => ctx.app.close?.());
+    await composeComment(ctx, 'compose-1');
+    const comment = ctx.db.prepare('SELECT * FROM R8Comment').get();
+    const anchor = annotationAnchorFor(ctx.db, comment.id);
+    const value = await dispatchRemove(ctx, 'remove-value', {
+      annotationId: anchor.id, relatedId: comment.id, expected: String(comment.updatedAt),
+    });
+    assert.equal(value.ok, false);
+    assert.match(value.failure?.message ?? '', /invariant returned a value/);
+    assert.deepEqual(threadCounts(ctx.db), { comments: 1, annotations: 1 });
+    await ctx.app.close?.();
+  }
+  {
+    const ctx = await setupRemoveDoc({ removeOptions: { invariant: () => Promise.resolve() } });
+  t.after(() => ctx.app.close?.());
+    await composeComment(ctx, 'compose-1');
+    const comment = ctx.db.prepare('SELECT * FROM R8Comment').get();
+    const anchor = annotationAnchorFor(ctx.db, comment.id);
+    const async = await dispatchRemove(ctx, 'remove-async', {
+      annotationId: anchor.id, relatedId: comment.id, expected: String(comment.updatedAt),
+    });
+    assert.equal(async.ok, false);
+    assert.match(async.failure?.message ?? '', /invariant returned a value/);
+    assert.deepEqual(threadCounts(ctx.db), { comments: 1, annotations: 1 });
+    await ctx.app.close?.();
+  }
+});
+
+test('remove action dedupe replays the receipt; a changed payload conflicts', async (t) => {
+  const ctx = await setupRemoveDoc();
+  t.after(() => ctx.app.close?.());
+  await composeComment(ctx, 'compose-1');
+  const comment = ctx.db.prepare('SELECT * FROM R8Comment').get();
+  const anchor = annotationAnchorFor(ctx.db, comment.id);
+  const payload = { annotationId: anchor.id, relatedId: comment.id, expected: String(comment.updatedAt), mutationId: 'fixed-mutation' };
+  const first = await dispatchRemove(ctx, 'remove-1', payload);
+  assert.equal(first.ok, true, first.failure?.message);
+  const replay = await dispatchRemove(ctx, 'remove-1', payload);
+  assert.equal(replay.ok, true, replay.failure?.message);
+  assert.equal(replay.resultData?.confirmedThrough, first.resultData?.confirmedThrough);
+  assert.deepEqual(threadCounts(ctx.db), { comments: 0, annotations: 0 });
+  const conflict = await dispatchRemove(ctx, 'remove-1', { ...payload, expected: '999999' });
+  assert.equal(conflict.ok, false);
+  assert.equal(conflict.failure?.category, 'conflict');
+});
+
+test('remove action declaration validation rejects framework-owned and missing stale columns', async () => {
+  for (const [label, removeAction] of [
+    ['framework-owned', annotationEntityRemoveAction({ relation: 'comment', project: 'project', author: 'author', stale: 'id', capability: write })],
+    ['missing column', annotationEntityRemoveAction({ relation: 'comment', project: 'project', author: 'author', stale: 'nope', capability: write })],
+  ]) {
+    const deferred = await appFor(new DatabaseSync(':memory:'), null, {
+      thread: true, removeAction, deferStart: true,
+    });
+    await assert.rejects(() => deferred.app.start(), new RegExp(label === 'framework-owned' ? 'framework-owned' : 'stale'));
+    deferred.db.close();
+  }
+});
+
+test('the compiled remove handle is data-only: the invariant never reaches it', async (t) => {
+  const ctx = await setupRemoveDoc({ removeOptions: { invariant: () => {} } });
+  t.after(() => ctx.app.close?.());
+  const handle = ctx.Document.body.annotations.comment.actions.remove;
+  assert.equal(handle.kind, 'annotationEntityRemoveAction');
+  assert.equal(handle.stale, 'updatedAt');
+  assert.equal(handle.relation, 'comment');
+  assert.equal('invariant' in handle, false, 'the server-side invariant must stay off the compiled handle');
+  assert.equal(Object.isFrozen(handle), true);
 });

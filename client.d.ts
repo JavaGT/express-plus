@@ -6,6 +6,7 @@
 import type {
   AnnotatedTextAnnotationActionValues,
   AnnotatedTextAnnotationEntityActionHandle,
+  AnnotatedTextAnnotationEntityRemoveActionHandle,
   AnnotatedTextFieldHandle,
   AnyWorkbenchEntity,
   WorkbenchEntity,
@@ -858,12 +859,15 @@ export interface AnnotatedTextHttpSession {
   replace(input: { readonly mutationId?: string; readonly from: AnnotatedTextEditPosition; readonly to: AnnotatedTextEditPosition; readonly text: string }): Promise<LiveDeliveryDispatchResult | null>;
   applyAnnotation(input: { readonly mutationId: string; readonly annotation: { readonly id: string; readonly family: string; readonly fields: Readonly<Record<string, unknown>>; readonly protectedTargetIds?: readonly string[] }; readonly from: AnnotatedTextEditPosition; readonly to: AnnotatedTextEditPosition }): Promise<ScopeDispatchResult>;
   applyAnnotationAction<Action extends AnnotatedTextAnnotationEntityActionHandle>(actionHandle: Action, input: { readonly mutationId: string; readonly from: AnnotatedTextEditPosition; readonly to: AnnotatedTextEditPosition; readonly values: AnnotatedTextAnnotationActionValues<Action> }): Promise<ScopeDispatchResult>;
+  /** Removes an annotation-owned related entity row and its anchor annotation in ONE settlement. `expected` is the declared stale column's opaque version token. */
+  removeAnnotationEntity<Action extends AnnotatedTextAnnotationEntityRemoveActionHandle>(actionHandle: Action, input: { readonly mutationId: string; readonly annotationId: string; readonly relatedId: string; readonly expected: string }): Promise<ScopeDispatchResult>;
   removeAnnotation(input: { readonly mutationId: string; readonly annotationId: string }): Promise<ScopeDispatchResult>;
   publishCaret?(input: { readonly offset: number }): boolean;
   clearCaret?(): boolean;
   onCaret?(listener: OnCaret): () => void;
   reconnect(): Promise<void>;
   recoverFromUnresolvableRange(): void;
+  /** Each accepted projection publication supplies a fresh immutable document identity; duplicate delivery produces no publication; family and document are installed atomically. */
   subscribe(listener: (document: AnnotatedTextDocument | null) => void): () => void;
   close(): void;
 }

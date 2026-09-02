@@ -109,7 +109,7 @@ export function annotatedText(options: FieldOptions = {}): FieldDescriptor {
 // Declarative annotation/measurement constructors — re-exported from
 // annotated-text-field.mjs for the public surface. Named here so the
 // import-surface contract (index.mjs, internal.mjs) stays in field.mjs.
-export { annotation, protectingAnnotation, measurement, annotationAction, annotationEntityAction } from './annotated-text-field.ts';
+export { annotation, protectingAnnotation, measurement, annotationAction, annotationEntityAction, annotationEntityRemoveAction } from './annotated-text-field.ts';
 // Live-data tier vocabulary + declaration normalization (S3/A1) — the entity
 // declaration slice. Re-exported here so the import-surface contract
 // (index.mjs, internal.mjs) stays in field.mjs, matching the pattern above.

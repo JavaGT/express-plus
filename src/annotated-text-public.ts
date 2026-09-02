@@ -7,6 +7,7 @@ export {
   measurement,
   annotationAction,
   annotationEntityAction,
+  annotationEntityRemoveAction,
 } from './field.ts';
 export {
   registerAnnotatedTextContract,

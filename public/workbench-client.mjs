@@ -4386,6 +4386,20 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       // stays positional across a concurrent foreign edit.
       const edit = action?.payload?.version === 9 ? action.payload.edit : null;
       const relatedAction = pendingAnnotationRanges.get(action?.actionId);
+      if (!edit && relatedAction?.kind === 'annotationEntityRemoveAction' && action?.payload?.version === 1) {
+        // A pending generated removal optimistically hides its annotation (and
+        // its ranges) exactly like a structural annotation.remove would.
+        return projectPendingAnnotatedTextDocument(document, {
+          payload: {
+            version: 9,
+            edit: {
+              kind: 'annotation.remove',
+              mutationId: action.payload.mutationId,
+              annotationId: relatedAction.annotationId,
+            },
+          },
+        }, null);
+      }
       if (!edit && relatedAction?.kind === 'annotationEntityAction' && action?.payload?.version === 1) {
         return projectPendingAnnotatedTextDocument(document, {
           payload: {
@@ -4949,6 +4963,39 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
          finally { translatedActions -= 1; flushAuthoringAcknowledgements(); }
        });
      },
+    removeAnnotationEntity(actionHandle, { mutationId, annotationId, relatedId, expected }) {
+      if (!actionHandle || actionHandle.kind !== 'annotationEntityRemoveAction' || typeof actionHandle.actionName !== 'string') {
+        throw new TypeError('annotated text action handle is invalid');
+      }
+      const annotationHandle = field.annotations?.[actionHandle.family];
+      const expectedHandle = annotationHandle?.actions?.[actionHandle.actionName];
+      if (!annotationHandle || expectedHandle !== actionHandle) throw new TypeError('annotated text action handle is not declared by this document');
+      if (typeof mutationId !== 'string' || mutationId.length === 0
+        || typeof annotationId !== 'string' || annotationId.length === 0
+        || typeof relatedId !== 'string' || relatedId.length === 0
+        || typeof expected !== 'string' || expected.length === 0) throw new TypeError('annotated text removal input is invalid');
+      flushOpenInsertBurst();
+      // The annotation disappears optimistically; retire any captured range
+      // anchored to it (the map is keyed by action identity, so scan entries).
+      for (const [pendingActionId, entry] of pendingAnnotationRanges) {
+        if (entry.annotationId === annotationId) pendingAnnotationRanges.delete(pendingActionId);
+      }
+      // Retain the envelope identity by mutation id so an uncertain retry
+      // reuses the same durable receipt (mirrors the compose action).
+      const actionId = pendingAnnotationActionIds.get(mutationId) ?? mintActionId();
+      pendingAnnotationActionIds.set(mutationId, actionId);
+      pendingAnnotationRanges.set(actionId, { kind: 'annotationEntityRemoveAction', annotationId });
+      return queueAuthoringMutation({ kind: 'annotation.remove', mutationId, annotationId }, async () => {
+        if (!session.snapshot || !snapshotBinding.authoring) throw new ClientClosedError('Annotated text document is unavailable');
+        const action = {
+          type: `${entity.name}.${field.fieldName}.${actionHandle.family}.${actionHandle.actionName}`,
+          payload: Object.freeze({ version: 1, id: documentId, mutationId, annotationId, relatedId, expected }),
+        };
+        translatedActions += 1;
+        try { return await session.dispatch(action.type, action.payload, { actionId }); }
+        finally { translatedActions -= 1; flushAuthoringAcknowledgements(); }
+      }, { actionId });
+    },
     removeAnnotation({ mutationId, annotationId }) {
       flushOpenInsertBurst();
       // Retire any captured range for removed annotations by annotation id (the
