@@ -22,7 +22,17 @@
 // drift; an object owned by a participant OTHER than the one whose declaration
 // is being validated is a conflicting-ownership drift (consideration #8/#9).
 
-import { censusKey,                  } from './schema-census.mjs';
+import { censusKey, classifyObservedObject,                                                   } from './schema-census.mjs';
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -526,6 +536,7 @@ export function validateExactSchema(
   db               ,
   census                                  ,
   schemas                                    ,
+  options                     = {},
 )                              {
   const errors                     = [];
   const push       = (code, ownerKind, owner, objectKind, name, detail) => {
@@ -541,6 +552,32 @@ export function validateExactSchema(
   for (const schema of schemas) {
     for (const table of schema.tables) validateTable(db, census, schema.name, table, push);
     for (const virtualTable of schema.virtualTables) validateVirtualTable(db, census, schema.name, virtualTable, push);
+  }
+  if (options.validateCensus) {
+    for (const entry of census.values()) {
+      const type = entry.objectKind === 'virtual-table' || entry.objectKind === 'shadow-table' ? 'table' : entry.objectKind;
+      const live = db.prepare('SELECT sql FROM sqlite_schema WHERE type = ? AND lower(name) = lower(?)').get(type, entry.name);
+      const objectKind = entry.objectKind === 'table' ? 'table' : entry.objectKind;
+      const ownerKind = entry.kind;
+      const owner = entry.owner;
+      if (live === undefined) {
+        push('missing-object', ownerKind, owner, objectKind, entry.name, 'is declared by the lifecycle census but absent from the live schema');
+      } else if (entry.objectKind === 'virtual-table' && !/^CREATE\s+VIRTUAL\s+TABLE/i.test(String(live.sql ?? ''))) {
+        push('object-kind', ownerKind, owner, 'virtual-table', entry.name, 'is declared as a virtual table but exists as an ordinary table');
+      } else if (entry.objectKind === 'table' && /^CREATE\s+VIRTUAL\s+TABLE/i.test(String(live.sql ?? ''))) {
+        push('object-kind', ownerKind, owner, 'table', entry.name, 'is declared as an ordinary table but exists as a virtual table');
+      }
+    }
+    const observed = db.prepare("SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND type IN ('table', 'index', 'trigger')").all()
+      .map((row) => ({
+        type: (String(row.type) === 'table' && /^CREATE\s+VIRTUAL\s+TABLE/i.test(String(row.sql ?? '')) ? 'virtual-table' : String(row.type))              ,
+        name: String(row.name),
+      }                        ));
+    for (const object of observed) {
+      if (classifyObservedObject(object, census).kind === 'undeclared') {
+        push('undeclared-object', 'undeclared', 'undeclared', object.type, object.name, 'exists in the live schema but is absent from the lifecycle census');
+      }
+    }
   }
   return errors;
 }

@@ -22,13 +22,13 @@
 // drift; an object owned by a participant OTHER than the one whose declaration
 // is being validated is a conflicting-ownership drift (consideration #8/#9).
 
-import { censusKey, type CensusEntry } from './schema-census.ts';
+import { censusKey, classifyObservedObject, type CensusEntry, type ObjectKind, type OwnerKind } from './schema-census.ts';
 import type { SqliteSchemaDescription } from './sqlite-schema.ts';
 
 export interface ExactSchemaError {
   readonly code: string;
   readonly message: string;
-  readonly ownerKind: 'schema' | 'plugin';
+  readonly ownerKind: OwnerKind | 'undeclared';
   readonly owner: string;
   readonly objectKind: 'table' | 'column' | 'index' | 'trigger' | 'virtual-table' | 'shadow-table';
   readonly name: string;
@@ -43,6 +43,11 @@ export interface ExactSchemaDb {
   prepare(sql: string): ExactSchemaStatement;
 }
 
+export type ExactSchemaOptions = {
+  /** Check every declared lifecycle object, not only schema declarations. */
+  validateCensus?: boolean;
+};
+
 type Push = (
   code: string,
   ownerKind: ExactSchemaError['ownerKind'],
@@ -51,6 +56,11 @@ type Push = (
   name: string,
   detail: string,
 ) => void;
+
+type CatalogObject = {
+  readonly type: ObjectKind;
+  readonly name: string;
+};
 
 function folded(name: string): string {
   return name.toLowerCase();
@@ -526,6 +536,7 @@ export function validateExactSchema(
   db: ExactSchemaDb,
   census: ReadonlyMap<string, CensusEntry>,
   schemas: readonly SqliteSchemaDescription[],
+  options: ExactSchemaOptions = {},
 ): readonly ExactSchemaError[] {
   const errors: ExactSchemaError[] = [];
   const push: Push = (code, ownerKind, owner, objectKind, name, detail) => {
@@ -541,6 +552,32 @@ export function validateExactSchema(
   for (const schema of schemas) {
     for (const table of schema.tables) validateTable(db, census, schema.name, table, push);
     for (const virtualTable of schema.virtualTables) validateVirtualTable(db, census, schema.name, virtualTable, push);
+  }
+  if (options.validateCensus) {
+    for (const entry of census.values()) {
+      const type = entry.objectKind === 'virtual-table' || entry.objectKind === 'shadow-table' ? 'table' : entry.objectKind;
+      const live = db.prepare('SELECT sql FROM sqlite_schema WHERE type = ? AND lower(name) = lower(?)').get(type, entry.name);
+      const objectKind = entry.objectKind === 'table' ? 'table' : entry.objectKind;
+      const ownerKind = entry.kind;
+      const owner = entry.owner;
+      if (live === undefined) {
+        push('missing-object', ownerKind, owner, objectKind, entry.name, 'is declared by the lifecycle census but absent from the live schema');
+      } else if (entry.objectKind === 'virtual-table' && !/^CREATE\s+VIRTUAL\s+TABLE/i.test(String(live.sql ?? ''))) {
+        push('object-kind', ownerKind, owner, 'virtual-table', entry.name, 'is declared as a virtual table but exists as an ordinary table');
+      } else if (entry.objectKind === 'table' && /^CREATE\s+VIRTUAL\s+TABLE/i.test(String(live.sql ?? ''))) {
+        push('object-kind', ownerKind, owner, 'table', entry.name, 'is declared as an ordinary table but exists as a virtual table');
+      }
+    }
+    const observed = db.prepare("SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND type IN ('table', 'index', 'trigger')").all()
+      .map((row) => ({
+        type: (String(row.type) === 'table' && /^CREATE\s+VIRTUAL\s+TABLE/i.test(String(row.sql ?? '')) ? 'virtual-table' : String(row.type)) as ObjectKind,
+        name: String(row.name),
+      } satisfies CatalogObject));
+    for (const object of observed) {
+      if (classifyObservedObject(object, census).kind === 'undeclared') {
+        push('undeclared-object', 'undeclared', 'undeclared', object.type, object.name, 'exists in the live schema but is absent from the lifecycle census');
+      }
+    }
   }
   return errors;
 }
