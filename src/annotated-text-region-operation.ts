@@ -142,7 +142,7 @@ export function annotatedTextOperation<E extends { name: string; fields?: Record
   });
 }
 
-function compiledDeclarationFor(handle: AnnotatedTextOperationHandle, entities: ReadonlyMap<string, any>): { descriptor: any; compiledMeta: any; fields: Record<string, any> } {
+function compiledDeclarationFor(handle: AnnotatedTextOperationHandle, entities: ReadonlyMap<string, any>): { entity: any; descriptor: any; compiledMeta: any; fields: Record<string, any> } {
   const entity = entities.get(handle.entity);
   const descriptor = entity?.fields?.[handle.field];
   if (!entity || !descriptor || descriptor.kind !== 'annotatedText') {
@@ -150,7 +150,7 @@ function compiledDeclarationFor(handle: AnnotatedTextOperationHandle, entities: 
   }
   const compiledMeta = getAnnotatedTextCompiledMetadata(descriptor);
   if (!compiledMeta) throw new Error(`annotatedTextOperation declaration '${handle.entity}.${handle.field}' is not compiled`);
-  return { descriptor, compiledMeta, fields: entity.fields };
+  return { entity, descriptor, compiledMeta, fields: entity.fields };
 }
 
 function loadPlanContext(dbInTxn: DbHandle, prefix: string, documentId: string, entity: string, field: string, compiledMeta: any, descriptor: any) {
@@ -277,7 +277,7 @@ export function compileRegionFieldPolicy(
   entities: ReadonlyMap<string, any>,
   appDb: unknown,
 ): CompiledRegionFieldPolicy {
-  const { descriptor, compiledMeta, fields } = compiledDeclarationFor(handle, entities);
+  const { entity, descriptor, compiledMeta, fields } = compiledDeclarationFor(handle, entities);
   const prefix = `${handle.entity}_${handle.field}`;
   const fieldGrantCheck = write;
 
@@ -307,7 +307,7 @@ export function compileRegionFieldPolicy(
       }
       // Mandatory in-transaction annotated field admission; the outer action
       // authorization never substitutes for field authorization.
-      await authorizeFieldOp({ name: handle.entity, fields } as any, handle.field, fieldGrantCheck as unknown as string, row, principal);
+      await authorizeFieldOp(entity, handle.field, fieldGrantCheck as unknown as string, row, principal);
        const { family, annotations, regionDeclarations, structureVersion } = loadPlanContext(dbInTxn, prefix, documentId, handle.entity, handle.field, compiledMeta, descriptor);
       const actor = createHash('sha256')
         .update(`${handle.entity}\u0000${handle.field}\u0000${documentId}\u0000${principal?.id ?? ''}\u0000${owners.scope}`)
