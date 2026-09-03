@@ -84,7 +84,6 @@ interface OperatedFacts {
   ranges: Array<Record<string, unknown>>;
   measurements: Array<Record<string, unknown>>;
   emptiedAnnotations: Array<EmptiedAnnotationFact>;
-  annotationChanges: Array<Record<string, unknown>>;
   annotationUpdates: Array<Record<string, unknown>>;
   removedAnnotationIds: unknown[];
   family: unknown;
@@ -341,14 +340,6 @@ function canonicalToReplayPayload(canonical: CanonicalOperatedEvent): OperatedEn
     case 'text.replace':
       operation = Object.freeze({ kind: 'text.replace', operations: [...canonical.operations] as Array<Record<string, unknown>> });
       break;
-    case 'annotation.paste':
-      operation = Object.freeze({
-        kind: 'annotation.paste',
-        operation: canonical.operation,
-        annotation: canonical.annotation as Record<string, unknown> | undefined,
-        selection: canonical.selection,
-      });
-      break;
     case 'annotation.apply-range':
       operation = Object.freeze({
         kind: 'annotation.apply-range',
@@ -413,7 +404,6 @@ function projectFromCanonical({ name, handle, db, descriptor, canonical }: {
   switch (canonical.kind) {
     case 'text.apply': return projectBlocklessTextApply({ name, handle, db, descriptor, data });
     case 'text.replace': return projectBlocklessTextReplace({ name, handle, db, descriptor, data });
-    case 'annotation.paste': return projectBlocklessAnnotationPaste({ name, handle, db, descriptor, data });
     case 'annotation.apply-range': return projectBlocklessAnnotationApplyRange({ name, handle, db, descriptor, data });
     case 'annotation.remove': return projectBlocklessAnnotationRemove({ name, handle, db, data });
     default: throw new Error(`${name}.${handle.field}.operated event has unknown operation kind`);
@@ -467,38 +457,6 @@ function projectBlocklessTextReplace({ name, handle, db, descriptor, data }: { n
   db.prepare(`UPDATE ${prefix}_state SET structure_version = ?, family_checkpoint = ? WHERE document_id = ?`).run(data.after.structuralRevision, serializeCompactTextFamilyCheckpoint(next), data.id);
   applyEmptiedAnnotationDispositions({ name, handle, db, prefix, data });
   applyAnnotationUpdateFacts({ name, handle, db, prefix, descriptor, data });
-}
-
-/**
- * Project an annotation paste event (text insert + annotation apply). Validates
- * the envelope, applies the text operation, then projects the range annotation
- * onto the inserted text. Annotation-update facts ride the same event.
- */
-function projectBlocklessAnnotationPaste({ name, handle, db, descriptor, data }: { name: string; handle: NativeEventHandle; db: Db; descriptor: FieldDescriptor; data: OperatedEnvelope }) {
-  const prefix = `${name}_${handle.field}`;
-  const operation = data.operation;
-  const f = data.facts;
-  if (!operation || !operation.operation || !Array.isArray(operation.operation) ||
-      !operation.annotation || !operation.selection || !isTextRevision(data.before) || !isTextRevision(data.after)) throw new Error(`${name}.${handle.field}.operated v${data.version} annotation.paste event has invalid data`);
-  const currentRow = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(data.id);
-  if (!currentRow) throw new Error(`${name}.${handle.field}.operated v13 document does not exist`);
-  const current = restoreTextFamilySerialized(currentRow.family_checkpoint as string);
-  if (currentRow.structure_version !== data.before.structuralRevision ||
-      JSON.stringify(current.checkpoint.frontier) !== JSON.stringify(data.before.frontier)) throw new Error(`${name}.${handle.field}.operated v13 event conflicts with projection state`);
-  let canonical;
-  try { canonical = canonicalTextOp(operation.operation); } catch { throw new Error(`${name}.${handle.field}.operated v13 text operation is invalid`); }
-  if (JSON.stringify(canonical[4]) !== JSON.stringify(data.before.frontier)) throw new Error(`${name}.${handle.field}.operated v13 text operation has the wrong frontier`);
-  let next;
-  try { next = applyContinuousTextOperation(current, canonical); } catch { throw new Error(`${name}.${handle.field}.operated v13 text operation is not applicable to prior state`); }
-  if (JSON.stringify(data.after.frontier) !== JSON.stringify(next.checkpoint.frontier)) throw new Error(`${name}.${handle.field}.operated v13 family does not match the paste operation`);
-  db.prepare(`UPDATE ${prefix}_state SET structure_version = ?, family_checkpoint = ? WHERE document_id = ?`).run(data.after.structuralRevision, serializeCompactTextFamilyCheckpoint(next), data.id);
-  applyEmptiedAnnotationDispositions({ name, handle, db, prefix, data });
-  applyAnnotationUpdateFacts({ name, handle, db, prefix, descriptor, data });
-  // Project the range membership for the pasted annotation.
-  const annotationOpMeta = operation.annotation as Record<string, unknown>;
-  db.prepare(`INSERT OR REPLACE INTO ${prefix}_annotation (id, family, document_id) VALUES (?, ?, ?)`).run(annotationOpMeta.id, annotationOpMeta.family, data.id);
-  const selection = operation.selection as { startOffset?: unknown; endOffset?: unknown };
-  projectBlocklessAnnotationApplyRange({ name, handle, db, descriptor, data });
 }
 
 function applyEmptiedAnnotationDispositions({ name, handle, db, prefix, data }: { name: string; handle: NativeEventHandle; db: Db; prefix: string; data: OperatedEnvelope }) {
@@ -555,7 +513,7 @@ function applyAnnotationUpdateFacts({ name, handle, db, prefix, descriptor, data
     } catch {
       throw new Error(`${name}.${handle.field}.operated v${data.version} annotation update value is invalid`);
     }
-    db.prepare(`UPDATE ${prefix}_annotation_${stored.family} SET ${fieldNames.join(', ')} WHERE annotation_id = ?`).run(...values, annotationId);
+    db.prepare(`UPDATE ${prefix}_annotation_${stored.family} SET ${fieldNames.map((f) => `${f} = ?`).join(', ')} WHERE annotation_id = ?`).run(...values, annotationId);
   }
 }
 

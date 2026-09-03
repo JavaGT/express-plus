@@ -128,6 +128,122 @@ function ordinalsByEncounterOrder(ranges: ReadonlyArray<{ annotationId: string; 
   });
 }
 
+/**
+ * Capture pre-image data for annotations affected by edit-overlap behavior
+ * (Decision 0025 policy 4 / M4). Reads the DB before projection applies the
+ * overlap side effects, so annotations and their typed rows still exist.
+ * Returns null when no overlap side effects are present.
+ */
+function captureOverlapPreImages(db: any, { prefix, documentId, descriptor, planFacts }: {
+  prefix: string; documentId: string; descriptor: FieldDescriptor; planFacts: any;
+}): { removedAnnotations: Array<{ annotationId: string; family: string; fields: Record<string, unknown>; empty: string; rangeId: number | null; ordinal: number }>; patchedAnnotations: Array<{ annotationId: string; family: string; originalFields: Record<string, unknown>; newFields: Record<string, unknown> }> } | null {
+  const emptied = planFacts?.emptiedAnnotations as Array<{ annotationId: string; empty: string }> | undefined;
+  const updates = planFacts?.annotationUpdates as Array<{ annotationId: string; fields: Record<string, unknown> }> | undefined;
+  if ((!emptied || emptied.length === 0) && (!updates || updates.length === 0)) return null;
+  const declarations = (descriptor.annotations ?? []) as Array<{ annotationName: string; fields: Record<string, unknown> }>;
+  const removed: Array<any> = [];
+  const patched: Array<any> = [];
+  if (emptied && emptied.length > 0) {
+    for (const entry of emptied) {
+      const ann = db.prepare(`SELECT id, family FROM ${prefix}_annotation WHERE id = ? AND document_id = ?`).get(entry.annotationId, documentId) as { id: string; family: string } | undefined;
+      if (!ann) continue;
+      const typed = db.prepare(`SELECT * FROM ${prefix}_annotation_${ann.family} WHERE annotation_id = ?`).get(entry.annotationId) as Record<string, unknown> | undefined;
+      const membership = db.prepare(`SELECT range_id, ordinal FROM ${prefix}_membership WHERE annotation_id = ?`).get(entry.annotationId) as { range_id: number; ordinal: number } | undefined;
+      const decl = declarations.find((d) => d.annotationName === ann.family);
+      const fields: Record<string, unknown> = {};
+      if (decl && typed) {
+        for (const [key, desc] of Object.entries(decl.fields)) {
+          fields[key] = deserializeField(desc as any, (typed as Record<string, unknown>)[key]);
+        }
+      }
+      removed.push({ annotationId: entry.annotationId, family: ann.family, fields, empty: entry.empty, rangeId: membership?.range_id ?? null, ordinal: membership?.ordinal ?? 0 });
+    }
+  }
+  if (updates && updates.length > 0) {
+    const updatesById = new Map(updates.map((u) => [u.annotationId, u.fields]));
+    for (const update of updates) {
+      const ann = db.prepare(`SELECT id, family FROM ${prefix}_annotation WHERE id = ? AND document_id = ?`).get(update.annotationId, documentId) as { id: string; family: string } | undefined;
+      if (!ann) continue;
+      const typed = db.prepare(`SELECT * FROM ${prefix}_annotation_${ann.family} WHERE annotation_id = ?`).get(update.annotationId) as Record<string, unknown> | undefined;
+      const decl = declarations.find((d) => d.annotationName === ann.family);
+      const originalFields: Record<string, unknown> = {};
+      if (decl && typed) {
+        for (const [key, desc] of Object.entries(decl.fields)) {
+          originalFields[key] = deserializeField(desc as any, (typed as Record<string, unknown>)[key]);
+        }
+      }
+      patched.push({ annotationId: update.annotationId, family: ann.family, originalFields, newFields: { ...(updatesById.get(update.annotationId) ?? {}) } });
+    }
+  }
+  return { removedAnnotations: removed, patchedAnnotations: patched };
+}
+
+/**
+ * Apply or reverse overlap side effects for undo/redo compensation (M4).
+ * Called AFTER the text operation has been applied. Undo re-creates removed
+ * annotations and restores original field values; redo re-deletes and re-applies.
+ */
+function applyOverlapSideEffects(db: any, { prefix, descriptor, payload, sourceFact, direction }: {
+  prefix: string; descriptor: FieldDescriptor; payload: any; sourceFact: any; direction: string;
+}): void {
+  const declarations = (descriptor.annotations ?? []) as Array<{ annotationName: string; fields: Record<string, unknown> }>;
+  if (direction === 'undo') {
+    const removals = sourceFact.overlapRemovals as Array<any> | undefined;
+    if (removals && removals.length > 0) {
+      for (const removal of removals) {
+        db.prepare(`INSERT INTO ${prefix}_annotation (id, family, document_id) VALUES (?, ?, ?)`).run(removal.annotationId, removal.family, payload.id);
+        const decl = declarations.find((d) => d.annotationName === removal.family);
+        if (decl) {
+          const fieldNames = Object.keys(removal.fields);
+          if (fieldNames.length > 0) {
+            const values = fieldNames.map((key) => serializeField(decl.fields[key] as any, removal.fields[key]));
+            db.prepare(`INSERT INTO ${prefix}_annotation_${removal.family} (annotation_id, ${fieldNames.join(', ')}) VALUES (?, ${fieldNames.map(() => '?').join(', ')})`).run(removal.annotationId, ...values);
+          }
+        }
+        if (removal.rangeId !== null) {
+          db.prepare(`INSERT INTO ${prefix}_membership (annotation_id, range_id, document_id, ordinal) VALUES (?, ?, ?, ?)`).run(removal.annotationId, removal.rangeId, payload.id, removal.ordinal);
+        }
+      }
+    }
+    const patches = sourceFact.overlapPatches as Array<any> | undefined;
+    if (patches && patches.length > 0) {
+      for (const patch of patches) {
+        const decl = declarations.find((d) => d.annotationName === patch.family);
+        if (decl) {
+          const fieldNames = Object.keys(patch.originalFields);
+          if (fieldNames.length > 0) {
+            const values = fieldNames.map((key) => serializeField(decl.fields[key] as any, patch.originalFields[key]));
+            db.prepare(`UPDATE ${prefix}_annotation_${patch.family} SET ${fieldNames.map((f) => `${f} = ?`).join(', ')} WHERE annotation_id = ?`).run(...values, patch.annotationId);
+          }
+        }
+      }
+    }
+  } else if (direction === 'redo') {
+    const removals = sourceFact.overlapRemovals as Array<any> | undefined;
+    if (removals && removals.length > 0) {
+      for (const removal of removals) {
+        db.prepare(`DELETE FROM ${prefix}_membership WHERE annotation_id = ?`).run(removal.annotationId);
+        db.prepare(`DELETE FROM ${prefix}_annotation_protected_target WHERE annotation_id = ? OR target_annotation_id = ?`).run(removal.annotationId, removal.annotationId);
+        db.prepare(`DELETE FROM ${prefix}_annotation_${removal.family} WHERE annotation_id = ?`).run(removal.annotationId);
+        db.prepare(`DELETE FROM ${prefix}_annotation WHERE id = ?`).run(removal.annotationId);
+      }
+    }
+    const patches = sourceFact.overlapPatches as Array<any> | undefined;
+    if (patches && patches.length > 0) {
+      for (const patch of patches) {
+        const decl = declarations.find((d) => d.annotationName === patch.family);
+        if (decl) {
+          const fieldNames = Object.keys(patch.newFields);
+          if (fieldNames.length > 0) {
+            const values = fieldNames.map((key) => serializeField(decl.fields[key] as any, patch.newFields[key]));
+            db.prepare(`UPDATE ${prefix}_annotation_${patch.family} SET ${fieldNames.map((f) => `${f} = ?`).join(', ')} WHERE annotation_id = ?`).run(...values, patch.annotationId);
+          }
+        }
+      }
+    }
+  }
+}
+
 interface AnnotationUpdateTransition {
   kind: 'annotation.update';
   annotationId: string;
@@ -940,6 +1056,10 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         }
         if (!operation) return { events: [], privateFact: { version: 2, kind: 'annotated-text.compensation', documentId: payload.id, linkage: { rootActionId: payload.history.rootActionId, targetActionId: payload.history.targetActionId, direction: payload.history.direction, outcome: 'noop' } }, historyOutcome: 'noop' };
         const nextFamily = applyTextOperation(family, operation);
+        // M4: Apply or reverse overlap side effects atomically with the text operation.
+        if (sourceFact.overlapRemovals || sourceFact.overlapPatches) {
+          applyOverlapSideEffects(db, { prefix, descriptor, payload, sourceFact, direction: payload.history.direction });
+        }
         const handle = eventHandles.native(name, fieldName, 'operated');
         const compensation: Record<string, any> = { version: 2, kind: 'annotated-text.compensation', documentId: payload.id, linkage: { rootActionId: payload.history.rootActionId, targetActionId: payload.history.targetActionId, direction: payload.history.direction, outcome: 'applied' }, contribution: { kind: 'text.insert', opId: operation[2], anchor: contribution.anchor, text: contribution.text, scalarCount: contribution.scalarCount } };
         if (payload.history.direction === 'undo') compensation.redo = { kind: 'text.insert', opId: originalOp, anchor: contribution.anchor, text: contribution.text, scalarCount: contribution.scalarCount };
@@ -957,7 +1077,20 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       return Promise.resolve(r1Handler({ payload, db, scope, principal, actionId })).then((events: any) => {
         if (payload.version !== 9) return events;
         const originFact = command.edit.kind === 'text.insert' || command.edit.kind === 'annotation.paste'
-          ? { version: 2, kind: 'annotated-text.contribution', documentId: command.id, contribution: { kind: 'text.insert', opId: events[0].data.operation.operation[2], anchor: events[0].data.operation.operation[5][1], text: command.edit.text, scalarCount: scalarCount(command.edit.text) } }
+          ? (() => {
+            const fact: Record<string, any> = { version: 2, kind: 'annotated-text.contribution', documentId: command.id, contribution: { kind: 'text.insert', opId: events[0].data.operation.operation[2], anchor: events[0].data.operation.operation[5][1], text: command.edit.text, scalarCount: scalarCount(command.edit.text) } };
+            // M4: Capture overlap side effects (removed annotations + field patches)
+            // so undo/redo can reverse them atomically with the text operation.
+            const planFacts = events[0]?.data?.facts;
+            if (planFacts) {
+              const overlapPre = captureOverlapPreImages(db, { prefix, documentId: command.id, descriptor, planFacts });
+              if (overlapPre && (overlapPre.removedAnnotations.length > 0 || overlapPre.patchedAnnotations.length > 0)) {
+                fact.overlapRemovals = overlapPre.removedAnnotations;
+                fact.overlapPatches = overlapPre.patchedAnnotations;
+              }
+            }
+            return fact;
+          })()
           : command.edit.kind === 'annotation.update'
             ? (() => {
               // #174: capture the WHOLE pre-image (and the edges that stay

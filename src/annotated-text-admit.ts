@@ -15,7 +15,7 @@ import { applyTextOperation, restoreTextFamilySerialized, materializeText, textF
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.ts';
 import { resolveStream, resolveLease, resolvePosition } from './annotated-text-authoring-stream.ts';
 import { readSeq } from './committed-log.ts';
-import { planAnnotationPaste, planAnnotationRemove, planAnnotationUpdate, planTextOffsetEdit, planTextRangeApply, type EditOverlapBehavior } from './annotated-text-plan.ts';
+import { planAnnotationRemove, planAnnotationUpdate, planTextOffsetEdit, planTextRangeApply, type EditOverlapBehavior } from './annotated-text-plan.ts';
 import { mapVisibleOffsetToCanonical, authoringRedactionsForRecipient, type AuthoringRedaction } from './annotated-text-recipient-projection.ts';
 import { projectAnnotatedTextSnapshot } from './annotated-text-snapshot.ts';
 import type { StructuralEndpoint } from './annotated-text-family.ts';
@@ -591,9 +591,18 @@ async function admitAnnotationPaste(ctx: V9Prelude & { edit: V9EditLoose }): Pro
   const pastedAnnotation = edit.annotation;
   const familyMeta = compiledMeta.annotationHandles[pastedAnnotation.family];
   if (!familyMeta) throw new ValidationError(`${ctx.name}.${ctx.fieldName}.operation unknown annotation family`, { code: 'position-invalid' });
+  // Build edit-overlap behaviors from compiled annotation handles (Decision 0025 policy 4).
+  const editOverlapByFamily: Record<string, EditOverlapBehavior> = {};
+  for (const [familyName, meta] of Object.entries(ctx.compiledMeta.annotationHandles as Record<string, any>)) {
+    if (meta.editOverlap) editOverlapByFamily[familyName] = meta.editOverlap;
+  }
+  const textAnnotations = loadAnnotations({ db, prefix, compiledMeta: ctx.compiledMeta, documentId: command.id });
+  const textRanges = loadRanges({ db, prefix, documentId: command.id });
+  const textAnnotationFields = loadAnnotationFields({ db, prefix, compiledMeta: ctx.compiledMeta, descriptor: ctx.descriptor, annotations: textAnnotations });
   const insertPlan = planTextOffsetEdit({
     documentId: command.id, structureVersion: state.structure_version, family, actor, lamport,
     edit: { kind: 'text.insert', at: { offset: edit.at.offset, affinity: edit.at.affinity }, text: edit.text },
+    editOverlapByFamily, annotationFields: textAnnotationFields,
   });
   const insertedFamily = applyTextOperation(family, insertPlan.operation.operation);
   const id = randomUUID();

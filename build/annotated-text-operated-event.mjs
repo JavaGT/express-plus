@@ -34,7 +34,6 @@ import {
 export const OPERATED_FACT_KEYS = [
   'actorId',
   'annotation',
-  'annotationChanges',
   'annotationUpdates',
   'emptiedAnnotations',
   'family',
@@ -49,20 +48,6 @@ export const OPERATED_FACT_KEYS = [
 export const OPERATED_ENVELOPE_KEYS = ['after', 'before', 'facts', 'id', 'operation', 'version']         ;
 
 const V15_PROOF_KEYS = ['affectedIds', 'afterDigest', 'beforeDigest']         ;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -186,13 +171,11 @@ const V15_PROOF_KEYS = ['affectedIds', 'afterDigest', 'beforeDigest']         ;
 
 
 
-
 export function packOperatedFacts(data                                                      )                {
   const arrays = (value         ) => Object.freeze(value ?? []);
   return Object.freeze({
-  family: data.family ?? null,
-  annotation: data.annotation ?? null,
-    annotationChanges: arrays(data.annotationChanges),
+    family: data.family ?? null,
+    annotation: data.annotation ?? null,
     annotationUpdates: arrays(data.annotationUpdates),
     ranges: arrays(data.ranges),
     measurements: arrays(data.measurements),
@@ -227,11 +210,16 @@ function isTextRevision(value         )                        {
 }
 
 function parseFacts(facts         , entity        , field        , version         )                {
-  if (!isPlainObject(facts) || !exactKeys(facts, OPERATED_FACT_KEYS)) invalidEnvelope(entity, field, version);
+  if (!isPlainObject(facts)) invalidEnvelope(entity, field, version);
   const f = facts                           ;
+  // Accept both the legacy 10-key set (v13/v14 events stored before
+  // annotationUpdates was added) and the current 11-key set. The new key
+  // must be an array when present.
+  const hasAnnotationUpdates = Object.hasOwn(f, 'annotationUpdates');
+  const expectedKeys = hasAnnotationUpdates ? OPERATED_FACT_KEYS : OPERATED_FACT_KEYS.filter((k) => k !== 'annotationUpdates');
+  if (!exactKeys(f, expectedKeys)) invalidEnvelope(entity, field, version);
+  if (hasAnnotationUpdates && !Array.isArray(f.annotationUpdates)) invalidEnvelope(entity, field, version);
   if (!Array.isArray(f.ranges) || !Array.isArray(f.measurements) || !Array.isArray(f.emptiedAnnotations) || !Array.isArray(f.removedAnnotationIds)
-    || !Array.isArray(f.annotationChanges)
-    || !Array.isArray(f.annotationUpdates)
     || (f.family !== null && (!f.family || typeof f.family !== 'object'))
     || (f.annotation !== null && (!f.annotation || typeof f.annotation !== 'object'))
     || (f.lifecycle !== null && (!f.lifecycle || typeof f.lifecycle !== 'object'))
@@ -681,23 +669,6 @@ export function normalizeOperatedEvent(raw         , context                    
       wireVersion: version,
     });
   }
-  if (kind === 'annotation.paste' && exactKeys(operation, ['annotation', 'kind', 'operation', 'selection'])
-    && Array.isArray(operation.operation)
-    && operation.annotation && typeof operation.annotation === 'object' && !Array.isArray(operation.annotation)
-    && operation.selection && typeof operation.selection === 'object' && !Array.isArray(operation.selection)) {
-    return Object.freeze({
-      kind: 'annotation.paste',
-      id: raw.id,
-      before: raw.before,
-      after: raw.after,
-      operation: operation.operation,
-      annotation: operation.annotation,
-      selection: operation.selection,
-      facts,
-      familyProof,
-      wireVersion: version,
-    });
-  }
   if (kind === 'annotation.apply-range' && exactKeys(operation, ['annotation', 'kind', 'selection'])) {
     return Object.freeze({
       kind: 'annotation.apply-range',
@@ -902,7 +873,6 @@ export function constructV13OperatedEvent(data
 
 
 
-
  )                       {
   return Object.freeze({
     version: 13,
@@ -915,7 +885,6 @@ export function constructV13OperatedEvent(data
 }
 
 export function constructV14OperatedEvent(data
-
 
 
 
