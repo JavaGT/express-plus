@@ -24,15 +24,21 @@ import { admitsInvitationRemoval, admitInvitationAcceptance } from '../auth/invi
 import { clearAuthoringState, issueAuthoringSnapshot, buildAuthoringEnvelope, readAnnotatedTextFamilyCheckpoint } from '../annotated-text-authoring-stream.ts';
 import { admitV9AnnotatedTextEdit, assertV9AuthoringBinding as assertV9AuthoringBindingFromAdmit } from '../annotated-text-admit.ts';
 import { constructV14OperatedEvent } from '../annotated-text-operated-event.ts';
-import { applyTextOperation, compactTextFamilyCheckpoint, materializeText, projectEndpointToOffset, restoreTextFamilySerialized, textFamilyBasis } from '../annotated-text-continuous.ts';
+import { applyTextOperation, compactTextFamilyCheckpoint, materializeText, projectEndpointToOffset, resolveOffsetToEndpoint, restoreTextFamilySerialized, textFamilyBasis, type ContinuousTextFamily } from '../annotated-text-continuous.ts';
 import { projectAnnotatedTextSnapshot } from '../annotated-text-snapshot.ts';
 import { authoringRedactionsForRecipient } from '../annotated-text-recipient-projection.ts';
 import { mapVisibleOffsetToCanonical } from '../annotated-text-recipient-projection.ts';
 import { planAnnotationRemove, planTextRangeApply } from '../annotated-text-plan.ts';
-import { annotationRangeRows, loadAnnotationImages } from '../annotated-text-storage.ts';
+import { annotationRangeRows, attachAnnotationRange, loadAnnotationImages } from '../annotated-text-storage.ts';
 import { canonicalEndpointJSON } from '../annotated-text-delete-history-shared.ts';
+import { rgaTraversal } from '../annotated-text-family.ts';
 import { assertUtf16Range } from '../annotated-text.ts';
 import { rawRow } from './query.ts';
+import {
+  captureDeleteContribution,
+  type DeleteContribution,
+  type StoredAnnotationImage,
+} from '../annotated-text-delete-history.ts';
 
 export const CRUD_CURSOR_POLICY = Symbol('workbench.crud-cursor-policy');
 /**
@@ -113,6 +119,268 @@ function liveStateMatchesAnnotationUpdateImage(db: any, options: { prefix: strin
   });
   if (!live) return false;
   return annotationUpdateImagesEqual(live, options.expected);
+}
+
+type HistoryAnnotationTransition = Readonly<{
+  before: readonly StoredAnnotationImage[];
+  after: readonly StoredAnnotationImage[];
+}>;
+
+function historyAnnotationDeclarations(descriptor: any): Array<{
+  annotationName: string;
+  fields: Record<string, unknown>;
+  empty?: string;
+  cardinality?: string;
+}> {
+  return ((descriptor.annotations ?? []) as Array<any>).map((annotation: any) => ({
+    annotationName: annotation.annotationName,
+    fields: annotation.fields ?? {},
+    ...(annotation.empty === undefined ? {} : { empty: annotation.empty }),
+    ...(annotation.cardinality === undefined ? {} : { cardinality: annotation.cardinality }),
+  }));
+}
+
+/** Add the absolute text offsets needed to re-anchor a historical range. */
+function historyImageWithOffsets(image: StoredAnnotationImage, family: ReturnType<typeof restoreTextFamilySerialized>): StoredAnnotationImage {
+  return {
+    ...image,
+    memberships: image.memberships.map((membership) => ({
+      ordinal: membership.ordinal,
+      start: membership.start,
+      end: membership.end,
+    })),
+    rangeOffsets: image.memberships.map((membership) => ({
+      ordinal: membership.ordinal,
+      start: projectEndpointToOffset(family, membership.start),
+      end: projectEndpointToOffset(family, membership.end),
+    })),
+  };
+}
+
+function storedFieldsFromPostimage(rawFields: Record<string, unknown>, declaration: any): Record<string, unknown> {
+  const fields: Record<string, unknown> = {};
+  for (const fieldName of Object.keys(declaration?.fields ?? {}).sort()) {
+    fields[fieldName] = serializeField(declaration.fields[fieldName], rawFields[fieldName]);
+  }
+  return fields;
+}
+
+function annotationPrerequisitesFromStoredFields(fields: Record<string, unknown>, declaration: any): Array<{ entity: string; id: string }> {
+  return Object.keys(declaration?.fields ?? {}).sort().flatMap((fieldName) => {
+    const field = declaration.fields[fieldName] as any;
+    const value = fields[fieldName];
+    if (field?.type !== 'ref' || value === null || value === undefined) return [];
+    const target = typeof field.target === 'string' ? field.target : field.target?.name;
+    return typeof target === 'string' && target.length > 0 ? [{ entity: target, id: String(value) }] : [];
+  });
+}
+
+/** Convert the planner's typed postimage marker back to canonical stored cells. */
+function storedImagesFromTextPostimage({
+  marker,
+  descriptor,
+  family,
+  beforeById,
+}: {
+  marker: any;
+  descriptor: FieldDescriptor;
+  family: ReturnType<typeof restoreTextFamilySerialized>;
+  beforeById: ReadonlyMap<string, StoredAnnotationImage>;
+}): StoredAnnotationImage[] {
+  if (!marker || marker.kind !== 'text-edit-postimage' || !Array.isArray(marker.annotations)) return [];
+  return marker.annotations.map((raw: any) => {
+    const declaration = ((descriptor as any).annotations ?? []).find((entry: any) => entry.annotationName === raw.family) as any;
+    if (!declaration) throw new ValidationError(`annotated text postimage family '${String(raw.family)}' is not declared`);
+    const fields = storedFieldsFromPostimage(raw.fields ?? {}, declaration);
+    const memberships = (raw.memberships ?? []).map((membership: any, ordinal: number) => ({
+      ordinal,
+      start: membership.start,
+      end: membership.end,
+    }));
+    const prior = beforeById.get(raw.id);
+    const image: StoredAnnotationImage = {
+      id: raw.id,
+      family: raw.family,
+      empty: raw.empty === 'orphan' ? 'orphan' : 'delete',
+      cardinality: raw.cardinality === 'one' ? 'one' : 'many',
+      fields,
+      protectedTargetIds: [...(raw.protectedTargetIds ?? [])].sort(),
+      memberships,
+      prerequisites: annotationPrerequisitesFromStoredFields(fields, declaration),
+      orphan: raw.orphan ?? null,
+    };
+    // Ref prerequisites do not change during a text edit, but retaining the
+    // captured set preserves the exact target identity for custom ref shapes.
+    const withPrerequisites = prior && JSON.stringify(prior.prerequisites) === JSON.stringify(image.prerequisites)
+      ? { ...image, prerequisites: prior.prerequisites }
+      : image;
+    return historyImageWithOffsets(withPrerequisites, family);
+  });
+}
+
+function storedImageCore(image: StoredAnnotationImage): Record<string, unknown> {
+  return {
+    id: image.id,
+    family: image.family,
+    empty: image.empty ?? null,
+    cardinality: image.cardinality ?? null,
+    fields: Object.fromEntries(Object.keys(image.fields).sort().map((name) => [name, image.fields[name]])),
+    protectedTargetIds: [...image.protectedTargetIds].sort(),
+    memberships: [...image.memberships]
+      .sort((left, right) => left.ordinal - right.ordinal)
+      .map((membership) => ({ ordinal: membership.ordinal, start: canonicalEndpointJSON(membership.start), end: canonicalEndpointJSON(membership.end) })),
+    orphan: image.orphan ?? null,
+  };
+}
+
+function historyImagesEqual(left: StoredAnnotationImage, right: StoredAnnotationImage): boolean {
+  return JSON.stringify(storedImageCore(left)) === JSON.stringify(storedImageCore(right));
+}
+
+/** Capture only annotation rows whose postimage changed with the text edit. */
+function textAnnotationTransition({
+  before,
+  after,
+  beforeFamily,
+  afterFamily,
+}: {
+  before: readonly StoredAnnotationImage[];
+  after: readonly StoredAnnotationImage[];
+  beforeFamily: ReturnType<typeof restoreTextFamilySerialized>;
+  afterFamily: ReturnType<typeof restoreTextFamilySerialized>;
+}): HistoryAnnotationTransition | undefined {
+  const beforePrepared = before.map((image) => historyImageWithOffsets(image, beforeFamily));
+  const afterPrepared = after.map((image) => historyImageWithOffsets(image, afterFamily));
+  const beforeById = new Map(beforePrepared.map((image) => [image.id, image]));
+  const afterById = new Map(afterPrepared.map((image) => [image.id, image]));
+  const changed = new Set<string>();
+  for (const id of new Set([...beforeById.keys(), ...afterById.keys()])) {
+    const left = beforeById.get(id);
+    const right = afterById.get(id);
+    if (!left || !right || !historyImagesEqual(left, right)) changed.add(id);
+  }
+  if (changed.size === 0) return undefined;
+  return Object.freeze({
+    before: Object.freeze([...beforePrepared].filter((image) => changed.has(image.id)).sort((left, right) => left.id.localeCompare(right.id))),
+    after: Object.freeze([...afterPrepared].filter((image) => changed.has(image.id)).sort((left, right) => left.id.localeCompare(right.id))),
+  });
+}
+
+function textFamilyAfterEvent(family: ReturnType<typeof restoreTextFamilySerialized>, data: any): ReturnType<typeof restoreTextFamilySerialized> {
+  let next = family;
+  if (data.operation?.kind === 'text.apply') {
+    next = applyTextOperation(next, canonicalTextOp(data.operation.operation));
+  } else if (data.operation?.kind === 'text.replace' && Array.isArray(data.operation.operations)) {
+    for (const operation of data.operation.operations) next = applyTextOperation(next, canonicalTextOp(operation));
+  }
+  return next;
+}
+
+function captureNativeTextHistory({
+  command,
+  events,
+  beforeFamily,
+  beforeImages,
+  descriptor,
+}: {
+  command: any;
+  events: any[];
+  beforeFamily: ReturnType<typeof restoreTextFamilySerialized>;
+  beforeImages: readonly StoredAnnotationImage[];
+  descriptor: any;
+}): Record<string, unknown> {
+  const data = events[0]?.data;
+  if (!data) throw new ValidationError('annotated text operation did not emit an event');
+  const afterFamily = textFamilyAfterEvent(beforeFamily, data);
+  const declarations = historyAnnotationDeclarations(descriptor);
+  const beforePrepared = beforeImages.map((image) => historyImageWithOffsets(image, beforeFamily));
+  const beforeById = new Map(beforePrepared.map((image) => [image.id, image]));
+  const afterImages = storedImagesFromTextPostimage({ marker: data.facts?.result, descriptor, family: afterFamily, beforeById });
+  const transition = textAnnotationTransition({ before: beforePrepared, after: afterImages, beforeFamily, afterFamily });
+  const edit = command.edit as any;
+  if (edit.kind === 'text.delete' || edit.kind === 'text.replace') {
+    const marker = data.facts?.result;
+    const from = marker?.from;
+    const to = marker?.to;
+    if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || to <= from) {
+      throw new ValidationError('annotated text delete history has no valid edit window');
+    }
+    let inserted: DeleteContribution['inserted'];
+    if (edit.kind === 'text.replace') {
+      const rawOperation = data.operation?.operations?.[1];
+      const operation = canonicalTextOp(rawOperation) as any;
+      const payload = operation[5];
+      if (!Array.isArray(payload) || payload[0] !== 'insert') throw new ValidationError('annotated text replacement history has no insert contribution');
+      inserted = {
+        kind: 'text.insert',
+        opId: operation[2],
+        anchor: operation[5][1],
+        text: payload[2],
+        scalarCount: scalarCount(payload[2]),
+        at: from,
+      };
+    }
+    const postDeleteMemberships = new Map(afterImages.map((image) => [image.id, image.memberships]));
+    return captureDeleteContribution({
+      documentId: command.id,
+      family: beforeFamily,
+      fromUtf16: from,
+      toUtf16: to,
+      annotations: beforePrepared,
+      declarations,
+      postDeleteMemberships,
+      ...(transition === undefined ? {} : { annotationTransition: transition }),
+      ...(inserted === undefined ? {} : { inserted }),
+    });
+  }
+
+  if (edit.kind === 'text.insert' || edit.kind === 'annotation.paste') {
+    const operation = canonicalTextOp(data.operation.operation) as any;
+    const payload = operation[5];
+    if (!Array.isArray(payload) || payload[0] !== 'insert') throw new ValidationError('annotated text insert history has no insert contribution');
+    const contribution: Record<string, unknown> = {
+      kind: 'text.insert',
+      opId: operation[2],
+      anchor: payload[1],
+      text: payload[2],
+      scalarCount: scalarCount(payload[2]),
+    };
+    // A paste mints one fresh annotation over the inserted run. Bind its
+    // effect image (family, serialized fields, membership endpoints) into the
+    // contribution so undo/redo compensates text and annotation atomically.
+    // The image comes from the planner's complete postimage, converted back
+    // to stored cells above — never from the raw wire envelope.
+    if (edit.kind === 'annotation.paste') {
+      const createdId = (data.facts?.result as { createdAnnotationId?: unknown } | null)?.createdAnnotationId;
+      if (typeof createdId !== 'string' || createdId.length === 0) {
+        throw new ValidationError('annotated text paste history has no created annotation');
+      }
+      const created = afterImages.find((image) => image.id === createdId);
+      if (!created) throw new ValidationError('annotated text paste history has no created annotation');
+      contribution.createdAnnotation = {
+        id: created.id,
+        family: created.family,
+        fields: { ...created.fields },
+        protectedTargetIds: [...created.protectedTargetIds].sort(),
+        memberships: created.memberships.map((membership) => ({
+          ordinal: membership.ordinal,
+          start: membership.start,
+          end: membership.end,
+        })),
+        empty: created.empty ?? 'delete',
+      };
+    }
+    const fact: Record<string, unknown> = {
+      version: 2,
+      kind: 'annotated-text.contribution',
+      documentId: command.id,
+      contribution,
+    };
+    if (transition !== undefined) fact.annotationTransition = transition;
+    return fact;
+  }
+
+  return { version: 2, kind: 'annotated-text.barrier', documentId: command.id };
 }
 
 /**
@@ -335,6 +603,112 @@ function annotatedUpdateCompensation({ name, fieldName, prefix, db, scope, paylo
     compensation.redo = { kind: 'annotation.update', annotationId: step.annotationId, before: movingTo, after: movingFrom };
   }
   return { events: [event], privateFact: compensation, historyOutcome: 'applied' };
+}
+
+
+/**
+ * Paste-created annotation compensation (annotation.paste atomicity).
+ *
+ * A paste mints one fresh annotation over its inserted run; the origin
+ * contribution binds its effect image (`createdAnnotation`). Undo deletes the
+ * annotation row atomically with the text delete; redo re-creates the SAME id
+ * anchored to the fresh insert scalars. Both directions are
+ * compare-and-compensate: a live image that drifted (or a re-occupied id on
+ * redo) makes the whole move a durable no-op, never a partial restore.
+ */
+function createdAnnotationLiveMatches(db: any, prefix: string, documentId: string, created: any): boolean {
+  if (!created || typeof created.id !== 'string' || typeof created.family !== 'string') return false;
+  const live = db.prepare(`SELECT id, family FROM ${prefix}_annotation WHERE id = ? AND document_id = ?`).get(created.id, documentId) as { id: string; family: string } | undefined;
+  if (!live || live.family !== created.family) return false;
+  const typed = (() => {
+    try {
+      return db.prepare(`SELECT * FROM ${prefix}_annotation_${created.family} WHERE annotation_id = ?`).get(created.id) as Record<string, unknown> | undefined;
+    } catch {
+      return undefined;
+    }
+  })();
+  const expectedFields = created.fields ?? {};
+  const liveFields: Record<string, unknown> = {};
+  for (const key of Object.keys(expectedFields).sort()) {
+    liveFields[key] = typed?.[key] ?? null;
+  }
+  if (JSON.stringify(liveFields) !== JSON.stringify(Object.fromEntries(Object.keys(expectedFields).sort().map((key) => [key, (expectedFields as Record<string, unknown>)[key]])))) return false;
+  const rows = annotationRangeRows(db, prefix, documentId).filter((row) => row.annotation_id === created.id);
+  const expectedMemberships = (created.memberships ?? []) as Array<{ ordinal: number; start: unknown; end: unknown }>;
+  if (rows.length !== expectedMemberships.length) return false;
+  const liveSignatures = rows.map((row) => JSON.stringify([row.ordinal, canonicalEndpointJSON(JSON.parse(row.start_point)), canonicalEndpointJSON(JSON.parse(row.end_point))])).sort();
+  const expectedSignatures = expectedMemberships.map((entry) => JSON.stringify([entry.ordinal, canonicalEndpointJSON(entry.start), canonicalEndpointJSON(entry.end)])).sort();
+  return JSON.stringify(liveSignatures) === JSON.stringify(expectedSignatures);
+}
+
+function deleteCreatedAnnotation(db: any, prefix: string, annotationId: string, family: string): void {
+  db.prepare(`DELETE FROM ${prefix}_membership WHERE annotation_id = ?`).run(annotationId);
+  db.prepare(`DELETE FROM ${prefix}_annotation_protected_target WHERE annotation_id = ? OR target_annotation_id = ?`).run(annotationId, annotationId);
+  try {
+    db.prepare(`DELETE FROM ${prefix}_annotation_${family} WHERE annotation_id = ?`).run(annotationId);
+  } catch {
+    // Zero-field families have no extension table.
+  }
+  try {
+    db.prepare(`DELETE FROM ${prefix}_annotation_orphan_state WHERE annotation_id = ?`).run(annotationId);
+  } catch {
+    // Never orphaned by a paste, but stay total.
+  }
+  db.prepare(`DELETE FROM ${prefix}_annotation WHERE id = ?`).run(annotationId);
+}
+
+/** UTF-16 window of one op's live scalars in RGA order, or null. */
+function freshInsertWindow(family: ContinuousTextFamily, opId: readonly [string, number], scalarCountValue: number, text: string): { start: number; end: number } | null {
+  let offset = 0;
+  let first: number | null = null;
+  let width = 0;
+  let found = 0;
+  for (const [, element] of rgaTraversal(family.checkpoint)) {
+    if (element.deletedBy.length > 0) continue;
+    if (element.op[0] === opId[0] && element.op[1] === opId[1] && element.ordinal >= 0 && element.ordinal < scalarCountValue) {
+      if (first === null) first = offset;
+      width += element.scalar.length;
+      found += 1;
+    }
+    offset += element.scalar.length;
+  }
+  if (first === null || found !== scalarCountValue) return null;
+  if (materializeText(family).slice(first, first + width) !== text) return null;
+  return { start: first, end: first + width };
+}
+
+/**
+ * Build a paste-created annotation effect image directly from the planner's
+ * postimage marker. Used when the pre-edit capture was unavailable (the marker
+ * is the same canonical source the stored-image path converts): fields are
+ * serialized through the declaration, endpoints pass through as stored.
+ * Exported for unit testing; not part of the handler contract.
+ */
+export function createdAnnotationFromMarker(marker: any, descriptor: any): Record<string, unknown> {
+  const createdId = (marker as { createdAnnotationId?: unknown } | null)?.createdAnnotationId;
+  if (typeof createdId !== 'string' || createdId.length === 0) {
+    throw new ValidationError('annotated text paste history has no created annotation');
+  }
+  const raw = Array.isArray(marker.annotations)
+    ? (marker.annotations as Array<any>).find((entry) => entry?.id === createdId)
+    : undefined;
+  if (!raw) throw new ValidationError('annotated text paste history has no created annotation');
+  const declaration = ((descriptor as any).annotations ?? []).find((entry: any) => entry.annotationName === raw.family) as any;
+  if (!declaration) throw new ValidationError(`annotated text postimage family '${String(raw.family)}' is not declared`);
+  const memberships = (raw.memberships ?? []).map((membership: any, ordinal: number) => {
+    if (!membership || typeof membership !== 'object' || !membership.start || !membership.end) {
+      throw new ValidationError('annotated text paste history has no created annotation');
+    }
+    return { ordinal, start: membership.start, end: membership.end };
+  });
+  return {
+    id: raw.id,
+    family: raw.family,
+    fields: storedFieldsFromPostimage(raw.fields ?? {}, declaration),
+    protectedTargetIds: [...(raw.protectedTargetIds ?? [])].sort(),
+    memberships,
+    empty: raw.empty === 'orphan' ? 'orphan' : 'delete',
+  };
 }
 
 
@@ -1056,16 +1430,77 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         }
         if (!operation) return { events: [], privateFact: { version: 2, kind: 'annotated-text.compensation', documentId: payload.id, linkage: { rootActionId: payload.history.rootActionId, targetActionId: payload.history.targetActionId, direction: payload.history.direction, outcome: 'noop' } }, historyOutcome: 'noop' };
         const nextFamily = applyTextOperation(family, operation);
-        // M4: Apply or reverse overlap side effects atomically with the text operation.
+        // Paste atomicity: the created annotation rides the text operation.
+        // Undo CAS-gates on the live image and deletes the row; redo
+        // re-creates the same id anchored to the fresh insert scalars. Every
+        // gate below is read-only: all no-op returns precede the first write,
+        // so a rejected move never leaves a partial write behind.
+        const created = (contribution as { createdAnnotation?: unknown }).createdAnnotation as { id: string; family: string; fields: Record<string, unknown>; protectedTargetIds?: readonly string[] } | undefined;
+        let recreatedRange: { start: unknown; end: unknown } | null = null;
+        if (payload.history.direction === 'undo' && created) {
+          if (!createdAnnotationLiveMatches(db, prefix, payload.id, created)) {
+            return { events: [], privateFact: { version: 2, kind: 'annotated-text.compensation', documentId: payload.id, linkage: { rootActionId: payload.history.rootActionId, targetActionId: payload.history.targetActionId, direction: payload.history.direction, outcome: 'noop' } }, historyOutcome: 'noop' };
+          }
+        }
+        if (payload.history.direction === 'redo' && created) {
+          const occupied = db.prepare(`SELECT id FROM ${prefix}_annotation WHERE id = ?`).get((created as { id: string }).id);
+          if (occupied) {
+            return { events: [], privateFact: { version: 2, kind: 'annotated-text.compensation', documentId: payload.id, linkage: { rootActionId: payload.history.rootActionId, targetActionId: payload.history.targetActionId, direction: payload.history.direction, outcome: 'noop' } }, historyOutcome: 'noop' };
+          }
+          for (const targetId of created.protectedTargetIds ?? []) {
+            if (!db.prepare(`SELECT id FROM ${prefix}_annotation WHERE id = ?`).get(targetId)) {
+              return { events: [], privateFact: { version: 2, kind: 'annotated-text.compensation', documentId: payload.id, linkage: { rootActionId: payload.history.rootActionId, targetActionId: payload.history.targetActionId, direction: payload.history.direction, outcome: 'noop' } }, historyOutcome: 'noop' };
+            }
+          }
+          const window = freshInsertWindow(nextFamily, (operation as any)[2], contribution.scalarCount, contribution.text);
+          if (!window) {
+            return { events: [], privateFact: { version: 2, kind: 'annotated-text.compensation', documentId: payload.id, linkage: { rootActionId: payload.history.rootActionId, targetActionId: payload.history.targetActionId, direction: payload.history.direction, outcome: 'noop' } }, historyOutcome: 'noop' };
+          }
+          try {
+            recreatedRange = {
+              start: resolveOffsetToEndpoint(nextFamily, window.start, nextFamily.checkpoint.frontier, 'right'),
+              end: resolveOffsetToEndpoint(nextFamily, window.end, nextFamily.checkpoint.frontier, 'left'),
+            };
+          } catch {
+            return { events: [], privateFact: { version: 2, kind: 'annotated-text.compensation', documentId: payload.id, linkage: { rootActionId: payload.history.rootActionId, targetActionId: payload.history.targetActionId, direction: payload.history.direction, outcome: 'noop' } }, historyOutcome: 'noop' };
+          }
+          if (!rawRow(db, name, payload.id)) {
+            return { events: [], privateFact: { version: 2, kind: 'annotated-text.compensation', documentId: payload.id, linkage: { rootActionId: payload.history.rootActionId, targetActionId: payload.history.targetActionId, direction: payload.history.direction, outcome: 'noop' } }, historyOutcome: 'noop' };
+          }
+        }
+        // All gates passed: text, overlap side effects, and the created
+        // annotation transform together or not at all (one transaction).
         if (sourceFact.overlapRemovals || sourceFact.overlapPatches) {
           applyOverlapSideEffects(db, { prefix, descriptor, payload, sourceFact, direction: payload.history.direction });
         }
+        if (payload.history.direction === 'undo' && created) {
+          deleteCreatedAnnotation(db, prefix, created.id, created.family);
+        }
+        if (payload.history.direction === 'redo' && created && recreatedRange) {
+          const documentRow = rawRow(db, name, payload.id);
+          if (!documentRow) {
+            throw new ValidationError(`${name}.${fieldName}.operation document does not exist`);
+          }
+          db.prepare(`INSERT INTO ${prefix}_annotation (id, document_id, project_id, owner_id, family) VALUES (?, ?, ?, ?, ?)`)
+            .run(created.id, payload.id, documentRow[descriptor.project], documentRow[descriptor.owner], created.family);
+          const fieldNames = Object.keys(created.fields ?? {}).sort();
+          if (fieldNames.length > 0) {
+            const values = fieldNames.map((fieldName) => (created.fields as Record<string, unknown>)[fieldName]);
+            db.prepare(`INSERT INTO ${prefix}_annotation_${created.family} (annotation_id, ${fieldNames.join(', ')}) VALUES (?, ${fieldNames.map(() => '?').join(', ')})`)
+              .run(created.id, ...values);
+          }
+          for (const targetId of [...(created.protectedTargetIds ?? [])].sort()) {
+            db.prepare(`INSERT INTO ${prefix}_annotation_protected_target (annotation_id, target_annotation_id) VALUES (?, ?)`)
+              .run(created.id, targetId);
+          }
+          attachAnnotationRange(db, prefix, payload.id, created.id, (recreatedRange as { start: unknown }).start, (recreatedRange as { end: unknown }).end, 0);
+        }
         const handle = eventHandles.native(name, fieldName, 'operated');
-        const compensation: Record<string, any> = { version: 2, kind: 'annotated-text.compensation', documentId: payload.id, linkage: { rootActionId: payload.history.rootActionId, targetActionId: payload.history.targetActionId, direction: payload.history.direction, outcome: 'applied' }, contribution: { kind: 'text.insert', opId: operation[2], anchor: contribution.anchor, text: contribution.text, scalarCount: contribution.scalarCount } };
+        const compensation: Record<string, any> = { version: 2, kind: 'annotated-text.compensation', documentId: payload.id, linkage: { rootActionId: payload.history.rootActionId, targetActionId: payload.history.targetActionId, direction: payload.history.direction, outcome: 'applied' }, contribution: { kind: 'text.insert', opId: operation[2], anchor: contribution.anchor, text: contribution.text, scalarCount: contribution.scalarCount, ...(created ? { createdAnnotation: created } : {}) } };
         // Propagate overlap side-effect data so redo can re-apply them.
         if (sourceFact.overlapRemovals) compensation.overlapRemovals = sourceFact.overlapRemovals;
         if (sourceFact.overlapPatches) compensation.overlapPatches = sourceFact.overlapPatches;
-        if (payload.history.direction === 'undo') compensation.redo = { kind: 'text.insert', opId: originalOp, anchor: contribution.anchor, text: contribution.text, scalarCount: contribution.scalarCount };
+        if (payload.history.direction === 'undo') compensation.redo = { kind: 'text.insert', opId: originalOp, anchor: contribution.anchor, text: contribution.text, scalarCount: contribution.scalarCount, ...(created ? { createdAnnotation: created } : {}) };
          const before = Object.freeze({ structuralRevision: Number(state.structure_version), frontier: [...family.checkpoint.frontier] });
          const after = Object.freeze({ structuralRevision: Number(state.structure_version), frontier: [...nextFamily.checkpoint.frontier] });
         const envelope = constructV14OperatedEvent({
@@ -1077,11 +1512,59 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         return { events: [Object.freeze({ handle, type: handle.type, scope, data: Object.freeze(envelope) })], privateFact: compensation, historyOutcome: 'applied' };
       }
       if (payload.version === 1) throw new ValidationError('annotated text compensation is history-authored only');
+      // Canonical atomic history: capture the pre-edit family + annotation
+      // images BEFORE admission plans (projection has not run yet, so the DB
+      // still holds the pre-image after r1Handler returns too).
+      let beforeFamily: ReturnType<typeof restoreTextFamilySerialized> | null = null;
+      let beforeImages: StoredAnnotationImage[] | null = null;
+      if (command && (command.edit.kind === 'text.insert' || command.edit.kind === 'annotation.paste')) {
+        try {
+          const beforeState = db.prepare(`SELECT family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(command.id) as { family_checkpoint: string } | undefined;
+          if (beforeState) {
+            beforeFamily = restoreTextFamilySerialized(beforeState.family_checkpoint);
+            beforeImages = loadAnnotationImages(db, { prefix, documentId: command.id, declarations: historyAnnotationDeclarations(descriptor) }) as unknown as StoredAnnotationImage[];
+          }
+        } catch {
+          beforeFamily = null;
+          beforeImages = null;
+        }
+      }
       return Promise.resolve(r1Handler({ payload, db, scope, principal, actionId })).then((events: any) => {
         if (payload.version !== 9) return events;
         const originFact = command.edit.kind === 'text.insert' || command.edit.kind === 'annotation.paste'
           ? (() => {
+            // Prefer the canonical postimage-derived fact (text + annotation
+            // transition in one step); fall back to the legacy narrow fact
+            // when the pre-image was unavailable.
+            if (beforeFamily && beforeImages) {
+              try {
+                const canonical = captureNativeTextHistory({ command, events, beforeFamily, beforeImages, descriptor }) as Record<string, any>;
+                const planFacts = events[0]?.data?.facts;
+                if (planFacts) {
+                  const overlapPre = captureOverlapPreImages(db, { prefix, documentId: command.id, descriptor, planFacts });
+                  if (overlapPre && (overlapPre.removedAnnotations.length > 0 || overlapPre.patchedAnnotations.length > 0)) {
+                    canonical.overlapRemovals = overlapPre.removedAnnotations;
+                    canonical.overlapPatches = overlapPre.patchedAnnotations;
+                  }
+                }
+                return canonical;
+              } catch {
+                // Fall through to the legacy fact below.
+              }
+            }
             const fact: Record<string, any> = { version: 2, kind: 'annotated-text.contribution', documentId: command.id, contribution: { kind: 'text.insert', opId: events[0].data.operation.operation[2], anchor: events[0].data.operation.operation[5][1], text: command.edit.text, scalarCount: scalarCount(command.edit.text) } };
+            // A paste without a pre-image still binds its created annotation
+            // from the planner's own postimage marker, so undo stays atomic
+            // (text + annotation together) instead of orphaning the row.
+            if (command.edit.kind === 'annotation.paste') {
+              try {
+                fact.contribution.createdAnnotation = createdAnnotationFromMarker(events[0]?.data?.facts?.result, descriptor);
+              } catch {
+                // Marker unusable (unreachable through admission, which
+                // validates the family): falls back to a text-only fact whose
+                // undo removes the insert but leaves a collapsed-range row.
+              }
+            }
             // M4: Capture overlap side effects (removed annotations + field patches)
             // so undo/redo can reverse them atomically with the text operation.
             const planFacts = events[0]?.data?.facts;

@@ -44,15 +44,22 @@ A package-owned, non-public action is generated per annotated field:
 
 ### 3.1 Text CRDT insert (current landing)
 
-Eligible: a v9 `text.insert` edit with non-empty text
+Eligible: a v9 `text.insert` edit with non-empty text, and a v9
+`annotation.paste` edit (a text insert with one annotation sidecar), each
 (`<entity>.<field>.operation` whose payload parses to
-`edit.kind === 'text.insert'`). Its private fact is an
+`edit.kind === 'text.insert'` or `'annotation.paste'`). Its private fact is an
 `annotated-text.contribution` v2 fact:
 
 ```
 { version: 2, kind: 'annotated-text.contribution',
   documentId, contribution: { kind: 'text.insert', opId, anchor, text, scalarCount } }
 ```
+
+A paste contribution additionally binds `contribution.createdAnnotation` (the
+fresh annotation's effect image) and the fact carries the complete
+`annotationTransition` before/after postimage, so one undo step reverses text
+and annotation together. The same transition rides ordinary inserts when the
+edit overlapped an annotation (edited-word side effects).
 
 **Inverse (undo)** of an insert — a *fresh* `text.delete` operation that targets
 only the surviving contribution:
@@ -71,7 +78,8 @@ only the surviving contribution:
 anchor with a fresh opId/actor/lamport/frontier. It re-applies only the intended
 contribution. It is not snapshot restoration: the anchor is resolved against the
 current family, so intervening collaborators' contributions remain placed
-around it.
+around it. Redo of a paste additionally re-creates the same annotation id
+anchored to the fresh insert scalars.
 
 **No-op law.** An inverse that cannot apply safely is an explicit, durable no-op,
 never a global rewind:
@@ -100,12 +108,15 @@ identity. Designed algebra (same shape as the insert inverse above):
   anchor; redo = fresh delete of that restored contribution;
 - the same liveness/atomicity/no-op laws apply.
 
-**Current landing:** deletes are not yet undoable. A `text.delete` (and any
-non-eligible annotated edit) is a **barrier**: it clears that principal's cursor
-(`past = future = []`) rather than exposing an older eligible action across a
-newer non-eligible one, and the annotated history surface fails closed. Making
-deletes undoable is tracked against the compensation handler
-(`src/entity/crud.mjs`).
+**Current landing:** deletes are not yet undoable through the native
+compensation path. A `text.delete`/`text.replace` origin captures a v3
+`annotated-text.delete-contribution` fact (exact scalar spans, gap anchor, and
+annotation images) but still classifies as a **barrier**: it clears that
+principal's cursor (`past = future = []`) rather than exposing an older
+eligible action across a newer non-eligible one. Wiring the native compensator
+to that fact (fresh re-insert + annotation restoration, same no-op laws) is
+tracked against the compensation handler (`src/entity/crud.mjs`). The v16
+region path already compensates delete/replace contributions.
 
 ### 3.3 Paragraph anchors, structural block changes, block groups
 
@@ -118,9 +129,11 @@ inverse that would rewind document topology fails closed.
 
 ### 3.4 Annotation memberships and measurements
 
-Annotation apply/remove edits and measurement-producing edits change no text
-(`before.frontier === after.frontier`) and are not eligible: they fall through to
-the ordinary envelope grammar and act as cursor barriers. Intended algebra:
+Eligible: `annotation.update` (one semantic step over its captured
+before/after images, §3.1 of issue #174). Still barriers: annotation
+apply/remove edits and measurement-producing edits change no text
+(`before.frontier === after.frontier`) and fall through to the ordinary
+envelope grammar. Intended algebra:
 
 - an annotation membership inverse compensates only that membership's surviving
   contribution, atomically with its text transform;
@@ -148,8 +161,9 @@ partial write:
   `forbidden`/`TypeError` before the handler runs.
 - principal/session mismatch on a retried actionId → `409`.
 - forged public compensation dispatch → `forbidden`.
-- non-eligible annotated actions (deletes, annotation edits, retired payloads)
-  → barrier that clears the cursor; the annotated surface stays forbidden.
+- non-eligible annotated actions (deletes, annotation apply/remove,
+  retired payloads) → barrier that clears the cursor; the annotated surface
+  stays forbidden. Eligible: text.insert, annotation.paste, annotation.update.
 - restricted/redacted recipients and protecting-family transitions → snapshot
   recovery, never a fold.
 - redo after a no-op undo, or undo of a fully-consumed contribution → durable

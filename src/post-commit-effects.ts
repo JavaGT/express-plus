@@ -4,7 +4,7 @@
 
 import type { DbHandle } from './driver.ts';
 import { recordFactDependencies } from './private-action-fact-dependency.ts';
-import { isDeleteFact } from './annotated-text-delete-history.ts';
+import { isDeleteFact, parseAnnotationTransition } from './annotated-text-delete-history.ts';
 import { decodeLogRowData } from './committed-log.ts';
 import {
   applicationPrivateFactView,
@@ -170,8 +170,17 @@ function annotatedPrivateFact(fact: PrivateFactLike): boolean {
   if (fact.kind === 'annotated-text.contribution') {
     const contributionKeys = ['version', 'kind', 'documentId', 'contribution',
       ...(Object.hasOwn(fact, 'overlapRemovals') ? ['overlapRemovals'] : []),
-      ...(Object.hasOwn(fact, 'overlapPatches') ? ['overlapPatches'] : [])];
-    return exactKeys(fact, contributionKeys) && annotatedContribution(fact.contribution);
+      ...(Object.hasOwn(fact, 'overlapPatches') ? ['overlapPatches'] : []),
+      ...(Object.hasOwn(fact, 'annotationTransition') ? ['annotationTransition'] : [])];
+    if (!exactKeys(fact, contributionKeys) || !annotatedContribution(fact.contribution)) return false;
+    if (Object.hasOwn(fact, 'annotationTransition')) {
+      try {
+        parseAnnotationTransition((fact as { annotationTransition?: unknown }).annotationTransition);
+      } catch {
+        return false;
+      }
+    }
+    return true;
   }
   // #174: a committed annotation.update binds its whole before/after images.
   if (fact.kind === 'annotated-text.annotation-update') {

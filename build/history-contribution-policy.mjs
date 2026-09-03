@@ -226,6 +226,11 @@ function classifyNativeInsert(handle                    , payload         )     
   if (command.edit.kind === 'text.insert' && typeof command.edit.text === 'string' && command.edit.text.length > 0) {
     return 'eligible';
   }
+  // A paste is a text insert with an annotation sidecar: the same insert
+  // algebra applies, and the created annotation compensates atomically.
+  if (command.edit.kind === 'annotation.paste' && typeof command.edit.text === 'string' && command.edit.text.length > 0) {
+    return 'eligible';
+  }
   if (command.edit.kind === 'annotation.update') {
     return 'eligible';
   }
