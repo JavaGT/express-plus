@@ -1,6 +1,7 @@
 import type { DbHandle } from './driver.ts';
 import { annotationDeclarationFingerprint } from './annotated-text-delete-history.ts';
 import { canonicalEndpointJSON, membershipDigest } from './annotated-text-delete-history-shared.ts';
+import { assertStructuralEndpoint } from './annotated-text-family.ts';
 export { canonicalEndpointJSON } from './annotated-text-delete-history-shared.ts';
 // A stored annotation-to-range link joined with its immutable range record.
 // Ranges are DOCUMENT-scoped: the UNIQUE(document_id, start_point, end_point)
@@ -52,8 +53,8 @@ interface StoredAnnotationRow {
 /** Parsed structural endpoints of one membership, keyed by its stored ordinal. */
 export interface AnnotationMembershipEntry {
   ordinal: number;
-  start: unknown;
-  end: unknown;
+  start: import('./annotated-text-family.ts').StructuralEndpoint;
+  end: import('./annotated-text-family.ts').StructuralEndpoint;
 }
 
 /**
@@ -63,11 +64,35 @@ export interface AnnotationMembershipEntry {
  * canonical stored cells; `deserializeFields: true` is only for callers that
  * explicitly need projected values and must not feed those values to restore.
  */
+/** Saved orphan state per annotation. Missing side table (pre-orphan schemas,
+ * minimal fixtures) means "no orphans" rather than an error. */
+export function annotationOrphanStates(db: DbHandle, prefix: string, documentId: string): Map<string, {
+  savedQuote: string;
+  lastRange: readonly [number, number] | null;
+}> {
+  const table = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(`${prefix}_annotation_orphan_state`);
+  if (!table) return new Map();
+  const orphanRows = db.prepare(
+    `SELECT orphan.annotation_id, orphan.saved_quote, orphan.last_range
+       FROM ${prefix}_annotation_orphan_state AS orphan
+       JOIN ${prefix}_annotation AS annotation ON annotation.id = orphan.annotation_id
+      WHERE annotation.document_id = ?`,
+  ).all(documentId) as unknown as Array<{ annotation_id: string; saved_quote: string; last_range: string | null }>;
+  return new Map(orphanRows.map((row) => [row.annotation_id, {
+    savedQuote: row.saved_quote,
+    lastRange: row.last_range === null ? null : JSON.parse(row.last_range) as readonly [number, number] | null,
+  }]));
+}
 export function loadAnnotationImages(db: DbHandle, options: {
   prefix: string;
   documentId: string;
   /** Compiled declaration annotations (`descriptor.annotations`), each carrying `annotationName` and `fields`. */
-  declarations: Iterable<{ annotationName: string; fields: Record<string, unknown> }>;
+  declarations: Iterable<{
+    annotationName: string;
+    fields: Readonly<Record<string, unknown>>;
+    empty?: string;
+    cardinality?: string;
+  }>;
   deserializeFields?: boolean;
 }): Array<{
   id: string;
@@ -76,7 +101,10 @@ export function loadAnnotationImages(db: DbHandle, options: {
   protectedTargetIds: string[];
   memberships: AnnotationMembershipEntry[];
   prerequisites: Array<{ entity: string; id: string }>;
-}> {
+    empty?: 'delete' | 'orphan';
+    cardinality?: 'many' | 'one';
+    orphan?: { savedQuote: string; lastRange: readonly [number, number] | null } | null;
+  }> {
   const { prefix, documentId } = options;
   const declarations = [...options.declarations];
   const deserialize = options.deserializeFields === true;
@@ -92,9 +120,10 @@ export function loadAnnotationImages(db: DbHandle, options: {
   const membershipsByAnnotation = new Map<string, AnnotationMembershipEntry[]>();
   for (const row of annotationRangeRows(db, prefix, documentId)) {
     const entries = membershipsByAnnotation.get(row.annotation_id) ?? [];
-    entries.push({ ordinal: row.ordinal, start: JSON.parse(row.start_point), end: JSON.parse(row.end_point) });
+    entries.push({ ordinal: row.ordinal, start: assertStructuralEndpoint(JSON.parse(row.start_point)), end: assertStructuralEndpoint(JSON.parse(row.end_point)) });
     membershipsByAnnotation.set(row.annotation_id, entries);
   }
+  const orphanByAnnotation = annotationOrphanStates(db, prefix, documentId);
   const fieldsByFamilyByAnnotation = new Map<string, Map<string, Record<string, unknown>>>();
   for (const declared of declarations) {
     const familyRows = db.prepare(
@@ -113,6 +142,9 @@ export function loadAnnotationImages(db: DbHandle, options: {
     protectedTargetIds: string[];
     memberships: AnnotationMembershipEntry[];
     prerequisites: Array<{ entity: string; id: string }>;
+    empty?: 'delete' | 'orphan';
+    cardinality?: 'many' | 'one';
+    orphan?: { savedQuote: string; lastRange: readonly [number, number] | null } | null;
   }>;
   for (const row of rows) {
     const declared = declarations.find((candidate) => candidate.annotationName === row.family);
@@ -138,6 +170,9 @@ export function loadAnnotationImages(db: DbHandle, options: {
       protectedTargetIds: targetsByAnnotation.get(row.id) ?? [],
       memberships: membershipsByAnnotation.get(row.id) ?? [],
       prerequisites,
+      empty: declared.empty === 'orphan' ? 'orphan' : 'delete',
+      cardinality: declared.cardinality === 'one' ? 'one' : 'many',
+      orphan: orphanByAnnotation.get(row.id) ?? null,
     });
   }
   return images;

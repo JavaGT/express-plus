@@ -1,6 +1,7 @@
 
 import { annotationDeclarationFingerprint } from './annotated-text-delete-history.mjs';
 import { canonicalEndpointJSON, membershipDigest } from './annotated-text-delete-history-shared.mjs';
+import { assertStructuralEndpoint } from './annotated-text-family.mjs';
 export { canonicalEndpointJSON } from './annotated-text-delete-history-shared.mjs';
 // A stored annotation-to-range link joined with its immutable range record.
 // Ranges are DOCUMENT-scoped: the UNIQUE(document_id, start_point, end_point)
@@ -63,7 +64,31 @@ export function attachAnnotationRange(db          , prefix        , documentId  
  * canonical stored cells; `deserializeFields: true` is only for callers that
  * explicitly need projected values and must not feed those values to restore.
  */
+/** Saved orphan state per annotation. Missing side table (pre-orphan schemas,
+ * minimal fixtures) means "no orphans" rather than an error. */
+export function annotationOrphanStates(db          , prefix        , documentId        )
+
+
+   {
+  const table = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(`${prefix}_annotation_orphan_state`);
+  if (!table) return new Map();
+  const orphanRows = db.prepare(
+    `SELECT orphan.annotation_id, orphan.saved_quote, orphan.last_range
+       FROM ${prefix}_annotation_orphan_state AS orphan
+       JOIN ${prefix}_annotation AS annotation ON annotation.id = orphan.annotation_id
+      WHERE annotation.document_id = ?`,
+  ).all(documentId)                                                                                               ;
+  return new Map(orphanRows.map((row) => [row.annotation_id, {
+    savedQuote: row.saved_quote,
+    lastRange: row.last_range === null ? null : JSON.parse(row.last_range)                                    ,
+  }]));
+}
 export function loadAnnotationImages(db          , options
+
+
+
+
+
 
 
 
@@ -76,7 +101,10 @@ export function loadAnnotationImages(db          , options
 
 
 
-   {
+
+
+
+     {
   const { prefix, documentId } = options;
   const declarations = [...options.declarations];
   const deserialize = options.deserializeFields === true;
@@ -92,9 +120,10 @@ export function loadAnnotationImages(db          , options
   const membershipsByAnnotation = new Map                                     ();
   for (const row of annotationRangeRows(db, prefix, documentId)) {
     const entries = membershipsByAnnotation.get(row.annotation_id) ?? [];
-    entries.push({ ordinal: row.ordinal, start: JSON.parse(row.start_point), end: JSON.parse(row.end_point) });
+    entries.push({ ordinal: row.ordinal, start: assertStructuralEndpoint(JSON.parse(row.start_point)), end: assertStructuralEndpoint(JSON.parse(row.end_point)) });
     membershipsByAnnotation.set(row.annotation_id, entries);
   }
+  const orphanByAnnotation = annotationOrphanStates(db, prefix, documentId);
   const fieldsByFamilyByAnnotation = new Map                                              ();
   for (const declared of declarations) {
     const familyRows = db.prepare(
@@ -107,6 +136,9 @@ export function loadAnnotationImages(db          , options
   }
 
   const images = []
+
+
+
 
 
 
@@ -138,6 +170,9 @@ export function loadAnnotationImages(db          , options
       protectedTargetIds: targetsByAnnotation.get(row.id) ?? [],
       memberships: membershipsByAnnotation.get(row.id) ?? [],
       prerequisites,
+      empty: declared.empty === 'orphan' ? 'orphan' : 'delete',
+      cardinality: declared.cardinality === 'one' ? 'one' : 'many',
+      orphan: orphanByAnnotation.get(row.id) ?? null,
     });
   }
   return images;

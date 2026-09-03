@@ -11,17 +11,17 @@ import { ValidationError, deserializeField, type FieldDescriptor } from './field
 import * as eventHandles from './event-handle.ts';
 import { authorizeFieldOp } from './strategy/index.ts';
 import { write } from './grant.ts';
-import { applyTextOperation, restoreTextFamilySerialized, materializeText, textFamilyBasis, type ContinuousTextFamily } from './annotated-text-continuous.ts';
+import { restoreTextFamilySerialized, materializeText, textFamilyBasis, type ContinuousTextFamily } from './annotated-text-continuous.ts';
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.ts';
 import { resolveStream, resolveLease, resolvePosition } from './annotated-text-authoring-stream.ts';
 import { readSeq } from './committed-log.ts';
-import { planAnnotationRemove, planAnnotationUpdate, planTextOffsetEdit, planTextRangeApply, type EditOverlapBehavior } from './annotated-text-plan.ts';
+import { planAnnotationPaste, planAnnotationRemove, planAnnotationUpdate, planTextOffsetEdit, planTextRangeApply, type EditOverlapBehavior } from './annotated-text-plan.ts';
 import { mapVisibleOffsetToCanonical, authoringRedactionsForRecipient, type AuthoringRedaction } from './annotated-text-recipient-projection.ts';
 import { projectAnnotatedTextSnapshot } from './annotated-text-snapshot.ts';
 import type { StructuralEndpoint } from './annotated-text-family.ts';
 import type { Principal } from './principal.ts';
 import { rawRow } from './entity/query.ts';
-import { annotationRangeRows } from './annotated-text-storage.ts';
+import { annotationRangeRows, annotationOrphanStates } from './annotated-text-storage.ts';
 
 interface Statement {
   run(...args: unknown[]): { changes: number };
@@ -119,8 +119,10 @@ interface LoadedAnnotation {
   id: string;
   family: string;
   empty: 'delete' | 'orphan';
+  cardinality: 'many' | 'one';
   fields: Record<string, unknown>;
   protectedTargetIds: string[];
+  orphan?: { savedQuote: string; lastRange: [number, number] | null } | null;
 }
 
 interface LoadedRange {
@@ -167,6 +169,7 @@ function loadAnnotations({ db, prefix, compiledMeta, documentId }: {
   const targetsByAnnotation = new Map();
   for (const target of targets) targetsByAnnotation.set(target.annotation_id, [...(targetsByAnnotation.get(target.annotation_id) ?? []), target.target_annotation_id]);
   const annotations: LoadedAnnotation[] = [];
+  const orphanByAnnotation = annotationOrphanStates(db as any, prefix, documentId);
   for (const row of rows) {
     const metadata = compiledMeta.annotationHandles[row.family];
     if (!metadata) throw new ValidationError(`annotated-text unknown annotation family '${row.family}'`);
@@ -177,7 +180,18 @@ function loadAnnotations({ db, prefix, compiledMeta, documentId }: {
       const value = stored?.[fieldName];
       fields[fieldName] = value === undefined ? null : deserializeField(field as FieldDescriptor, value);
     }
-    annotations.push({ id: row.id, family: row.family, empty: metadata.empty, fields, protectedTargetIds: targetsByAnnotation.get(row.id) ?? [] });
+    // Pre-existing orphans ride the postimage untouched: the projector rewrites
+    // orphan rows from the marker, so carry the current orphan state through.
+    const orphan = orphanByAnnotation.get(row.id) ?? null;
+    annotations.push({
+      id: row.id,
+      family: row.family,
+      empty: metadata.empty,
+      cardinality: metadata.cardinality === 'one' ? 'one' : 'many',
+      fields,
+      protectedTargetIds: targetsByAnnotation.get(row.id) ?? [],
+      orphan: orphan === null ? null : { savedQuote: orphan.savedQuote, lastRange: orphan.lastRange === null ? null : [...orphan.lastRange] as [number, number] },
+    });
   }
   return annotations;
 }
@@ -577,39 +591,32 @@ async function admitTextAnnotationUpdate(ctx: V9Prelude & { edit: V9EditLoose })
 
 /**
  * Paste text and carry one source annotation onto the pasted characters. The
- * two ordinary events are returned in one admission result, so the commit
- * pipeline can append them together; the copied annotation always receives a
- * new identity and its endpoints are resolved against the inserted family.
+ * text insertion and annotation postimage are emitted as one operated event,
+ * so projection and history cannot split the paste into two steps.
  */
 async function admitAnnotationPaste(ctx: V9Prelude & { edit: V9EditLoose }): Promise<unknown[]> {
   const { edit, family, state, command, documentScope, actor, lamport, compiledMeta, db, prefix } = ctx;
   if (!edit.annotation || typeof edit.text !== 'string' || !edit.text.length || !edit.at) {
     throw new ValidationError(`${ctx.name}.${ctx.fieldName}.operation annotation.paste requires annotation, at, and text`);
   }
-  // Bind once past the guard: TS property narrowing does not reach into the
-  // filter callback below, and every later use reads this same annotation.
   const pastedAnnotation = edit.annotation;
   const familyMeta = compiledMeta.annotationHandles[pastedAnnotation.family];
   if (!familyMeta) throw new ValidationError(`${ctx.name}.${ctx.fieldName}.operation unknown annotation family`, { code: 'position-invalid' });
-  // Build edit-overlap behaviors from compiled annotation handles (Decision 0025 policy 4).
-  const editOverlapByFamily: Record<string, EditOverlapBehavior> = {};
-  for (const [familyName, meta] of Object.entries(ctx.compiledMeta.annotationHandles as Record<string, any>)) {
-    if (meta.editOverlap) editOverlapByFamily[familyName] = meta.editOverlap;
-  }
-  const textAnnotations = loadAnnotations({ db, prefix, compiledMeta: ctx.compiledMeta, documentId: command.id });
-  const textRanges = loadRanges({ db, prefix, documentId: command.id });
-  const textAnnotationFields = loadAnnotationFields({ db, prefix, compiledMeta: ctx.compiledMeta, descriptor: ctx.descriptor, annotations: textAnnotations });
-  const insertPlan = planTextOffsetEdit({
-    documentId: command.id, structureVersion: state.structure_version, family, actor, lamport,
-    edit: { kind: 'text.insert', at: { offset: edit.at.offset, affinity: edit.at.affinity }, text: edit.text },
-    editOverlapByFamily, annotationFields: textAnnotationFields,
-  });
-  const insertedFamily = applyTextOperation(family, insertPlan.operation.operation);
+
+  // Paste positions use the same wire-to-canonical redaction mapping as a
+  // normal text insertion. A restricted recipient can paste only at a visible
+  // boundary and never smuggle a canonical offset for hidden text.
+  const redactions = parsedRedactions(ctx.position);
+  const mapped = mapWireRangeToCanonical(edit.at.offset, edit.at.affinity, edit.at.offset, edit.at.affinity, redactions, false);
+  assertEditLandsInVisibleText(mapped.from, mapped.to, redactions, 'paste position');
+  assertOffsetInDocument(family, mapped.from, 'paste position');
+
   const id = randomUUID();
   const annotation = {
     id,
     family: pastedAnnotation.family,
     empty: familyMeta.empty,
+     cardinality: (familyMeta.cardinality === 'one' ? 'one' : 'many') as 'many' | 'one',
     fields: { ...(pastedAnnotation.fields ?? {}) },
     // Protection edges point at document-local ids and cannot be copied by
     // reference; a paste copies annotation fields, not those relationships.
@@ -617,19 +624,34 @@ async function admitAnnotationPaste(ctx: V9Prelude & { edit: V9EditLoose }): Pro
   };
   const ranges = loadRanges({ db, prefix, documentId: command.id });
   const annotations = loadAnnotations({ db, prefix, compiledMeta, documentId: command.id });
-  const sameFamilyAnnotationIds = new Set(annotations.filter((candidate) => candidate.family === pastedAnnotation.family).map((candidate) => candidate.id));
-  const annotationPlan = planTextRangeApply({
-    documentId: command.id, structureVersion: insertPlan.after.structuralRevision, family: insertedFamily,
-    annotation, from: { offset: edit.at.offset, affinity: 'left' },
-    to: { offset: edit.at.offset + edit.text.length, affinity: 'right' },
-    ranges, actorId: ctx.principal?.id ?? '', cardinality: familyMeta.cardinality,
-    sameFamilyAnnotationIds,
-  });
+  const annotationFields = new Map(annotations.map((candidate) => [candidate.id, candidate.fields]));
+  const editOverlapByFamily: Record<string, EditOverlapBehavior> = {};
+  for (const [familyName, meta] of Object.entries(compiledMeta.annotationHandles as Record<string, any>)) {
+    if (meta.editOverlap) editOverlapByFamily[familyName] = meta.editOverlap;
+  }
+  let plan;
+  try {
+    plan = planAnnotationPaste({
+      documentId: command.id,
+      structureVersion: state.structure_version,
+      family,
+      actor,
+      lamport,
+      text: edit.text,
+      at: { offset: mapped.from, affinity: edit.at.affinity },
+      annotation,
+      annotations,
+      ranges,
+      editOverlapByFamily,
+      annotationFields,
+      actorId: ctx.principal?.id ?? '',
+    });
+  } catch (error) {
+    const err = error as Error & { code?: string };
+    throw new ValidationError(`${ctx.name}.${ctx.fieldName}.operation ${err.message}`, err.code ? { code: err.code } : undefined);
+  }
   const handle = eventHandles.native(ctx.name, ctx.fieldName, 'operated');
-  return [
-    { handle, type: handle.type, scope: documentScope, data: insertPlan },
-    { handle, type: handle.type, scope: documentScope, data: annotationPlan },
-  ];
+  return [{ handle, type: handle.type, scope: documentScope, data: plan }];
 }
 
 function edit_annotationId(command: V9Command): string | undefined {
