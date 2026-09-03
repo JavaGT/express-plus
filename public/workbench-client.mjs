@@ -4672,7 +4672,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       && text.charCodeAt(offset) >= 0xdc00 && text.charCodeAt(offset) <= 0xdfff;
   }
   function projectQueuedDocumentText(text, command) {
-    if (command.kind === 'text.insert') {
+    if (command.kind === 'text.insert' || command.kind === 'annotation.paste') {
       const offset = command.at?.offset;
       if (!Number.isSafeInteger(offset) || offset < 0 || offset > text.length || splitsSurrogate(text, offset)) return null;
       return text.slice(0, offset) + command.text + text.slice(offset);
@@ -4885,6 +4885,28 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     delete({ mutationId, from, to }) {
       flushOpenInsertBurst();
       const command = { kind: 'text.delete', mutationId, from, to };
+      return queueAuthoringMutation(command, (current, actionId) => dispatchNow(current, actionId));
+    },
+    paste({ mutationId, at, text, annotation }) {
+      // An annotation-bearing paste is its own semantic operation: it must
+      // never coalesce into a typing burst (the burst combiner only carries
+      // { at, text } and would drop the annotation sidecar). The server mints
+      // the fresh annotation id; the client projects the text immediately and
+      // the annotation arrives on the confirmed echo.
+      flushOpenInsertBurst();
+      if (!at || typeof at !== 'object' || !Number.isSafeInteger(at.offset) || at.offset < 0
+        || (at.affinity !== 'left' && at.affinity !== 'right')) {
+        return Promise.resolve({ ok: false, failure: new TypeError('annotated text paste requires a valid at position') });
+      }
+      if (typeof text !== 'string' || text.length === 0) {
+        return Promise.resolve({ ok: false, failure: new TypeError('annotated text pasted text must be non-empty') });
+      }
+      if (!annotation || typeof annotation !== 'object'
+        || typeof annotation.family !== 'string' || annotation.family.length === 0
+        || (annotation.fields !== undefined && (typeof annotation.fields !== 'object' || annotation.fields === null || Array.isArray(annotation.fields)))) {
+        return Promise.resolve({ ok: false, failure: new TypeError('annotated text paste requires an annotation family') });
+      }
+      const command = { kind: 'annotation.paste', mutationId, at, text, annotation: { family: annotation.family, ...(annotation.fields ? { fields: { ...annotation.fields } } : {}) } };
       return queueAuthoringMutation(command, (current, actionId) => dispatchNow(current, actionId));
     },
     replace(input) {

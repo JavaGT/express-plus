@@ -856,6 +856,13 @@ export interface AnnotatedTextHttpSession {
   readonly ready: Promise<void>;
   insert(input: { readonly mutationId?: string; readonly at: AnnotatedTextEditPosition; readonly text: string }): Promise<LiveDeliveryDispatchResult>;
   delete(input: { readonly mutationId?: string; readonly from: AnnotatedTextEditPosition; readonly to: AnnotatedTextEditPosition }): Promise<LiveDeliveryDispatchResult>;
+  /**
+   * Annotation-aware paste: inserts `text` at `at` and anchors one fresh
+   * server-minted annotation of `annotation.family` (with `fields`) over the
+   * inserted run, in ONE operated event and ONE undo step. Protection edges
+   * are never copied. The annotation id arrives on the confirmed echo.
+   */
+  paste(input: { readonly mutationId?: string; readonly at: AnnotatedTextEditPosition; readonly text: string; readonly annotation: { readonly family: string; readonly fields?: Readonly<Record<string, unknown>> } }): Promise<LiveDeliveryDispatchResult>;
   replace(input: { readonly mutationId?: string; readonly from: AnnotatedTextEditPosition; readonly to: AnnotatedTextEditPosition; readonly text: string }): Promise<LiveDeliveryDispatchResult | null>;
   applyAnnotation(input: { readonly mutationId: string; readonly annotation: { readonly id: string; readonly family: string; readonly fields: Readonly<Record<string, unknown>>; readonly protectedTargetIds?: readonly string[] }; readonly from: AnnotatedTextEditPosition; readonly to: AnnotatedTextEditPosition }): Promise<ScopeDispatchResult>;
   applyAnnotationAction<Action extends AnnotatedTextAnnotationEntityActionHandle>(actionHandle: Action, input: { readonly mutationId: string; readonly from: AnnotatedTextEditPosition; readonly to: AnnotatedTextEditPosition; readonly values: AnnotatedTextAnnotationActionValues<Action> }): Promise<ScopeDispatchResult>;
