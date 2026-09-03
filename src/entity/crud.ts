@@ -9,7 +9,7 @@
 // focused on the entity-row lifecycle.
 
 import { createHash, randomUUID } from 'node:crypto';
-import { validateMaterializedField, validateMutation, ValidationError, deserializeField, serializeField, flattenStruct, resolveStrategy } from '../field-strategy.ts';
+import { validateMaterializedField, validateMutation, ValidationError, deserializeField, serializeField, flattenStruct, resolveStrategy, type FieldDescriptor } from '../field-strategy.ts';
 import { scopeOf } from '../scope-handle.ts';
 import * as eventHandles from '../event-handle.ts';
 import { assertUtf16Offset, assertWellFormedText, canonicalTextOp, scalarCount } from '../annotated-text.ts';
@@ -1062,9 +1062,12 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         }
         const handle = eventHandles.native(name, fieldName, 'operated');
         const compensation: Record<string, any> = { version: 2, kind: 'annotated-text.compensation', documentId: payload.id, linkage: { rootActionId: payload.history.rootActionId, targetActionId: payload.history.targetActionId, direction: payload.history.direction, outcome: 'applied' }, contribution: { kind: 'text.insert', opId: operation[2], anchor: contribution.anchor, text: contribution.text, scalarCount: contribution.scalarCount } };
+        // Propagate overlap side-effect data so redo can re-apply them.
+        if (sourceFact.overlapRemovals) compensation.overlapRemovals = sourceFact.overlapRemovals;
+        if (sourceFact.overlapPatches) compensation.overlapPatches = sourceFact.overlapPatches;
         if (payload.history.direction === 'undo') compensation.redo = { kind: 'text.insert', opId: originalOp, anchor: contribution.anchor, text: contribution.text, scalarCount: contribution.scalarCount };
-        const before = Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier });
-        const after = Object.freeze({ structuralRevision: state.structure_version, frontier: nextFamily.checkpoint.frontier });
+         const before = Object.freeze({ structuralRevision: Number(state.structure_version), frontier: [...family.checkpoint.frontier] });
+         const after = Object.freeze({ structuralRevision: Number(state.structure_version), frontier: [...nextFamily.checkpoint.frontier] });
         const envelope = constructV14OperatedEvent({
           id: payload.id,
           before,
