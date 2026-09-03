@@ -136,7 +136,7 @@ function ordinalsByEncounterOrder(ranges: ReadonlyArray<{ annotationId: string; 
  */
 function captureOverlapPreImages(db: any, { prefix, documentId, descriptor, planFacts }: {
   prefix: string; documentId: string; descriptor: FieldDescriptor; planFacts: any;
-}): { removedAnnotations: Array<{ annotationId: string; family: string; fields: Record<string, unknown>; empty: string; rangeId: number | null; ordinal: number }>; patchedAnnotations: Array<{ annotationId: string; family: string; originalFields: Record<string, unknown>; newFields: Record<string, unknown> }> } | null {
+}): { removedAnnotations: Array<{ annotationId: string; family: string; fields: Record<string, unknown>; projectId: string; ownerId: string; empty: string; rangeId: number | null; ordinal: number }>; patchedAnnotations: Array<{ annotationId: string; family: string; originalFields: Record<string, unknown>; newFields: Record<string, unknown> }> } | null {
   const emptied = planFacts?.emptiedAnnotations as Array<{ annotationId: string; empty: string }> | undefined;
   const updates = planFacts?.annotationUpdates as Array<{ annotationId: string; fields: Record<string, unknown> }> | undefined;
   if ((!emptied || emptied.length === 0) && (!updates || updates.length === 0)) return null;
@@ -145,7 +145,7 @@ function captureOverlapPreImages(db: any, { prefix, documentId, descriptor, plan
   const patched: Array<any> = [];
   if (emptied && emptied.length > 0) {
     for (const entry of emptied) {
-      const ann = db.prepare(`SELECT id, family FROM ${prefix}_annotation WHERE id = ? AND document_id = ?`).get(entry.annotationId, documentId) as { id: string; family: string } | undefined;
+      const ann = db.prepare(`SELECT id, family, project_id, owner_id FROM ${prefix}_annotation WHERE id = ? AND document_id = ?`).get(entry.annotationId, documentId) as { id: string; family: string; project_id: string; owner_id: string } | undefined;
       if (!ann) continue;
       const typed = db.prepare(`SELECT * FROM ${prefix}_annotation_${ann.family} WHERE annotation_id = ?`).get(entry.annotationId) as Record<string, unknown> | undefined;
       const membership = db.prepare(`SELECT range_id, ordinal FROM ${prefix}_membership WHERE annotation_id = ?`).get(entry.annotationId) as { range_id: number; ordinal: number } | undefined;
@@ -156,7 +156,7 @@ function captureOverlapPreImages(db: any, { prefix, documentId, descriptor, plan
           fields[key] = deserializeField(desc as any, (typed as Record<string, unknown>)[key]);
         }
       }
-      removed.push({ annotationId: entry.annotationId, family: ann.family, fields, empty: entry.empty, rangeId: membership?.range_id ?? null, ordinal: membership?.ordinal ?? 0 });
+      removed.push({ annotationId: entry.annotationId, family: ann.family, fields, projectId: ann.project_id, ownerId: ann.owner_id, empty: entry.empty, rangeId: membership?.range_id ?? null, ordinal: membership?.ordinal ?? 0 });
     }
   }
   if (updates && updates.length > 0) {
@@ -191,7 +191,7 @@ function applyOverlapSideEffects(db: any, { prefix, descriptor, payload, sourceF
     const removals = sourceFact.overlapRemovals as Array<any> | undefined;
     if (removals && removals.length > 0) {
       for (const removal of removals) {
-        db.prepare(`INSERT INTO ${prefix}_annotation (id, family, document_id) VALUES (?, ?, ?)`).run(removal.annotationId, removal.family, payload.id);
+        db.prepare(`INSERT INTO ${prefix}_annotation (id, document_id, project_id, owner_id, family) VALUES (?, ?, ?, ?, ?)`).run(removal.annotationId, payload.id, removal.projectId, removal.ownerId, removal.family);
         const decl = declarations.find((d) => d.annotationName === removal.family);
         if (decl) {
           const fieldNames = Object.keys(removal.fields);

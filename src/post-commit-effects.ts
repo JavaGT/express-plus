@@ -64,12 +64,90 @@ function annotatedContribution(value: unknown): boolean {
   // Blockless (issue #33): a contribution is one document-scoped text.insert
   // operation — no blockId. A block-era contribution (with blockId) is still
   // recognized so stored history remains readable until migration.
-  const record = value as { kind?: unknown; opId?: unknown; anchor?: unknown; text?: unknown; scalarCount?: unknown; blockId?: unknown } | null | undefined;
-  return !!value && typeof value === 'object' && !Array.isArray(value)
-    && (exactKeys(record as object, ['kind', 'opId', 'anchor', 'text', 'scalarCount']) || exactKeys(record as object, ['kind', 'blockId', 'opId', 'anchor', 'text', 'scalarCount']))
+  const record = value as ({
+    kind?: unknown;
+    opId?: unknown;
+    anchor?: unknown;
+    text?: unknown;
+    scalarCount?: unknown;
+    blockId?: unknown;
+    overlapRemovals?: unknown;
+    overlapPatches?: unknown;
+    createdAnnotation?: unknown;
+  } & Record<string, unknown>) | null | undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  if (!record) return false;
+  const keys = Object.keys(record as object);
+  const required = ['kind', 'opId', 'anchor', 'text', 'scalarCount'];
+  const legacyRequired = ['kind', 'blockId', 'opId', 'anchor', 'text', 'scalarCount'];
+  const base = exactKeys(record as object, required) || exactKeys(record as object, legacyRequired);
+  if (!base) {
+    const allowed = new Set([...required, 'blockId', 'overlapRemovals', 'overlapPatches', 'createdAnnotation']);
+    if (keys.some((key) => !allowed.has(key)) || !required.every((key) => Object.hasOwn(record as object, key))) return false;
+  }
+  if (Object.hasOwn(record as object, 'overlapRemovals') && !annotationEffectImages(record.overlapRemovals, 'annotationId')) return false;
+  if (Object.hasOwn(record as object, 'createdAnnotation') && !annotationEffectImage(record.createdAnnotation, 'id')) return false;
+  if (Object.hasOwn(record as object, 'overlapPatches') && !annotationPatches(record.overlapPatches)) return false;
+  return (exactKeys(record as object, required) || exactKeys(record as object, legacyRequired)
+    || keys.every((key) => [...required, 'blockId', 'overlapRemovals', 'overlapPatches', 'createdAnnotation'].includes(key)))
     && record?.kind === 'text.insert' && (!Object.hasOwn(record as object, 'blockId') || (typeof record?.blockId === 'string' && record.blockId.length > 0))
     && Array.isArray(record?.opId) && Array.isArray(record?.anchor) && typeof record?.text === 'string'
     && Number.isSafeInteger(record?.scalarCount) && (record?.scalarCount as number) > 0;
+}
+
+function plainJsonObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function annotationEffectImage(value: unknown, idKey: 'id' | 'annotationId'): boolean {
+  if (!plainJsonObject(value)) return false;
+  const allowed = [idKey, 'family', 'fields', 'protectedTargetIds', 'memberships', 'empty'];
+  if (Object.keys(value).some((key) => !allowed.includes(key))
+    || !Object.hasOwn(value, idKey) || typeof value[idKey] !== 'string' || !value[idKey]
+    || typeof value.family !== 'string' || !value.family
+    || !plainJsonObject(value.fields)
+    || !Array.isArray(value.protectedTargetIds)
+    || value.protectedTargetIds.some((id) => typeof id !== 'string' || !id)
+    || !Array.isArray(value.memberships)) return false;
+  const targets = value.protectedTargetIds as string[];
+  if (targets.some((id, index) => index > 0 && targets[index - 1] >= id)) return false;
+  let previousOrdinal = -1;
+  for (const rawMembership of value.memberships) {
+    const membership = rawMembership as Record<string, unknown>;
+    const ordinal = membership.ordinal;
+    if (!plainJsonObject(membership)
+      || Object.keys(membership).sort().join() !== 'end,ordinal,start'
+      || !Number.isSafeInteger(ordinal) || (ordinal as number) <= previousOrdinal
+      || !plainJsonObject(membership.start) || !plainJsonObject(membership.end)) return false;
+    previousOrdinal = ordinal as number;
+    try { json(membership.start, 'annotation effect endpoint'); json(membership.end, 'annotation effect endpoint'); } catch { return false; }
+  }
+  if (Object.hasOwn(value, 'empty') && value.empty !== 'delete' && value.empty !== 'orphan') return false;
+  for (const field of Object.values(value.fields)) {
+    try { json(field, 'annotation effect field'); } catch { return false; }
+  }
+  return true;
+}
+
+function annotationEffectImages(value: unknown, idKey: 'id' | 'annotationId'): boolean {
+  return Array.isArray(value) && value.every((entry) => annotationEffectImage(entry, idKey));
+}
+
+function annotationPatches(value: unknown): boolean {
+  if (!Array.isArray(value)) return false;
+  return value.every((entry) => {
+    if (!plainJsonObject(entry)
+      || Object.keys(entry).sort().join() !== 'annotationId,family,newFields,originalFields'
+      || typeof entry.annotationId !== 'string' || !entry.annotationId
+      || typeof entry.family !== 'string' || !entry.family
+      || !plainJsonObject(entry.originalFields) || !plainJsonObject(entry.newFields)) return false;
+    for (const fields of [entry.originalFields, entry.newFields]) {
+      for (const value of Object.values(fields)) {
+        try { json(value, 'annotation effect field'); } catch { return false; }
+      }
+    }
+    return true;
+  });
 }
 
 interface PrivateFactLike {
@@ -90,7 +168,10 @@ function annotatedPrivateFact(fact: PrivateFactLike): boolean {
   if (fact.kind === 'annotated-text.delete-contribution') return isDeleteFact(fact as unknown);
   if (fact.version !== 2 || typeof fact.documentId !== 'string' || fact.documentId.length === 0) return false;
   if (fact.kind === 'annotated-text.contribution') {
-    return exactKeys(fact, ['version', 'kind', 'documentId', 'contribution']) && annotatedContribution(fact.contribution);
+    const contributionKeys = ['version', 'kind', 'documentId', 'contribution',
+      ...(Object.hasOwn(fact, 'overlapRemovals') ? ['overlapRemovals'] : []),
+      ...(Object.hasOwn(fact, 'overlapPatches') ? ['overlapPatches'] : [])];
+    return exactKeys(fact, contributionKeys) && annotatedContribution(fact.contribution);
   }
   // #174: a committed annotation.update binds its whole before/after images.
   if (fact.kind === 'annotated-text.annotation-update') {
@@ -99,8 +180,11 @@ function annotatedPrivateFact(fact: PrivateFactLike): boolean {
   if (fact.kind === 'annotated-text.barrier') return exactKeys(fact, ['version', 'kind', 'documentId']);
   if (fact.kind !== 'annotated-text.compensation' || !fact.linkage || typeof fact.linkage !== 'object' || Array.isArray(fact.linkage)) return false;
   const validContribution = (value: unknown) => annotatedContribution(value) || annotatedUpdateContribution(value);
+  const compensationBase = ['version', 'kind', 'documentId', 'linkage', 'contribution', ...(fact.linkage.direction === 'undo' ? ['redo'] : [])];
   const keys = fact.linkage.outcome === 'applied'
-    ? ['version', 'kind', 'documentId', 'linkage', 'contribution', ...(fact.linkage.direction === 'undo' ? ['redo'] : [])]
+    ? [...compensationBase,
+      ...(Object.hasOwn(fact, 'overlapRemovals') ? ['overlapRemovals'] : []),
+      ...(Object.hasOwn(fact, 'overlapPatches') ? ['overlapPatches'] : [])]
     : ['version', 'kind', 'documentId', 'linkage'];
   return exactKeys(fact, keys)
     && exactKeys(fact.linkage, ['rootActionId', 'targetActionId', 'direction', 'outcome'])

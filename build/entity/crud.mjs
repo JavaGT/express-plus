@@ -136,7 +136,7 @@ function ordinalsByEncounterOrder(ranges                                        
  */
 function captureOverlapPreImages(db     , { prefix, documentId, descriptor, planFacts }
 
- )                                                                                                                                                                                                                                                                                                                            {
+ )                                                                                                                                                                                                                                                                                                                                                                {
   const emptied = planFacts?.emptiedAnnotations                                                              ;
   const updates = planFacts?.annotationUpdates                                                                                ;
   if ((!emptied || emptied.length === 0) && (!updates || updates.length === 0)) return null;
@@ -145,7 +145,7 @@ function captureOverlapPreImages(db     , { prefix, documentId, descriptor, plan
   const patched             = [];
   if (emptied && emptied.length > 0) {
     for (const entry of emptied) {
-      const ann = db.prepare(`SELECT id, family FROM ${prefix}_annotation WHERE id = ? AND document_id = ?`).get(entry.annotationId, documentId)                                              ;
+      const ann = db.prepare(`SELECT id, family, project_id, owner_id FROM ${prefix}_annotation WHERE id = ? AND document_id = ?`).get(entry.annotationId, documentId)                                                                                    ;
       if (!ann) continue;
       const typed = db.prepare(`SELECT * FROM ${prefix}_annotation_${ann.family} WHERE annotation_id = ?`).get(entry.annotationId)                                       ;
       const membership = db.prepare(`SELECT range_id, ordinal FROM ${prefix}_membership WHERE annotation_id = ?`).get(entry.annotationId)                                                     ;
@@ -156,7 +156,7 @@ function captureOverlapPreImages(db     , { prefix, documentId, descriptor, plan
           fields[key] = deserializeField(desc       , (typed                           )[key]);
         }
       }
-      removed.push({ annotationId: entry.annotationId, family: ann.family, fields, empty: entry.empty, rangeId: membership?.range_id ?? null, ordinal: membership?.ordinal ?? 0 });
+      removed.push({ annotationId: entry.annotationId, family: ann.family, fields, projectId: ann.project_id, ownerId: ann.owner_id, empty: entry.empty, rangeId: membership?.range_id ?? null, ordinal: membership?.ordinal ?? 0 });
     }
   }
   if (updates && updates.length > 0) {
@@ -191,7 +191,7 @@ function applyOverlapSideEffects(db     , { prefix, descriptor, payload, sourceF
     const removals = sourceFact.overlapRemovals                          ;
     if (removals && removals.length > 0) {
       for (const removal of removals) {
-        db.prepare(`INSERT INTO ${prefix}_annotation (id, family, document_id) VALUES (?, ?, ?)`).run(removal.annotationId, removal.family, payload.id);
+        db.prepare(`INSERT INTO ${prefix}_annotation (id, document_id, project_id, owner_id, family) VALUES (?, ?, ?, ?, ?)`).run(removal.annotationId, payload.id, removal.projectId, removal.ownerId, removal.family);
         const decl = declarations.find((d) => d.annotationName === removal.family);
         if (decl) {
           const fieldNames = Object.keys(removal.fields);
