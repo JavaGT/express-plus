@@ -9,7 +9,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { annotatedText, annotation, entity, ref } from '../build/index.mjs';
-import { importTextToFamily, textFamilyCheckpoint } from '../public/workbench-annotated-text-continuous.mjs';
+import {
+  importTextToFamily, textFamilyCheckpoint, applyTextOperation, materializeText,
+  textOperationForOffsetEdit,
+} from '../public/workbench-annotated-text-continuous.mjs';
 import { createAnnotatedTextHttpSession } from '../public/workbench-client.mjs';
 
 const Document = entity('PasteClientDoc', {
@@ -54,11 +57,13 @@ async function bootSession(options = {}) {
   const baseFamily = seedHelloWorld();
   const sources = [];
   const posts = [];
+  const mints = [];
   let number = 0;
   const session = createAnnotatedTextHttpSession({
     baseUrl: 'https://example.test/live-delivery',
     context: { entity: Document, field: Document.body, documentId: 'd1' },
-    historySession: 'tab-a', createActionId: () => `action-${number}-${posts.length}`,
+    historySession: 'tab-a',
+    createActionId: () => { const id = `action-${mints.length}`; mints.push(id); return id; },
     fetchImpl: async (url, fetchOptions) => {
       if (fetchOptions?.method === 'POST') {
         if (url.includes('/authoring/ack')) return { ok: true, status: 200, json: async () => ({ ok: true }) };
@@ -88,7 +93,7 @@ async function bootSession(options = {}) {
     },
   });
   await session.ready;
-  return { session, sources, posts };
+  return { session, sources, posts, mints, baseFamily };
 }
 
 test('paste projects text optimistically and dispatches one annotation.paste edit', async (t) => {
@@ -114,7 +119,7 @@ test('paste projects text optimistically and dispatches one annotation.paste edi
 });
 
 test('paste never coalesces into an open typing burst', async (t) => {
-  const { session, posts } = await bootSession();
+  const { session, sources, posts, mints, baseFamily } = await bootSession();
   // Harden against mid-test assertion throws: pending ops reject at close.
   let typing = null;
   let pasting = null;
@@ -126,6 +131,7 @@ test('paste never coalesces into an open typing burst', async (t) => {
   typing.catch(() => {});
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.equal(posts.length, 0, 'burst holds the insert');
+  assert.equal(mints.length, 1, 'burst minted its action identity');
 
   // The paste must flush the burst instead of merging into it: the burst
   // combiner only carries { at, text } and would drop the annotation sidecar.
@@ -140,6 +146,39 @@ test('paste never coalesces into an open typing burst', async (t) => {
   const burstEdit = findEditKind(JSON.parse(posts[0]), 'text.insert');
   assert.ok(burstEdit, 'flushed burst dispatches as text.insert');
   assert.equal(burstEdit.text, '!', 'burst text is unextended by the paste');
+  assert.equal(mints.length, 2, 'paste minted its own action identity');
+
+  // Settle the burst with its OWN fold echo (matched by action identity):
+  // the queued paste must then dispatch as its own annotation.paste op.
+  // (A foreign edit here would correctly fail the paste closed — offsets
+  // captured against the old base can't be trusted — so the echo must
+  // reflect the burst's own insert.)
+  const ownEchoInsert = textOperationForOffsetEdit(
+    baseFamily, { kind: 'text.insert', at: { offset: 5, affinity: 'right' }, text: '!' }, 'b'.repeat(32), 2,
+  );
+  const nextFamily = applyTextOperation(baseFamily, ownEchoInsert);
+  sources[0].onmessage({ data: JSON.stringify([{
+    type: 'event', entity: 'Project', id: 'p1', seq: 2, seqSpan: [2, 2],
+    event: { type: 'PasteClientDoc.body.operated', scope: 'Project:p1', seq: 2, actionId: mints[0] },
+    fold: {
+      kind: 'annotatedText', version: 5, field: 'body', baseCursor: 1, fence: 2,
+      text: { reducer: 'workbench.text', operations: [ownEchoInsert] },
+      projection: { text: materializeText(nextFamily) },
+      dispositions: [],
+      familyElementCount: Object.keys(nextFamily.checkpoint.elements).length,
+      authoring: {
+        acknowledgementFence: 2,
+        stream: token('stream'), lease: token('lease'), snapshot: token('snapshot2'),
+        positionFrames: [{ positionToken: token('position2') }],
+      },
+    },
+  }]) });
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.equal(posts.length, 2, 'paste dispatched after the burst settled');
+  const pasteEdit = findPasteEdit(JSON.parse(posts[1]));
+  assert.ok(pasteEdit, 'second dispatch carries the annotation.paste edit');
+  assert.equal(pasteEdit.text, 'zz');
+  assert.equal(pasteEdit.annotation.family, 'note');
 });
 
 test('paste fails closed on empty text or missing family without dispatching', async (t) => {

@@ -4436,6 +4436,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
         || action.payload?.edit?.kind === 'text.delete'
         || action.payload?.edit?.kind === 'text.replace'
         || action.payload?.edit?.kind === 'annotation.apply'
+        || action.payload?.edit?.kind === 'annotation.paste'
         || action.payload?.edit?.kind === 'annotation.remove';
     },
     validateSnapshot(snapshot, delivery) {
