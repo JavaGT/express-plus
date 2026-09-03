@@ -146,7 +146,26 @@ function compilePolicy(opts: { actionType: string; handle: ContributionHandle; n
       // root targets the origin itself; any chain move targets the current head
       // receipt's OWN envelope — selected and linkage-validated HERE, never by
       // the history engine.
-      if (origin.actionId === target.actionId) return originFact;
+      if (origin.actionId === target.actionId) {
+        if (nativeInsert) {
+          // The chain-move branch below validates head receipts, but the
+          // first move targets the origin's own fact — validate its shape
+          // here. Without this, a malformed origin fact ({}, wrong
+          // kind/version) passes through and fails late inside the handler,
+          // where the pipeline converts the throw into a resolved failure
+          // object instead of the fail-closed rejection the undo contract
+          // requires (malformed/erased inverse facts fail closed).
+          // Eligible native origins only: v2 contribution (text.insert,
+          // annotation.paste) and v2 annotation-update, bound to the origin
+          // document. Delete/barrier origins never reach selection (barriers
+          // cleave the cursor); anything else fails closed here.
+          const of = originFact as { version?: unknown; kind?: unknown; documentId?: unknown };
+          if ((of?.kind !== 'annotated-text.contribution' && of?.kind !== 'annotated-text.annotation-update')
+            || of?.version !== 2
+            || of?.documentId !== (origin.payload as { id?: unknown } | null | undefined)?.id) throw forbidden();
+        }
+        return originFact;
+      }
       void operation;
       const rawLink = (targetFact as { linkage?: unknown }).linkage ?? null;
       const linkage = rawLink && typeof rawLink === 'object'
