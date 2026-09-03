@@ -68,7 +68,7 @@ export function restoreTextFamily(familyCheckpoint) {
   if (!familyCheckpoint || typeof familyCheckpoint !== 'object' || Array.isArray(familyCheckpoint)) {
     fail('family checkpoint must be a non-array object');
   }
-  const allowedKeys = new Set(['id', 'checkpoint']);
+  const allowedKeys = new Set(['id', 'checkpoint', 'maxLamport']);
   for (const key of Object.keys(familyCheckpoint)) {
     if (!allowedKeys.has(key)) fail(`unknown family checkpoint key: ${key}`);
   }
@@ -76,7 +76,7 @@ export function restoreTextFamily(familyCheckpoint) {
     fail('family checkpoint id must be a non-empty string');
   }
   const checkpoint = restoreTextCheckpoint(familyCheckpoint.checkpoint);
-  return familyOf(familyCheckpoint.id, checkpoint);
+  return familyOf(familyCheckpoint.id, checkpoint, familyCheckpoint.maxLamport);
 }
 
 export function createTextFamily(id, checkpoint) {
