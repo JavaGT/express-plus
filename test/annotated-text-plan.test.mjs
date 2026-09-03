@@ -557,3 +557,175 @@ test('replace spanning the entire document collapses to a root-anchored insert',
   assert.equal(plan.operation.operations[1][5][1][0], 'root');
   assert.equal(materializePlan(family, plan), 'Q');
 });
+
+// ---------------------------------------------------------------------------
+// Edited-word overlap detection (Decision 0025 policy 4). A text edit that
+// overlaps a range of a family declaring `editOverlap` adjusts the owning
+// annotation: removal or a field patch. Offsets resolve against the BEFORE
+// family. An insert counts only when strictly interior. A delete/replace
+// counts on any positive-width intersection. Fully-covered ranges are
+// excluded (they already resolve through emptied dispositions).
+// ---------------------------------------------------------------------------
+
+test('edited-word insert interior to a timing range sets approximate=true', () => {
+  const family = familyFromText('abc def ghi');
+  const annotations = [
+    { id: 't1', family: 'timing', empty: 'delete' },
+    { id: 'u1', family: 'uncertainty', empty: 'delete' },
+  ];
+  const ranges = [rangeFor(family, 't1', 4, 7), rangeFor(family, 'u1', 0, 3)];
+  const editOverlapByFamily = {
+    timing: { kind: 'fields', fields: { approximate: true } },
+    uncertainty: { kind: 'remove' },
+  };
+  const annotationFields = new Map([
+    ['t1', { mediaStartMs: 100, mediaEndMs: 200, timingSource: 'original', approximate: false }],
+    ['u1', { confidence: 0.5 }],
+  ]);
+  // Insert at offset 5 (strictly interior to t1's range [4, 7), exterior to u1's [0, 3)).
+  const plan = input(family, { kind: 'text.insert', text: 'X', at: at(5) }, {
+    annotations, ranges, editOverlapByFamily, annotationFields,
+  });
+  assert.equal(materializePlan(family, plan), 'abc dXef ghi');
+  assert.equal(plan.after.structuralRevision, 1, 'insert alone does not bump revision');
+  // t1 is overlapped (interior insert) → field patch to set approximate
+  assert.equal(plan.facts.annotationUpdates.length, 1);
+  assert.equal(plan.facts.annotationUpdates[0].annotationId, 't1');
+  assert.equal(plan.facts.annotationUpdates[0].fields.approximate, true);
+  assert.equal(plan.facts.annotationUpdates[0].fields.mediaStartMs, 100, 'other fields preserved');
+  // u1 is not overlapped by interior insert (offset 5 is outside [0, 3)) → untouched
+  assert.equal(plan.facts.emptiedAnnotations.length, 0);
+});
+
+test('edited-word insert at boundary does NOT trigger overlap', () => {
+  const family = familyFromText('abc def ghi');
+  const annotations = [
+    { id: 't1', family: 'timing', empty: 'delete' },
+    { id: 't2', family: 'timing', empty: 'delete' },
+  ];
+  const ranges = [rangeFor(family, 't1', 0, 3), rangeFor(family, 't2', 4, 7)];
+  const editOverlapByFamily = { timing: { kind: 'fields', fields: { approximate: true } } };
+  const annotationFields = new Map([
+    ['t1', { mediaStartMs: 0, mediaEndMs: 100, timingSource: 'original', approximate: false }],
+    ['t2', { mediaStartMs: 100, mediaEndMs: 200, timingSource: 'original', approximate: false }],
+  ]);
+  // Insert at offset 3 — exactly at the boundary between t1 and t2, not interior.
+  const plan = input(family, { kind: 'text.insert', text: 'X', at: at(3) }, {
+    annotations, ranges, editOverlapByFamily, annotationFields,
+  });
+  assert.equal(plan.facts.annotationUpdates.length, 0, 'boundary insert does not trigger overlap');
+});
+
+test('edited-word delete that partially overlaps timing sets approximate=true; removes uncertainty', () => {
+  const family = familyFromText('abc def ghi');
+  const annotations = [
+    { id: 't1', family: 'timing', empty: 'delete' },
+    { id: 'u1', family: 'uncertainty', empty: 'delete' },
+  ];
+  const ranges = [rangeFor(family, 't1', 4, 7), rangeFor(family, 'u1', 0, 3)];
+  const editOverlapByFamily = {
+    timing: { kind: 'fields', fields: { approximate: true } },
+    uncertainty: { kind: 'remove' },
+  };
+  const annotationFields = new Map([
+    ['t1', { mediaStartMs: 100, mediaEndMs: 200, timingSource: 'original', approximate: false }],
+    ['u1', { confidence: 0.5 }],
+  ]);
+  // Delete from offset 2 to 5: overlaps u1 ([0, 3) ∩ [2, 5) = [2, 3)) and t1 ([4, 7) ∩ [2, 5) = [4, 5))
+  const plan = input(family, { kind: 'text.delete', from: at(2), to: at(5) }, {
+    annotations, ranges, editOverlapByFamily, annotationFields,
+  });
+  assert.equal(materializePlan(family, plan), 'abef ghi');
+  // t1 is partially overlapped → field patch sets approximate
+  assert.ok(plan.facts.annotationUpdates.some((u) => u.annotationId === 't1' && u.fields.approximate === true), 'timing gets approximate=true');
+  // u1 is partially overlapped → removed
+  assert.ok(plan.facts.emptiedAnnotations.some((e) => e.annotationId === 'u1'), 'uncertainty is emptied');
+});
+
+test('edited-word replace that partially overlaps timing sets approximate=true', () => {
+  const family = familyFromText('abc def ghi');
+  const annotations = [
+    { id: 't1', family: 'timing', empty: 'delete' },
+  ];
+  const ranges = [rangeFor(family, 't1', 4, 7)];
+  const editOverlapByFamily = { timing: { kind: 'fields', fields: { approximate: true } } };
+  const annotationFields = new Map([
+    ['t1', { mediaStartMs: 100, mediaEndMs: 200, timingSource: 'original', approximate: false }],
+  ]);
+  // Replace from 3 to 6: "abc def ghi" → delete " de" (offset 3-6), insert "XYZ"
+  const plan = input(family, { kind: 'text.replace', text: 'XYZ', from: at(3), to: at(6) }, {
+    annotations, ranges, editOverlapByFamily, annotationFields,
+  });
+  assert.equal(materializePlan(family, plan), 'abcXYZf ghi');
+  assert.equal(plan.facts.annotationUpdates.length, 1);
+  assert.equal(plan.facts.annotationUpdates[0].annotationId, 't1');
+  assert.equal(plan.facts.annotationUpdates[0].fields.approximate, true);
+});
+
+test('edited-word delete fully covering a range does NOT double-dip (emptied dispositions own it)', () => {
+  const family = familyFromText('abc def ghi');
+  const annotations = [
+    { id: 't1', family: 'timing', empty: 'delete' },
+  ];
+  const ranges = [rangeFor(family, 't1', 0, 3)];
+  const editOverlapByFamily = { timing: { kind: 'fields', fields: { approximate: true } } };
+  const annotationFields = new Map([
+    ['t1', { mediaStartMs: 0, mediaEndMs: 100, timingSource: 'original', approximate: false }],
+  ]);
+  // Delete fully covers t1's range [0, 3) → emptied, not overlapped.
+  const plan = input(family, { kind: 'text.delete', from: at(0), to: at(5) }, {
+    annotations, ranges, editOverlapByFamily, annotationFields,
+  });
+  assert.equal(plan.facts.emptiedAnnotations.length, 1);
+  assert.equal(plan.facts.emptiedAnnotations[0].annotationId, 't1');
+  assert.equal(plan.facts.annotationUpdates.length, 0, 'no field patch for fully-covered range');
+});
+
+test('edited-word idempotence: second overlap on already-approximate timing skips field update', () => {
+  const family = familyFromText('abc def ghi');
+  const annotations = [
+    { id: 't1', family: 'timing', empty: 'delete' },
+  ];
+  const ranges = [rangeFor(family, 't1', 4, 7)];
+  const editOverlapByFamily = { timing: { kind: 'fields', fields: { approximate: true } } };
+  // Already approximate: stored.approximate === true, same as the patch.
+  const annotationFields = new Map([
+    ['t1', { mediaStartMs: 100, mediaEndMs: 200, timingSource: 'original', approximate: true }],
+  ]);
+  const plan = input(family, { kind: 'text.insert', text: 'X', at: at(5) }, {
+    annotations, ranges, editOverlapByFamily, annotationFields,
+  });
+  assert.equal(plan.facts.annotationUpdates.length, 0, 'already-approximate timing produces no update');
+});
+
+test('edited-word with no overlap behavior declared keeps historical shrinking behavior', () => {
+  const family = familyFromText('abc def ghi');
+  const annotations = [
+    { id: 'c1', family: 'code', empty: 'delete' },
+  ];
+  const ranges = [rangeFor(family, 'c1', 4, 7)];
+  // No editOverlapByFamily entry for 'code' → no overlap behavior.
+  const plan = input(family, { kind: 'text.delete', from: at(2), to: at(5) }, {
+    annotations, ranges,
+    editOverlapByFamily: {}, annotationFields: new Map(),
+  });
+  assert.equal(plan.facts.annotationUpdates.length, 0, 'no overlap behavior → no annotation update');
+  assert.equal(plan.facts.emptiedAnnotations.length, 0, 'partial overlap still shrinks, not emptied');
+});
+
+test('edited-word insert that overlaps uncertainty removes it', () => {
+  const family = familyFromText('abc def ghi');
+  const annotations = [
+    { id: 'u1', family: 'uncertainty', empty: 'delete' },
+  ];
+  const ranges = [rangeFor(family, 'u1', 0, 3)];
+  const editOverlapByFamily = { uncertainty: { kind: 'remove' } };
+  const annotationFields = new Map();
+  // Insert at offset 1 (strictly interior to u1's [0, 3))
+  const plan = input(family, { kind: 'text.insert', text: 'X', at: at(1) }, {
+    annotations, ranges, editOverlapByFamily, annotationFields,
+  });
+  assert.equal(plan.facts.emptiedAnnotations.length, 1);
+  assert.equal(plan.facts.emptiedAnnotations[0].annotationId, 'u1');
+  assert.equal(plan.facts.emptiedAnnotations[0].disposition.kind, 'deleted');
+});

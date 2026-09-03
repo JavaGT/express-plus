@@ -285,7 +285,32 @@ function freezeAnnotationActions(actions: any, owner: string): any {
   return Object.freeze({ ...actions });
 }
 
-export function annotation(name: string, { appliesTo = 'text-range', cardinality = 'many', fields = {} as any, actions = {}, empty = 'delete' }: any = {}): any {
+/**
+ * Normalize the `editOverlap` annotation option (Decision 0025 policy 4).
+ * Returns the frozen behavior record or null when the family declares none.
+ */
+function normalizeEditOverlap(owner: string, editOverlap: any): any {
+  if (editOverlap === null || editOverlap === undefined) return null;
+  if (editOverlap === 'remove') return Object.freeze({ kind: 'remove' });
+  if (editOverlap && typeof editOverlap === 'object' && !Array.isArray(editOverlap) && Object.getPrototypeOf(editOverlap) === Object.prototype) {
+    const { fields, ...rest } = editOverlap;
+    if (Object.keys(rest).length > 0) {
+      throw new Error(`annotation '${owner}' editOverlap must be 'remove' or { fields }`);
+    }
+    if (!fields || typeof fields !== 'object' || Array.isArray(fields) || Object.getPrototypeOf(fields) !== Object.prototype || Object.keys(fields).length === 0) {
+      throw new Error(`annotation '${owner}' editOverlap.fields must be a non-empty keyed plain object`);
+    }
+    for (const key of Object.keys(fields)) {
+      if (!IDENTIFIER.test(key)) {
+        throw new Error(`annotation '${owner}' editOverlap.fields key '${key}' is not a valid identifier`);
+      }
+    }
+    return Object.freeze({ kind: 'fields', fields: Object.freeze({ ...fields }) });
+  }
+  throw new Error(`annotation '${owner}' editOverlap must be 'remove' or { fields }`);
+}
+
+export function annotation(name: string, { appliesTo = 'text-range', cardinality = 'many', fields = {} as any, actions = {}, empty = 'delete', editOverlap = null }: any = {}): any {
   if (typeof name !== 'string' || !IDENTIFIER.test(name)) {
     throw new Error(`annotation name '${name}' is not a valid identifier`);
   }
@@ -301,6 +326,11 @@ export function annotation(name: string, { appliesTo = 'text-range', cardinality
   if (empty !== 'delete' && empty !== 'orphan') {
     throw new Error(`annotation '${name}' empty policy must be 'delete' or 'orphan'`);
   }
+  // Edited-word behavior (Decision 0025 policy 4): what a text edit that
+  // overlaps this family's ranges does to the overlapped annotations.
+  // 'remove' deletes them; { fields } merges the patch into their stored
+  // fields. Null (default) keeps historical behavior: overlaps only shrink.
+  const editOverlapBehavior = normalizeEditOverlap(name, editOverlap);
   const frozenFields: Record<string, any> = {};
   for (const [k, v] of Object.entries(fields as Record<string, any>)) {
     frozenFields[k] = Object.freeze({ ...v });
@@ -314,6 +344,7 @@ export function annotation(name: string, { appliesTo = 'text-range', cardinality
     fields: Object.freeze(frozenFields),
     actions: frozenActions,
     empty,
+    editOverlap: editOverlapBehavior,
   });
 }
 
@@ -605,7 +636,7 @@ export function validateAnnotatedTextDeclaration(entity: string, field: string, 
   }
 
   // Validate no unknown keys on annotation annotations
-  const ALLOWED_ANN_KEYS = new Set(['kind', 'annotationName', 'appliesTo', 'cardinality', 'fields', 'actions', 'empty', 'protects', 'placeholder', 'access']);
+  const ALLOWED_ANN_KEYS = new Set(['kind', 'annotationName', 'appliesTo', 'cardinality', 'fields', 'actions', 'empty', 'editOverlap', 'protects', 'placeholder', 'access']);
   for (const ann of descriptor.annotations) {
     for (const key of Object.keys(ann)) {
       if (!ALLOWED_ANN_KEYS.has(key)) {
@@ -745,6 +776,7 @@ export function validateAnnotatedTextDeclaration(entity: string, field: string, 
           cardinality: annConfig?.cardinality === undefined ? 'many' : annConfig.cardinality,
           actions: actionHandles,
           empty: (annConfig && annConfig.empty) || 'delete',
+          editOverlap: (annConfig && annConfig.editOverlap) || null,
         })];
       }))
     ),

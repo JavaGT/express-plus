@@ -611,6 +611,7 @@ export function annotation<
   fields?: Record<string, FieldDescriptor<unknown, FieldMode>>;
   actions?: Actions;
   empty?: 'delete' | 'orphan';
+  editOverlap?: 'remove' | { readonly fields: Readonly<Record<string, unknown>> };
 }): AnnotatedTextAnnotationDescriptor<Name, Actions>;
 export function protectingAnnotation<
   Name extends string,

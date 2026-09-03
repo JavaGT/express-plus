@@ -7,7 +7,7 @@
 // blockless operated event/plan.
 
 import { createHash, randomUUID } from 'node:crypto';
-import { ValidationError,                      } from './field-strategy.mjs';
+import { ValidationError, deserializeField,                      } from './field-strategy.mjs';
 import * as eventHandles from './event-handle.mjs';
 import { authorizeFieldOp } from './strategy/index.mjs';
 import { write } from './grant.mjs';
@@ -15,7 +15,7 @@ import { applyTextOperation, restoreTextFamilySerialized, materializeText, textF
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
 import { resolveStream, resolveLease, resolvePosition } from './annotated-text-authoring-stream.mjs';
 import { readSeq } from './committed-log.mjs';
-import { planAnnotationRemove, planAnnotationUpdate, planTextOffsetEdit, planTextRangeApply } from './annotated-text-plan.mjs';
+import { planAnnotationPaste, planAnnotationRemove, planAnnotationUpdate, planTextOffsetEdit, planTextRangeApply,                          } from './annotated-text-plan.mjs';
 import { mapVisibleOffsetToCanonical, authoringRedactionsForRecipient,                         } from './annotated-text-recipient-projection.mjs';
 import { projectAnnotatedTextSnapshot } from './annotated-text-snapshot.mjs';
 
@@ -135,6 +135,7 @@ import { annotationRangeRows } from './annotated-text-storage.mjs';
 
 
 
+
 /** Resolve the authoring stream + lease for a v9 command. */
 export function assertV9AuthoringBinding({ name, fieldName, prefix, command, db, principal }
 
@@ -169,7 +170,14 @@ function loadAnnotations({ db, prefix, compiledMeta, documentId }
   for (const row of rows) {
     const metadata = compiledMeta.annotationHandles[row.family];
     if (!metadata) throw new ValidationError(`annotated-text unknown annotation family '${row.family}'`);
-    annotations.push({ id: row.id, family: row.family, empty: metadata.empty, protectedTargetIds: targetsByAnnotation.get(row.id) ?? [] });
+    const declaration = compiledMeta.annotationFields?.[row.family]?.descriptor;
+    const stored = db.prepare(`SELECT * FROM ${prefix}_annotation_${row.family} WHERE annotation_id = ?`).get(row.id)                                       ;
+    const fields                          = {};
+    for (const [fieldName, field] of Object.entries(declaration?.fields ?? {})) {
+      const value = stored?.[fieldName];
+      fields[fieldName] = value === undefined ? null : deserializeField(field                   , value);
+    }
+    annotations.push({ id: row.id, family: row.family, empty: metadata.empty, fields, protectedTargetIds: targetsByAnnotation.get(row.id) ?? [] });
   }
   return annotations;
 }
@@ -185,6 +193,48 @@ function loadRanges({ db, prefix, documentId }
     start: JSON.parse(row.start_point),
     end: JSON.parse(row.end_point),
   }));
+}
+
+/**
+ * Load stored annotation field values for families with field-patch editOverlap
+ * behavior (Decision 0025 policy 4). Returns a Map from annotation id to its
+ * deserialized field record. Families without a `{ kind: 'fields' }` overlap
+ * declaration are skipped — their fields are never needed for overlap patching.
+ */
+function loadAnnotationFields({ db, prefix, compiledMeta, descriptor, annotations }
+
+
+
+
+
+ )                                       {
+  // Index families whose overlap behavior is a field patch.
+  const fieldPatchFamilies = new Set        ();
+  for (const [family, meta] of Object.entries(compiledMeta.annotationHandles                       )) {
+    if (meta.editOverlap?.kind === 'fields') fieldPatchFamilies.add(family);
+  }
+  if (fieldPatchFamilies.size === 0) return new Map();
+  // Build a field-descriptor lookup for deserialization.
+  const annDescriptors = new Map                                         ();
+  for (const ann of (descriptor.annotations ?? [])              ) {
+    if (fieldPatchFamilies.has(ann.annotationName)) {
+      annDescriptors.set(ann.annotationName, ann.fields ?? {});
+    }
+  }
+  const fields = new Map                                 ();
+  for (const annotation of annotations) {
+    if (!fieldPatchFamilies.has(annotation.family)) continue;
+    const row = db.prepare(`SELECT * FROM ${prefix}_annotation_${annotation.family} WHERE annotation_id = ?`).get(annotation.id)                                       ;
+    if (!row) continue;
+    const fieldDescs = annDescriptors.get(annotation.family);
+    if (!fieldDescs) continue;
+    const record                          = {};
+    for (const [key, fieldDesc] of Object.entries(fieldDescs)) {
+      record[key] = deserializeField(fieldDesc, (row                           )[key]);
+    }
+    fields.set(annotation.id, record);
+  }
+  return fields;
 }
 
 /** Cross-cutting admission shared by every edit kind. */
@@ -362,6 +412,12 @@ async function admitTextEdit(ctx                                   )            
   if (edit.kind !== 'text.insert') assertOffsetInDocument(family, mapped.to, 'replacement end');
   const annotations = loadAnnotations({ db, prefix, compiledMeta: ctx.compiledMeta, documentId: command.id });
   const ranges = loadRanges({ db, prefix, documentId: command.id });
+  // Build edit-overlap behaviors from compiled annotation handles (Decision 0025 policy 4).
+  const editOverlapByFamily                                      = {};
+  for (const [familyName, meta] of Object.entries(ctx.compiledMeta.annotationHandles                       )) {
+    if (meta.editOverlap) editOverlapByFamily[familyName] = meta.editOverlap;
+  }
+  const annotationFields = loadAnnotationFields({ db, prefix, compiledMeta: ctx.compiledMeta, descriptor: ctx.descriptor, annotations });
   const plannerEdit = edit.kind === 'text.insert'
     ? { kind: 'text.insert', at: { offset: mapped.from, affinity: edit.at .affinity }, text: edit.text }
     : { kind: edit.kind, from: { offset: mapped.from, affinity: edit.from .affinity }, to: { offset: mapped.to, affinity: edit.to .affinity }, text: edit.text };
@@ -370,6 +426,7 @@ async function admitTextEdit(ctx                                   )            
     plan = planTextOffsetEdit({
       documentId: command.id, structureVersion: state.structure_version, family, actor, lamport,
       annotations, ranges, edit: plannerEdit       ,
+      editOverlapByFamily, annotationFields,
     });
   } catch (error) {
     const err = error                             ;

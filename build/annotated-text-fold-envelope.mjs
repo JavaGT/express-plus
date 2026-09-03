@@ -117,7 +117,7 @@ import { rawRow } from './entity/query.mjs';
 // The v13 operated-event facts bag is one exact key set (mirrors
 // annotated-text-operated-facts.mjs and the row projection). Anything else —
 // including a block-era facts bag — fails closed and falls through.
-const OPERATED_FACTS_KEYS = ['actorId', 'annotation', 'emptiedAnnotations', 'family', 'lifecycle', 'measurements', 'ranges', 'removedAnnotationIds', 'result', 'selectedRange'];
+const OPERATED_FACTS_KEYS = ['actorId', 'annotation', 'annotationUpdates', 'emptiedAnnotations', 'family', 'lifecycle', 'measurements', 'ranges', 'removedAnnotationIds', 'result', 'selectedRange'];
 
 function recovery(ctx         , entity        , id        , reason        )           {
   return [{ type: 'resync', entity, id, seq: ctx.event.seq, reason }];
@@ -231,6 +231,15 @@ export async function tryBuildAnnotatedTextFoldEnvelopes(ctx         , { db, doc
   const { entity: scopeEntity, id: scopeId } = scopeParts(ctx.scope);
   const entityName = scopeEntity ?? document.entity.name;
   const id = scopeId ?? document.documentId;
+
+  // Edited-word field patches (Decision 0025 policy 4) do not fold: the fold
+  // envelope carries text operations plus delete/orphan dispositions only. An
+  // edit that patches annotation fields falls back to snapshot recovery so the
+  // recipient's annotation view stays correct.
+  const annotationUpdates = (facts       ).annotationUpdates;
+  if (Array.isArray(annotationUpdates) && annotationUpdates.length > 0) {
+    return recovery(ctx, entityName, id, 'annotated-text-snapshot-required');
+  }
 
   const row = rawRow(db, document.entity.name, document.documentId);
   if (!row) return recovery(ctx, entityName, id, 'annotated-text-snapshot-required');

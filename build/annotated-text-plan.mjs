@@ -64,6 +64,14 @@ function deepFreeze   (value   )    {
 
 
 
+/** Declared edited-word behavior per family (Decision 0025 policy 4). */
+
+
+
+
+
+
+
 
 
 
@@ -94,6 +102,8 @@ function unifiedPlan(data                     )           {
     after: data.after,
     operation: data.operation,
     annotation: data.annotation,
+    annotationChanges: data.annotationChanges,
+    annotationUpdates: data.annotationUpdates,
     ranges: data.ranges,
     measurements: data.measurements,
     lifecycle: data.lifecycle,
@@ -184,10 +194,178 @@ function materializeRangeBetween(family                      , range            
 }
 
 /**
+ * Edited-word overlap detection (Decision 0025 policy 4). A text edit that
+ * touches a range of a family declaring `editOverlap` adjusts the owning
+ * annotation: removal, or a field patch. Offsets resolve against the BEFORE
+ * family — the edit's own coordinates.
+ *
+ * An insert counts only when strictly interior (`start < at < end`): typing
+ * exactly at a word boundary must not clear the neighbors' evidence. A
+ * delete/replace counts on any positive-width intersection with [from, to).
+ * Fully-covered ranges are excluded — they already resolve through the
+ * ordinary emptied dispositions, never twice.
+ */
+export function findEditOverlapIds({ family, annotations, ranges, edit, editOverlapByFamily }
+
+
+
+
+
+ )                                                    {
+  const familyById = new Map(annotations.map((annotation) => [annotation.id, annotation.family]));
+  const removeIds = new Set        ();
+  const approximateIds = new Set        ();
+  const isInsert = edit.kind === 'text.insert';
+  const at = isInsert ? (edit                              ).at.offset : 0;
+  const from = !isInsert ? (edit                                ).from.offset : 0;
+  const to = !isInsert ? (edit                              ).to.offset : 0;
+  for (const range of ranges) {
+    const start = projectEndpointToOffset(family, range.start);
+    const end = projectEndpointToOffset(family, range.end);
+    if (start >= end) continue;
+    const familyName = familyById.get(range.annotationId);
+    if (!familyName) continue;
+    const behavior = editOverlapByFamily[familyName];
+    if (!behavior) continue;
+    if (isInsert) {
+      if (!(start < at && at < end)) continue;
+    } else {
+      if (!(start < to && from < end)) continue;
+      // Fully covered: the emptied dispositions own this annotation.
+      if (start >= from && end <= to) continue;
+    }
+    if (behavior.kind === 'remove') removeIds.add(range.annotationId);
+    else approximateIds.add(range.annotationId);
+  }
+  return {
+    removeIds: [...removeIds].sort(),
+    approximateIds: [...approximateIds].sort(),
+  };
+}
+
+/** Deleted-disposition entry for an overlap removal (ordinary emptied shape). */
+function overlapRemovalDisposition({ annotations, annotationId, family }
+
+
+
+ )                    {
+  const annotation = annotations.find((candidate) => candidate.id === annotationId);
+  if (!annotation) throw new Error(`overlap removal target '${annotationId}' is not a known annotation`);
+  void family;
+  return {
+    annotationId,
+    empty: annotation.empty,
+    disposition: { kind: 'deleted', family: annotation.family, savedQuote: null, lastRange: null },
+  };
+}
+
+/**
+ * Field-patch facts for overlapped `{ fields }` families. Ids already gone
+ * (emptied or removed) are skipped — there is nothing to patch. An id whose
+ * stored fields already carry every patch value is skipped too, so a second
+ * keystroke in an already-approximated word plans no update. A missing stored
+ * record fails closed: the admit layer must supply fields for every id the
+ * detector names.
+ */
+function overlapUpdateFacts({ adjustments, annotations, annotationFields, editOverlapByFamily, documentId }
+
+
+
+
+
+ )                                                                   {
+  void documentId;
+  const gone = new Set(adjustments.removeIds);
+  const familyById = new Map(annotations.map((annotation) => [annotation.id, annotation.family]));
+  const facts                                                                   = [];
+  for (const annotationId of adjustments.approximateIds) {
+    if (gone.has(annotationId)) continue;
+    const familyName = familyById.get(annotationId);
+    const behavior = (familyName && editOverlapByFamily[familyName]) || null;
+    if (!behavior || behavior.kind !== 'fields') continue;
+    const stored = annotationFields.get(annotationId);
+    if (!stored) throw new Error(`overlap field patch target '${annotationId}' has no stored fields`);
+    const merged = { ...stored, ...behavior.fields };
+    let changed = false;
+    for (const key of Object.keys(behavior.fields)) {
+      if (JSON.stringify((merged                           )[key]) !== JSON.stringify(stored[key])) { changed = true; break; }
+    }
+    if (!changed) continue;
+    facts.push({ annotationId, fields: deepFreeze({ ...merged }) });
+  }
+  return facts;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function annotationImage(annotation            , ranges                   )                  {
+  const ordinal = new Map                ();
+  return {
+    id: annotation.id,
+    family: annotation.family,
+    fields: { ...(annotation.fields ?? {}) },
+    protectedTargetIds: [...(annotation.protectedTargetIds ?? [])].sort(),
+    ranges: ranges
+      .filter((entry) => entry.annotationId === annotation.id)
+      .map((entry) => {
+        const nextOrdinal = ordinal.get(entry.annotationId) ?? 0;
+        ordinal.set(entry.annotationId, nextOrdinal + 1);
+        return { annotationId: entry.annotationId, ordinal: nextOrdinal, start: entry.start, end: entry.end };
+      }),
+  };
+}
+
+function annotationChangesForPostimage({ annotations, ranges, nextAnnotations = annotations, nextRanges }
+
+
+
+
+ )                     {
+  const beforeById = new Map(annotations.map((annotation) => [annotation.id, annotationImage(annotation, ranges)]));
+  const afterById = new Map(nextAnnotations.map((annotation) => [annotation.id, annotationImage(annotation, nextRanges)]));
+  const ids = [...new Set([...beforeById.keys(), ...afterById.keys()])].sort();
+  return ids.flatMap((annotationId) => {
+    const beforeImage = beforeById.get(annotationId) ?? null;
+    const afterImage = afterById.get(annotationId) ?? null;
+    if (JSON.stringify(beforeImage) === JSON.stringify(afterImage)) return [];
+    return [{ annotationId, before: beforeImage, after: afterImage }];
+  });
+}
+
+function copyRanges(ranges                   )                    {
+  return ranges.map((entry) => ({
+    annotationId: entry.annotationId,
+    start: entry.start,
+    end: entry.end,
+  }));
+}
+
+/**
  * Plan a document-wide text insert/delete/replace. The edit names ABSOLUTE
  * offsets; the operation applies to the whole continuous family.
+ *
+ * `editOverlapByFamily` carries the declared edited-word behaviors (Decision
+ * 0025 policy 4): families whose overlapped annotations are removed or field-
+ * patched by the edit. `annotationFields` holds the stored field records for
+ * families with a `{ fields }` behavior so patches merge over current values;
+ * an id missing from the map fails closed. Overlaps already emptied by the
+ * edit resolve through the ordinary emptied dispositions, never twice.
  */
-export function planTextOffsetEdit({ documentId, structureVersion, family, actor, lamport, edit, annotations = [], ranges = [] }
+export function planTextOffsetEdit({ documentId, structureVersion, family, actor, lamport, edit, annotations = [], ranges = [], editOverlapByFamily = {}, annotationFields = new Map() }
+
+
 
 
 
@@ -202,12 +380,28 @@ export function planTextOffsetEdit({ documentId, structureVersion, family, actor
     assertForwardOffset(text, edit.at.offset, edit.at.offset);
     const operation = textOperationForOffsetEdit(family, { kind: 'text.insert', at: edit.at, text: edit.text }, actor, lamport);
     const nextFamily = applyTextOperation(family, operation);
+    const adjustments = findEditOverlapIds({ family, annotations, ranges, edit, editOverlapByFamily });
+    const updateFacts = overlapUpdateFacts({ adjustments, annotations, annotationFields, editOverlapByFamily, documentId });
+    const emptied = adjustments.removeIds.map((annotationId) => overlapRemovalDisposition({ annotations, annotationId, family }));
+    const removed = new Set(emptied.map((entry) => entry.annotationId));
+    const updatedById = new Map(updateFacts.map((fact) => [fact.annotationId, fact.fields]));
+    const nextAnnotations = annotations
+      .filter((annotation) => !removed.has(annotation.id))
+      .map((annotation) => ({
+        ...annotation,
+        ...(updatedById.has(annotation.id) ? { fields: updatedById.get(annotation.id) } : {}),
+      }));
+    const nextRanges = ranges.filter((entry) => !removed.has(entry.annotationId));
     return unifiedPlan({
       id: documentId,
       before: before(family, structureVersion),
       operation: { kind: 'text.apply', operation },
-      after: Object.freeze({ structuralRevision: structureVersion, frontier: nextFamily.checkpoint.frontier }),
+      after: Object.freeze({ structuralRevision: structureVersion + (emptied.length ? 1 : 0), frontier: nextFamily.checkpoint.frontier }),
       family: textFamilyCheckpoint(nextFamily),
+      emptiedAnnotations: Object.freeze(emptied),
+      annotationUpdates: Object.freeze(updateFacts),
+      ranges: Object.freeze(copyRanges(nextRanges).map((entry) => deepFreeze(entry))),
+      annotationChanges: Object.freeze(annotationChangesForPostimage({ annotations, ranges, nextAnnotations, nextRanges })),
     });
   }
   if (edit.kind === 'text.delete' || edit.kind === 'text.replace') {
@@ -238,6 +432,22 @@ export function planTextOffsetEdit({ documentId, structureVersion, family, actor
       // A replacement can empty an annotation range exactly like a delete does;
       // the emptied-annotation dispositions must be planned and applied.
       const emptied = emptiedRanges({ beforeFamily: family, afterFamily: nextFamily, ranges, annotations, structureVersion });
+      const emptiedIds = new Set(emptied.map((entry) => entry.annotationId));
+      const adjustments = findEditOverlapIds({ family, annotations, ranges, edit, editOverlapByFamily });
+      for (const annotationId of adjustments.removeIds) {
+        if (emptiedIds.has(annotationId)) continue;
+        emptied.push(overlapRemovalDisposition({ annotations, annotationId, family }));
+        emptiedIds.add(annotationId);
+      }
+      const updateFacts = overlapUpdateFacts({ adjustments, annotations, annotationFields, editOverlapByFamily, documentId })
+        .filter((fact) => !emptiedIds.has(fact.annotationId));
+      const updatedById = new Map(updateFacts.map((fact) => [fact.annotationId, fact.fields]));
+      const nextAnnotations = annotations
+        .filter((annotation) => !emptiedIds.has(annotation.id))
+        .map((annotation) => ({
+          ...annotation,
+          ...(updatedById.has(annotation.id) ? { fields: updatedById.get(annotation.id) } : {}),
+        }));
       return unifiedPlan({
         id: documentId,
         before: before(family, structureVersion),
@@ -246,12 +456,30 @@ export function planTextOffsetEdit({ documentId, structureVersion, family, actor
         family: textFamilyCheckpoint(nextFamily),
         ranges: Object.freeze(nextRanges.map((entry) => deepFreeze({ annotationId: entry.annotationId, start: entry.start, end: entry.end }))),
         emptiedAnnotations: Object.freeze(emptied),
+        annotationUpdates: Object.freeze(updateFacts),
+        annotationChanges: Object.freeze(annotationChangesForPostimage({ annotations, ranges, nextAnnotations, nextRanges })),
       });
     }
     const operation = textOperationForOffsetEdit(family, { kind: 'text.delete', from: edit.from, to: edit.to }, actor, lamport);
     const nextFamily = applyTextOperation(family, operation);
     const nextRanges = rangesAfterDelete({ beforeFamily: family, afterFamily: nextFamily, ranges, from: edit.from.offset, to: edit.to.offset });
     const emptied = emptiedRanges({ beforeFamily: family, afterFamily: nextFamily, ranges, annotations, structureVersion });
+    const emptiedIds = new Set(emptied.map((entry) => entry.annotationId));
+    const adjustments = findEditOverlapIds({ family, annotations, ranges, edit, editOverlapByFamily });
+    for (const annotationId of adjustments.removeIds) {
+      if (emptiedIds.has(annotationId)) continue;
+      emptied.push(overlapRemovalDisposition({ annotations, annotationId, family }));
+      emptiedIds.add(annotationId);
+    }
+    const updateFacts = overlapUpdateFacts({ adjustments, annotations, annotationFields, editOverlapByFamily, documentId })
+      .filter((fact) => !emptiedIds.has(fact.annotationId));
+    const updatedById = new Map(updateFacts.map((fact) => [fact.annotationId, fact.fields]));
+    const nextAnnotations = annotations
+      .filter((annotation) => !emptiedIds.has(annotation.id))
+      .map((annotation) => ({
+        ...annotation,
+        ...(updatedById.has(annotation.id) ? { fields: updatedById.get(annotation.id) } : {}),
+      }));
     return unifiedPlan({
       id: documentId,
       before: before(family, structureVersion),
@@ -260,11 +488,122 @@ export function planTextOffsetEdit({ documentId, structureVersion, family, actor
       family: textFamilyCheckpoint(nextFamily),
       ranges: Object.freeze(nextRanges.map((entry) => deepFreeze({ annotationId: entry.annotationId, start: entry.start, end: entry.end }))),
       emptiedAnnotations: Object.freeze(emptied),
+      annotationUpdates: Object.freeze(updateFacts),
+      annotationChanges: Object.freeze(annotationChangesForPostimage({ annotations, ranges, nextAnnotations, nextRanges })),
     });
   }
   const error = new Error(`unsupported edit kind: ${(edit       ).kind}`)                            ;
   error.code = 'position-invalid';
   throw error;
+}
+
+/**
+ * Plan an annotation-aware paste as one operated event. The text insertion,
+ * copied annotation, exclusive-family trimming, and edited-word side effects
+ * share one postimage and therefore one durable history step.
+ */
+export function planAnnotationPaste({ documentId, structureVersion, family, actor, lamport, text, at, annotation, annotations = [], ranges = [], editOverlapByFamily = {}, annotationFields = new Map(), actorId }
+
+
+
+
+
+
+
+
+
+
+
+
+
+ )           {
+  const textPlan = planTextOffsetEdit({
+    documentId,
+    structureVersion,
+    family,
+    actor,
+    lamport,
+    edit: { kind: 'text.insert', at, text },
+    annotations,
+    ranges,
+    editOverlapByFamily,
+    annotationFields,
+  });
+  const operation = textPlan.operation.operation;
+  const insertedFamily = applyTextOperation(family, operation);
+  const sameFamilyAnnotationIds = new Set(annotations
+    .filter((candidate) => candidate.family === annotation.family)
+    .map((candidate) => candidate.id));
+  const start = at.offset;
+  const end = at.offset + text.length;
+  assertForwardOffset(materializeText(insertedFamily), start, end);
+  const pastedRange                  = {
+    annotationId: annotation.id,
+    start: resolveOffsetToEndpoint(insertedFamily, start, insertedFamily.checkpoint.frontier, 'left'),
+    end: resolveOffsetToEndpoint(insertedFamily, end, insertedFamily.checkpoint.frontier, 'right'),
+  };
+  const finalRanges                    = [];
+  for (const entry of textPlan.facts.ranges                     ) {
+    if (entry.annotationId === annotation.id) continue;
+    if (annotation.cardinality === 'one' && sameFamilyAnnotationIds.has(entry.annotationId)) {
+      const existingStart = projectEndpointToOffset(insertedFamily, entry.start);
+      const existingEnd = projectEndpointToOffset(insertedFamily, entry.end);
+      if (existingEnd > start && existingStart < end) {
+        if (existingStart < start) {
+          finalRanges.push({
+            annotationId: entry.annotationId,
+            start: entry.start,
+            end: resolveOffsetToEndpoint(insertedFamily, start, insertedFamily.checkpoint.frontier, 'left'),
+          });
+        }
+        if (existingEnd > end) {
+          finalRanges.push({
+            annotationId: entry.annotationId,
+            start: resolveOffsetToEndpoint(insertedFamily, end, insertedFamily.checkpoint.frontier, 'right'),
+            end: entry.end,
+          });
+        }
+        continue;
+      }
+    }
+    finalRanges.push(entry);
+  }
+  finalRanges.push(pastedRange);
+  const emptiedIds = new Set((textPlan.facts.emptiedAnnotations                                   ).map((entry) => entry.annotationId));
+  const updatedById = new Map((textPlan.facts.annotationUpdates                                                                    )
+    .map((entry) => [entry.annotationId, entry.fields]));
+  const nextAnnotations = annotations
+    .filter((candidate) => !emptiedIds.has(candidate.id))
+    .map((candidate) => ({
+      ...candidate,
+      ...(updatedById.has(candidate.id) ? { fields: updatedById.get(candidate.id) } : {}),
+    }))
+    .concat(annotation);
+  const changes = annotationChangesForPostimage({
+    annotations,
+    ranges,
+    nextAnnotations,
+    nextRanges: finalRanges,
+  });
+  return unifiedPlan({
+    id: documentId,
+    before: before(family, structureVersion),
+    after: Object.freeze({ structuralRevision: textPlan.after.structuralRevision, frontier: insertedFamily.checkpoint.frontier }),
+    operation: {
+      kind: 'annotation.paste',
+      operation,
+      annotation,
+      selection: { startOffset: start, endOffset: end },
+    },
+    family: textFamilyCheckpoint(insertedFamily),
+    annotation,
+    ranges: Object.freeze(finalRanges.map((entry) => deepFreeze({ ...entry }))),
+    annotationChanges: Object.freeze(changes.map((change) => deepFreeze(change))),
+    annotationUpdates: textPlan.facts.annotationUpdates,
+    emptiedAnnotations: textPlan.facts.emptiedAnnotations,
+    actorId,
+    selectedRange: pastedRange,
+  });
 }
 
 /** Plan a document-range annotation.apply: one contiguous range, no blocks. */
