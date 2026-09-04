@@ -15,7 +15,8 @@ import { restoreTextFamilySerialized, materializeText, textFamilyBasis,         
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
 import { resolveStream, resolveLease, resolvePosition } from './annotated-text-authoring-stream.mjs';
 import { readSeq } from './committed-log.mjs';
-import { planAnnotationPaste, planAnnotationRemove, planAnnotationUpdate, planTextOffsetEdit, planTextRangeApply,                          } from './annotated-text-plan.mjs';
+import { planAnnotationRemove, planAnnotationUpdate, planTextOffsetEdit, planTextRangeApply,                          } from './annotated-text-plan.mjs';
+import { planAnnotationPaste } from './annotation-paste-plan.mjs';
 import { mapVisibleOffsetToCanonical, authoringRedactionsForRecipient,                         } from './annotated-text-recipient-projection.mjs';
 import { projectAnnotatedTextSnapshot } from './annotated-text-snapshot.mjs';
 
