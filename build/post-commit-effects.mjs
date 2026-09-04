@@ -4,7 +4,8 @@
 
 
 import { recordFactDependencies } from './private-action-fact-dependency.mjs';
-import { isDeleteFact, parseAnnotationTransition } from './annotated-text-delete-history.mjs';
+import { isDeleteFact } from './annotated-text-delete-history.mjs';
+import { parseAnnotationTransition } from './annotation-transition.mjs';
 import { decodeLogRowData } from './committed-log.mjs';
 import {
   applicationPrivateFactView,

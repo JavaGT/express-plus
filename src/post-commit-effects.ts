@@ -4,7 +4,8 @@
 
 import type { DbHandle } from './driver.ts';
 import { recordFactDependencies } from './private-action-fact-dependency.ts';
-import { isDeleteFact, parseAnnotationTransition } from './annotated-text-delete-history.ts';
+import { isDeleteFact } from './annotated-text-delete-history.ts';
+import { parseAnnotationTransition } from './annotation-transition.ts';
 import { decodeLogRowData } from './committed-log.ts';
 import {
   applicationPrivateFactView,
