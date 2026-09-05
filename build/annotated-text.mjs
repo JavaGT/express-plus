@@ -241,10 +241,45 @@ export function assertTextOp(value         )         {
   return Object.freeze(['workbench.text', 1, op, lamport, deps, canonicalBody]);
 }
 
+// assertTextOp closes every nested array and validates every leaf as a string
+// or safe integer, so structural identity with the canonical form implies
+// identical JSON. An inherited toJSON hook is the one way an equal structure
+// could still serialize differently, so the exact string comparison is kept
+// for that adversarial case (and re-derives the same failure for genuine
+// structural differences). This removes the two per-apply full-op
+// JSON.stringify passes from the keystroke hot path.
+function assertCanonicalForm(value         , canonical        ) {
+  if (!sameArrayTree(value, canonical) || treeHasToJSONHook(value)) {
+    if (JSON.stringify(value) !== JSON.stringify(canonical)) fail('operation is not in canonical form');
+  }
+}
+
+function sameArrayTree(left         , right         )          {
+  if (left === right) return true;
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    if (!sameArrayTree(left[index], right[index])) return false;
+  }
+  return true;
+}
+
+function treeHasToJSONHook(value         )          {
+  if (!Array.isArray(value)) return false;
+  if (typeof (value                        ).toJSON === 'function') return true;
+  return value.some((child) => treeHasToJSONHook(child));
+}
+
 export function canonicalTextOp(value         )         {
   const canonical = assertTextOp(value);
-  if (JSON.stringify(value) !== JSON.stringify(canonical)) fail('operation is not in canonical form');
+  assertCanonicalForm(value, canonical);
   return canonical;
+}
+
+/** Canonicalize an operation and produce its integrity digest in one pass. */
+function canonicalTextOpDigest(value         )                                 {
+  const op = assertTextOp(value);
+  assertCanonicalForm(value, op);
+  return { op, digest: JSON.stringify(op) };
 }
 
 export function assertStructuralPoint(value         )                  {
@@ -268,10 +303,6 @@ function elementKey(op      , ordinal        )         {
 
 function anchorKey(anchor        )         {
   return anchor[0] === 'root' ? ROOT_ID : elementKey(anchor[1][0], anchor[1][1]);
-}
-
-function canonicalDigest(op        )         {
-  return JSON.stringify(op);
 }
 
 function canonicalFrontier(frontier          )         {
@@ -423,8 +454,7 @@ function assertCheckpoint(value         )            {
   }
   for (const registryName of ['operations', 'pending']         ) {
     for (const [key, entry] of Object.entries((raw[registryName] ?? {})                       )) {
-      const op = canonicalTextOp(entry?.op);
-      const digest = canonicalDigest(op);
+      const { op, digest } = canonicalTextOpDigest(entry?.op);
       if (key !== opKey(op[2]) || entry.digest !== digest) throw new TypeError('invalid annotated-text checkpoint operation registry');
       state[registryName][key] = Object.freeze({ digest, op });
     }
@@ -545,8 +575,7 @@ function restoreCompactTextCheckpoint(raw                                )      
   }
   const expectedFrontier = assertFrontier(raw.frontier);
   const readRegistry = (registry                                   ) => Object.entries(registry).map(([key, entry]) => {
-    const op = canonicalTextOp(entry?.op);
-    const digest = canonicalDigest(op);
+    const { op, digest } = canonicalTextOpDigest(entry?.op);
     if (key !== opKey(op[2]) || entry?.digest !== digest) throw new TypeError('invalid compact annotated-text checkpoint operation registry');
     return { op, digest };
   });
@@ -638,9 +667,8 @@ export function applyTextOp(current           , value         )            {
   // early return spent the full per-apply copy for an unchanged result.
   if (validated.rebootstrapRequired) return Object.freeze(validated);
   const state = cloneState(validated);
-  const op = canonicalTextOp(value);
+  const { op, digest } = canonicalTextOpDigest(value);
   const key = opKey(op[2]);
-  const digest = canonicalDigest(op);
   const known = state.operations[key] ?? state.pending[key];
   if (known) {
     if (known.digest !== digest) throw new Error('annotated-text operation ID was reused with different content');
