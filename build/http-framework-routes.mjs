@@ -1,5 +1,5 @@
-// Framework-owned HTTP routes — snapshot, events-since, blob upload, job queue,
-// and the browser SDK endpoint.
+// Framework-owned HTTP routes — snapshot, multi-snapshot, events-since, blob
+// upload, job queue, and the browser SDK endpoint.
 //
 // These are NOT mounted routes: they are framework defaults intercepted before
 // route matching in the request handler, like /health. Auth runs through the
@@ -139,11 +139,12 @@ async function admittedTextReducerCheckpoints(
   return checkpoints.filter((seed) => readable.has(seed.field));
 }
 
-// routes — resolved at request time from `/snapshot/:entity/:id` and
-// `/events-since/:entity/:id`. The entity table IS the snapshot (scope's proven
-// shape); the committed `_Log` is the RESYNC source. Authorization runs the SAME
-// mayVerb('read') engine as REST `read` (the viewer bar), after the same
-// readScope row filter — one auth engine, no second path (SPEC §7, §7.1).
+// routes — resolved at request time from `/snapshot/:entity/:id`,
+// `/snapshots?scope=...`, and `/events-since/:entity/:id`. The entity table IS
+// the snapshot (scope's proven shape); the committed `_Log` is the RESYNC
+// source. Authorization runs the SAME mayVerb('read') engine as REST `read`
+// (the viewer bar), after the same readScope row filter — one auth engine, no
+// second path (SPEC §7, §7.1).
 //
 // Returns true when the request was handled (the caller short-circuits); false
 // when the path is not a framework resync route (fall through to matchRoute).
@@ -157,13 +158,17 @@ export async function handleResyncRoute(
   const seg = url.pathname.split('/').filter(Boolean);
   const isSnapshot = seg[0] === 'snapshot';
   const isEventsSince = seg[0] === 'events-since';
-  if (!isSnapshot && !isEventsSince) return false;
+  const isSnapshots = seg[0] === 'snapshots' && seg.length === 1;
+  if (!isSnapshot && !isEventsSince && !isSnapshots) return false;
   if (!app || !app.entities || !app.db) return false;
 
   if (!principal || principal.id == null) {
     reject(res, 401, 'unauthorized');
     return true;
   }
+
+  // Authorized multi-snapshot bootstrap (issue #184): GET /snapshots?scope=...
+  if (isSnapshots) return bulkSnapshotRoute(app, principal, res, url.searchParams);
 
   // Scope-level requests: GET /snapshot?scope=project:p1 etc.
   const scopeParam = url.searchParams.get('scope');
@@ -178,57 +183,172 @@ export async function handleResyncRoute(
   const [, entityName, id] = seg;
   const entity = app.entities.get(entityName);
   if (!entity) { reject(res, 404, 'not found'); return true; }
-  const row = hasAnnotatedTextFields(entity) ? rawRow(app.db, entity.name, id) : null;
-  const annotatedEntry = Object.entries(entity.fields).find(([, field]) => field.kind === 'annotatedText');
-  const [, descriptor] = annotatedEntry ?? [];
-  const retiredScope = !row && descriptor
-    ? findRetiredAnnotatedDocumentScope(app.db, id)
-    : undefined;
-  const scopeKey         = descriptor
-    ? (row ? resolveAnnotatedTextOwningScope(descriptor, entity.fields, row).key : (retiredScope                      ) ?? scopeOf(entityName, id).key)
-    : scopeOf(entityName, id).key;
-  if (isSnapshot) return snapshotRoute(app, entity, id, scopeKey, principal, res);
+  if (isSnapshot) return snapshotRoute(app, entity, id, principal, res);
+  // events-since needs the owning scope to replay the committed log; the
+  // snapshot capture derives it itself.
+  const scopeKey = resolveEntityScopeKey(app, entity, id);
   const cursor = Number(url.searchParams.get('cursor') ?? 0);
   return eventsSinceRoute(app, entity, scopeKey, id, principal, res, cursor);
 }
 
-async function snapshotRoute(
+// The scope a row's snapshot and stream are keyed on. Usually `Entity:id`;
+// an annotated-text document is owned by its parent row's scope, and a retired
+// (deleted) document is located by decoding its committed events.
+function resolveEntityScopeKey(app              , entity            , id        )         {
+  const db = app.db ;
+  const row = hasAnnotatedTextFields(entity) ? rawRow(db, entity.name, id) : null;
+  const annotatedEntry = Object.entries(entity.fields).find(([, field]) => field.kind === 'annotatedText');
+  const [, descriptor] = annotatedEntry ?? [];
+  const retiredScope = !row && descriptor
+    ? findRetiredAnnotatedDocumentScope(db, id)
+    : undefined;
+  return descriptor
+    ? (row ? resolveAnnotatedTextOwningScope(descriptor, entity.fields, row).key : (retiredScope                      ) ?? scopeOf(entity.name, id).key)
+    : scopeOf(entity.name, id).key;
+}
+
+// One per-scope snapshot capture — the single bootstrap engine, parameterized
+// by scope set (issue #184): snapshotRoute serves ONE scope through it and
+// bulkSnapshotRoute serves many. Every capture runs the same row grant + field
+// read admission + recipient projection, so a bulk response is authz-equivalent
+// to N single-snapshot requests for the same principal.
+
+
+              
+
+
+
+
+async function captureEntitySnapshot(
   app              ,
   entity            ,
   id        ,
-  scopeKey        ,
   principal           ,
-  res                  ,
-)                   {
+)                           {
+  const db = app.db ;
+  const scopeKey = resolveEntityScopeKey(app, entity, id);
   // Read the row + the scope cursor in ONE synchronous block — no await between
   // them — then authorize. A concurrent dispatch commit cannot split the pair
   // (eng-review Tier-1 #2): the cursor is captured alongside the row, before the
   // async mayVerb yields. The pair we authorize is the pair we return.
   const row = readScopedRow(app, entity, id, principal);
   const { sql: where, params } = entity.scopeFilter(principal);
-  const storedRow = app.db .prepare(`SELECT * FROM ${entity.name} AS t0 WHERE ${where} AND t0.id = :id`)
+  const storedRow = db.prepare(`SELECT * FROM ${entity.name} AS t0 WHERE ${where} AND t0.id = :id`)
     .get({ ...params, id });
-  const lastSeq = readSeq(app.db , scopeKey);
+  const lastSeq = readSeq(db, scopeKey);
   const auth = await authorizeRow(app, entity, 'read', id, principal, row, { authorization: routeAuthorization(app) ?? undefined });
-  if (auth.status) {
-    reject(res, auth.status, auth.status === 404 ? 'not found' : 'forbidden');
-    return true;
-  }
+  if (auth.status) return { ok: false, status: auth.status };
   let snapshot                         ;
   try {
-    snapshot = await projectEntitySnapshot({ db: app.db, entity, row: auth.row , principal, authorization: routeAuthorization(app) });
+    snapshot = await projectEntitySnapshot({ db, entity, row: auth.row , principal, authorization: routeAuthorization(app) });
     // Projection can await policy checks. Do not pair facts assembled across a
     // concurrent scope mutation with the cursor captured before those checks.
-    if (hasAnnotatedTextFields(entity) && readSeq(app.db , scopeKey) !== lastSeq) throw new Error('snapshot changed while projecting');
+    if (hasAnnotatedTextFields(entity) && readSeq(db, scopeKey) !== lastSeq) {
+      return { ok: false, status: 'raced' };
+    }
   } catch {
-    reject(res, 403, 'forbidden');
+    return { ok: false, status: 403 };
+  }
+  const reducers = await admittedTextReducerCheckpoints(entity, storedRow                                                , principal, routeAuthorization(app));
+  return { ok: true, snapshot, seq: lastSeq, reducers };
+}
+
+async function snapshotRoute(
+  app              ,
+  entity            ,
+  id        ,
+  principal           ,
+  res                  ,
+)                   {
+  const capture = await captureEntitySnapshot(app, entity, id, principal);
+  if (!capture.ok) {
+    const status = capture.status === 'raced' ? 403 : capture.status;
+    reject(res, status, status === 404 ? 'not found' : 'forbidden');
     return true;
   }
   sendJson(res, 200, {
-    snapshot,
-    seq: lastSeq,
-    reducers: await admittedTextReducerCheckpoints(entity, storedRow                                                , principal, routeAuthorization(app)),
+    snapshot: capture.snapshot,
+    seq: capture.seq,
+    reducers: capture.reducers,
   });
+  return true;
+}
+
+// Authorized multi-snapshot bootstrap (issue #184): `GET
+// /snapshots?scope=<Entity:id>&scope=...` returns the SAME per-scope snapshots
+// LiveList already understands — each `results` entry is exactly a
+// `GET /snapshot/:entity/:id` response body — plus the per-scope cursors the
+// client sets BEFORE starting its per-scope streams (SPEC §7.1 bootstrap
+// ordering; the endpoint itself starts no stream). One bootstrap engine,
+// parameterized by scope set: every entry runs through captureEntitySnapshot,
+// so the response rows are exactly the union of the per-scope compiled-scope
+// rows for the requesting principal — withheld fields stay withheld, and no
+// trailer metadata ever bypasses a per-scope grant. A scope the principal
+// cannot read is ABSENT from `results` and `cursors`: the 404-equivalent
+// denial, contributing no rows and no cursor.
+//
+// Fail closed (#189 version skew): an unknown query parameter, a malformed
+// scope key, an unknown entity, or an over-budget scope set rejects the WHOLE
+// request with 400 — a partial success could be silently folded, an error
+// forces the client's re-bootstrap.
+const MAX_BULK_SCOPES = 256;
+// A single bootstrap may legitimately reach several MB (annotated-text
+// documents). The multi-snapshot response is capped so a very large workspace
+// fails closed (503, content-free) into per-scope fetches instead of pinning
+// the process with an unbounded serialization.
+const BULK_RESPONSE_LIMIT = 32 * 1024 * 1024;
+
+async function bulkSnapshotRoute(
+  app              ,
+  principal           ,
+  res                  ,
+  searchParams                 ,
+)                   {
+  for (const key of new Set(searchParams.keys())) {
+    if (key !== 'scope') { reject(res, 400, 'unknown query parameter'); return true; }
+  }
+  const requested = searchParams.getAll('scope');
+  if (requested.length === 0) { reject(res, 400, 'scope parameter required'); return true; }
+  if (requested.length > MAX_BULK_SCOPES) { reject(res, 400, 'too many scopes'); return true; }
+  const targets                                                           = [];
+  for (const scope of requested) {
+    const handle = tryParseScopeKey(scope);
+    const entity = handle ? app.entities .get(handle.entity) : undefined;
+    if (!handle || !entity) { reject(res, 400, `unknown scope '${scope}'`); return true; }
+    targets.push({ scope, entity, id: handle.id });
+  }
+  const entries = new Map                                                                                         ();
+  const cursors = new Map                ();
+  for (const target of targets) {
+    if (entries.has(target.scope)) continue;
+    const capture = await captureEntitySnapshot(app, target.entity, target.id, principal);
+    if (capture.ok) {
+      entries.set(target.scope, { snapshot: capture.snapshot, seq: capture.seq, reducers: capture.reducers });
+      cursors.set(target.scope, capture.seq);
+      continue;
+    }
+    if (capture.status === 'raced') {
+      // Never pair a stale capture with its cursor, and never spell a race as a
+      // denial (the row exists). Fail the whole request; the client re-bootstraps.
+      reject(res, 503, 'snapshot changed while capturing');
+      return true;
+    }
+  }
+  const body = {
+    results: Object.fromEntries(entries),
+    cursors: Object.fromEntries(cursors),
+  };
+  const payload = JSON.stringify(body);
+  if (Buffer.byteLength(payload) > BULK_RESPONSE_LIMIT) {
+    reject(res, 503, 'bulk snapshot exceeds response budget');
+    return true;
+  }
+  res.writeHead(200, {
+    'content-type': 'application/json; charset=utf-8',
+    'content-length': Buffer.byteLength(payload),
+    'cache-control': 'no-store',
+  });
+  res.end(payload);
   return true;
 }
 
