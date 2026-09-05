@@ -419,6 +419,41 @@ export function appendEvents(db          , events                 ) {
   }
 }
 
+// compactReceiptResultData — age-based `_ActionReceipt.resultData` compaction.
+// Used by the receipt-result compactor clock (application-runtime). Runs under
+// the writeQueue mutex. Returns the number of receipts compacted.
+//
+// Compacted-receipt semantics: the receipt keeps proving the action committed,
+// and a replay still returns the commit acknowledgement — `{ actionId,
+// confirmedThrough }`, the two fields every replayed receipt must carry for the
+// action HTTP surface — but the stored result payload is replaced by an
+// explicit `__workbenchCompactedResult` marker (with the reclaimed byte count,
+// for audit). Compaction is fail-closed in three ways: receipts whose resultData
+// carries the `__workbenchMixedReplay` envelope are NEVER compacted (that
+// envelope is the mixed-tier replay authority — losing it would turn a retry
+// into a re-apply); receipts whose stored result object cannot prove a usable
+// `actionId`/`confirmedThrough` pair are left untouched (compaction must never
+// make a previously replayable receipt unplayable); and malformed or non-object
+// resultData is left untouched rather than interpreted.
+export function compactReceiptResultData(db          , cutoffIso        )         {
+  return Number(prepareCached(db, `
+    UPDATE _ActionReceipt
+    SET resultData = json_object(
+      '__workbenchCompactedResult', json_object('version', 1, 'reclaimedBytes', length(resultData)),
+      'actionId', json_extract(resultData, '$.actionId'),
+      'confirmedThrough', json_extract(resultData, '$.confirmedThrough')
+    )
+    WHERE committedAt < :cutoff
+      AND resultData IS NOT NULL
+      AND CASE WHEN json_valid(resultData) THEN
+        json_type(resultData) = 'object'
+        AND json_extract(resultData, '$.__workbenchMixedReplay') IS NULL
+        AND json_extract(resultData, '$.actionId') = actionId
+        AND typeof(json_extract(resultData, '$.confirmedThrough')) = 'integer'
+      ELSE 0 END
+  `).run({ cutoff: cutoffIso }).changes);
+}
+
 // retentionPrune — delete log entries older than a cutoff date. Used by the
 // log retention reaper (serve.mjs). Runs under the writeQueue mutex.
 export function retentionPrune(db          , cutoffIso        ) {
