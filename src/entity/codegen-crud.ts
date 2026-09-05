@@ -38,7 +38,6 @@ import { admitRow, mayFieldOp } from '../row-grant.ts';
 import { write } from '../grant.ts';
 import { admitRowTransition } from '../field-admission.ts';
 import type { AuthorizationAdapter } from '../authorization-adapter.ts';
-import { rawRow } from './query.ts';
 import { materializeCreateDefaults, resolveGeneratedEventScope } from './crud.ts';
 
 /** The `action(type)` handle shape (pipeline.ts — structural, the module exports no types). */
@@ -84,7 +83,8 @@ export interface CodegenEntity {
   readonly conditionalHistory?: boolean;
   readonly conditionalCreateHistory?: boolean;
   readonly tier?: string;
-  deserializeRow?(row: unknown): Record<string, unknown>;
+  /** Bound-record query seam (installed by installEntityQueries on bind). */
+  findById?(id: string): unknown;
   [member: string]: unknown;
 }
 
@@ -185,8 +185,7 @@ function assertPayloadKindIsCovered(
     throw new ValidationError(
       `${entity.name}.${fieldName} is a ${kind} field: its mutation is not assignment-shaped ` +
         `(M1 merge/stub outcome). It stays hand-written — dispatch the hand-written verb ` +
-        `(${kind === 'store' || kind === 'ordered' ? `the row-handle mutation on ${entity.name}.${fieldName}` : `${entity.name}.${fieldName} apply`}), ` +
-        'never a CRUD payload.',
+        `(${handWrittenVerbHint(entity.name, fieldName, descriptor)}), never a CRUD payload.`,
     );
   }
   if ((FRAMEWORK_KINDS as readonly string[]).includes(kind)) {
@@ -196,6 +195,24 @@ function assertPayloadKindIsCovered(
     throw new ValidationError(
       `${entity.name}.${fieldName} is immutable: a client may set it on create but may not change it.`,
     );
+  }
+}
+
+/** The hand-written mutation route for one merge/stub kind (the M1 table's outcome owner). */
+function handWrittenVerbHint(entityName: string, fieldName: string, descriptor: FieldDescriptor): string {
+  switch (descriptor.kind) {
+    case 'store':
+      return descriptor.type === 'log'
+        ? `the log append on ${entityName}.${fieldName}`
+        : `the row-handle mutation on ${entityName}.${fieldName} (row.${fieldName}.set)`;
+    case 'ordered':
+      return `the native list verb on ${entityName}.${fieldName} (list.insert / list.move)`;
+    case 'crdt':
+      return `the native verb on ${entityName}.${fieldName} (${entityName}.${fieldName}.apply)`;
+    case 'annotatedText':
+      return 'the semantic text/annotation verbs (text.insert, annotation.apply)';
+    default:
+      return `the ${descriptor.kind} field's hand-written verb`;
   }
 }
 
@@ -317,10 +334,19 @@ function forbidden(): Error {
   return Object.assign(new Error('forbidden'), { status: 403 });
 }
 
-function materializedRow(entity: CodegenEntity, db: CodegenDb | null | undefined, id: string): Record<string, unknown> | null {
-  if (typeof entity.deserializeRow !== 'function' || db == null) return null;
-  const stored = rawRow(db, entity.name, id);
-  return stored ? (entity.deserializeRow({ ...stored }) as Record<string, unknown>) : null;
+/**
+ * The materialized current row, read through the bound record's query seam —
+ * the same seam the compiled CRUD handlers use (a non-`inTransaction` handler
+ * runs outside the transaction, where the context db is absent).
+ */
+function materializedRow(entity: CodegenEntity, id: string): Record<string, unknown> | null {
+  if (typeof entity.findById !== 'function') return null;
+  try {
+    const row = (entity.findById as (id: string) => unknown)(id);
+    return row && typeof row === 'object' ? (row as Record<string, unknown>) : null;
+  } catch {
+    return null; // no durable database — admission skips its transition check (as the compiled handler does)
+  }
 }
 
 /**
@@ -366,7 +392,7 @@ export function codegenCreateHandler(entity: CodegenEntity): CodegenCrudHandler 
  */
 export function codegenUpdateHandler(entity: CodegenEntity): CodegenCrudHandler {
   const updatedHandle = updated(entity.name);
-  return async ({ payload, principal, db, scope, authorization }) => {
+  return async ({ payload, principal, scope, authorization }) => {
     assertCoveredLifecycle(entity, 'update');
     const { id, ...rest } = payload;
     if (!id) throw Object.assign(new Error('update requires an id'), { status: 400 });
@@ -381,7 +407,7 @@ export function codegenUpdateHandler(entity: CodegenEntity): CodegenCrudHandler 
     // against the current row before anything is emitted (validation, not merge).
     for (const [fieldName, descriptor] of Object.entries(entity.fields)) {
       if (descriptor.kind !== 'state' || !(fieldName in validatedFields)) continue;
-      const current = materializedRow(entity, db, String(id));
+      const current = materializedRow(entity, String(id));
       if (!current || current[fieldName] == null) {
         throw new ValidationError(`${entity.name}.${fieldName}: illegal transition (no current state) -> ${validatedFields[fieldName]}`);
       }
@@ -397,7 +423,7 @@ export function codegenUpdateHandler(entity: CodegenEntity): CodegenCrudHandler 
     for (const [fieldName, descriptor] of Object.entries(entity.fields)) {
       if (descriptor.touch) data[fieldName] = new Date();
     }
-    const before = materializedRow(entity, db, String(id));
+    const before = materializedRow(entity, String(id));
     if (before) {
       // SPEC §5.4: every changed covered field runs its declared `.can` write
       // floor against the materialized row; no declared floor strong-inherits
@@ -435,19 +461,25 @@ export function codegenUpdateHandler(entity: CodegenEntity): CodegenCrudHandler 
  * stored row) → emit `removed`. Cascade removals (an `onRemove` ref) are not
  * codegen-covered — derive throws at registration time instead.
  */
+/**
+ * The derived `${name}.remove` handler: admit the row verb (`write` on the
+ * stored row) → emit `removed`. Cascade removals (an `onRemove` ref) and
+ * uncovered lifecycle modes refuse here at invocation — derivation stays
+ * total so an entity's coverage can always be inspected before use.
+ */
 export function codegenRemoveHandler(entity: CodegenEntity): CodegenCrudHandler {
-  if (declarationRemovesByCascade(entity)) {
-    throw new ValidationError(
-      `${entity.name}.remove is not codegen-covered: an onRemove cascade owns the removal ` +
-        'semantics (descendant events), which stays hand-written.',
-    );
-  }
-  assertCoveredLifecycle(entity, 'remove');
   const removedHandle = removed(entity.name);
-  return async ({ payload, principal, db, scope }) => {
+  return async ({ payload, principal, scope }) => {
+    assertCoveredLifecycle(entity, 'remove');
+    if (declarationRemovesByCascade(entity)) {
+      throw new ValidationError(
+        `${entity.name}.remove is not codegen-covered: an onRemove cascade owns the removal ` +
+          'semantics (descendant events), which stays hand-written.',
+      );
+    }
     const { id } = payload;
     if (!id) throw Object.assign(new Error('remove requires an id'), { status: 400 });
-    const admissionRow = db == null ? null : rawRow(db, entity.name, String(id));
+    const admissionRow = materializedRow(entity, String(id));
     if (!admissionRow || !(await admitRow({ kind: 'verb', entity: entity as AdmissionEntity, row: admissionRow, principal, verb: 'remove' }))) {
       throw forbidden();
     }
