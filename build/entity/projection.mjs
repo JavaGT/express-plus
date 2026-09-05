@@ -121,6 +121,8 @@ import { rawRow } from './query.mjs';
 
 
 
+const quoteColumn = (column) => `"${column.replace(/"/g, '""')}"`;
+
 function isTextRevision(value         )                        {
   const record = value                           ;
   return !!value && typeof value === 'object' && !Array.isArray(value) &&
@@ -1229,7 +1231,7 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
         const cols = Object.keys(row);
         if (cols.length > 0) {
           db.prepare(
-            `INSERT INTO ${table} (${cols.join(', ')}) VALUES (${cols.map((c) => `:${c}`).join(', ')})`,
+            `INSERT INTO ${table} (${cols.map(quoteColumn).join(', ')}) VALUES (${cols.map((c) => `:${c}`).join(', ')})`,
           ).run(row);
           const init = initializeAnnotatedText({ name, fields, event, db, row, asyncSeed });
           if (init instanceof Promise) return init;
@@ -1246,13 +1248,13 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
           if (descriptor && descriptor.kind === 'store') continue;
           if (descriptor && descriptor.kind === 'struct') {
             for (const [column, cell] of Object.entries(flattenStruct(key, descriptor, value))) {
-              updates.push(`${column} = :${column}`);
+              updates.push(`${quoteColumn(column)} = :${column}`);
               params[column] = cell;
             }
             continue;
           }
           const stored = descriptor ? serializeField(descriptor, value) : value;
-          updates.push(`${key} = :${key}`);
+          updates.push(`${quoteColumn(key)} = :${key}`);
           params[key] = stored;
         }
         if (storedComputedFields.length > 0) {
@@ -1269,7 +1271,7 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
                 const computeRow = buildProjectedComputeRow(merged, fields);
                 const result = compute (computeRow);
                 const stored = resolveStrategy('computed').serialize (result);
-                updates.push(`${fieldName} = :${fieldName}`);
+                updates.push(`${quoteColumn(fieldName)} = :${fieldName}`);
                 params[fieldName] = stored;
               } catch {
                 throw new Error(`${name}.${fieldName} computed.stored compute failed`);
@@ -1338,11 +1340,11 @@ export function createConditionalHistoryProjection({ name, verbs }              
       const params                          = {};
       const assignments = columns.filter((column) => column !== 'id').map((column) => {
         params[`after_${column}`] = after[column];
-        return `${column} = :after_${column}`;
+        return `${quoteColumn(column)} = :after_${column}`;
       });
       const preimage = columns.map((column) => {
         params[`before_${column}`] = before[column];
-        return `${column} IS :before_${column}`;
+        return `${quoteColumn(column)} IS :before_${column}`;
       });
       const result = db.prepare(`UPDATE ${name} SET ${assignments.join(', ')} WHERE ${preimage.join(' AND ')}`).run(params);
       if (Number(result.changes) !== 1) {
@@ -1372,7 +1374,7 @@ export function createConditionalCreateHistoryProjection({ name, verbs }        
       if (!current) throw Object.assign(new Error(`${name} ${before.id} not found`), { status: 404 });
       if (!columns.every((column) => Object.is(current[column], before[column]))) throw Object.assign(new Error(`${name} remove conflicts`), { status: 409 });
       captureDeletedRowAnchor(db                                                 , name, before.id          , current, event.committedAt          );
-      const predicates = columns.map((column) => `${column} IS :${column}`);
+      const predicates = columns.map((column) => `${quoteColumn(column)} IS :${column}`);
       const result = db.prepare(`DELETE FROM ${name} WHERE ${predicates.join(' AND ')}`).run(before);
       if (Number(result.changes) !== 1) throw Object.assign(new Error(`${name} remove conflicts`), { status: 409 });
     }
