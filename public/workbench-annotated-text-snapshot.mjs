@@ -39,12 +39,29 @@ function hasStrictExactKeys(value, keys) {
   });
 }
 
+// Strict-closed-array check on the hot v3 materialization path (every point,
+// frontier, and endpoint table pays it), so the walk avoids per-key regular
+// expressions and property descriptors. Acceptance is byte-identical to the
+// descriptor walk it replaces: a real array's own string keys are ordered
+// canonical integer indices ascending then string keys in insertion order, and
+// 'length' is always an own non-index, non-enumerable name. So the table is
+// strict-closed iff there are exactly `length` index names followed by
+// 'length', and every index is an enumerable own property. Non-enumerable
+// string extras shorten nothing but show up in the own-name list (rejected by
+// position), and a non-enumerable index shows up in Object.keys (rejected by
+// count) — the two lists together see exactly what the per-key descriptor
+// walk saw.
 function isStrictClosedArray(value, length) {
   if (!Array.isArray(value) || value.length !== length || Object.getOwnPropertySymbols(value).length !== 0) return false;
   const names = Object.getOwnPropertyNames(value);
-  if (names.length !== length + 1 || !names.includes('length')) return false;
-  return names.every((key) => key === 'length' || (/^(0|[1-9][0-9]*)$/.test(key)
-    && Number(key) < length && Object.getOwnPropertyDescriptor(value, key)?.enumerable === true));
+  if (names.length !== length + 1 || names[length] !== 'length') return false;
+  const enumerableNames = Object.keys(value);
+  if (enumerableNames.length !== length) return false;
+  for (let index = 0; index < length; index += 1) {
+    const expected = `${index}`;
+    if (names[index] !== expected || enumerableNames[index] !== expected) return false;
+  }
+  return true;
 }
 
 function compactPointKey(point) {
