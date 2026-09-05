@@ -342,7 +342,10 @@ function stateFrontierCounter(state: TextState, actor: string): number {
 }
 
 function operationReady(state: TextState, op: TextOp): boolean {
-  if (!frontierDominates(state.frontier, op[4])) return false;
+  // Both frontiers are validated at their boundaries (applyTextOp's assertState
+  // and canonicalTextOp); the validating frontierDominates wrapper re-ran the
+  // full regex walk per readiness check on the hot apply path.
+  if (!frontierDominatesValidated(state.frontier, op[4])) return false;
   const body = op[5];
   if (body[0] === 'insert') return body[1][0] === 'root' || Object.hasOwn(state.elements, anchorKey(body[1]));
   return body[1].every(([target, first, count]) => {
@@ -630,8 +633,11 @@ export function materializeText(state: TextState): string {
 // either fully reduced, retained intact in the bounded pending registry, or the
 // replica fails closed and must rebootstrap from a checkpoint.
 export function applyTextOp(current: TextState, value: unknown): TextState {
-  const state = cloneState(assertState(current));
-  if (state.rebootstrapRequired) return Object.freeze(state);
+  const validated = assertState(current);
+  // A failed-closed replica freezes in place; cloning the registries before the
+  // early return spent the full per-apply copy for an unchanged result.
+  if (validated.rebootstrapRequired) return Object.freeze(validated);
+  const state = cloneState(validated);
   const op = canonicalTextOp(value);
   const key = opKey(op[2]);
   const digest = canonicalDigest(op);
