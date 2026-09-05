@@ -348,12 +348,27 @@ function cloneState(state: TextState): TextState {
   return {
     version: 1,
     frontier: [...state.frontier],
-    elements: { ...state.elements },
-    operations: { ...state.operations },
-    pending: { ...state.pending },
+    elements: cloneRegistry(state.elements),
+    operations: cloneRegistry(state.operations),
+    pending: cloneRegistry(state.pending),
     maxPending: state.maxPending,
     rebootstrapRequired: state.rebootstrapRequired,
   };
+}
+
+// The element registry holds one computed string key per document scalar, so
+// the per-apply copy is the dominant apply cost on large documents. Adding
+// thousands of computed keys to a fast-mode object pays a hidden-class
+// transition per key; a normalized (dictionary-mode) target hash-inserts
+// without transitioning and clones roughly twice as fast. Dictionary-mode
+// objects keep insertion order for string keys, so iteration is unchanged,
+// and reads pay only a small constant lookup.
+function cloneRegistry<T extends TextRegistryEntry | TextElement>(registry: Record<string, T>): Record<string, T> {
+  const clone: Record<string, T> = {};
+  clone.__normalized__ = 1;
+  delete clone.__normalized__;
+  for (const key in registry) clone[key] = registry[key];
+  return clone;
 }
 
 function assertState(state: TextState): TextState {
