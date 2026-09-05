@@ -429,39 +429,102 @@ function assertCheckpoint(value: unknown): TextState {
   return state;
 }
 
+function sameOpId(left: OpId, right: OpId): boolean {
+  return left[0] === right[0] && left[1] === right[1];
+}
+
+function sameTextOp(left: TextOp, right: TextOp): boolean {
+  return left[0] === right[0] && left[1] === right[1]
+    && sameOpId(left[2], right[2]) && left[3] === right[3]
+    && left[4].length === right[4].length && left[4].every((dep, index) => sameOpId(dep, right[4][index]))
+    && left[5][0] === right[5][0] && JSON.stringify(left[5]) === JSON.stringify(right[5]);
+}
+
+/**
+ * Structural equality of two canonical v1 checkpoints. `textCheckpoint` output
+ * is deterministic (sorted keys, sorted tombstone tags), so this accepts and
+ * rejects exactly the pairs the previous JSON.stringify comparison did, without
+ * materializing two full-document JSON strings per restore.
+ */
+function sameCheckpointState(left: TextState, right: TextState): boolean {
+  if (left.maxPending !== right.maxPending || left.rebootstrapRequired !== right.rebootstrapRequired) return false;
+  if (left.frontier.length !== right.frontier.length) return false;
+  for (let index = 0; index < left.frontier.length; index += 1) {
+    if (!sameOpId(left.frontier[index], right.frontier[index])) return false;
+  }
+  const leftElementKeys = Object.keys(left.elements);
+  if (leftElementKeys.length !== Object.keys(right.elements).length) return false;
+  for (const key of leftElementKeys) {
+    const a = left.elements[key];
+    const b = right.elements[key];
+    if (!b || a.ordinal !== b.ordinal || a.scalar !== b.scalar || a.parent !== b.parent
+      || a.lamport !== b.lamport || !sameOpId(a.op, b.op)
+      || a.deletedBy.length !== b.deletedBy.length
+      || a.deletedBy.some((tag, tagIndex) => tag !== b.deletedBy[tagIndex])) return false;
+  }
+  for (const registryName of ['operations', 'pending'] as const) {
+    const a = left[registryName];
+    const b = right[registryName];
+    if (Object.keys(a).length !== Object.keys(b).length) return false;
+    for (const [key, entry] of Object.entries(a)) {
+      const other = b[key];
+      if (!other || entry.digest !== other.digest || !sameTextOp(entry.op, other.op)) return false;
+    }
+  }
+  return true;
+}
+
 export function restoreTextCheckpoint(checkpoint: unknown): TextState {
   const compact = checkpoint as Partial<CompactTextCheckpoint> | null;
   if (compact?.version === 2) return restoreCompactTextCheckpoint(compact);
   const supplied = assertCheckpoint(checkpoint);
-  const applied = Object.values(supplied.operations).map((entry) => entry.op);
-  const pending = Object.values(supplied.pending).map((entry) => entry.op);
-  const appliedIds = new Set(applied.map((op) => opKey(op[2])));
-  if (pending.some((op) => appliedIds.has(opKey(op[2])))) {
+  const applied = Object.values(supplied.operations);
+  const pending = Object.values(supplied.pending);
+  const appliedIds = new Set(applied.map(({ op }) => opKey(op[2])));
+  if (pending.some(({ op }) => appliedIds.has(opKey(op[2])))) {
     throw new TypeError('annotated-text checkpoint duplicates an operation across registries');
   }
 
   // Reducer effects are derived from the canonical operation registry. Never
   // admit independently supplied topology, tombstones, or frontier state.
-  let restored = createTextState({ maxPending: supplied.maxPending });
+  // Replay on ONE mutable state using the entries assertCheckpoint already
+  // canonicalized (same trust pattern as restoreCompactTextCheckpoint). Going
+  // through applyTextOp re-cloned the whole element registry per operation —
+  // O(operations × elements) — and re-canonicalized validated ops. The
+  // behind-frontier and pending-cap rules below replicate applyTextOp exactly.
+  const restored = makeState({ maxPending: supplied.maxPending });
   const remaining = [...applied];
   while (remaining.length > 0) {
-    const nextIndex = remaining.findIndex((operation) => operationReady(restored, operation));
+    const nextIndex = remaining.findIndex(({ op }) => operationReady(restored, op));
     if (nextIndex === -1) {
       throw new TypeError('annotated-text checkpoint applied operations are not causally reducible');
     }
-    const [operation] = remaining.splice(nextIndex, 1);
-    restored = applyTextOp(restored, operation);
+    const [{ op, digest }] = remaining.splice(nextIndex, 1);
+    if (stateFrontierCounter(restored, op[2][0]) >= op[2][1]) {
+      throw new Error('annotated-text operation ID is behind the applied frontier');
+    }
+    applyReadyOperation(restored, op, digest);
   }
-  for (const operation of pending.sort((left, right) => compareOpId(left[2], right[2]))) {
-    if (operationReady(restored, operation)) {
+  for (const { op, digest } of pending.sort((left, right) => compareOpId(left.op[2], right.op[2]))) {
+    if (operationReady(restored, op)) {
       throw new TypeError('annotated-text checkpoint contains a ready pending operation');
     }
-    restored = applyTextOp(restored, operation);
+    if (stateFrontierCounter(restored, op[2][0]) >= op[2][1]) {
+      throw new Error('annotated-text operation ID is behind the applied frontier');
+    }
+    if (Object.keys(restored.pending).length >= restored.maxPending) {
+      restored.rebootstrapRequired = true;
+    } else {
+      restored.pending[opKey(op[2])] = { digest, op };
+    }
   }
   // The operation that exceeded the live pending cap is intentionally not
   // retained. Its terminal outcome is nevertheless durable checkpoint state.
-  if (supplied.rebootstrapRequired) restored = Object.freeze({ ...cloneState(restored), rebootstrapRequired: true });
-  if (JSON.stringify(textCheckpoint(supplied)) !== JSON.stringify(textCheckpoint(restored))) {
+  if (supplied.rebootstrapRequired) restored.rebootstrapRequired = true;
+  // `supplied` is already normalized by assertCheckpoint (canonical frontier,
+  // sorted tombstone tags, key-checked elements); only the replayed side needs
+  // canonicalization. Same acceptance as the previous double-JSON comparison.
+  if (!sameCheckpointState(supplied, textCheckpoint(restored))) {
     throw new TypeError('annotated-text checkpoint does not match its operation registry');
   }
   return Object.freeze(restored);
