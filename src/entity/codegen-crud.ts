@@ -33,7 +33,6 @@
 import { randomUUID } from 'node:crypto';
 import { action, event } from '../pipeline.ts';
 import { created, updated, removed } from '../event-handle.ts';
-import { scopeOf } from '../scope-handle.ts';
 import { validateMutation, ValidationError, type FieldDescriptor } from '../field-strategy.ts';
 import { admitRow, mayFieldOp } from '../row-grant.ts';
 import { write } from '../grant.ts';
@@ -55,6 +54,12 @@ interface EventDeclaration {
   readonly type: string;
   readonly reduce: (state: unknown, payload: unknown) => unknown;
 }
+
+// The row-grant engine's EntityRecord declares a mutable field map it only ever
+// reads; the codegen's frozen declaration satisfies it at runtime. This alias
+// is the one typed boundary at the admission seams (the same boundary cast
+// http-crud-dispatch applies).
+type AdmissionEntity = Parameters<typeof admitRow>[0]['entity'];
 
 // ---------------------------------------------------------------------------
 // M1 coverage — the whole-value replace kinds are the only ones assignment
@@ -79,7 +84,6 @@ export interface CodegenEntity {
   readonly conditionalHistory?: boolean;
   readonly conditionalCreateHistory?: boolean;
   readonly tier?: string;
-  readonly removalCascade?: unknown;
   deserializeRow?(row: unknown): Record<string, unknown>;
   [member: string]: unknown;
 }
@@ -146,7 +150,9 @@ export function crudCodegenCoverage(entity: CodegenEntity): CrudCoverage {
   const coversLifecycle = entity.tier !== 'live'
     && entity.conditionalHistory !== true
     && entity.conditionalCreateHistory !== true;
-  const coversRemove = entity.removalCascade === undefined || entity.removalCascade === null;
+  // An onRemove ref declares cascade removal: descendant removal events are
+  // semantic, not assignment-shaped — remove stays hand-written for the entity.
+  const coversRemove = !Object.values(entity.fields).some((descriptor) => descriptor.onRemove !== undefined);
   return Object.freeze({
     name: entity.name,
     createFields: Object.freeze(createFields),
@@ -170,7 +176,6 @@ function assertCoveredLifecycle(entity: CodegenEntity, verb: 'create' | 'update'
 
 function assertPayloadKindIsCovered(
   entity: CodegenEntity,
-  coverage: CrudCoverage,
   verb: 'create' | 'update',
   fieldName: string,
 ): void {
@@ -212,10 +217,9 @@ export interface CrudActionHandle {
  */
 export function crudCreateAction(entity: CodegenEntity, input: Record<string, unknown>): CrudActionHandle {
   assertCoveredLifecycle(entity, 'create');
-  const coverage = crudCodegenCoverage(entity);
   const { id: requestedId, ...fieldsPayload } = input;
   for (const fieldName of Object.keys(fieldsPayload)) {
-    assertPayloadKindIsCovered(entity, coverage, 'create', fieldName);
+    assertPayloadKindIsCovered(entity, 'create', fieldName);
   }
   if (requestedId !== undefined && (typeof requestedId !== 'string' || requestedId.length === 0)) {
     throw new ValidationError(`${entity.name}.id: expected a non-empty text id`);
@@ -229,9 +233,8 @@ export function crudUpdateAction(entity: CodegenEntity, id: string, input: Recor
   if (typeof id !== 'string' || id.length === 0) {
     throw new ValidationError(`${entity.name}.update requires a non-empty row id`);
   }
-  const coverage = crudCodegenCoverage(entity);
   for (const fieldName of Object.keys(input)) {
-    assertPayloadKindIsCovered(entity, coverage, 'update', fieldName);
+    assertPayloadKindIsCovered(entity, 'update', fieldName);
   }
   return { type: `${entity.name}.update`, payload: { ...input, id } };
 }
@@ -239,7 +242,7 @@ export function crudUpdateAction(entity: CodegenEntity, id: string, input: Recor
 /** Shape the `${name}.remove` action payload. */
 export function crudRemoveAction(entity: CodegenEntity, id: string): CrudActionHandle {
   assertCoveredLifecycle(entity, 'remove');
-  if (!coverageSaysRemovable(entity)) {
+  if (!declarationRemovesByCascade(entity)) {
     throw new ValidationError(
       `${entity.name}.remove is not codegen-covered: an onRemove cascade owns the removal ` +
         'semantics (descendant events), which stays hand-written.',
@@ -251,8 +254,9 @@ export function crudRemoveAction(entity: CodegenEntity, id: string): CrudActionH
   return { type: `${entity.name}.remove`, payload: { id } };
 }
 
-function coverageSaysRemovable(entity: CodegenEntity): boolean {
-  return entity.removalCascade === undefined || entity.removalCascade === null;
+/** True when the declaration routes removal through an onRemove cascade (semantic, hand-written). */
+function declarationRemovesByCascade(entity: CodegenEntity): boolean {
+  return Object.values(entity.fields).some((descriptor) => descriptor.onRemove !== undefined);
 }
 
 // ---------------------------------------------------------------------------
@@ -271,7 +275,10 @@ export function codegenCrudEvents(entity: CodegenEntity): CodegenEvents {
   // The lifecycle fold is the whole-value merge the compiled verbs declare
   // (`{ ...state, ...data }`); removed marks the tombstone. The parity test
   // proves a derived fold and the compiled fold agree on the same log event.
-  const foldFields = (state: unknown, { data }: { data: Record<string, unknown> }) => ({ ...(state as object), ...data });
+  const foldFields = (state: unknown, payload: unknown) => ({
+    ...(state as object),
+    ...(payload as { data: Record<string, unknown> }).data,
+  });
   return {
     created: event(created(entity.name), foldFields),
     updated: event(updated(entity.name), foldFields),
@@ -323,7 +330,6 @@ function materializedRow(entity: CodegenEntity, db: CodegenDb | null | undefined
  * projection folds into the row.
  */
 export function codegenCreateHandler(entity: CodegenEntity): CodegenCrudHandler {
-  const coverage = crudCodegenCoverage(entity);
   const createdHandle = created(entity.name);
   return ({ payload, principal }) => {
     assertCoveredLifecycle(entity, 'create');
@@ -332,7 +338,7 @@ export function codegenCreateHandler(entity: CodegenEntity): CodegenCrudHandler 
     }
     const { id: requestedId, ...fieldsPayload } = payload;
     for (const fieldName of Object.keys(fieldsPayload)) {
-      assertPayloadKindIsCovered(entity, coverage, 'create', fieldName);
+      assertPayloadKindIsCovered(entity, 'create', fieldName);
     }
     if (requestedId !== undefined && (typeof requestedId !== 'string' || requestedId.length === 0)) {
       throw new ValidationError(`${entity.name}.id: expected a non-empty text id`);
@@ -359,7 +365,6 @@ export function codegenCreateHandler(entity: CodegenEntity): CodegenCrudHandler 
  * field edit or a forbidden row move is a hard reject (403) with zero events.
  */
 export function codegenUpdateHandler(entity: CodegenEntity): CodegenCrudHandler {
-  const coverage = crudCodegenCoverage(entity);
   const updatedHandle = updated(entity.name);
   return async ({ payload, principal, db, scope, authorization }) => {
     assertCoveredLifecycle(entity, 'update');
@@ -369,7 +374,7 @@ export function codegenUpdateHandler(entity: CodegenEntity): CodegenCrudHandler 
       throw new ValidationError(`${entity.name}.update requires at least one field to change`);
     }
     for (const fieldName of Object.keys(rest)) {
-      assertPayloadKindIsCovered(entity, coverage, 'update', fieldName);
+      assertPayloadKindIsCovered(entity, 'update', fieldName);
     }
     const validatedFields = validateMutation(entity, rest);
     // State fields keep their declared transition graph: the move is checked
@@ -400,13 +405,13 @@ export function codegenUpdateHandler(entity: CodegenEntity): CodegenCrudHandler 
       for (const fieldName of Object.keys(validatedFields)) {
         const declaredFloor = entity.fields[fieldName]?.access;
         if (declaredFloor !== undefined && declaredFloor !== null
-          && !(await mayFieldOp(entity, fieldName, write, before, principal))) {
+          && !(await mayFieldOp(entity as AdmissionEntity, fieldName, write, before, principal))) {
           throw forbidden();
         }
       }
       const after = { ...before, ...data };
       if (!(await admitRowTransition({
-        entity,
+        entity: entity as AdmissionEntity,
         verb: 'update',
         before,
         after,
@@ -431,7 +436,7 @@ export function codegenUpdateHandler(entity: CodegenEntity): CodegenCrudHandler 
  * codegen-covered — derive throws at registration time instead.
  */
 export function codegenRemoveHandler(entity: CodegenEntity): CodegenCrudHandler {
-  if (!coverageSaysRemovable(entity)) {
+  if (declarationRemovesByCascade(entity)) {
     throw new ValidationError(
       `${entity.name}.remove is not codegen-covered: an onRemove cascade owns the removal ` +
         'semantics (descendant events), which stays hand-written.',
@@ -443,7 +448,7 @@ export function codegenRemoveHandler(entity: CodegenEntity): CodegenCrudHandler 
     const { id } = payload;
     if (!id) throw Object.assign(new Error('remove requires an id'), { status: 400 });
     const admissionRow = db == null ? null : rawRow(db, entity.name, String(id));
-    if (!admissionRow || !(await admitRow({ kind: 'verb', entity, row: admissionRow, principal, verb: 'remove' }))) {
+    if (!admissionRow || !(await admitRow({ kind: 'verb', entity: entity as AdmissionEntity, row: admissionRow, principal, verb: 'remove' }))) {
       throw forbidden();
     }
     return [{
@@ -496,20 +501,29 @@ export function codegenInverse(
   if (verb === 'create') return { type: `${entity.name}.remove`, payload: { id } };
   if (preimageRow == null) return null;
   if (verb === 'remove') {
+    // Re-create from the preimage. Preimage-null cells are omitted: the fresh
+    // row's column stays null, which is the preimage value. (A null cannot ride
+    // the payload — validateMutation rejects clearing a non-nullable field —
+    // but omission materializes the same null cell.)
     const coverage = crudCodegenCoverage(entity);
     const payload: Record<string, unknown> = { id };
     for (const fieldName of coverage.createFields) {
-      if (preimageRow[fieldName] !== undefined) payload[fieldName] = preimageRow[fieldName];
+      if (preimageRow[fieldName] !== undefined && preimageRow[fieldName] !== null) payload[fieldName] = preimageRow[fieldName];
     }
     return { type: `${entity.name}.create`, payload };
   }
   // update → restore exactly what the forward event changed, from the preimage.
+  // A restore that would have to CLEAR a non-nullable field (preimage null) is
+  // not expressible as a CRUD payload (validateMutation rejects the clear) —
+  // the inverse returns null and that undo stays hand-written. This is the
+  // kill-switch rule applied to inverses, not a silent partial restore.
   const payload: Record<string, unknown> = { id };
   for (const fieldName of Object.keys(forwardData)) {
     if (fieldName === 'id') continue;
-    if (!(fieldName in entity.fields)) continue;
-    if (kindCoverage(entity.fields[fieldName]) !== 'expressed') continue;
-    if (entity.fields[fieldName].immutable === true) continue;
+    const descriptor = entity.fields[fieldName];
+    if (!descriptor || kindCoverage(descriptor) !== 'expressed') continue;
+    if (descriptor.immutable === true) continue;
+    if (preimageRow[fieldName] === null && descriptor.nullable !== true) return null;
     payload[fieldName] = preimageRow[fieldName];
   }
   return { type: `${entity.name}.update`, payload };
@@ -523,7 +537,7 @@ export function codegenInverse(
 export interface CodegenCrudSurface {
   readonly name: string;
   readonly coverage: CrudCoverage;
-  readonly actions: Readonly<Record<'create' | 'update' | 'remove', ActionHandle>>;
+  readonly actions: Readonly<Record<'create' | 'update' | 'remove', ActionDeclaration>>;
   readonly events: CodegenEvents;
   readonly handlers: Readonly<Record<string, CodegenCrudHandler>>;
 }
