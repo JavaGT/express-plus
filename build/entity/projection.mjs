@@ -121,10 +121,7 @@ import { rawRow } from './query.mjs';
 
 
 
-/** Quote a column identifier for generated SQL — entity fields may collide
- *  with SQLite reserved words ('order', 'group', …), which otherwise breaks
- *  the generated INSERT/UPDATE/preimage statements. */
-const quoteColumn = (column        )         => `"${column.replace(/"/g, '""')}"`;
+const quoteColumn = (column) => `"${column.replace(/"/g, '""')}"`;
 
 function isTextRevision(value         )                        {
   const record = value                           ;
