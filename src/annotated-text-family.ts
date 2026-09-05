@@ -1,5 +1,5 @@
 import {
-  assertFrontier, assertStructuralPoint, compareOpIdValidated,
+  assertFrontier, assertStructuralPoint,
 } from './annotated-text.ts';
 import type {
   Frontier, StructuralPoint, TextElement, TextState,
@@ -30,16 +30,28 @@ function deepFreeze<T>(value: T): T {
 
 function buildChildren(checkpoint: TextState): Map<string, Array<[string, TextElement]>> {
   const children = new Map<string, Array<[string, TextElement]>>([[ROOT_ID, []]]);
-  for (const [key, element] of Object.entries(checkpoint.elements)) {
+  // for-in avoids the per-element entry-tuple allocation of Object.entries on
+  // this per-keystroke traversal rebuild; key order is identical.
+  for (const key in checkpoint.elements) {
+    const element = checkpoint.elements[key];
     const list = children.get(element.parent) ?? [];
     list.push([key, element]);
     children.set(element.parent, list);
   }
-  for (const list of children.values()) {
-    // Element ops are frozen and were validated at their admission boundary;
-    // the validating compareOpId re-ran the actor regex and a key-shape scan
-    // per comparison on this O(elements log elements) sort.
-    list.sort(([, left], [, right]) => right.lamport - left.lamport || -compareOpIdValidated(left.op, right.op));
+  for (const [parent, list] of children) {
+    // Schwartzian transform: precompute the sort keys once instead of paying
+    // tuple destructuring plus op derefs on every comparison. Ordering is
+    // identical to the inline comparator (lamport desc, then op id desc).
+    const keyed = new Array(list.length);
+    for (let index = 0; index < list.length; index += 1) {
+      const entry = list[index];
+      keyed[index] = { lamport: entry[1].lamport, actor: entry[1].op[0], counter: entry[1].op[1], entry };
+    }
+    keyed.sort((left, right) => right.lamport - left.lamport
+      || (left.actor === right.actor ? right.counter - left.counter : left.actor < right.actor ? 1 : -1));
+    const sorted = new Array(list.length);
+    for (let index = 0; index < keyed.length; index += 1) sorted[index] = keyed[index].entry;
+    children.set(parent, sorted);
   }
   return children;
 }
