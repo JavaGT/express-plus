@@ -63,6 +63,14 @@ const OUTBOX_DEFAULTS = Object.freeze({
   sendTimeoutMs: 10000,
 });
 
+// History snapshots must be detached from live state: the preimage returned
+// by overlayFor aliases the LiveList's state object, and the outbox means the
+// fold can land between dispatch and undo — an aliased preimage would undo
+// into the NEW value, not the old one.
+function snapshotRow(value) {
+  return value == null ? null : JSON.parse(JSON.stringify(value));
+}
+
 /**
  * One durable client mutation waiting for its authoritative commit.
  *
@@ -126,6 +134,7 @@ export class OutboxEntry {
       failure: this.failure,
       createdAt: this.createdAt,
       updatedAt: this.updatedAt,
+      timestamp: this.updatedAt, // byTimestamp index — prune must see (and skip) us
     };
     // The row id is assigned by the store's auto-increment key on append;
     // an explicit null is an invalid key.
@@ -189,6 +198,11 @@ export class OutboxEntry {
     if (this.terminal || this.status === 'queued') return false;
     this.status = 'queued';
     this.updatedAt = now;
+    if (this.attempts > 0) {
+      // A started attempt settled without committing — transport-grade
+      // failure; the same actionId retries with backoff.
+      this.resolveFirst({ status: 'queued', actionId: this.actionId });
+    }
     return true;
   }
 
@@ -199,6 +213,9 @@ export class OutboxEntry {
     this.resultRow = row ?? null;
     this.failure = null;
     this.updatedAt = now;
+    const outcome = { status: 'committed', seq: this.committedSeq, row: this.resultRow };
+    this.resolveFirst(outcome);
+    this.resolveTerminal(outcome);
     return true;
   }
 
@@ -207,6 +224,9 @@ export class OutboxEntry {
     this.status = 'rejected';
     this.failure = failure ?? null;
     this.updatedAt = now;
+    const outcome = { status: 'rejected', failure: this.failure };
+    this.resolveFirst(outcome);
+    this.resolveTerminal(outcome);
     return true;
   }
 }
@@ -314,6 +334,14 @@ function createOutbox({ log, broadcast, options = {} }) {
       return;
     }
     entries.set(entry.id, entry);
+    // A durably enqueued entry whose chain is already busy or backing off
+    // settles its dispatch as 'queued' at once (the text-outbox precedent:
+    // per-scope ordering defers the attempt; completion still resolves the
+    // channels later). Waiting for the entry's OWN attempt would hang the
+    // dispatching call for as long as the transport stays down.
+    if (chains.has(chainKeyOf(entry)) || Date.now() < retryUntil) {
+      entry.resolveFirst({ status: 'queued', actionId: entry.actionId });
+    }
     notifyAndBroadcast(entry.toRow());
     kick();
   }
@@ -549,6 +577,9 @@ function createOutbox({ log, broadcast, options = {} }) {
           transition(entry, (e) => e.markQueued());
           return;
         }
+        // The commit-seq header is authoritative per-scope seq evidence when
+        // the server provides it; a resend that lost its evidence is still
+        // completed by the committed event in the log (the delta path).
         transition(entry, (e) => e.markCommitted({
           seq: _seqFromHeader(res),
           row: res.status === 204 ? null : (decoded.value ?? null),
@@ -990,18 +1021,18 @@ export async function createLocalStore({ baseUrl, name, path, local, channel, fe
       return originalDispatch(type, payload);
     }
 
-    const preimage = id != null ? store.overlayFor(id) : null;
+    const preimage = id != null ? snapshotRow(store.overlayFor(id)) : null;
 
     const result = await originalDispatch(type, payload);
 
     if (result.ok && result.opId) {
-      _history.set(result.opId, { kind, id: result.id ?? id, preimage, payload });
+      _history.set(result.opId, { kind, id: result.id ?? id, preimage, payload: snapshotRow(payload) });
     } else if (result.status === 'queued' && result.actionId) {
       _pendingHistory.set(result.actionId, {
         kind,
         id: result.id ?? id,
         preimage,
-        payload,
+        payload: snapshotRow(payload),
         opId: result.opId,
       });
     }
