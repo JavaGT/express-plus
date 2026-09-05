@@ -2179,6 +2179,11 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl, repli
       entry.confirmedSeq = first.seq ?? null;
       if (kind === 'create') {
         _overlay.delete(opId);
+      } else {
+        // The fold may already have caught up (the delta can beat the
+        // response) — resolve the confirmed overlay now, not on the next
+        // list render.
+        _clearConfirmedOverlays(entry.id);
       }
       _storeRender();
       return {
@@ -2226,6 +2231,8 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl, repli
         entry.confirmedSeq = final.seq ?? null;
         if (kind === 'create') {
           _overlay.delete(opId);
+        } else {
+          _clearConfirmedOverlays(entry.id);
         }
         _storeRender();
       } else if (final.status === 'rejected') {
