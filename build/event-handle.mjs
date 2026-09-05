@@ -126,7 +126,7 @@ export function native(
   });
 }
 
-export function parseEventType(type        )                      {
+function parseEventTypeUncached(type        )                      {
   if (typeof type !== 'string') {
     throw new Error(`event type must be a string, got ${typeof type}`);
   }
@@ -144,6 +144,30 @@ export function parseEventType(type        )                      {
     return native(entity, field, nativeName);
   }
   throw new Error(`invalid event type '${type}'`);
+}
+
+/**
+ * The commit and delivery loops parse the same small vocabulary of event type
+ * strings once per event per loop; handles are immutable and their identity is
+ * the type string, so one parse per distinct string per process is sound. The
+ * cache is bounded FIFO: adversarial distinct strings still validate (and
+ * throw) exactly as before, they just are not retained.
+ */
+const PARSED_EVENT_TYPE_CACHE_LIMIT = 1024;
+const parsedEventTypeCache = new Map                             ();
+
+export function parseEventType(type        )                      {
+  if (typeof type !== 'string') {
+    throw new Error(`event type must be a string, got ${typeof type}`);
+  }
+  const cached = parsedEventTypeCache.get(type);
+  if (cached) return cached;
+  const handle = parseEventTypeUncached(type);
+  parsedEventTypeCache.set(type, handle);
+  if (parsedEventTypeCache.size > PARSED_EVENT_TYPE_CACHE_LIMIT) {
+    parsedEventTypeCache.delete(parsedEventTypeCache.keys().next().value          );
+  }
+  return handle;
 }
 
 export function lifecycleVerb(
