@@ -31,12 +31,16 @@ function deepFreeze   (value   )    {
 function buildChildren(checkpoint           )                                            {
   const children = new Map                                      ([[ROOT_ID, []]]);
   // for-in avoids the per-element entry-tuple allocation of Object.entries on
-  // this per-keystroke traversal rebuild; key order is identical.
+  // this per-keystroke traversal rebuild, and get-once avoids a second hash
+  // op per element; key order is identical.
   for (const key in checkpoint.elements) {
     const element = checkpoint.elements[key];
-    const list = children.get(element.parent) ?? [];
+    let list = children.get(element.parent);
+    if (list === undefined) {
+      list = [];
+      children.set(element.parent, list);
+    }
     list.push([key, element]);
-    children.set(element.parent, list);
   }
   for (const [parent, list] of children) {
     // Schwartzian transform: precompute the sort keys once instead of paying
@@ -59,12 +63,21 @@ function buildChildren(checkpoint           )                                   
 export function rgaTraversal(checkpoint           )                               {
   const children = buildChildren(checkpoint);
   const order                               = [];
-  const stack                               = [...(children.get(ROOT_ID) ?? [])].reverse();
+  const root = children.get(ROOT_ID);
+  const stack                               = [];
+  // Depth-first, first-child first: push each child list back-to-front instead
+  // of allocating slice/reverse/spread copies per parent (a large document's
+  // root run also approaches the spread argument limit).
+  if (root) {
+    for (let index = root.length - 1; index >= 0; index -= 1) stack.push(root[index]);
+  }
   while (stack.length > 0) {
     const entry = stack.pop()                         ;
     order.push(entry);
     const descendants = children.get(entry[0]);
-    if (descendants) stack.push(...descendants.slice().reverse());
+    if (descendants) {
+      for (let index = descendants.length - 1; index >= 0; index -= 1) stack.push(descendants[index]);
+    }
   }
   return order;
 }
