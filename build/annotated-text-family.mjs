@@ -1,5 +1,5 @@
 import {
-  assertFrontier, assertStructuralPoint, compareOpId,
+  assertFrontier, assertStructuralPoint, compareOpIdValidated,
 } from './annotated-text.mjs';
 
 
@@ -36,7 +36,10 @@ function buildChildren(checkpoint           )                                   
     children.set(element.parent, list);
   }
   for (const list of children.values()) {
-    list.sort(([, left], [, right]) => right.lamport - left.lamport || -compareOpId(left.op, right.op));
+    // Element ops are frozen and were validated at their admission boundary;
+    // the validating compareOpId re-ran the actor regex and a key-shape scan
+    // per comparison on this O(elements log elements) sort.
+    list.sort(([, left], [, right]) => right.lamport - left.lamport || -compareOpIdValidated(left.op, right.op));
   }
   return children;
 }
