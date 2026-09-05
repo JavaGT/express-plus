@@ -365,8 +365,9 @@ function cloneState(state: TextState): TextState {
 // and reads pay only a small constant lookup.
 function cloneRegistry<T extends TextRegistryEntry | TextElement>(registry: Record<string, T>): Record<string, T> {
   const clone: Record<string, T> = {};
-  clone.__normalized__ = 1;
-  delete clone.__normalized__;
+  const normalizable = clone as Record<string, unknown>;
+  normalizable.__normalized__ = 1;
+  delete normalizable.__normalized__;
   for (const key in registry) clone[key] = registry[key];
   return clone;
 }

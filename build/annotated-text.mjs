@@ -365,8 +365,9 @@ function cloneState(state           )            {
 // and reads pay only a small constant lookup.
 function cloneRegistry                                           (registry                   )                    {
   const clone                    = {};
-  clone.__normalized__ = 1;
-  delete clone.__normalized__;
+  const normalizable = clone                           ;
+  normalizable.__normalized__ = 1;
+  delete normalizable.__normalized__;
   for (const key in registry) clone[key] = registry[key];
   return clone;
 }
