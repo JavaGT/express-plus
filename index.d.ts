@@ -2420,4 +2420,13 @@ export type {
   ServeStaticOptions,
 } from './src/server.js';
 
+export interface LogRetentionReport {
+  cutoffIso: string;
+  retentionDays: number;
+  log: { totalRows: number; totalBytes: number; rowsPruned: number; bytesPruned: number; oldestCommittedAt: string | null };
+  receipt: { totalRows: number; rowsExpired: number; actionDataBytesNulled: number; resultDataBytesRetained: number };
+  privateActionFact: { rowsPruned: number; bytesPruned: number };
+}
+export function logRetentionReport(db: WorkbenchDatabase, retentionDays: number, nowMs?: number): LogRetentionReport;
+
 export default function workbench(options?: WorkbenchOptions): WorkbenchApp;
