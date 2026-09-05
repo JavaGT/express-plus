@@ -13,7 +13,7 @@ import {
 import { reconcileProjectedRecovery } from './projected-async.mjs';
 import { reconcileDurableEffects } from './durable-effects.mjs';
 import { startSimulation } from './simulate.mjs';
-import { retentionPrune } from './committed-log.mjs';
+import { compactReceiptResultData, retentionPrune } from './committed-log.mjs';
 import { getLog, withLog } from './log.mjs';
 
 import { EMPTY_BLOB_CENSUS,                 } from './blob-census.mjs';
@@ -43,7 +43,15 @@ export const DEFAULT_LOW_DISK_HEADROOM_BYTES = 256 * 1024 * 1024;
 
 
 
+
+
+
+                                                                         
+
+
+
                                              
+
 
 
 
@@ -228,6 +236,18 @@ function engageMaintenance(app            , log              )       {
       fn: () => void app.sweepLog ().catch((err) => log.warn('system', 'log retention sweep failed', { err })),
     });
   }
+  if (options.resultDataRetentionDays > 0) {
+    app.sweepReceiptResultData = () => app.writeQueue.run(() => {
+      const cutoff = new Date(Date.now() - options.resultDataRetentionDays * 86_400_000).toISOString();
+      const compacted = compactReceiptResultData(app.db         , cutoff);
+      if (compacted > 0) log.info('system', 'receipt resultData compaction', { compacted });
+    });
+    app.clock.add({
+      name: 'receipt-result-compactor',
+      intervalMs: options.logRetentionIntervalMs,
+      fn: () => void app.sweepReceiptResultData ().catch((err) => log.warn('system', 'receipt resultData compaction sweep failed', { err })),
+    });
+  }
 }
 
 async function bootApplication(app            )                      {
@@ -360,6 +380,7 @@ export const maintenanceDefaults                               = Object.freeze({
   blobReapTtlMs: blobRetentionDefaults.abandonedUploadTtlMs,
   logRetentionDays: 0,
   logRetentionIntervalMs: BLOB_REAP_INTERVAL_MS,
+  resultDataRetentionDays: 0,
   blobRetention: blobRetentionDefaults,
   blobLowDiskHeadroomBytes: DEFAULT_LOW_DISK_HEADROOM_BYTES,
 });
@@ -371,7 +392,7 @@ export function validateMaintenanceOptions(options                    )         
       throw new TypeError(`${name} must be a finite number greater than zero`);
     }
   }
-  for (const name of ['blobReapTtlMs', 'logRetentionDays']         ) {
+  for (const name of ['blobReapTtlMs', 'logRetentionDays', 'resultDataRetentionDays']         ) {
     const value = options[name];
     if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
       throw new TypeError(`${name} must be a finite non-negative number`);
@@ -407,6 +428,7 @@ export function validateMaintenanceOptions(options                    )         
     blobReapTtlMs: retentionMs(blobRetention, 'abandoned-upload'),
     logRetentionDays: options.logRetentionDays,
     logRetentionIntervalMs: options.logRetentionIntervalMs,
+    resultDataRetentionDays: options.resultDataRetentionDays,
     blobRetention,
     blobLowDiskHeadroomBytes,
   });

@@ -419,6 +419,99 @@ export function appendEvents(db          , events                 ) {
   }
 }
 
+// compactReceiptResultData — age-based `_ActionReceipt.resultData` compaction.
+// Used by the receipt-result compactor clock (application-runtime). Runs under
+// the writeQueue mutex. Returns the number of receipts compacted.
+//
+// Compacted-receipt semantics: the receipt keeps proving the action committed,
+// and a replay still returns the commit acknowledgement — `{ actionId,
+// confirmedThrough }`, the two fields every replayed receipt must carry for the
+// action HTTP surface — but the stored result payload is replaced by an
+// explicit `__workbenchCompactedResult` marker (with the reclaimed byte count,
+// for audit). Compaction is fail-closed in three ways: receipts whose resultData
+// carries the `__workbenchMixedReplay` envelope are NEVER compacted (that
+// envelope is the mixed-tier replay authority — losing it would turn a retry
+// into a re-apply); receipts whose stored result object cannot prove a usable
+// `actionId`/`confirmedThrough` pair are left untouched (compaction must never
+// make a previously replayable receipt unplayable); malformed or non-object
+// resultData is left untouched rather than interpreted; and already-compacted
+// receipts never re-match, so repeated sweeps are no-ops.
+export function compactReceiptResultData(db          , cutoffIso        )         {
+  return Number(prepareCached(db, `
+    UPDATE _ActionReceipt
+    SET resultData = json_object(
+      '__workbenchCompactedResult', json_object('version', 1, 'reclaimedBytes', length(resultData)),
+      'actionId', json_extract(resultData, '$.actionId'),
+      'confirmedThrough', json_extract(resultData, '$.confirmedThrough')
+    )
+    WHERE committedAt < :cutoff
+      AND resultData IS NOT NULL
+      AND CASE WHEN json_valid(resultData) THEN
+        json_type(resultData) = 'object'
+        AND json_extract(resultData, '$.__workbenchMixedReplay') IS NULL
+        AND json_extract(resultData, '$.__workbenchCompactedResult') IS NULL
+        AND json_extract(resultData, '$.actionId') = actionId
+        AND typeof(json_extract(resultData, '$.confirmedThrough')) = 'integer'
+      ELSE 0 END
+  `).run({ cutoff: cutoffIso }).changes);
+}
+
+// logRetentionReport — read-only dry-run for the log retention reaper. Used by
+// apps to show what `retentionPrune` would reclaim at a given retention window
+// without mutating anything. Read-only SELECTs against the history-tier tables
+// this module owns (_Log, _ActionReceipt, _PrivateActionFact); per-table
+// existence guards keep it usable against databases that predate a table.
+
+
+
+
+
+
+
+
+function columnBytes(db          , table        , payloadColumn        , cutoffIso         )                                  {
+  const exists = db.prepare('SELECT 1 FROM sqlite_schema WHERE type = \'table\' AND name = ?').get(table);
+  if (exists === undefined) return { rows: 0, bytes: 0 };
+  const row = cutoffIso
+    ? db.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(${payloadColumn})), 0) AS bytes FROM ${table} WHERE committedAt < ?`).get(cutoffIso)
+    : db.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(${payloadColumn})), 0) AS bytes FROM ${table}`).get()                                ;
+  return { rows: Number(row.n), bytes: Number(row.bytes) };
+}
+
+export function logRetentionReport(db          , retentionDays        , nowMs         = Date.now())                     {
+  const cutoffIso = new Date(nowMs - retentionDays * 86_400_000).toISOString();
+  const logTotal = columnBytes(db, '_Log', 'eventData');
+  const logPruned = columnBytes(db, '_Log', 'eventData', cutoffIso);
+  const oldestRow = db.prepare('SELECT 1 FROM sqlite_schema WHERE type = \'table\' AND name = \'_Log\'').get() !== undefined
+    ? db.prepare('SELECT MIN(committedAt) AS oldest FROM _Log').get()
+    : { oldest: null };
+  const receiptTotal = columnBytes(db, '_ActionReceipt', 'actionData');
+  const receiptExpiredRows = columnBytes(db, '_ActionReceipt', 'actionData', cutoffIso);
+  const receiptResultData = columnBytes(db, '_ActionReceipt', 'resultData');
+  const factPruned = columnBytes(db, '_PrivateActionFact', 'fact', cutoffIso);
+  return {
+    cutoffIso,
+    retentionDays,
+    log: {
+      totalRows: logTotal.rows,
+      totalBytes: logTotal.bytes,
+      rowsPruned: logPruned.rows,
+      bytesPruned: logPruned.bytes,
+      oldestCommittedAt: oldestRow.oldest
+    },
+    receipt: {
+      totalRows: receiptTotal.rows,
+      rowsExpired: receiptExpiredRows.rows,
+      actionDataBytesNulled: receiptExpiredRows.bytes,
+      resultDataBytesRetained: receiptResultData.bytes
+    },
+    privateActionFact: {
+      rowsPruned: factPruned.rows,
+      bytesPruned: factPruned.bytes
+    }
+  };
+}
+
 // retentionPrune — delete log entries older than a cutoff date. Used by the
 // log retention reaper (serve.mjs). Runs under the writeQueue mutex.
 export function retentionPrune(db          , cutoffIso        ) {

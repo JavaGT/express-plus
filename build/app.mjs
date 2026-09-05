@@ -116,6 +116,7 @@ import { makeMountable } from './router.mjs';
 
 
 
+
 const publicWorkbenchOptionsAreCovered                                   = true;
 void publicWorkbenchOptionsAreCovered;
 
@@ -302,6 +303,7 @@ export default function workbench({
   blobReapTtlMs = maintenanceDefaults.blobReapTtlMs,
   logRetentionDays = maintenanceDefaults.logRetentionDays,
   logRetentionIntervalMs = maintenanceDefaults.logRetentionIntervalMs,
+  resultDataRetentionDays = maintenanceDefaults.resultDataRetentionDays,
   blobRetention = maintenanceDefaults.blobRetention,
   blobLowDiskHeadroomBytes = maintenanceDefaults.blobLowDiskHeadroomBytes,
   operationalConsumers = [],
@@ -611,6 +613,7 @@ export default function workbench({
       blobReapTtlMs,
       logRetentionDays,
       logRetentionIntervalMs,
+      resultDataRetentionDays,
       blobRetention: blobRetention                                            ,
       blobLowDiskHeadroomBytes,
     });

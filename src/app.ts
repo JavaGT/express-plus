@@ -108,6 +108,7 @@ interface WorkbenchOptions {
   blobReapTtlMs?: number;
   logRetentionDays?: number;
   logRetentionIntervalMs?: number;
+  resultDataRetentionDays?: number;
   blobRetention?: Partial<typeof maintenanceDefaults.blobRetention>;
   blobLowDiskHeadroomBytes?: number;
   operationalConsumers?: readonly unknown[];
@@ -302,6 +303,7 @@ export default function workbench({
   blobReapTtlMs = maintenanceDefaults.blobReapTtlMs,
   logRetentionDays = maintenanceDefaults.logRetentionDays,
   logRetentionIntervalMs = maintenanceDefaults.logRetentionIntervalMs,
+  resultDataRetentionDays = maintenanceDefaults.resultDataRetentionDays,
   blobRetention = maintenanceDefaults.blobRetention,
   blobLowDiskHeadroomBytes = maintenanceDefaults.blobLowDiskHeadroomBytes,
   operationalConsumers = [],
@@ -611,6 +613,7 @@ export default function workbench({
       blobReapTtlMs,
       logRetentionDays,
       logRetentionIntervalMs,
+      resultDataRetentionDays,
       blobRetention: blobRetention as typeof maintenanceDefaults.blobRetention,
       blobLowDiskHeadroomBytes,
     });

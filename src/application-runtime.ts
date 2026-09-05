@@ -13,7 +13,7 @@ import {
 import { reconcileProjectedRecovery } from './projected-async.ts';
 import { reconcileDurableEffects } from './durable-effects.ts';
 import { startSimulation } from './simulate.ts';
-import { retentionPrune } from './committed-log.ts';
+import { compactReceiptResultData, retentionPrune } from './committed-log.ts';
 import { getLog, withLog } from './log.ts';
 import type { FrameworkLog } from './log.ts';
 import { EMPTY_BLOB_CENSUS, type BlobCensus } from './blob-census.ts';
@@ -43,6 +43,13 @@ export interface RuntimeMaintenance {
   blobReapTtlMs: number;
   logRetentionDays: number;
   logRetentionIntervalMs: number;
+  /**
+   * Age cutoff (days) for receipt `resultData` compaction: a receipt past the
+   * cutoff keeps its commit acknowledgement but loses the stored result payload
+   * (mixed-tier replay envelopes are never compacted). 0 — the default — never
+   * compacts.
+   */
+  resultDataRetentionDays: number;
   /** Named blob retention policies (S6/A5) — the single TTL source; no scattered literals. */
   blobRetention: Readonly<BlobRetentionPolicies>;
   /** Low-disk upload guard (S6/A5 #5): refuse new uploads below this many free bytes (0 disables). */
@@ -113,6 +120,7 @@ interface RuntimeApp {
   sweepBlobs?: () => Promise<unknown>;
   sweepPendingBlobs?: () => Promise<unknown>;
   sweepLog?: () => Promise<unknown>;
+  sweepReceiptResultData?: () => Promise<unknown>;
   ready?: Promise<unknown>;
   onShutdown(name: string, hook: () => void | Promise<void>, options?: { timeoutMs?: number }): void;
   _shutdownFromStartFailure?(): Promise<unknown>;
@@ -226,6 +234,18 @@ function engageMaintenance(app: RuntimeApp, log: FrameworkLog): void {
       name: 'log-reaper',
       intervalMs: options.logRetentionIntervalMs,
       fn: () => void app.sweepLog!().catch((err) => log.warn('system', 'log retention sweep failed', { err })),
+    });
+  }
+  if (options.resultDataRetentionDays > 0) {
+    app.sweepReceiptResultData = () => app.writeQueue.run(() => {
+      const cutoff = new Date(Date.now() - options.resultDataRetentionDays * 86_400_000).toISOString();
+      const compacted = compactReceiptResultData(app.db as never, cutoff);
+      if (compacted > 0) log.info('system', 'receipt resultData compaction', { compacted });
+    });
+    app.clock.add({
+      name: 'receipt-result-compactor',
+      intervalMs: options.logRetentionIntervalMs,
+      fn: () => void app.sweepReceiptResultData!().catch((err) => log.warn('system', 'receipt resultData compaction sweep failed', { err })),
     });
   }
 }
@@ -360,6 +380,7 @@ export const maintenanceDefaults: Readonly<RuntimeMaintenance> = Object.freeze({
   blobReapTtlMs: blobRetentionDefaults.abandonedUploadTtlMs,
   logRetentionDays: 0,
   logRetentionIntervalMs: BLOB_REAP_INTERVAL_MS,
+  resultDataRetentionDays: 0,
   blobRetention: blobRetentionDefaults,
   blobLowDiskHeadroomBytes: DEFAULT_LOW_DISK_HEADROOM_BYTES,
 });
@@ -371,7 +392,7 @@ export function validateMaintenanceOptions(options: RuntimeMaintenance): Readonl
       throw new TypeError(`${name} must be a finite number greater than zero`);
     }
   }
-  for (const name of ['blobReapTtlMs', 'logRetentionDays'] as const) {
+  for (const name of ['blobReapTtlMs', 'logRetentionDays', 'resultDataRetentionDays'] as const) {
     const value = options[name];
     if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
       throw new TypeError(`${name} must be a finite non-negative number`);
@@ -407,6 +428,7 @@ export function validateMaintenanceOptions(options: RuntimeMaintenance): Readonl
     blobReapTtlMs: retentionMs(blobRetention, 'abandoned-upload'),
     logRetentionDays: options.logRetentionDays,
     logRetentionIntervalMs: options.logRetentionIntervalMs,
+    resultDataRetentionDays: options.resultDataRetentionDays,
     blobRetention,
     blobLowDiskHeadroomBytes,
   });
