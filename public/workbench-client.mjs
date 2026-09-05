@@ -1783,7 +1783,7 @@ function mergeReplicaFrontiers(left, right) {
  * Returns a store object with: subscribe, dispatch, create, update, remove,
  * action, close, overlayFor, overlayStatusFor, pendingCreates, onRender.
  */
-export function createLiveStore({ baseUrl, name, path, channel, fetchImpl, replicaState }) {
+export function createLiveStore({ baseUrl, name, path, channel, fetchImpl, replicaState, sendMutation }) {
   const resolvedChannel = channel ?? new LiveChannel(baseUrl);
   const resolvedFetch = fetchImpl ?? globalThis.fetch;
   const resolvedReplicaState = replicaState ?? createIndexedDbReplicaState();
@@ -1898,6 +1898,42 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl, repli
     for (const cb of _renderCallbacks) {
       try { cb(); } catch { /* swallow */ }
     }
+  }
+
+  /**
+   * Direct transport for a serialized CRUD mutation: one fetch, the response
+   * (or its absence) is the whole outcome. Settlement and completion are the
+   * same promise — there is nothing durable to complete later.
+   *
+   * Outcome shapes:
+   *   { status:'committed', row, seq }        — commit seq evidence included
+   *   { status:'rejected', failure }          — the server answered No
+   *   { status:'outcome-unknown', deliveryError } — transmitted, result lost
+   */
+  function directMutationSend({ method, url, body }) {
+    const run = async () => {
+      const fetchOpts = { method, credentials: 'include' };
+      if (body !== undefined) {
+        fetchOpts.headers = { 'Content-Type': 'application/json' };
+        fetchOpts.body = body;
+      }
+      try {
+        const res = await resolvedFetch(url, fetchOpts);
+        const decoded = await decodeResult(res);
+        if (decoded.ok) {
+          const row = res.status === 204 ? undefined : decoded.value;
+          return { status: 'committed', row, seq: _confirmedSeq(res) };
+        }
+        if (decoded.failure) {
+          return { status: 'rejected', failure: decoded.failure };
+        }
+        return { status: 'outcome-unknown', deliveryError: { message: decoded.error } };
+      } catch (err) {
+        return { status: 'outcome-unknown', deliveryError: { message: err?.message ?? String(err) } };
+      }
+    };
+    const outcome = run();
+    return { settlement: outcome, completion: outcome };
   }
 
   // --- Subscribe ---
@@ -2069,101 +2105,141 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl, repli
     _overlay.set(opId, entry);
     _storeRender();
 
-    // Fire REST. Keep requestAttempted separate from the optimistic state so a
-    // local encoding failure cannot be mistaken for an uncertain server write.
-    let requestAttempted = false;
-    try {
-      let method, url, body;
-      if (kind === 'create') {
-        method = 'POST';
-        url = `${baseUrl}${path}`;
+    // Serialize the exact request bytes once. A durable outbox resends these
+    // same bytes with the same actionId, so a lost response can never fork
+    // the outcome into two server-side mutations.
+    let method, url, body;
+    if (kind === 'create') {
+      method = 'POST';
+      url = `${baseUrl}${path}`;
+    } else if (kind === 'update') {
+      method = 'PATCH';
+      url = `${baseUrl}${path}/${id}`;
+    } else {
+      method = 'DELETE';
+      url = `${baseUrl}${path}/${id}`;
+    }
+    if (kind !== 'remove') {
+      try {
         body = JSON.stringify(payload);
-      } else if (kind === 'update') {
-        method = 'PATCH';
-        url = `${baseUrl}${path}/${id}`;
-        body = JSON.stringify(payload);
-      } else {
-        method = 'DELETE';
-        url = `${baseUrl}${path}/${id}`;
-        body = undefined;
-      }
-
-      const fetchOpts = { method, credentials: 'include' };
-      if (body !== undefined) {
-        fetchOpts.headers = { 'Content-Type': 'application/json' };
-        fetchOpts.body = body;
-      }
-
-      requestAttempted = true;
-      const res = await resolvedFetch(url, fetchOpts);
-      const decoded = await decodeResult(res);
-
-      if (!decoded.ok) {
-        // Failure — roll back
+      } catch (err) {
+        // Never transmitted — a known rollback, not an uncertain server write.
         _overlay.delete(opId);
         _storeRender();
-        if (decoded.failure) {
-          return {
-            ok: false,
-            status: 'failed-rolled-back',
-            opId,
-            failure: decoded.failure,
-          };
-        }
         return {
           ok: false,
-          status: 'outcome-unknown',
+          status: 'failed-rolled-back',
           opId,
-          deliveryError: { message: decoded.error },
+          failure: clientFailure('invalid-input', err.message ?? String(err)),
         };
       }
+    }
 
-      // Success
-      const is204 = res.status === 204;
-      const returnedRow = is204 ? undefined : decoded.value;
-      let realId = id;
+    // Every durable mutation goes through ONE transport seam. The direct
+    // transport fetches and returns the committed outcome; a durable transport
+    // (the local store's outbox) enqueues and settles on authoritative
+    // per-scope seq evidence instead of a bare transport ack.
+    let sender;
+    try {
+      sender = sendMutation
+        ? sendMutation({ entity: name, opId, kind, id, payload, method, url, body })
+        : directMutationSend({ method, url, body });
+    } catch (err) {
+      // The transport refused before any transmission — a known rollback.
+      _overlay.delete(opId);
+      _storeRender();
+      return {
+        ok: false,
+        status: 'failed-rolled-back',
+        opId,
+        failure: clientFailure('invalid-input', err?.message ?? String(err)),
+      };
+    }
 
-      if (kind === 'create') {
-        realId = returnedRow && returnedRow.id;
-      }
+    let first;
+    try {
+      first = await sender.settlement;
+    } catch (err) {
+      // Settlement itself failed before transmission (e.g. the durable queue
+      // could not persist the entry) — a known rollback.
+      _overlay.delete(opId);
+      _storeRender();
+      return {
+        ok: false,
+        status: 'failed-rolled-back',
+        opId,
+        failure: clientFailure('invalid-input', err?.message ?? String(err)),
+      };
+    }
 
-      // Update overlay entry
+    if (first.status === 'committed') {
       entry.status = 'confirmed';
-      entry.id = realId;
-      entry.row = returnedRow ?? null;
-      entry.confirmedSeq = _confirmedSeq(res);
-
+      entry.id = first.row?.id ?? entry.id;
+      entry.row = first.row ?? null;
+      entry.confirmedSeq = first.seq ?? null;
       if (kind === 'create') {
         _overlay.delete(opId);
       }
       _storeRender();
-
       return {
         ok: true,
         status: 'committed',
         opId,
-        id: realId,
-        row: kind === 'remove' ? undefined : returnedRow,
+        id: kind === 'create' ? (first.row && first.row.id) : id,
+        row: kind === 'remove' ? undefined : first.row,
       };
-    } catch (err) {
-      // Never leave uncertain optimistic data visible as if it were committed.
+    }
+
+    if (first.status === 'rejected') {
+      // The server answered No — roll the placeholder back and surface the
+      // failure. Never silently dropped.
       _overlay.delete(opId);
       _storeRender();
-      const message = err.message ?? String(err);
-      return requestAttempted
-        ? {
-          ok: false,
-          status: 'outcome-unknown',
-          opId,
-          deliveryError: { message },
-        }
-        : {
-          ok: false,
-          status: 'failed-rolled-back',
-          opId,
-          failure: clientFailure('invalid-input', message),
-        };
+      return {
+        ok: false,
+        status: 'failed-rolled-back',
+        opId,
+        failure: first.failure,
+      };
     }
+
+    if (first.status === 'outcome-unknown') {
+      _overlay.delete(opId);
+      _storeRender();
+      return {
+        ok: false,
+        status: 'outcome-unknown',
+        opId,
+        deliveryError: first.deliveryError,
+      };
+    }
+
+    // 'queued' — the placeholder stays visible while the durable entry waits
+    // for completion. The terminal outcome still confirms or rolls the
+    // placeholder back through this one overlay entry (one apply path).
+    void sender.completion.then((final) => {
+      if (_closed) return;
+      if (final.status === 'committed' && entry.status === 'pending') {
+        entry.status = 'confirmed';
+        entry.id = final.row?.id ?? entry.id;
+        entry.row = final.row ?? null;
+        entry.confirmedSeq = final.seq ?? null;
+        if (kind === 'create') {
+          _overlay.delete(opId);
+        }
+        _storeRender();
+      } else if (final.status === 'rejected') {
+        _overlay.delete(opId);
+        _storeRender();
+      }
+    }).catch(() => {});
+
+    return {
+      ok: false,
+      status: 'queued',
+      opId,
+      actionId: first.actionId,
+    };
   }
 
   function text(id, field) {
