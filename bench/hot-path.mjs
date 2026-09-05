@@ -37,6 +37,7 @@ import {
 } from '../build/annotated-text-continuous.mjs';
 import { projectAnnotatedTextSnapshot } from '../build/annotated-text-snapshot.mjs';
 import { ensureStream, ensureLease, hashClientNonce } from '../build/annotated-text-authoring-stream.mjs';
+import { readAnnotatedTextFamilyCheckpoint, restoreTextFamilySerialized } from '../build/annotated-text-authoring-public.mjs';
 import { materializeAnnotatedTextSnapshot } from '../public/workbench-client.mjs';
 
 const SCHEMA_VERSION = 2;
@@ -927,9 +928,17 @@ async function runUnifiedAnnotatedTextSample(config) {
     const serializeOps = await timed(annotationRows, () => { JSON.stringify(recipient); });
 
     // Client reconciliation: materialize the client's annotated document view
-    // from the canonical recipient snapshot.
+    // from the canonical recipient snapshot. A fully-visible recipient is v3:
+    // compact endpoint tables that only resolve against a family replica, so
+    // production consumers restore one from the durable family checkpoint
+    // (the live client seeds the same checkpoint from its authoring envelope).
+    // The replica is a one-time client bootstrap, so it is restored outside
+    // the timed loop exactly once, mirroring a live session's familyReplica.
+    const familyCheckpoint = readAnnotatedTextFamilyCheckpoint(db, 'UnifiedDoc_body', 'd1');
+    if (familyCheckpoint === undefined) throw new Error('unified materialize failed: family checkpoint is missing');
+    const familyReplica = restoreTextFamilySerialized(familyCheckpoint);
     const materializeOps = await timed(annotationRows, () => {
-      materializeAnnotatedTextSnapshot(recipient, Doc.body);
+      materializeAnnotatedTextSnapshot(recipient, Doc.body, { family: familyReplica });
     });
 
     // Declaration action: timing.correct through the Commit loop against one
