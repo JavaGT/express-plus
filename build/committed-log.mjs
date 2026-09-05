@@ -433,8 +433,9 @@ export function appendEvents(db          , events                 ) {
 // envelope is the mixed-tier replay authority — losing it would turn a retry
 // into a re-apply); receipts whose stored result object cannot prove a usable
 // `actionId`/`confirmedThrough` pair are left untouched (compaction must never
-// make a previously replayable receipt unplayable); and malformed or non-object
-// resultData is left untouched rather than interpreted.
+// make a previously replayable receipt unplayable); malformed or non-object
+// resultData is left untouched rather than interpreted; and already-compacted
+// receipts never re-match, so repeated sweeps are no-ops.
 export function compactReceiptResultData(db          , cutoffIso        )         {
   return Number(prepareCached(db, `
     UPDATE _ActionReceipt
@@ -448,6 +449,7 @@ export function compactReceiptResultData(db          , cutoffIso        )       
       AND CASE WHEN json_valid(resultData) THEN
         json_type(resultData) = 'object'
         AND json_extract(resultData, '$.__workbenchMixedReplay') IS NULL
+        AND json_extract(resultData, '$.__workbenchCompactedResult') IS NULL
         AND json_extract(resultData, '$.actionId') = actionId
         AND typeof(json_extract(resultData, '$.confirmedThrough')) = 'integer'
       ELSE 0 END
