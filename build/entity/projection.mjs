@@ -692,15 +692,61 @@ function projectBlocklessAnnotationApplyRange({ name, handle, db, descriptor, da
   // ordered links admit the multiple rows a trimmed annotation's left+right
   // remnants require. Writing the WHOLE postimage makes the exclusive trim of
   // another annotation's range durable and replay deterministically from the
-  // committed event.
-  db.prepare(`DELETE FROM ${prefix}_membership WHERE annotation_id IN (SELECT id FROM ${prefix}_annotation WHERE document_id = ?)`).run(data.id);
-  const ordinalByAnnotation = new Map                ();
-  for (const entry of f.ranges) {
-    const ordinal = ordinalByAnnotation.get(entry.annotationId          ) ?? 0;
-    attachAnnotationRange(db, prefix, data.id          , entry.annotationId          , entry.start, entry.end, ordinal);
-    ordinalByAnnotation.set(entry.annotationId          , ordinal + 1);
+  // committed event. When the stored relation already equals the postimage (the
+  // common field-only correction: values change, geometry does not), the
+  // delete+rewrite is skipped — the rewrite would write back exactly the rows
+  // already stored, so the resulting tables and every ordered read of them are
+  // identical either way.
+  if (!membershipRelationMatchesPostimage(db, prefix, data.id          , f.ranges)) {
+    db.prepare(`DELETE FROM ${prefix}_membership WHERE annotation_id IN (SELECT id FROM ${prefix}_annotation WHERE document_id = ?)`).run(data.id);
+    const ordinalByAnnotation = new Map                ();
+    for (const entry of f.ranges) {
+      const ordinal = ordinalByAnnotation.get(entry.annotationId          ) ?? 0;
+      attachAnnotationRange(db, prefix, data.id          , entry.annotationId          , entry.start, entry.end, ordinal);
+      ordinalByAnnotation.set(entry.annotationId          , ordinal + 1);
+    }
   }
   db.prepare(`UPDATE ${prefix}_state SET structure_version = ? WHERE document_id = ?`).run(data.after.structuralRevision, data.id);
+}
+
+// True when the stored membership relation of one document already equals the
+// plan's range postimage: the same (annotation_id, ordinal, start, end) rows.
+// `annotationRangeRows` returns the relation grouped by annotation with
+// ascending ordinals — exactly the rows and per-annotation ordinals the
+// postimage rewrite would write — so a full match proves the rewrite is a
+// no-op on stored state. The postimage array itself may interleave annotations
+// in any order, so equality is compared per annotation, not row-for-row.
+// Any mismatch (count, annotation set, ordinal, or canonical endpoint text)
+// fails closed into the whole-postimage rewrite.
+function membershipRelationMatchesPostimage(db    , prefix        , documentId        , ranges                                                               )          {
+  const expected = new Map                                 ();
+  for (const entry of ranges) {
+    let endpoints = expected.get(entry.annotationId);
+    if (!endpoints) {
+      endpoints = [];
+      expected.set(entry.annotationId, endpoints);
+    }
+    endpoints.push([canonicalEndpointJSON(entry.start), canonicalEndpointJSON(entry.end)]);
+  }
+  const stored = annotationRangeRows(db, prefix, documentId);
+  if (stored.length !== ranges.length) return false;
+  let index = 0;
+  while (index < stored.length) {
+    const annotationId = stored[index].annotation_id;
+    const endpoints = expected.get(annotationId);
+    if (!endpoints) return false;
+    let ordinal = 0;
+    while (index < stored.length && stored[index].annotation_id === annotationId) {
+      const row = stored[index];
+      const pair = endpoints[ordinal];
+      if (!pair || row.ordinal !== ordinal || row.start_point !== pair[0] || row.end_point !== pair[1]) return false;
+      index += 1;
+      ordinal += 1;
+    }
+    if (endpoints.length !== ordinal) return false;
+    expected.delete(annotationId);
+  }
+  return expected.size === 0;
 }
 
 // Semantic atomic annotation.update (#174): one history step replacing an
