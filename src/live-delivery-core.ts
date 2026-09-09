@@ -233,19 +233,26 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
   const SHARED_READ_MAX_ENTRIES = 128;
 
   function sharedReadMaxSeq(scope: string): number {
-    const row = prepareCached(
+    const row = prepareCached<{ get(params: Record<string, unknown>): { maxSeq?: number | null } | undefined }>(
       db as never,
       'SELECT MAX(seq) AS maxSeq FROM _Log WHERE scope = :scope',
-    ).get({ scope }) as { maxSeq?: number | null } | undefined;
+    ).get({ scope });
     return typeof row?.maxSeq === 'number' ? row.maxSeq : 0;
   }
 
-  function readSinceShared(scope: string, cursor: number): LogEvent[] {
+  // Burst hint: catchUp passes true only while another subscription on the
+  // scope can reuse the read this turn, so a single-subscriber scope pays no
+  // cache overhead (no entry, no invalidation timer, no extra MAX(seq) probe).
+  // A valid hit is always served regardless of the hint — a hit is sound
+  // wherever it survives.
+  function readSinceShared(scope: string, cursor: number, cacheable: boolean): LogEvent[] {
     const key = `${scope}\u0000${cursor}`;
     const hit = sharedReads.get(key);
+    if (!hit?.live && !cacheable) return readSince(db as never, scope, cursor);
     const maxSeq = sharedReadMaxSeq(scope);
-    if (hit && hit.live && hit.maxSeq === maxSeq) return hit.events;
+    if (hit?.live && hit.maxSeq === maxSeq) return hit.events;
     const events = readSince(db as never, scope, cursor);
+    if (!cacheable) return events;
     const entry = { events, maxSeq, live: true };
     sharedReads.set(key, entry);
     if (sharedReads.size > SHARED_READ_MAX_ENTRIES) {
@@ -431,12 +438,16 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
   // bumps, which MAX(seq) over _Log cannot observe.
   const reauthRows = new Map<string, { raw: Record<string, unknown> | undefined; maxSeq: number; live: boolean }>();
 
-  function reauthRowShared(entityRec: LiveEntityRecord, handle: ScopeHandle): Record<string, unknown> | undefined {
+  function reauthRowShared(entityRec: LiveEntityRecord, handle: ScopeHandle, cacheable: boolean): Record<string, unknown> | undefined {
     const key = `${entityRec.name}\u0000${handle.id}`;
     const hit = reauthRows.get(key);
+    if (!hit?.live && !cacheable) {
+      return db.prepare(`SELECT * FROM ${entityRec.name} WHERE id = :id`).get({ id: handle.id }) as Record<string, unknown> | undefined;
+    }
     const maxSeq = sharedReadMaxSeq(handle.key);
-    if (hit && hit.live && hit.maxSeq === maxSeq) return hit.raw;
+    if (hit?.live && hit.maxSeq === maxSeq) return hit.raw;
     const raw = db.prepare(`SELECT * FROM ${entityRec.name} WHERE id = :id`).get({ id: handle.id }) as Record<string, unknown> | undefined;
+    if (!cacheable) return raw;
     const entry = { raw, maxSeq, live: true };
     reauthRows.set(key, entry);
     if (reauthRows.size > SHARED_READ_MAX_ENTRIES) {
@@ -450,7 +461,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
     return raw;
   }
 
-  function reauthFor(entityRec: LiveEntityRecord, principal: Principal, handle: ScopeHandle, allowDeletedAnchor = false): { row: Record<string, unknown>; terminal: boolean } | null {
+  function reauthFor(entityRec: LiveEntityRecord, principal: Principal, handle: ScopeHandle, allowDeletedAnchor = false, cacheable = false): { row: Record<string, unknown>; terminal: boolean } | null {
     try {
       if (!scopeVisible({ entity: entityRec, principal, scope: handle })) return null;
       const { sql: where, params: scopeParams } = entityRec.scopeFilter(principal);
@@ -458,7 +469,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
       if (isLiveEntity(entityRec)) {
         current = db.prepare(`SELECT * FROM ${entityRec.name} AS t0 WHERE ${where} AND t0.id = :id`).get({ ...scopeParams, id: handle.id }) as Record<string, unknown> | undefined;
       } else {
-        const shared = reauthRowShared(entityRec, handle);
+        const shared = reauthRowShared(entityRec, handle, cacheable);
         if (shared) {
           const visible = db.prepare(`SELECT 1 AS visible FROM ${entityRec.name} AS t0 WHERE ${where} AND t0.id = :id LIMIT 1`).get({ ...scopeParams, id: handle.id });
           if (visible) current = shared;
@@ -555,6 +566,10 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
   async function catchUp(subId: number): Promise<void> {
     const sub = subs.get(subId);
     if (!sub || !sub.active) return;
+    // Burst hint: shared reads pay off only when another subscription on this
+    // scope can reuse them this turn. Single-subscriber scopes keep the plain
+    // uncached read (no entry, no invalidation timer, no extra MAX(seq) probe).
+    const cacheable = (byScope.get(sub.scope)?.size ?? 0) > 1;
     if (sub.paused) {
       sub.dirty = true;
       return;
@@ -667,13 +682,13 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
         }
         let events: Array<{ seq: number } & Readonly<Record<string, unknown>>>;
         try {
-          events = readSinceShared(sub.scope, sub.cursor) as unknown as Array<{ seq: number } & Readonly<Record<string, unknown>>>;
+          events = readSinceShared(sub.scope, sub.cursor, cacheable) as unknown as Array<{ seq: number } & Readonly<Record<string, unknown>>>;
         } catch (err) {
           log?.error?.('live', 'readSince failed', { scope: sub.scope, cursor: sub.cursor, err: String(err) });
           removeSub(subId);
           throw new Error(`readSince failed for scope '${sub.scope}'`);
         }
-        const auth = reauthFor(sub.entityRec, sub.principal, handle);
+        const auth = reauthFor(sub.entityRec, sub.principal, handle, false, cacheable);
         // A successful reauthorization means the grant exists again — stale
         // invalidation dedup keys for this scope must not suppress a FUTURE
         // invalidation.
