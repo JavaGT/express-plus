@@ -414,11 +414,56 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
     return Number(row?.count ?? 0) > limit;
   }
 
+  // ---- Wake-burst shared reauthorization row ---------------------------------
+  //
+  // reauthFor runs once per subscription per batch and its SELECT materializes
+  // the full row (a 4k-word document body, profiled at ~27% of the remaining
+  // fanout path) for every subscriber. For HISTORY-tier entities the shared
+  // by-PK row fetch below reuses the same two-way invalidation as the
+  // committed-batch read: turn-scoped plus MAX(seq)-validated. That rides one
+  // invariant of the delivery core: a history-tier row change is applied in the
+  // SAME transaction as its scope's committed events, so MAX(seq) unchanged
+  // within a turn implies the row is unchanged. Visibility (scopeFilter) stays
+  // per-principal and runs as a payload-free probe; hydrate stays per-principal
+  // and receives a fresh shallow copy, so a hydrate that mutates its input
+  // cannot contaminate the shared row. Live-tier entities keep the original
+  // single-query path: their rows change transactionally with _LiveRevision
+  // bumps, which MAX(seq) over _Log cannot observe.
+  const reauthRows = new Map                                                                                     ();
+
+  function reauthRowShared(entityRec                  , handle             )                                      {
+    const key = `${entityRec.name}\u0000${handle.id}`;
+    const hit = reauthRows.get(key);
+    const maxSeq = sharedReadMaxSeq(handle.key);
+    if (hit && hit.live && hit.maxSeq === maxSeq) return hit.raw;
+    const raw = db.prepare(`SELECT * FROM ${entityRec.name} WHERE id = :id`).get({ id: handle.id })                                       ;
+    const entry = { raw, maxSeq, live: true };
+    reauthRows.set(key, entry);
+    if (reauthRows.size > SHARED_READ_MAX_ENTRIES) {
+      const oldest = reauthRows.keys().next().value;
+      if (oldest !== undefined) reauthRows.delete(oldest);
+    }
+    setImmediate(() => {
+      entry.live = false;
+      if (reauthRows.get(key) === entry) reauthRows.delete(key);
+    });
+    return raw;
+  }
+
   function reauthFor(entityRec                  , principal           , handle             , allowDeletedAnchor = false)                                                             {
     try {
       if (!scopeVisible({ entity: entityRec, principal, scope: handle })) return null;
       const { sql: where, params: scopeParams } = entityRec.scopeFilter(principal);
-      const current = db.prepare(`SELECT * FROM ${entityRec.name} AS t0 WHERE ${where} AND t0.id = :id`).get({ ...scopeParams, id: handle.id });
+      let current                                     ;
+      if (isLiveEntity(entityRec)) {
+        current = db.prepare(`SELECT * FROM ${entityRec.name} AS t0 WHERE ${where} AND t0.id = :id`).get({ ...scopeParams, id: handle.id })                                       ;
+      } else {
+        const shared = reauthRowShared(entityRec, handle);
+        if (shared) {
+          const visible = db.prepare(`SELECT 1 AS visible FROM ${entityRec.name} AS t0 WHERE ${where} AND t0.id = :id LIMIT 1`).get({ ...scopeParams, id: handle.id });
+          if (visible) current = shared;
+        }
+      }
       const anchored = allowDeletedAnchor && !current
         ? readDeletedRowAnchor(db                                              , entityRec.name, handle.id)
         : undefined;
@@ -430,7 +475,9 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
       // fail closed — no raw row fallback. When hydrate is absent (compiled
       // entities without bind), use the raw row directly.
       if ('hydrate' in entityRec && typeof entityRec.hydrate !== 'function') return null;
-      const row = typeof entityRec.hydrate === 'function' ? entityRec.hydrate(raw, principal) : raw;
+      // A shallow copy isolates the shared cached row from hydrate mutation.
+      const hydrateInput = isLiveEntity(entityRec) ? raw : { ...raw };
+      const row = typeof entityRec.hydrate === 'function' ? entityRec.hydrate(hydrateInput, principal) : hydrateInput;
       if (row === null || row === undefined) return null;
       return { row, terminal: allowDeletedAnchor && !current };
     } catch (err) {
@@ -917,6 +964,8 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
     publishedRevocations.clear();
     for (const entry of sharedReads.values()) entry.live = false;
     sharedReads.clear();
+    for (const entry of reauthRows.values()) entry.live = false;
+    reauthRows.clear();
   }
 
   async function catchup({ principal, scope, after = 0, document = null }                                                                             )                             {
