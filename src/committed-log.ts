@@ -18,6 +18,7 @@ import { invalidationLedgerTableDDL } from './invalidation-ledger.ts';
 import { sweepFactDependencies } from './private-action-fact-dependency.ts';
 import { readV16Brand, v16AdmissionNonce, v16CapabilityBytesDigest, parseStoredV16OperatedEvent, serializeV16OperatedEvent, type OperatedWireEnvelope } from './annotated-text-operated-event.ts';
 import { compositeJournalDDL, pruneCompositeChanges } from './composite-journal.ts';
+import { STORAGE_ENVELOPE_PREFIX, maybeEnvelopeStoredPayload, unwrapStoredPayloadText } from './storage-envelope.ts';
 
 // The no-history lane (S3/A2) surfaces through this module alongside the
 // durable _Log/_ActionReceipt surfaces, so the boot DDL and the kernel have one
@@ -201,7 +202,11 @@ export function readSeq(db: CursorDatabase | null | undefined, scope: string): n
  * `<entity>.<field>.operated`.
  */
 export function decodeLogRowData(row: LogRowLike): unknown {
-  const text = row.eventData as string | null;
+  // Storage-envelope unwrap (storage-envelope.ts): a gzip-enveloped row is
+  // decompressed to its EXACT original text first, so v16 canonicality and
+  // every plain-JSON rule below see the same bytes they always have. Old
+  // plain rows pass through unchanged — mixed histories decode by probe.
+  const text = unwrapStoredPayloadText(row.eventData as string | null);
   if (!text) return null;
   const probe: unknown = JSON.parse(text);
   if (probe && typeof probe === 'object' && !Array.isArray(probe) && (probe as { version?: unknown }).version === 16) {
@@ -240,7 +245,13 @@ export function decodeConsumerLogRowData(row: LogRowLike, fallback: Record<strin
   } catch (error) {
     // Only genuine v16 strictness failures propagate; plain JSON errors on
     // non-v16 rows keep the consumer's legacy degrade-to-fallback behavior.
+    // A malformed STORAGE ENVELOPE is neither: an envelope that fails to
+    // decompress is corruption of a replay-authoritative row, so it throws
+    // exactly like v16 strictness instead of degrading (fail closed).
     const text = row.eventData as string | null;
+    if (typeof text === 'string' && text.startsWith(STORAGE_ENVELOPE_PREFIX)) {
+      throw error;
+    }
     let probe: unknown;
     try { probe = text ? JSON.parse(text) : undefined; } catch { return fallback; }
     if (probe && typeof probe === 'object' && !Array.isArray(probe) && (probe as { version?: unknown }).version === 16) {
@@ -275,7 +286,12 @@ export function receiptFor(db: DbHandle, scope: string, actionId: string): Parse
   return {
     ...row,
     eventRefs: JSON.parse(row.eventRefs as string),
-    resultData: row.resultData ? JSON.parse(row.resultData as string) : null,
+    // Storage-envelope unwrap: an enveloped resultData decompresses to the
+    // exact original JSON text, so replayed receipts (the {actionId,
+    // confirmedThrough} ack pair and any stored result payload) are identical
+    // whether the row was written plain or enveloped. A malformed envelope
+    // throws — a corrupted ack never silently degrades.
+    resultData: row.resultData ? JSON.parse(unwrapStoredPayloadText(row.resultData)) : null,
   } as ParsedReceipt;
 }
 
@@ -330,7 +346,11 @@ export function insertReceipt(db: DbHandle, scope: string, actionId: string, com
     principalKey: metadata.principalKey ?? null,
     sessionId: metadata.sessionId ?? null,
     operation: metadata.operation ?? 'action',
-    resultData: metadata.resultData === undefined ? null : JSON.stringify(metadata.resultData),
+    // Storage-envelope write seam: with the handle's payloadCompression
+    // policy attached, a resultData at or above the size threshold is stored
+    // as a gzip envelope (decoded transparently by receiptFor); with no
+    // policy the bytes are exactly the legacy JSON.stringify.
+    resultData: metadata.resultData === undefined ? null : maybeEnvelopeStoredPayload(db, JSON.stringify(metadata.resultData)),
     historyRootActionId: metadata.historyRootActionId ?? null,
     historyTargetActionId: metadata.historyTargetActionId ?? null,
     historyOutcome: metadata.historyOutcome ?? null,
@@ -436,8 +456,14 @@ export function appendEvents(db: DbHandle, events: AppendedEvent[]) {
 // make a previously replayable receipt unplayable); malformed or non-object
 // resultData is left untouched rather than interpreted; and already-compacted
 // receipts never re-match, so repeated sweeps are no-ops.
+//
+// Gzip-envelope rows (storage-envelope.ts) are compacted by the same rules
+// applied to their DECODED payload: an envelope whose decode fails is left
+// untouched (corruption is never interpreted), and the replacement marker is
+// written plain — a tiny marker never justifies compression. Idempotent: the
+// plain marker never re-matches either the JSON rules or the envelope prefix.
 export function compactReceiptResultData(db: DbHandle, cutoffIso: string): number {
-  return Number(prepareCached(db, `
+  const compacted = Number(prepareCached(db, `
     UPDATE _ActionReceipt
     SET resultData = json_object(
       '__workbenchCompactedResult', json_object('version', 1, 'reclaimedBytes', length(resultData)),
@@ -454,6 +480,58 @@ export function compactReceiptResultData(db: DbHandle, cutoffIso: string): numbe
         AND typeof(json_extract(resultData, '$.confirmedThrough')) = 'integer'
       ELSE 0 END
   `).run({ cutoff: cutoffIso }).changes);
+  return compacted + compactEnvelopedReceiptResultData(db, cutoffIso);
+}
+
+// compactEnvelopedReceiptResultData — the envelope-row arm of the compactor.
+// The SQL pass above cannot see through a gzip envelope (json_valid fails, so
+// those rows are skipped there — fail closed), so this pass decodes each
+// envelope-prefixed row past the cutoff and applies the SAME admissibility
+// rules to the decoded object before writing the plain marker. Any decode
+// failure or inadmissible payload leaves the row untouched.
+function compactEnvelopedReceiptResultData(db: DbHandle, cutoffIso: string): number {
+  const rows = prepareCached(db, `
+    SELECT scope, actionId, resultData FROM _ActionReceipt
+    WHERE committedAt < :cutoff
+      AND substr(resultData, 1, :prefixLength) = :prefix
+  `).all({
+    cutoff: cutoffIso,
+    prefixLength: STORAGE_ENVELOPE_PREFIX.length,
+    prefix: STORAGE_ENVELOPE_PREFIX,
+  }) as Array<{ scope: string; actionId: string; resultData: string }>;
+  let compacted = 0;
+  for (const row of rows) {
+    let reclaimedBytes: number;
+    let decoded: unknown;
+    try {
+      reclaimedBytes = Buffer.byteLength(row.resultData, 'utf8');
+      decoded = JSON.parse(unwrapStoredPayloadText(row.resultData));
+    } catch {
+      continue; // Corrupted envelope — left untouched, never interpreted.
+    }
+    if (!decoded || typeof decoded !== 'object' || Array.isArray(decoded)) continue;
+    const payload = decoded as Record<string, unknown>;
+    if (payload.__workbenchMixedReplay !== undefined) continue; // Mixed-tier replay authority.
+    if (payload.__workbenchCompactedResult !== undefined) continue;
+    if (payload.actionId !== row.actionId) continue;
+    if (typeof payload.confirmedThrough !== 'number' || !Number.isInteger(payload.confirmedThrough)) continue;
+    prepareCached(db, `
+      UPDATE _ActionReceipt
+      SET resultData = :marker
+      WHERE scope = :scope AND actionId = :actionId AND resultData = :stored
+    `).run({
+      marker: JSON.stringify({
+        __workbenchCompactedResult: { version: 1, reclaimedBytes },
+        actionId: payload.actionId,
+        confirmedThrough: payload.confirmedThrough,
+      }),
+      scope: row.scope,
+      actionId: row.actionId,
+      stored: row.resultData,
+    });
+    compacted += 1;
+  }
+  return compacted;
 }
 
 // logRetentionReport — read-only dry-run for the log retention reaper. Used by
@@ -630,9 +708,11 @@ function serializeAppendedEventData(db: DbHandle, event: AppendedEvent): string 
     if (!v16ClaimMatches(db, nonce, documentId, bytesDigest)) {
       throw new Error('operated v16 admission capability was missing, reused, or expired');
     }
-    return canonical;
+    // The canonical v16 text is the admission identity; enveloping it keeps
+    // the stored bytes decompressing to exactly those canonical bytes.
+    return maybeEnvelopeStoredPayload(db, canonical);
   }
-  return JSON.stringify(event.data ?? {});
+  return maybeEnvelopeStoredPayload(db, JSON.stringify(event.data ?? {}));
 }
 
 // Resolve which capability proof this append carries:

@@ -50,6 +50,15 @@ export interface RuntimeMaintenance {
    * compacts.
    */
   resultDataRetentionDays: number;
+  /**
+   * Minimum serialized size (UTF-8 bytes) at which `_Log.eventData` and
+   * `_ActionReceipt.resultData` payloads are stored as gzip envelopes
+   * (storage-envelope.ts): heavy transcript-style payloads compress ~20x.
+   * Reads decode transparently across mixed plain/envelope histories, so the
+   * knob is safe to enable and disable at any time. 0 — the default — writes
+   * every payload exactly as before (byte-parity).
+   */
+  payloadCompressionMinBytes: number;
   /** Named blob retention policies (S6/A5) — the single TTL source; no scattered literals. */
   blobRetention: Readonly<BlobRetentionPolicies>;
   /** Low-disk upload guard (S6/A5 #5): refuse new uploads below this many free bytes (0 disables). */
@@ -381,6 +390,7 @@ export const maintenanceDefaults: Readonly<RuntimeMaintenance> = Object.freeze({
   logRetentionDays: 0,
   logRetentionIntervalMs: BLOB_REAP_INTERVAL_MS,
   resultDataRetentionDays: 0,
+  payloadCompressionMinBytes: 0,
   blobRetention: blobRetentionDefaults,
   blobLowDiskHeadroomBytes: DEFAULT_LOW_DISK_HEADROOM_BYTES,
 });
@@ -392,7 +402,7 @@ export function validateMaintenanceOptions(options: RuntimeMaintenance): Readonl
       throw new TypeError(`${name} must be a finite number greater than zero`);
     }
   }
-  for (const name of ['blobReapTtlMs', 'logRetentionDays', 'resultDataRetentionDays'] as const) {
+  for (const name of ['blobReapTtlMs', 'logRetentionDays', 'resultDataRetentionDays', 'payloadCompressionMinBytes'] as const) {
     const value = options[name];
     if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
       throw new TypeError(`${name} must be a finite non-negative number`);
@@ -429,6 +439,7 @@ export function validateMaintenanceOptions(options: RuntimeMaintenance): Readonl
     logRetentionDays: options.logRetentionDays,
     logRetentionIntervalMs: options.logRetentionIntervalMs,
     resultDataRetentionDays: options.resultDataRetentionDays,
+    payloadCompressionMinBytes: options.payloadCompressionMinBytes,
     blobRetention,
     blobLowDiskHeadroomBytes,
   });

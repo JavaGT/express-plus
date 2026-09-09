@@ -69,6 +69,7 @@ import { createClock } from './clock.mjs';
 import { createWriteQueue } from './write-queue.mjs';
 import { createMaintenanceSeam } from './maintenance.mjs';
 import { createSchemaMaintenanceRunner } from './schema-maintenance.mjs';
+import { attachStorageEnvelopePolicy } from './storage-envelope.mjs';
 import { createDerivedResourceRegistry } from './derived-resource.mjs';
 import { createPrincipalSnapshotTransaction } from './principal-snapshot-transaction.mjs';
 import { prepareGracefulShutdown } from './lifecycle.mjs';
@@ -84,6 +85,7 @@ import { createSchemaReport } from './schema-report.mjs';
 import path from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { makeMountable } from './router.mjs';
+
 
 
 
@@ -304,6 +306,7 @@ export default function workbench({
   logRetentionDays = maintenanceDefaults.logRetentionDays,
   logRetentionIntervalMs = maintenanceDefaults.logRetentionIntervalMs,
   resultDataRetentionDays = maintenanceDefaults.resultDataRetentionDays,
+  payloadCompressionMinBytes = maintenanceDefaults.payloadCompressionMinBytes,
   blobRetention = maintenanceDefaults.blobRetention,
   blobLowDiskHeadroomBytes = maintenanceDefaults.blobLowDiskHeadroomBytes,
   operationalConsumers = [],
@@ -614,6 +617,7 @@ export default function workbench({
       logRetentionDays,
       logRetentionIntervalMs,
       resultDataRetentionDays,
+      payloadCompressionMinBytes,
       blobRetention: blobRetention                                            ,
       blobLowDiskHeadroomBytes,
     });
@@ -718,6 +722,16 @@ export default function workbench({
     // synchronously-opened db and is DEFERRED to the open for an adapter-backed
     // app (installPendingDb below).
     const attachHandleResources = (handle     )       => {
+      // Gzip storage envelopes (storage-envelope.ts): the handle's write
+      // policy travels with the handle so committed-log write/read seams see
+      // one storage decision. 0 (the default) attaches nothing — every stored
+      // byte is exactly the legacy format.
+      attachStorageEnvelopePolicy(
+        handle,
+        app._maintenance.payloadCompressionMinBytes > 0
+          ? { minBytes: app._maintenance.payloadCompressionMinBytes }
+          : null,
+      );
       // S6/A5 #5: the app's low-disk headroom travels with the store so the
       // /blobs upload route and the pending-blob stage both refuse new uploads
       // below the threshold (fail closed on an undeclaring durable backend).

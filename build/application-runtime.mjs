@@ -50,6 +50,15 @@ export const DEFAULT_LOW_DISK_HEADROOM_BYTES = 256 * 1024 * 1024;
 
 
 
+
+
+
+
+
+                                                                      
+
+
+
                                              
 
 
@@ -381,6 +390,7 @@ export const maintenanceDefaults                               = Object.freeze({
   logRetentionDays: 0,
   logRetentionIntervalMs: BLOB_REAP_INTERVAL_MS,
   resultDataRetentionDays: 0,
+  payloadCompressionMinBytes: 0,
   blobRetention: blobRetentionDefaults,
   blobLowDiskHeadroomBytes: DEFAULT_LOW_DISK_HEADROOM_BYTES,
 });
@@ -392,7 +402,7 @@ export function validateMaintenanceOptions(options                    )         
       throw new TypeError(`${name} must be a finite number greater than zero`);
     }
   }
-  for (const name of ['blobReapTtlMs', 'logRetentionDays', 'resultDataRetentionDays']         ) {
+  for (const name of ['blobReapTtlMs', 'logRetentionDays', 'resultDataRetentionDays', 'payloadCompressionMinBytes']         ) {
     const value = options[name];
     if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
       throw new TypeError(`${name} must be a finite non-negative number`);
@@ -429,6 +439,7 @@ export function validateMaintenanceOptions(options                    )         
     logRetentionDays: options.logRetentionDays,
     logRetentionIntervalMs: options.logRetentionIntervalMs,
     resultDataRetentionDays: options.resultDataRetentionDays,
+    payloadCompressionMinBytes: options.payloadCompressionMinBytes,
     blobRetention,
     blobLowDiskHeadroomBytes,
   });
