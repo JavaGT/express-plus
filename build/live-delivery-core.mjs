@@ -29,6 +29,8 @@
 // them and should not re-deliver on reconnect.
 
 import { readSeq, readSince } from './committed-log.mjs';
+
+import { prepareCached } from './driver.mjs';
 import { readRevision } from './live-revision.mjs';
 import { readDeletedRowAnchor } from './deleted-row-anchor.mjs';
 import { EventKind, parseEventType } from './event-handle.mjs';
@@ -204,6 +206,58 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
   // publish exactly once. A later invalidation (new events) gets a new key and
   // publishes again; entries are pruned when the scope is reauthorized.
   const publishedRevocations = new Map              ();
+
+  // ---- Wake-burst shared committed-batch read --------------------------------
+  //
+  // Every subscription on a scope re-runs readSince for its own cursor; a
+  // scope with many subscribers decodes the same committed payloads once per
+  // subscriber per wake (profiled at ~65% of the keystroke fanout path).
+  // Committed _Log rows are append-only within an event-loop turn, so a read
+  // of (scope, cursor) at committed cursor L is reproducible while L is
+  // unchanged. Entries are invalidated TWO ways so a later mutation can never
+  // be served stale:
+  //   1. turn-scoped — the entry dies at the end of the event-loop turn it was
+  //      filled in (setImmediate), so an erasure-directive rewrite (which does
+  //      not change seq values), a retention prune of the tail, or any
+  //      later-turn commit finds no entry;
+  //   2. max-seq-validated — a hit additionally requires the scope's committed
+  //      MAX(seq) (a _Log primary-key index seek) to equal the fill-time value,
+  //      so an append that commits mid-turn (between the fill and a later
+  //      subscription's read) misses and re-reads. This holds whether or not
+  //      the appender maintains _Cursor.
+  // The shared event objects are handed to each subscription's catchUp, which
+  // already treats them as read-only (per-event project context is a frozen
+  // shallow copy). Only frame-identical projection OUTPUT depends on decoder
+  // purity, which the one log-row decoder guarantees.
+  const sharedReads = new Map                                                               ();
+  const SHARED_READ_MAX_ENTRIES = 128;
+
+  function sharedReadMaxSeq(scope        )         {
+    const row = prepareCached(
+      db         ,
+      'SELECT MAX(seq) AS maxSeq FROM _Log WHERE scope = :scope',
+    ).get({ scope })                                          ;
+    return typeof row?.maxSeq === 'number' ? row.maxSeq : 0;
+  }
+
+  function readSinceShared(scope        , cursor        )             {
+    const key = `${scope}\u0000${cursor}`;
+    const hit = sharedReads.get(key);
+    const maxSeq = sharedReadMaxSeq(scope);
+    if (hit && hit.live && hit.maxSeq === maxSeq) return hit.events;
+    const events = readSince(db         , scope, cursor);
+    const entry = { events, maxSeq, live: true };
+    sharedReads.set(key, entry);
+    if (sharedReads.size > SHARED_READ_MAX_ENTRIES) {
+      const oldest = sharedReads.keys().next().value;
+      if (oldest !== undefined) sharedReads.delete(oldest);
+    }
+    setImmediate(() => {
+      entry.live = false;
+      if (sharedReads.get(key) === entry) sharedReads.delete(key);
+    });
+    return events;
+  }
 
   // The canonical key a subscription keys a revocation event on — a distinct
   // wake set entry per distinct revocation (category-prefixed so an entity
@@ -566,7 +620,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
         }
         let events                                                            ;
         try {
-          events = readSince(db         , sub.scope, sub.cursor)                                                                         ;
+          events = readSinceShared(sub.scope, sub.cursor)                                                                         ;
         } catch (err) {
           log?.error?.('live', 'readSince failed', { scope: sub.scope, cursor: sub.cursor, err: String(err) });
           removeSub(subId);
@@ -861,6 +915,8 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
     subs.clear();
     byScope.clear();
     publishedRevocations.clear();
+    for (const entry of sharedReads.values()) entry.live = false;
+    sharedReads.clear();
   }
 
   async function catchup({ principal, scope, after = 0, document = null }                                                                             )                             {
