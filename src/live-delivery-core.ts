@@ -29,6 +29,8 @@
 // them and should not re-deliver on reconnect.
 
 import { readSeq, readSince } from './committed-log.ts';
+import type { LogEvent } from './committed-log.ts';
+import { prepareCached } from './driver.ts';
 import { readRevision } from './live-revision.ts';
 import { readDeletedRowAnchor } from './deleted-row-anchor.ts';
 import { EventKind, parseEventType } from './event-handle.ts';
@@ -205,6 +207,76 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
   // publishes again; entries are pruned when the scope is reauthorized.
   const publishedRevocations = new Map<string, true>();
 
+  // ---- Wake-burst shared committed-batch read --------------------------------
+  //
+  // Every subscription on a scope re-runs readSince for its own cursor; a
+  // scope with many subscribers decodes the same committed payloads once per
+  // subscriber per wake (profiled at ~65% of the keystroke fanout path).
+  // Committed _Log rows are append-only within an event-loop turn, so a read
+  // of (scope, cursor) at committed cursor L is reproducible while L is
+  // unchanged. Entries are invalidated TWO ways so a later mutation can never
+  // be served stale:
+  //   1. turn-scoped — the entry dies at the end of the event-loop turn it was
+  //      filled in (setImmediate), so an erasure-directive rewrite (which does
+  //      not change seq values), a retention prune of the tail, or any
+  //      later-turn commit finds no entry;
+  //   2. max-seq-validated — a hit additionally requires the scope's committed
+  //      MAX(seq) (a _Log primary-key index seek) to equal the fill-time value,
+  //      so an append that commits mid-turn (between the fill and a later
+  //      subscription's read) misses and re-reads. This holds whether or not
+  //      the appender maintains _Cursor.
+  // The shared event objects are handed to each subscription's catchUp, which
+  // already treats them as read-only (per-event project context is a frozen
+  // shallow copy). Only frame-identical projection OUTPUT depends on decoder
+  // purity, which the one log-row decoder guarantees.
+  const sharedReads = new Map<string, { events: LogEvent[]; maxSeq: number; turn: number }>();
+  const reauthRows = new Map<string, { raw: Record<string, unknown> | undefined; maxSeq: number; turn: number }>();
+  const SHARED_READ_MAX_ENTRIES = 128;
+
+  // Turn bookkeeping: every cache entry is stamped with the turn it was filled
+  // in and dies when the turn ends. ONE shared setImmediate advances the turn
+  // and clears both maps — no per-entry timers.
+  let readTurn = 0;
+  let turnEndScheduled = false;
+  function scheduleTurnEnd(): void {
+    if (turnEndScheduled) return;
+    turnEndScheduled = true;
+    setImmediate(() => {
+      turnEndScheduled = false;
+      readTurn += 1;
+      sharedReads.clear();
+      reauthRows.clear();
+    });
+  }
+
+  function sharedReadMaxSeq(scope: string): number {
+    const row = prepareCached<{ get(params: Record<string, unknown>): { maxSeq?: number | null } | undefined }>(
+      db as never,
+      'SELECT MAX(seq) AS maxSeq FROM _Log WHERE scope = :scope',
+    ).get({ scope });
+    return typeof row?.maxSeq === 'number' ? row.maxSeq : 0;
+  }
+
+  // maxSeq is the committed MAX(seq) snapshot taken by the caller immediately
+  // before the read (one probe per catchUp iteration, shared by the batch read
+  // and the reauthorization row). A hit requires an unchanged turn AND an
+  // unchanged maxSeq; population is cheap enough (Map set, shared timer) that
+  // no subscriber-count gating is needed — one-shot catch-up storms and wake
+  // bursts reuse the cache alike.
+  function readSinceShared(scope: string, cursor: number, maxSeq: number): LogEvent[] {
+    const key = `${scope}\u0000${cursor}`;
+    const hit = sharedReads.get(key);
+    if (hit && hit.turn === readTurn && hit.maxSeq === maxSeq) return hit.events;
+    const events = readSince(db as never, scope, cursor);
+    sharedReads.set(key, { events, maxSeq, turn: readTurn });
+    if (sharedReads.size > SHARED_READ_MAX_ENTRIES) {
+      const oldest = sharedReads.keys().next().value;
+      if (oldest !== undefined) sharedReads.delete(oldest);
+    }
+    scheduleTurnEnd();
+    return events;
+  }
+
   // The canonical key a subscription keys a revocation event on — a distinct
   // wake set entry per distinct revocation (category-prefixed so an entity
   // scope and a principal key that happen to share a spelling never collapse).
@@ -360,11 +432,53 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
     return Number(row?.count ?? 0) > limit;
   }
 
-  function reauthFor(entityRec: LiveEntityRecord, principal: Principal, handle: ScopeHandle, allowDeletedAnchor = false): { row: Record<string, unknown>; terminal: boolean } | null {
+  // ---- Wake-burst shared reauthorization row ---------------------------------
+  //
+  // reauthFor runs once per subscription per batch and its SELECT materializes
+  // the full row (a 4k-word document body, profiled at ~27% of the remaining
+  // fanout path) for every subscriber. For HISTORY-tier entities the shared
+  // by-PK row fetch below reuses the same two-way invalidation as the
+  // committed-batch read: turn-scoped plus MAX(seq)-validated. That rides one
+  // invariant of the delivery core: a history-tier row change is applied in the
+  // SAME transaction as its scope's committed events, so MAX(seq) unchanged
+  // within a turn implies the row is unchanged. Visibility (scopeFilter) stays
+  // per-principal and runs as a payload-free probe; hydrate stays per-principal
+  // and receives a fresh shallow copy, so a hydrate that mutates its input
+  // cannot contaminate the shared row. Live-tier entities keep the original
+  // single-query path: their rows change transactionally with _LiveRevision
+  // bumps, which MAX(seq) over _Log cannot observe.
+  function reauthRowShared(entityRec: LiveEntityRecord, handle: ScopeHandle, maxSeq: number): Record<string, unknown> | undefined {
+    const key = `${entityRec.name}\u0000${handle.id}`;
+    const hit = reauthRows.get(key);
+    if (hit && hit.turn === readTurn && hit.maxSeq === maxSeq) return hit.raw;
+    const raw = db.prepare(`SELECT * FROM ${entityRec.name} WHERE id = :id`).get({ id: handle.id }) as Record<string, unknown> | undefined;
+    reauthRows.set(key, { raw, maxSeq, turn: readTurn });
+    if (reauthRows.size > SHARED_READ_MAX_ENTRIES) {
+      const oldest = reauthRows.keys().next().value;
+      if (oldest !== undefined) reauthRows.delete(oldest);
+    }
+    scheduleTurnEnd();
+    return raw;
+  }
+
+  // maxSeq: the caller's MAX(seq) snapshot (catchUp's iteration probe). When
+  // absent — one-shot admission paths — the row fetch is direct and uncached.
+  function reauthFor(entityRec: LiveEntityRecord, principal: Principal, handle: ScopeHandle, allowDeletedAnchor = false, maxSeq?: number): { row: Record<string, unknown>; terminal: boolean } | null {
     try {
       if (!scopeVisible({ entity: entityRec, principal, scope: handle })) return null;
       const { sql: where, params: scopeParams } = entityRec.scopeFilter(principal);
-      const current = db.prepare(`SELECT * FROM ${entityRec.name} AS t0 WHERE ${where} AND t0.id = :id`).get({ ...scopeParams, id: handle.id });
+      let current: Record<string, unknown> | undefined;
+      if (isLiveEntity(entityRec)) {
+        current = db.prepare(`SELECT * FROM ${entityRec.name} AS t0 WHERE ${where} AND t0.id = :id`).get({ ...scopeParams, id: handle.id }) as Record<string, unknown> | undefined;
+      } else {
+        const shared = maxSeq === undefined
+          ? db.prepare(`SELECT * FROM ${entityRec.name} WHERE id = :id`).get({ id: handle.id }) as Record<string, unknown> | undefined
+          : reauthRowShared(entityRec, handle, maxSeq);
+        if (shared) {
+          const visible = db.prepare(`SELECT 1 AS visible FROM ${entityRec.name} AS t0 WHERE ${where} AND t0.id = :id LIMIT 1`).get({ ...scopeParams, id: handle.id });
+          if (visible) current = shared;
+        }
+      }
       const anchored = allowDeletedAnchor && !current
         ? readDeletedRowAnchor(db as Parameters<typeof readDeletedRowAnchor>[0], entityRec.name, handle.id)
         : undefined;
@@ -376,7 +490,9 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
       // fail closed — no raw row fallback. When hydrate is absent (compiled
       // entities without bind), use the raw row directly.
       if ('hydrate' in entityRec && typeof entityRec.hydrate !== 'function') return null;
-      const row = typeof entityRec.hydrate === 'function' ? entityRec.hydrate(raw, principal) : raw;
+      // A shallow copy isolates the shared cached row from hydrate mutation.
+      const hydrateInput = isLiveEntity(entityRec) ? raw : { ...raw };
+      const row = typeof entityRec.hydrate === 'function' ? entityRec.hydrate(hydrateInput, principal) : hydrateInput;
       if (row === null || row === undefined) return null;
       return { row, terminal: allowDeletedAnchor && !current };
     } catch (err) {
@@ -564,15 +680,18 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
           if (sub.dirty || revocationsOwed > 0) continue;
           return;
         }
+        // One committed MAX(seq) snapshot for this iteration, taken in the
+        // same synchronous stretch as both shared reads it validates.
+        const maxSeq = sharedReadMaxSeq(sub.scope);
         let events: Array<{ seq: number } & Readonly<Record<string, unknown>>>;
         try {
-          events = readSince(db as never, sub.scope, sub.cursor) as unknown as Array<{ seq: number } & Readonly<Record<string, unknown>>>;
+          events = readSinceShared(sub.scope, sub.cursor, maxSeq) as unknown as Array<{ seq: number } & Readonly<Record<string, unknown>>>;
         } catch (err) {
           log?.error?.('live', 'readSince failed', { scope: sub.scope, cursor: sub.cursor, err: String(err) });
           removeSub(subId);
           throw new Error(`readSince failed for scope '${sub.scope}'`);
         }
-        const auth = reauthFor(sub.entityRec, sub.principal, handle);
+        const auth = reauthFor(sub.entityRec, sub.principal, handle, false, maxSeq);
         // A successful reauthorization means the grant exists again — stale
         // invalidation dedup keys for this scope must not suppress a FUTURE
         // invalidation.
@@ -861,6 +980,8 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, authorization, p
     subs.clear();
     byScope.clear();
     publishedRevocations.clear();
+    sharedReads.clear();
+    reauthRows.clear();
   }
 
   async function catchup({ principal, scope, after = 0, document = null }: { principal: Principal; scope: string; after?: number; document?: unknown }): Promise<CoreCatchupResult> {
