@@ -1904,6 +1904,20 @@ export interface WorkbenchOptions {
   logRetentionDays?: number;
   /** Durable-log sweep cadence in milliseconds; must be finite and > 0. */
   logRetentionIntervalMs?: number;
+  /**
+   * Age cutoff (days) for receipt `resultData` compaction: a receipt past the
+   * cutoff keeps its commit acknowledgement but loses the stored result payload.
+   * Finite and >= 0, with 0 (the default) never compacting.
+   */
+  resultDataRetentionDays?: number;
+  /**
+   * Minimum serialized size (UTF-8 bytes) at which durable-log event payloads
+   * and receipt result payloads are stored as gzip envelopes: heavy payloads
+   * (transcript-style operations) compress ~20x, and reads decode transparently
+   * across mixed plain/envelope histories. Finite and >= 0, with 0 (the
+   * default) writing every payload exactly as before.
+   */
+  payloadCompressionMinBytes?: number;
   /** Named blob retention policies (S6/A5): a partial override is filled from the central defaults. */
   blobRetention?: Readonly<Partial<{
     /** Abandoned-upload TTL (ms): a staged, never-claimed upload is reaped after this. */

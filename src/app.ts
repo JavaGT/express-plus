@@ -69,6 +69,7 @@ import { createClock } from './clock.ts';
 import { createWriteQueue } from './write-queue.ts';
 import { createMaintenanceSeam } from './maintenance.ts';
 import { createSchemaMaintenanceRunner } from './schema-maintenance.ts';
+import { attachStorageEnvelopePolicy } from './storage-envelope.ts';
 import { createDerivedResourceRegistry } from './derived-resource.ts';
 import { createPrincipalSnapshotTransaction } from './principal-snapshot-transaction.ts';
 import { prepareGracefulShutdown } from './lifecycle.ts';
@@ -109,6 +110,7 @@ interface WorkbenchOptions {
   logRetentionDays?: number;
   logRetentionIntervalMs?: number;
   resultDataRetentionDays?: number;
+  payloadCompressionMinBytes?: number;
   blobRetention?: Partial<typeof maintenanceDefaults.blobRetention>;
   blobLowDiskHeadroomBytes?: number;
   operationalConsumers?: readonly unknown[];
@@ -304,6 +306,7 @@ export default function workbench({
   logRetentionDays = maintenanceDefaults.logRetentionDays,
   logRetentionIntervalMs = maintenanceDefaults.logRetentionIntervalMs,
   resultDataRetentionDays = maintenanceDefaults.resultDataRetentionDays,
+  payloadCompressionMinBytes = maintenanceDefaults.payloadCompressionMinBytes,
   blobRetention = maintenanceDefaults.blobRetention,
   blobLowDiskHeadroomBytes = maintenanceDefaults.blobLowDiskHeadroomBytes,
   operationalConsumers = [],
@@ -614,6 +617,7 @@ export default function workbench({
       logRetentionDays,
       logRetentionIntervalMs,
       resultDataRetentionDays,
+      payloadCompressionMinBytes,
       blobRetention: blobRetention as typeof maintenanceDefaults.blobRetention,
       blobLowDiskHeadroomBytes,
     });
@@ -718,6 +722,16 @@ export default function workbench({
     // synchronously-opened db and is DEFERRED to the open for an adapter-backed
     // app (installPendingDb below).
     const attachHandleResources = (handle: any): void => {
+      // Gzip storage envelopes (storage-envelope.ts): the handle's write
+      // policy travels with the handle so committed-log write/read seams see
+      // one storage decision. 0 (the default) attaches nothing — every stored
+      // byte is exactly the legacy format.
+      attachStorageEnvelopePolicy(
+        handle,
+        app._maintenance.payloadCompressionMinBytes > 0
+          ? { minBytes: app._maintenance.payloadCompressionMinBytes }
+          : null,
+      );
       // S6/A5 #5: the app's low-disk headroom travels with the store so the
       // /blobs upload route and the pending-blob stage both refuse new uploads
       // below the threshold (fail closed on an undeclaring durable backend).
